@@ -191,6 +191,13 @@ export function exprOf(x, C) {
         return { kind: 'field', obj: { kind: 'name', name: flat }, name: 'v' };
       }
       /**
+       * **区间 for 按引用走的那一格量就是列表里那一格**（`for (T& v : xs)` —— `v` 是
+       * `xs[i]` 的别名）：读写都摊成那一格下标，于是"改得动元素"落成一次普通的
+       * `aset`，一格新东西也没加。这一条要与上面那格盒子分开：那是"装起来"，这是"摊开"。
+       */
+      const lv = C.lvAlias.get(flat);
+      if (lv !== undefined) return lv;
+      /**
        * **lambda 体里借走的那几格量**落成 `(cap …)`：那一层的作用域栈是换空过的
        * （见 index.js 的 `C.lambda`），所以"环境里没有、捕获表里有"就是一格捕获。
        */

@@ -253,6 +253,8 @@ export function cppToIR(tree) {
      * 但**`static` 数据成员还是要认得**，所以另开这一格。
      */
     statCls: null,
+    /** 名字 → 它其实是哪一格地方（区间 for 按引用走那一格：`v` 就是 `xs[i]`）。 */
+    lvAlias: new Map(),
     /**
      * **按值传一格记录要拷一份**（C++ 的值语义）。方言的记录是引用语义，所以"传进去、
      * 在里头改字段"从前**改到了调用者那一格**（`grow(a)` 之后 `a.x` 变了 —— 答案静默地错）。
@@ -1656,8 +1658,15 @@ export function stmtsOf(x, C) {
      */
     case 'for-range': {
       const [, declTok, iterTok, bodyTok] = kids(x);
-      if (tag(declTok) === 'ptr') {
-        throw new Error('cpp->IR: `for (T& v : …)`（按引用走一遍）还没接 —— 改不动元素那一档');
+      /**
+       * `for (T& v : xs)`（**改得动元素**那一档）：`v` 不是一格新量，它就是 `xs[i]`
+       * 的**别名** —— 读写都摊成那一格下标（见 expr.js 的 `C.lvAlias`）。
+       * 只认 `&`；`&&`（右值引用）在这条腿上没有意义，当场报。
+       */
+      const byRef = tag(declTok) === 'ptr'
+        && kids(declTok).some((y) => tag(y) === null && String(leaf(y)) === '&');
+      if (tag(declTok) === 'ptr' && !byRef) {
+        throw new Error('cpp->IR: `for (T&& v : …)` 还没接');
       }
       const iter = exprOf(iterTok, C);
       const it = typeOf(iter, C.tyCtx());
@@ -1665,18 +1674,22 @@ export function stmtsOf(x, C) {
         throw new Error(`cpp->IR: 只接在列表上走一遍（这儿是 ${it.kind}）`);
       }
       const elem = typeOfSpecs(part(x, 'specs'), C, declTok) ?? it.elem;
-      const vname = C.ref(nameOf(declTok));
+      const vname = C.ref(nameOf(byRef ? kids(declTok)[kids(declTok).length - 1] : declTok));
       const idx = C.fresh('ri');
       C.push();
       C.bind(idx, INT);
-      C.bind(vname, elem);
-      const one = {
-        kind: 'let',
-        name: vname,
-        type: elem,
-        init: copyIfLv({ kind: 'index', obj: iter, index: { kind: 'name', name: idx } }, elem, C),
-      };
-      const rbody = [one, ...stmtsOf(bodyTok, C)];
+      const at = { kind: 'index', obj: iter, index: { kind: 'name', name: idx } };
+      let rbody;
+      if (byRef) {
+        C.lvAlias.set(vname, at);
+        rbody = stmtsOf(bodyTok, C);
+        C.lvAlias.delete(vname);
+      } else {
+        C.bind(vname, elem);
+        rbody = [{
+          kind: 'let', name: vname, type: elem, init: copyIfLv(at, elem, C),
+        }, ...stmtsOf(bodyTok, C)];
+      }
       C.pop();
       return [{
         kind: 'for',
@@ -1731,7 +1744,7 @@ function lhsOf(t, C) {
    */
   if (tag(t) === 'n') {
     const e = exprOf(t, C);
-    if (e.kind !== 'name' && e.kind !== 'field') {
+    if (e.kind !== 'name' && e.kind !== 'field' && e.kind !== 'index') {
       throw new Error(`cpp->IR: \`${nameOf(t)}\` 不能当赋值的左边`);
     }
     return e;
@@ -2032,5 +2045,6 @@ function declOf(d, specs, C) {
 //      而 `xs` 根本不存在。长度只在"字面写着的"那一档有；`int xs[]` 那种开 0 格。
 //  12. **区间 for**（`for (T v : xs)`，`rangefor.cpp`）摊成三段式的下标循环 —— 公共层那格
 //      `for-range` 要一份语言钩子，而这一门的答案太直白，摊在 adapter 里省一层。
-//      那格量是**拷出来的**；`for (T& v : xs)`（改得动元素那一档）当场报，
-//      在字典上走一遍也报。元素是记录的数组声明时会把格子填上（否则是 null）。
+//      按值走那格量是**拷出来的**；**按引用走**（`T&`）的那一格不造新量 —— 它就是
+//      `xs[i]` 的**别名**（`C.lvAlias`），改它落成一次普通的 `aset`。`T&&` 与在字典上
+//      走一遍当场报。元素是记录的数组声明时会把格子填上（否则是 null）。
