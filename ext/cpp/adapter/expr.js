@@ -408,6 +408,14 @@ function callOf(x, C) {
   }
   /* `Point(1, 2)` —— **函数式的构造**（与 `Point p(1,2)` 落同一格调用，按实参个数挑）。 */
   if (C.records.has(name)) {
+    const hitT = C.pickCtor(C.ref(name), args.map((a) => typeOf(a, C.tyCtx())));
+    if (hitT !== null) {
+      return {
+        kind: 'call',
+        fn: { kind: 'name', name: hitT.name },
+        args: args.map((a, i) => coerce(a, hitT.params[i].type, C)),
+      };
+    }
     const pick = `${C.ref(name)}__ctor${args.length}`;
     if (C.fns.has(pick)) return { kind: 'call', fn: { kind: 'name', name: pick }, args };
     if ([...C.fns.keys()].some((k) => k.startsWith(`${C.ref(name)}__ctor`))) {
@@ -441,7 +449,7 @@ function callOf(x, C) {
 }
 
 /** 一格实参往形参的类型上凑（这条腿只认 `int -> real` 与 `bool -> int` 两格提升）。 */
-function coerce(a, want, C) {
+export function coerce(a, want, C) {
   const got = typeOf(a, C.tyCtx());
   if (want.kind === 'real' && got.kind === 'int') {
     return { kind: 'builtin', name: 'toreal', args: [a] };

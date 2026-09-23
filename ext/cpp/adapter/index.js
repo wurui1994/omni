@@ -14,7 +14,7 @@ import {
 } from '../../../src/core/lower/cst.js';
 import { INT, arrOf, named, typeOf } from '../../../src/core/lower/ty-of.js';
 import {
-  exprOf, condOf, typeOfSpecs, printArgs, nameOf, tyArg, vcallName, readParams,
+  exprOf, condOf, typeOfSpecs, printArgs, nameOf, tyArg, vcallName, readParams, coerce,
 } from './expr.js';
 
 /**
@@ -48,6 +48,27 @@ function methodName(rec, m, C) {
 function paramTags(fnTok, C) {
   const f = kids(fnTok).find((y) => tag(y) === 'fn');
   return readParams(part(f, 'params'), C).map((p) => tyTag(p.type)).join('_');
+}
+
+/**
+ * **这个类的几份构造各叫什么**（与方法那三档同一条规矩）：个数各不相同 → 缀个数
+ * （`Vec__ctor2`，与从前一样）；有两份个数一样 → 那一档缀**实参类型**
+ * （`Vec__ctor1_int` / `Vec__ctor1_real`）。`byType` 为真时**整个类**的几份构造都要进
+ * `C.ctorOvl`（调用点是按类名找那张表的，混着两种名字不要紧）。
+ */
+function ctorPlan(recRef, ctors, C) {
+  const seen = new Set();
+  const dup = new Set();
+  for (const ct of ctors) {
+    const k = ctorArity(ct);
+    if (seen.has(k)) dup.add(k);
+    seen.add(k);
+  }
+  return ctors.map((ct) => {
+    const argc = ctorArity(ct);
+    const base = ctorName(recRef, argc);
+    return { tok: ct, name: dup.has(argc) ? `${base}_${paramTags(ct, C)}` : base, byType: dup.size > 0 };
+  });
 }
 
 /**
@@ -189,6 +210,16 @@ export function cppToIR(tree) {
     },
     /** `类名_方法名`（都已 ref 过） → `[{ name, params }]`（params 里**不含** this）。 */
     methOvl: new Map(),
+    /**
+     * 类名（已 ref 过） → 它那几份构造 `[{ name, params }]`。只有"有两份实参个数一样"的类
+     * 在这张表里；造对象那两处（`newLet` 与 `Point(1,2)` 那种函数式的）先查它。
+     */
+    ctorOvl: new Map(),
+    /** 造对象时挑哪一份构造（不在 `ctorOvl` 里答 null —— 调用点退回按个数挑的老路）。 */
+    pickCtor: (recRef, argTypes) => {
+      const cands = C.ctorOvl.get(recRef);
+      return cands === undefined ? null : pickAmong(`${recRef}::构造`, cands, argTypes);
+    },
     /**
      * 一格类名 → 类型。**`name` 是落地的记录（可能是根）、`cls` 是写着的那个静态类型** ——
      * 非虚方法按 `cls` 单态分派（C++ 的隐藏规则），虚方法按 `name` 找分派表。
@@ -392,14 +423,16 @@ export function cppToIR(tree) {
        * 而方法体里也可能造一格自己）。落法与非模板那条路**同一条** —— 构造是一格交记录的
        * 普通函数 `Holder__int__ctor1`、析构挂在公共层的作用域出口上。
        */
-      const ctorSigs = (rec.ctors ?? []).map((ct) => {
-        const nm = ctorName(C.ref(inst), ctorArity(ct));
-        if (C.fns.has(nm)) {
-          throw new Error(`cpp->IR: ${inst} 有两份收 ${ctorArity(ct)} 个实参的构造函数`
-            + '（按实参**类型**挑那一档还没接）');
+      const ctorSigs = ctorPlan(C.ref(inst), rec.ctors ?? [], C).map(({ tok, name, byType }) => {
+        if (C.fns.has(name)) {
+          throw new Error(`cpp->IR: ${inst} 有两份形参一模一样的构造函数`);
         }
-        const s = sigOf(ct, undefined, nm);
-        C.fns.set(nm, { params: s.params, ret: selfType });
+        const s = sigOf(tok, undefined, name);
+        C.fns.set(name, { params: s.params, ret: selfType });
+        if (byType) {
+          if (!C.ctorOvl.has(C.ref(inst))) C.ctorOvl.set(C.ref(inst), []);
+          C.ctorOvl.get(C.ref(inst)).push({ name, params: s.params });
+        }
         return s;
       });
       if (rec.dtor !== null) {
@@ -577,16 +610,19 @@ export function cppToIR(tree) {
         ret: { kind: 'void' },
       });
     }
-    /* **构造函数**交的是一格记录（`Point__ctor(a, b) -> Point`）。 */
-    for (const ct of (rec.ctors ?? [])) {
-      const argc = ctorArity(ct);
-      const nm2 = ctorName(C.ref(rec.name), argc);
-      if (C.fns.has(nm2)) {
-        throw new Error(`cpp->IR: ${rec.name} 有两份收 ${argc} 个实参的构造函数`
-          + '（按实参**类型**挑那一档还没接）');
+    /* **构造函数**交的是一格记录（`Point__ctor(a, b) -> Point`）。名字那一格与方法同理
+       分三档（个数一样的两份缀实参类型 —— 见 `ctorPlan`）。 */
+    for (const { tok, name, byType } of ctorPlan(C.ref(rec.name), rec.ctors ?? [], C)) {
+      if (C.fns.has(name)) {
+        throw new Error(`cpp->IR: ${rec.name} 有两份形参一模一样的构造函数`);
       }
-      const s = sigOf(ct, undefined, nm2);
+      const s = sigOf(tok, undefined, name);
       C.fns.set(s.name, { params: s.params, ret: selfType });
+      if (byType) {
+        const k = C.ref(rec.name);
+        if (!C.ctorOvl.has(k)) C.ctorOvl.set(k, []);
+        C.ctorOvl.get(k).push({ name: s.name, params: s.params });
+      }
     }
   }
 
@@ -621,9 +657,9 @@ export function cppToIR(tree) {
       /* 体是 `owner` 的，接收者是 `rec` —— 字段已经摊平，所以同一份体在派生类上逐字成立。 */
       decls.push(fnDecl(s, C.records.get(owner).dtor, C, C.ref(rec.name)));
     }
-    for (const ct of (rec.ctors ?? [])) {
-      const s = sigOf(ct, undefined, ctorName(C.ref(rec.name), ctorArity(ct)));
-      decls.push(ctorDecl({ ...s, ret: selfType }, rec, ct, C));
+    for (const { tok, name } of ctorPlan(C.ref(rec.name), rec.ctors ?? [], C)) {
+      const s = sigOf(tok, undefined, name);
+      decls.push(ctorDecl({ ...s, ret: selfType }, rec, tok, C));
     }
   }
   for (const f of topFns) decls.push(fnDecl(topSig.get(f), f, C));
@@ -1431,10 +1467,25 @@ function declOf(d, specs, C) {
       kind: 'let', name, type, init: vtZeroRecord(type, C),
     };
   }
-  /* **哪一份构造**：数一数实参（`Vec a;` 是 0 个、`Vec c(3, 4)` 是 2 个）。 */
+  /* **哪一份构造**：数一数实参（`Vec a;` 是 0 个、`Vec c(3, 4)` 是 2 个）；
+     那个类有两份个数一样的构造时，再按**实参类型**挑（见 `ctorPlan` / `pickCtor`）。 */
   if (type.kind === 'named') {
     const as = ctorTok === undefined ? undefined : part(ctorTok, 'args');
     const args = as === undefined ? [] : kids(as).map((a) => exprOf(a, C));
+    const hitT = (ctorTok !== undefined || initTok === undefined)
+      ? C.pickCtor(type.cls ?? type.name, args.map((a) => typeOf(a, C.tyCtx()))) : null;
+    if (hitT !== null) {
+      return {
+        kind: 'let',
+        name,
+        type,
+        init: {
+          kind: 'call',
+          fn: { kind: 'name', name: hitT.name },
+          args: args.map((a, i) => coerce(a, hitT.params[i].type, C)),
+        },
+      };
+    }
     const pick = `${type.name}__ctor${args.length}`;
     if (C.fns.has(pick) && (ctorTok !== undefined || initTok === undefined)) {
       return {
@@ -1464,10 +1515,10 @@ function declOf(d, specs, C) {
 //      `&x` 只在记录/列表/字典上成立（标量上当场报，那要真指针）。
 //   4. 整数那一族只有一格宽度：定宽类型（`int8_t` …）的位宽表在
 //      `src/core/lower/cfam.js` 的 `C_INT_BITS`（与 jancy 共用一张），**回卷还没接**。
-//   5. **自由函数与方法**都按实参**类型**重载（`fnovl.cpp` / `methov2.cpp`：名字分三档 ——
-//      没重载不动 / 个数各不相同的缀个数 / 有两份个数一样的缀类型；挑那一份走 `pickAmong`）。
-//      **构造函数只按实参个数**，个数一样的两份当场报。拷贝构造与赋值算子没有 ——
-//      记录是引用语义，那两格在这条腿上本来就不是"拷贝"。
+//   5. **自由函数、方法与构造函数**都按实参**类型**重载（`fnovl.cpp` / `methov2.cpp` /
+//      `ctor3.cpp`：名字分三档 —— 没重载不动 / 个数各不相同的缀个数 / 有两份个数一样的
+//      缀类型；挑那一份三处共用 `pickAmong`）。形参一模一样的两份当场报。
+//      拷贝构造与赋值算子没有 —— 记录是引用语义，那两格在这条腿上本来就不是"拷贝"。
 //      **虚方法 + 重载**当场报（分派表按老名字找那一份）。
 //   6. 虚函数接**单继承与多继承**（分组按连通块 —— 见 `planVirtuals`）；纯虚（`= 0`）接了 ——
 //      声明处没有体，分派函数的兜底是一格 `(fail …)`。**菱形继承当场报**（两个基类都有
