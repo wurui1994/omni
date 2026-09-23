@@ -1611,6 +1611,55 @@ export function stmtsOf(x, C) {
       C.pop();
       return [{ kind: 'for', init, cond, post, body }];
     }
+    /**
+     * `for (T v : xs)` —— **按值在列表上走一遍**。C++ 里它就是一格下标循环，所以直接
+     * 摊成三段式的 `for`（公共层那格 `for-range` 要一份语言钩子 —— "在什么上走一遍"
+     * 各门语言答得不一样，而这一门的答案就是"下标从 0 到 alen"，没必要再加一层）。
+     * 那格量是**拷出来的**（记录就走 `类名__copy`）；`for (T& v : xs)` 当场报。
+     */
+    case 'for-range': {
+      const [, declTok, iterTok, bodyTok] = kids(x);
+      if (tag(declTok) === 'ptr') {
+        throw new Error('cpp->IR: `for (T& v : …)`（按引用走一遍）还没接 —— 改不动元素那一档');
+      }
+      const iter = exprOf(iterTok, C);
+      const it = typeOf(iter, C.tyCtx());
+      if (it.kind !== 'arr') {
+        throw new Error(`cpp->IR: 只接在列表上走一遍（这儿是 ${it.kind}）`);
+      }
+      const elem = typeOfSpecs(part(x, 'specs'), C, declTok) ?? it.elem;
+      const vname = C.ref(nameOf(declTok));
+      const idx = C.fresh('ri');
+      C.push();
+      C.bind(idx, INT);
+      C.bind(vname, elem);
+      const one = {
+        kind: 'let',
+        name: vname,
+        type: elem,
+        init: copyIfLv({ kind: 'index', obj: iter, index: { kind: 'name', name: idx } }, elem, C),
+      };
+      const rbody = [one, ...stmtsOf(bodyTok, C)];
+      C.pop();
+      return [{
+        kind: 'for',
+        init: { kind: 'let', name: idx, type: INT, init: { kind: 'int', value: 0 } },
+        cond: {
+          kind: 'binop',
+          op: '<',
+          left: { kind: 'name', name: idx },
+          right: { kind: 'builtin', name: 'alen', args: [iter] },
+        },
+        post: {
+          kind: 'assign',
+          target: { kind: 'name', name: idx },
+          value: {
+            kind: 'binop', op: '+', left: { kind: 'name', name: idx }, right: { kind: 'int', value: 1 },
+          },
+        },
+        body: rbody,
+      }];
+    }
     case 'return': {
       /* 析构不在这儿补 —— 公共层那一格 `scope` 在**每个**出口上补（见 `fnDecl`）。 */
       const vs = kids(x);
@@ -1747,6 +1796,58 @@ function declOf(d, specs, C) {
       return {
         kind: 'let', name, type: arrTy,
         init: { kind: 'block-expr', stmts, value: { kind: 'name', name: tmp } },
+      };
+    }
+    /**
+     * **元素是记录的那一档要把格子填上**（`P ps[2];`）：`anew` 开出来的格子是 null，
+     * `ps[0].x = 1` 在运行期报 "null reference"（C++ 那边 2 个子对象是现成的）。
+     * 填法是现搭一段 `while` —— 与按值拷列表那一段同一手。
+     */
+    if (elem.kind === 'named' && size > 0) {
+      const tmp2 = C.fresh('arr');
+      const idx2 = C.fresh('ai');
+      C.bind(tmp2, arrTy);
+      C.bind(idx2, INT);
+      return {
+        kind: 'let',
+        name,
+        type: arrTy,
+        init: {
+          kind: 'block-expr',
+          stmts: [
+            {
+              kind: 'let',
+              name: tmp2,
+              type: arrTy,
+              init: { kind: 'builtin', name: 'anew', args: [tyArg(arrTy), { kind: 'int', value: size }] },
+            },
+            { kind: 'let', name: idx2, type: INT, init: { kind: 'int', value: 0 } },
+            {
+              kind: 'while',
+              cond: {
+                kind: 'binop',
+                op: '<',
+                left: { kind: 'name', name: idx2 },
+                right: { kind: 'int', value: size },
+              },
+              body: [
+                {
+                  kind: 'assign',
+                  target: { kind: 'index', obj: { kind: 'name', name: tmp2 }, index: { kind: 'name', name: idx2 } },
+                  value: vtZeroRecord(elem, C),
+                },
+                {
+                  kind: 'assign',
+                  target: { kind: 'name', name: idx2 },
+                  value: {
+                    kind: 'binop', op: '+', left: { kind: 'name', name: idx2 }, right: { kind: 'int', value: 1 },
+                  },
+                },
+              ],
+            },
+          ],
+          value: { kind: 'name', name: tmp2 },
+        },
       };
     }
     return {
@@ -1890,3 +1991,7 @@ function declOf(d, specs, C) {
 //  11. **数组字段**（`int xs[3];`，`arrfield.cpp`）：收成一格列表字段并**记下长度** ——
 //      造对象时照它开格子。从前 `nameOf` 读 `(array …)` 答 null，字段表里多一格叫 `null` 的
 //      而 `xs` 根本不存在。长度只在"字面写着的"那一档有；`int xs[]` 那种开 0 格。
+//  12. **区间 for**（`for (T v : xs)`，`rangefor.cpp`）摊成三段式的下标循环 —— 公共层那格
+//      `for-range` 要一份语言钩子，而这一门的答案太直白，摊在 adapter 里省一层。
+//      那格量是**拷出来的**；`for (T& v : xs)`（改得动元素那一档）当场报，
+//      在字典上走一遍也报。元素是记录的数组声明时会把格子填上（否则是 null）。
