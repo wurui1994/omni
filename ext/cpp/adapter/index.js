@@ -890,6 +890,8 @@ export function cppToIR(tree) {
     let allRef = false;
     /** `[x = 表达式]`（C++14 的初始化捕获）—— 那格量是**新造的**，值在造闭包那一点求。 */
     const initToks = [];
+    /** `[*this]` —— 捕的是接收者的一份**拷贝**（造闭包那一点发一次 `类名__copy`）。 */
+    let starThis = false;
     for (const c of (capsTok === undefined ? [] : kids(capsTok))) {
       if (tag(c) === 'c') { wanted.push(String(leaf(kids(c)[0]))); continue; }
       if (tag(c) === 'c-init') { initToks.push(c); continue; }
@@ -909,6 +911,17 @@ export function cppToIR(tree) {
       if (tag(c) === 'c-this') {
         if (C.self === null) throw new Error('cpp->IR: `[this]` 只能在方法体里用');
         wanted.push('this');
+        continue;
+      }
+      /**
+       * **`[*this]`**：捕的是接收者的**一份拷贝**（C++17）。这条腿上记录是引用语义，
+       * 所以"拷一份"要真发一次 `类名__copy`（值语义那一刀留下的那台机器）——
+       * 造闭包那一点拷，闭包按值捕那格拷出来的记录，于是体里改字段改不到外头那个对象。
+       */
+      if (tag(c) === 'c-star-this') {
+        if (C.self === null) throw new Error('cpp->IR: `[*this]` 只能在方法体里用');
+        wanted.push('this');
+        starThis = true;
         continue;
       }
       throw new Error(`cpp->IR: lambda 的这一格捕获还没接：${tag(c)}`);
@@ -950,6 +963,15 @@ export function cppToIR(tree) {
       const v = exprOf(kids(c)[1], C);
       caps.push({ name: nm, type: typeOf(v, C.tyCtx()) });
       capArgs.push(v);
+    }
+    /* `[*this]`：那一格捕的是**拷贝**（造闭包那一点拷一份，体里改字段改不到外头那个）。 */
+    if (starThis) {
+      caps.forEach((c, i) => {
+        if (c.name !== 'this') return;
+        capArgs[i] = {
+          kind: 'call', fn: { kind: 'name', name: C.recCopy(c.type) }, args: [capArgs[i]],
+        };
+      });
     }
     /**
      * **`mutable`**：按值捕的那几格在体里**改得动**，改的是闭包自己那一份（外头那格量
@@ -2435,7 +2457,8 @@ function declOf(d, specs, C) {
 //      "多一格按值捕获"，实参在**外面那层**的作用域里求。**`mutable`** 是出参那台机器反着
 //      用：造闭包那一点现搭一格盒子装着抄过来的值，体里读写走 `.v` —— 于是"改得动自己那一
 //      份、外头看不见、几次调用之间留着"三条一起成立（记录 / 列表那几格不动，它们本来就是
-//      引用语义）。`[*this]` 与泛型 lambda（`auto` 形参）还没接。
+//      引用语义）。**`[*this]`** 也接了：捕的是接收者的一份**拷贝**，造闭包那一点发一次
+//      `类名__copy`（值语义那一刀留下的机器）。泛型 lambda（`auto` 形参）还没接。
 //   9. **`static` 数据成员**落成一格模块级的量（`类名__成员名`，`staticmem.cpp`）：
 //      一个类一份，初值（类里那句或类外那句 `int C::x = …;`）摆在 `main` 体的最前面 ——
 //      方言的 `(global 名字 类型)` 按设计零初始化，不带初值那一格。

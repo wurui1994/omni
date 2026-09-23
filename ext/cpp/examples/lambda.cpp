@@ -21,6 +21,16 @@ struct Box {
     };
     return add(d) + add(d);
   }
+  /* **`[*this]`**（C++17）：捕的是接收者的**一份拷贝**。这条腿上记录是引用语义，所以
+     "拷一份"要真发一次 `Box__copy`（值语义那一刀留下的机器）—— 造闭包之后把 `n` 改了，
+     闭包里看见的还是老的那一份。 */
+  int peek(int d) {
+    auto snap = [*this](int v) {
+      return n + v;
+    };
+    n = n + 100;
+    return snap(d);
+  }
 };
 
 int main() {
@@ -93,5 +103,7 @@ int main() {
   int t1 = tick();
   int t2 = tick();
   printf("%d %d %d\n", t1, t2, cnt);
+  printf("%d\n", bx.peek(2));
+  printf("%d\n", bx.n);
   return 0;
 }
