@@ -8,7 +8,7 @@
 //   * `m.count(k)` 是"在不在"、`std::make_pair(a,b)` 是一格两格值的记录（字段叫
 //     `first` / `second`，那是 C++ 自己的名字）。
 
-import { tag, kids, leaf, part, unquote } from '../../../src/core/lower/cst.js';
+import { tag, kids, leaf, part, unquote, isList } from '../../../src/core/lower/cst.js';
 import { cUnescape, fmtToIR, fmtToStmts } from '../../../src/core/lower/fmt.js';
 import {
   INT, REAL, STR, BOOL, arrOf, dictOf, named, typeOf,
@@ -29,6 +29,21 @@ const OPS = new Map([
   ['+', '+'], ['-', '-'], ['*', '*'], ['/', '/'], ['%', '%'],
   ['<', '<'], ['>', '>'], ['<=', '<='], ['>=', '>='], ['==', '=='], ['!=', '!='],
   ['&&', '&&'], ['||', '||'], ['&', '&'], ['|', '|'], ['<<', '<<'], ['>>', '>>'], ['^', '^'],
+]);
+
+/**
+ * **C99 `<math.h>` 里那几格的名字与元数** —— 与公共层 `(rmath …)` 那张表（正本在
+ * `src/core/sexpr/lower.js` 的 `RMATH`）**逐字相同**，所以这一门不用再编一套映射。
+ * `abs` / `labs` 不在里头：那两个是整数上的（见 `callOf` 末尾那一格三目）。
+ */
+const RMATH_ARITY = new Map([
+  ['sqrt', 1], ['fabs', 1], ['floor', 1], ['ceil', 1], ['round', 1],
+  ['pow', 2], ['fmod', 2],
+  ['sin', 1], ['cos', 1], ['tan', 1], ['asin', 1], ['acos', 1], ['atan', 1],
+  ['atan2', 2], ['sinh', 1], ['cosh', 1], ['tanh', 1],
+  ['asinh', 1], ['acosh', 1], ['atanh', 1],
+  ['exp', 1], ['expm1', 1], ['log', 1], ['log10', 1], ['log1p', 1],
+  ['cbrt', 1], ['hypot', 2], ['nextafter', 2],
 ]);
 
 /** 基本类型名 → 标准 IR 的类型。 */
@@ -170,9 +185,20 @@ export function typeOfSpecs(specs, C, declTok) {
  */
 export function readParams(paramsTok, C) {
   const ps = paramsTok === undefined ? [] : kids(paramsTok).filter((y) => tag(y) === 'p');
+  /** 名字可能埋在几层声明符底下（`int xs[3]` 是 `(array (n xs) (num 3))`）。 */
+  const deep = (t) => {
+    if (!isList(t)) return undefined;
+    if (tag(t) === 'n') return t;
+    for (const k of kids(t)) {
+      const got = deep(k);
+      if (got !== undefined) return got;
+    }
+    return undefined;
+  };
   return ps.map((p) => {
     const pn = kids(p).find((y) => tag(y) === 'n' || tag(y) === 'ptr' || tag(y) === 'array');
-    const pname = pn === undefined ? 'x' : nameOf(tag(pn) === 'n' ? pn : kids(pn)[kids(pn).length - 1]);
+    const nmTok = pn === undefined ? undefined : (tag(pn) === 'n' ? pn : deep(pn));
+    const pname = nmTok === undefined ? 'x' : nameOf(nmTok);
     const type = typeOfSpecs(part(p, 'specs'), C, pn) ?? INT;
     const amp = pn !== undefined && tag(pn) === 'ptr'
       && kids(pn).some((y) => tag(y) === null && String(leaf(y)) === '&');
@@ -183,6 +209,16 @@ export function readParams(paramsTok, C) {
       || type.kind === 'bool' || type.kind === 'string';
     if ((amp || (star && type.kind !== 'string')) && scalar) {
       return { name: C.ref(pname), type: C.refBox(type), ref: true, of: type };
+    }
+    /**
+     * **数组形参**（`void f(int xs[], int n)`）：声明符上那个 `[]` 从前**没人看** ——
+     * 形参当成一格 `int`，体里 `xs[i]` 就报"aget 的实参要是数组"。收成一格列表
+     * （方言的列表本来就是引用语义，与 C 里"数组退化成指针"对得上）。
+     * `int* xs` **不**走这条：那一格在这条腿上专指**出参**（见上面那格盒子）——
+     * 两种写法在 C++ 里没法分辨，所以这门定死：要数组就写 `[]`。
+     */
+    if (pn !== undefined && tag(pn) === 'array') {
+      return { name: C.ref(pname), type: arrOf(type) };
     }
     return { name: C.ref(pname), type };
   });
@@ -683,6 +719,45 @@ function callOf(x, C) {
       kind: 'call',
       fn: { kind: 'name', name: hit.name },
       args: args.map((a, i) => coerce(a, hit.params[i].type, C)),
+    };
+  }
+  /**
+   * **`<math.h>` 那几格**：公共层有现成的 `(rmath "sqrt" …)`（go 的 `math.Sqrt`、lua 的
+   * `math.floor`、V 的 `math.sqrt` 落的是同一格），而**名字与元数与 C99 逐字相同** ——
+   * 所以这儿直接转过去，实参补 `toreal`（方言那一格只收 real）。
+   * 程序自己定义了同名函数时**不抢**（先查 `C.fns`）。
+   */
+  if (!C.fns.has(C.ref(name)) && RMATH_ARITY.has(name)) {
+    const want = RMATH_ARITY.get(name);
+    if (args.length !== want) {
+      throw new Error(`cpp->IR: \`${name}\` 要 ${want} 个实参，给了 ${args.length} 个`);
+    }
+    return { kind: 'rmath', fn: name, args: args.map((a) => coerce(a, REAL, C)) };
+  }
+  /**
+   * `abs` / `labs` 是**整数**上的（不在 rmath 那张表里 —— 那张表全是 real）：摊成
+   * "先存一格临时量、再一格三目"。**不许把实参写两遍** —— 它可能带副作用。
+   * 实参本来就是 real 的那一档转给 `fabs`（C++ 里 `abs(double)` 有重载）。
+   */
+  if (!C.fns.has(C.ref(name)) && (name === 'abs' || name === 'labs') && args.length === 1) {
+    const at = typeOf(args[0], C.tyCtx());
+    if (at.kind === 'real') return { kind: 'rmath', fn: 'fabs', args: [args[0]] };
+    const t = C.fresh('ab');
+    C.bind(t, INT);
+    return {
+      kind: 'block-expr',
+      stmts: [{
+        kind: 'let', name: t, type: INT, init: args[0],
+      }],
+      value: {
+        kind: 'if-expr',
+        type: INT,
+        cond: {
+          kind: 'binop', op: '<', left: { kind: 'name', name: t }, right: { kind: 'int', value: 0 },
+        },
+        then: { kind: 'unop', op: '-', operand: { kind: 'name', name: t } },
+        else_: { kind: 'name', name: t },
+      },
     };
   }
   return { kind: 'call', fn: { kind: 'name', name: C.ref(name) }, args };
