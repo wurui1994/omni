@@ -494,10 +494,13 @@ export const REFPARAM = ['8', '16', '17', '2 1', '3.00', '17'];
  * `static const int LIMIT = 10;` 变成一格**每个对象各一份的零值字段**，`LIMIT - n`
  * 算出来是 `-n`（我们印 -3、`c++` 印 7）。现在发成一格模块级的量（`类名__成员名`）；
  * 方言的 `(global 名字 类型)` 不带初值，所以非零初值摆在 `main` 体的最前面。
- * 四行分别钉住：类里给初值、方法体里裸写着改它（一个类一份）、类外给初值
- * （`int Counter::total = 100;`）、`Counter::total` 那种读写。期望输出由 `c++` 给。
+ * 六行分别钉住：类里给初值、方法体里裸写着改它（一个类一份）、类外给初值
+ * （`int Counter::total = 100;`）、`Counter::total` 那种读写，以及**`static` 成员函数**
+ * （没有 `this` 的普通函数：从外头 `Counter::make(5)` 调、里头裸写着调另一格 static；
+ * 它看得见 static 数据成员，那是 `C.statCls` 那一格 —— `C.self` 管的是"裸名字当字段"）。
+ * 期望输出由 `c++` 给。
  */
-export const STATICMEM = ['7', '2', '1', '103', '7'];
+export const STATICMEM = ['7', '2', '1', '103', '7', '13', '8'];
 
 /**
  * **cpp 的记录是值语义**（`ext/cpp/examples/byvalue.cpp`）。第八个"答案静默地错"的洞，

@@ -245,6 +245,14 @@ export function cppToIR(tree) {
     refSig: new Map(),
     /** `类名_成员名`（类名已 ref 过） → 那格 `static` 成员落成的模块级名字。 */
     statics: new Map(),
+    /** `类名_成员函数名`（类名已 ref 过） → 那格 `static` 成员函数落成的函数名。 */
+    statFns: new Map(),
+    /**
+     * **正在发哪个类的 `static` 成员函数**（已 ref 过；不在里头是 null）。
+     * `C.self` 那一格管的是"裸名字当 `this->` 的字段"，而 static 里没有 `this` ——
+     * 但**`static` 数据成员还是要认得**，所以另开这一格。
+     */
+    statCls: null,
     /**
      * **按值传一格记录要拷一份**（C++ 的值语义）。方言的记录是引用语义，所以"传进去、
      * 在里头改字段"从前**改到了调用者那一格**（`grow(a)` 之后 `a.x` 变了 —— 答案静默地错）。
@@ -834,6 +842,15 @@ export function cppToIR(tree) {
       C.fns.set(s.name, { params: s.params, ret: s.ret });
       regMethOvl(rec, m, s, C);
     }
+    /* **`static` 成员函数**：一格普通函数（没有接收者）。 */
+    for (const sf of (rec.statFns ?? [])) {
+      const nm3 = `${C.ref(rec.name)}__${C.ref(sf.name)}`;
+      const s3 = sigOf(sf.tok, undefined, nm3);
+      noRefParams(s3, `${rec.name}::${sf.name}`);
+      if (C.fns.has(nm3)) throw new Error(`cpp->IR: ${rec.name}::${sf.name} 有两份`);
+      C.fns.set(nm3, { params: s3.params, ret: s3.ret });
+      C.statFns.set(`${C.ref(rec.name)}_${sf.name}`, nm3);
+    }
     for (const owner of (rec.dchain ?? [])) {
       C.fns.set(dtorName(C.ref(rec.name), C.ref(owner)), {
         params: [{ name: 'this', type: selfType }],
@@ -878,6 +895,15 @@ export function cppToIR(tree) {
     for (const m of rec.methods) {
       const s = sigOf(m.tok, selfType, methodName(rec, m, C));
       decls.push(fnDecl(s, m.tok, C, C.ref(rec.name)));
+    }
+    for (const sf of (rec.statFns ?? [])) {
+      const nm3 = `${C.ref(rec.name)}__${C.ref(sf.name)}`;
+      /* **体里没有 `this`**，所以 `selfName` 不给 —— 裸写字段名会当场报（正是 C++ 的规矩）；
+         但 `static` 数据成员与别的 static 成员函数要认得，那是 `C.statCls` 那一格的事。 */
+      const outerStat = C.statCls;
+      C.statCls = C.ref(rec.name);
+      decls.push(fnDecl(sigOf(sf.tok, undefined, nm3), sf.tok, C));
+      C.statCls = outerStat;
     }
     for (const owner of (rec.dchain ?? [])) {
       const s = {
@@ -1027,6 +1053,8 @@ function collectClass(cls, C, asName = null) {
   let dtorDeclared = false;
   /** `static` 的数据成员（一个类一份，落成模块级的量）。 */
   const statics = [];
+  /** `static` 的成员函数（没有 `this`，落成一格普通函数）。 */
+  const statFns = [];
   let dtor = null;
   const ctors = [];
   for (const m of (members === undefined ? [] : kids(members))) {
@@ -1117,6 +1145,15 @@ function collectClass(cls, C, asName = null) {
         ? opMethodName(head) : nameOf(kids(f)[0]);
       /* `virtual` 是 specs 里的一格光秃秃的词。 */
       const ms2 = part(m, 'specs');
+      /**
+       * **`static` 的成员函数就是一格没有 `this` 的普通函数**（名字 `类名__名字`）。
+       * 不收进 `methods` —— 那张表里的每一格都会带一格接收者。
+       */
+      if (ms2 !== undefined
+        && kids(ms2).some((y) => tag(y) === null && String(leaf(y)) === 'static')) {
+        statFns.push({ tok: m, name: mn2 });
+        continue;
+      }
       if (ms2 !== undefined
         && kids(ms2).some((y) => tag(y) === null && String(leaf(y)) === 'virtual')) {
         virtuals.add(mn2);
@@ -1126,7 +1163,7 @@ function collectClass(cls, C, asName = null) {
   }
   return {
     name: asName ?? nameOf(nm), bases, fields, methods, dtor, ctors, virtuals, pure,
-    declared, declaredCtors, dtorDeclared, statics,
+    declared, declaredCtors, dtorDeclared, statics, statFns,
   };
 }
 
@@ -1980,7 +2017,9 @@ function declOf(d, specs, C) {
 //   9. **`static` 数据成员**落成一格模块级的量（`类名__成员名`，`staticmem.cpp`）：
 //      一个类一份，初值（类里那句或类外那句 `int C::x = …;`）摆在 `main` 体的最前面 ——
 //      方言的 `(global 名字 类型)` 按设计零初始化，不带初值那一格。
-//      `static` 的**成员函数**还没接（那要"没有 this 的方法"）。
+//      `static` 的**成员函数**也接了：一格没有 `this` 的普通函数（`类名__名字`）。
+//      裸名字在它体里**不当字段**（C++ 的规矩），但 static 数据成员与别的 static 成员函数
+//      看得见 —— 那是 `C.statCls` 那一格（`C.self` 管的是"裸名字当 `this->` 的字段"）。
 //  10. **记录是值语义**（`byvalue.cpp`）：按值收的记录形参在**被调方进门第一句**拷一份
 //      （`类名__copy`，逐字段、字段是记录再递归拷），拷贝初始化与拷贝赋值也拷。
 //      不拷的两格是有意的：接收者（`this`）与借出去的形参（`T&` / `T*`）。

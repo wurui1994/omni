@@ -201,9 +201,14 @@ export function exprOf(x, C) {
         && (C.tyCtx().fields.get(C.self) ?? []).some((f) => f.name === n)) {
         return { kind: 'field', obj: { kind: 'name', name: 'this' }, name: n };
       }
-      /* 方法体里裸写的 `static` 成员：它不是字段，是一格模块级的量（一个类一份）。 */
-      if (C.self !== null && C.tyCtx().env.get(flat) === undefined) {
-        const g = C.statics.get(`${C.self}_${n}`);
+      /**
+       * 裸写的 `static` 数据成员：它不是字段，是一格模块级的量（一个类一份）。
+       * 两处都要认：普通方法里（`C.self`）与 **`static` 成员函数里**（`C.statCls` ——
+       * 那儿没有 `this`，但 static 成员照样看得见）。
+       */
+      const inCls = C.self ?? C.statCls;
+      if (inCls !== null && inCls !== undefined && C.tyCtx().env.get(flat) === undefined) {
+        const g = C.statics.get(`${inCls}_${n}`);
         if (g !== undefined) return { kind: 'name', name: g };
       }
       return { kind: 'name', name: flat };
@@ -381,6 +386,20 @@ function callOf(x, C) {
     throw new Error(`cpp->IR: \`.${m}()\` 这一格方法还没接`
       + `（接收者装的是 ${t.name ?? t.kind}）`);
   }
+  /* `Counter::make(3)` —— 一格 `static` 成员函数（没有接收者，就是普通调用）。 */
+  if (tag(fn) === 'qual') {
+    const ps = kids(fn);
+    if (ps.length === 2 && tag(ps[0]) === 'n' && tag(ps[1]) === 'n') {
+      const g = C.statFns.get(`${C.ref(nameOf(ps[0]))}_${nameOf(ps[1])}`);
+      if (g !== undefined) {
+        return {
+          kind: 'call',
+          fn: { kind: 'name', name: g },
+          args: rawArgs.map((a2) => exprOf(a2, C)),
+        };
+      }
+    }
+  }
   /* `std::make_pair(a, b)` —— 一格两格值的记录（字段叫 first / second）。 */
   if (tag(fn) === 'qual') {
     const nm = nameOf(kids(fn)[kids(fn).length - 1]);
@@ -459,6 +478,12 @@ function callOf(x, C) {
       fn: { kind: 'name', name: selfT.name },
       args: [{ kind: 'name', name: 'this' }, ...args.map((a, i) => coerce(a, selfT.params[i].type, C))],
     };
+  }
+  /* 裸写的 `static` 成员函数（方法体里 `make(3)`，或者另一格 static 里调它）。 */
+  const inCls2 = C.self ?? C.statCls;
+  if (inCls2 !== null && inCls2 !== undefined) {
+    const g = C.statFns.get(`${inCls2}_${name}`);
+    if (g !== undefined) return { kind: 'call', fn: { kind: 'name', name: g }, args };
   }
   const selfPick = C.self === null ? null : C.pickMethod(C.self, name, args.length);
   if (selfPick !== null) {
