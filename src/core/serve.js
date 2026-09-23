@@ -17,7 +17,7 @@
  * 代价是每趟一次 node 启动（量出来 ~100ms），实时模式那一档（250ms 防抖）吃得下。
  */
 
-import { readText, exists, isDir, stderr } from './host/native.js';
+import { readText, readBinary, exists, isDir, stderr } from './host/native.js';
 import { join, dirname } from './host/path.js';
 /* 白名单、后缀表、路径闸、目录树、等效命令 —— 那五样**与单体 HTML 共用**
    （`src/studio/browser-main.js` 从同一份拿），所以住在 `studio/shared.js`。 */
@@ -378,6 +378,29 @@ export function startServer(opts) {
         if (abs === null) return json(res, 404, { error: 'not found' });
         const text = readText(abs);
         return json(res, 200, { path: rel, lang: langOf(rel), text });
+      }
+      /**
+       * **一帧表面**（图形设备那一族）：`GET /api/gfx?path=.omni-cache/gfx/frame.rgba`。
+       *
+       * 回的是 `{ w, h, bytes }`，`bytes` 是**一个字符一个字节**的串（latin1）——
+       * 与封闭 ABI 的 `readBinary` 同一个口径。`/api/file` 那一格不能用：它 UTF-8 解码，
+       * 0x80-0xff 会全变成 U+FFFD，图就花了。
+       *
+       * 闸：只认 `.omni-cache/gfx/` 底下的 `.rgba`。那不在 `TREE_ROOTS` 里（它是产物，
+       * 不是源码），所以这一格自己关门 —— 放开整个 `.omni-cache` 等于把缓存交出去。
+       */
+      if (path === '/api/gfx') {
+        const rel = url.searchParams.get('path') ?? '';
+        if (rel.includes('..') || !rel.startsWith('.omni-cache/gfx/') || !rel.endsWith('.rgba')) {
+          return json(res, 400, { error: '只认 .omni-cache/gfx/ 底下的 .rgba' });
+        }
+        const abs = join(root, rel);
+        if (!exists(abs)) return json(res, 404, { error: 'not found' });
+        const raw = readBinary(abs);
+        const nl = raw.indexOf('\n');
+        const m = nl < 0 ? null : /^#rgba (\d+) (\d+)$/.exec(raw.slice(0, nl));
+        if (m === null) return json(res, 400, { error: '这份表面没有 #rgba 头' });
+        return json(res, 200, { w: Number(m[1]), h: Number(m[2]), bytes: raw.slice(nl + 1) });
       }
       if (path === '/api/run' && req.method === 'POST') {
         const body = JSON.parse(await readBody(req));

@@ -21,3 +21,6 @@ package-lock.json
 # 产物**只落 dist**：核心 dist/omni、符号表 dist/omni.syms、插件 dist/plugins/、
 # 数据 dist/share/，自举那一套也在里头。全是生成物，不进版本库。
 /dist/
+
+# `playwright-cli` 自己往这儿写页面快照（tests/studio 第 4 节拿真浏览器跑那一趟）
+/.playwright-cli/

@@ -18,7 +18,7 @@
 //   node tests/lower/run.js awk      只跑名字里带 awk 的那几格
 
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LANGS } from '../../src/core/lower/langs.js';
@@ -26,7 +26,7 @@ import {
   BASICS, INTMATH, LOOPEXIT, DICT, UNARY, RECORD, INDEX, SLICE, CONV, VALUES, MUT,
   DEFER, BLOCKRET, METHOD, ASSERTOK, STRCAT, NUMSTR, NAMEDARG, CASEFOR, CASERANGE,
   CTIF, MEMBER, BLOCKSCOPE, BITS, CHARLIT, CTCONST, DECLS, ENUMVAL, FNVAL, FORIN,
-  HOIST, LITNONE, MATCH, METHOD2, OPTRES, POINTER, POSINIT, PUSH, INHERIT, OPOVER, TMPL, CTOR, VIRT, CTMPL, LAMBDA, FMT, FORMAT, POSTEST, CTOR2, METHOV, PUREVIRT, DTORCHAIN, MIXVIRT, OUTLINE, CTMPL2, FNOVL, METHOV2, CTOR3, REFPARAM, STATICMEM, BYVALUE, ARRFIELD, RANGEFOR, SWBREAK, NARROW, ENUMDO, DECLMIX, ARRMATH, GLOBALS, CHAIN,
+  HOIST, LITNONE, MATCH, METHOD2, OPTRES, POINTER, POSINIT, PUSH, INHERIT, OPOVER, TMPL, CTOR, VIRT, CTMPL, LAMBDA, FMT, FORMAT, POSTEST, CTOR2, METHOV, PUREVIRT, DTORCHAIN, MIXVIRT, OUTLINE, CTMPL2, FNOVL, METHOV2, CTOR3, REFPARAM, STATICMEM, BYVALUE, ARRFIELD, RANGEFOR, SWBREAK, NARROW, ENUMDO, DECLMIX, ARRMATH, GLOBALS, CHAIN, EVALARR,
 } from '../lib/cases.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -57,6 +57,7 @@ const FAMILIES = {
   outline: OUTLINE, ctmpl2: CTMPL2, fnovl: FNOVL, methov2: METHOV2, ctor3: CTOR3, refparam: REFPARAM, staticmem: STATICMEM, byvalue: BYVALUE, arrfield: ARRFIELD, rangefor: RANGEFOR,
   swbreak: SWBREAK, narrow: NARROW, enumdo: ENUMDO, declmix: DECLMIX, arrmath: ARRMATH, globals: GLOBALS,
   chain: CHAIN,
+  evalarr: EVALARR,
 };
 const MIGRATED = {
   awk: ['basics', 'intmath', 'loopexit', 'dict', 'unary'],
@@ -107,11 +108,23 @@ const MIGRATED = {
      `Printf` 在迁过来之后曾经整格当场报，而 146 份例子那把尺子只看"退出码变没变"，
      一直记着它是红的，没人发现它本该是绿的。 */
   go: ['format', 'postest'],   // 两格都是 `Sprintf` 一修就转绿的
+  /* polydraw（`.pss`，Ken Silverman 的 EVAL）：先一格 `basics`。这门语言的正确性口径是
+     **那棵参考树里的旧实现**（`polydraw_src/eval.c` + `eval.txt`），不是新写的
+     `c_impl` / `js_impl`（它们有已知偏差）。这一版只接"只算不画"那一半 ——
+     画图那一族（glBegin / glVertex / 矩阵栈）在 adapter 里当场报，见任务 #19。 */
+  /* polydraw（`.pss`，Ken Silverman 的 EVAL）：`basics` 是"只算不画"那一半，
+     **`evalarr` 是这门语言自己的三样规矩**（`static` 数组 + 越界那两档 + RND/NRND，
+     口径在 `eval.txt` 的 "Variables & arrays"）。画图那一族的判据在第二节（判表面）。 */
+  polydraw: ['basics', 'evalarr'],
+  /* evaldraw（`.kc`）**与 polydraw 是同一门语言**：同一份 `.grammar`、同一份 `evalToIR`，
+     差别只有那张宿主表。这一格判据在的理由正是这个 —— 它证明"两门共用一份"没有走样。 */
+  evaldraw: ['basics'],
 };
 
 /** 敲一条命令，回 `{ code, out, err }`（out 按行切好，末尾空行去掉）。 */
-function omni(args) {
-  const r = spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', cwd: ROOT });
+function omni(args, extraEnv) {
+  const env = extraEnv === undefined ? process.env : { ...process.env, ...extraEnv };
+  const r = spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', cwd: ROOT, env });
   const out = (r.stdout ?? '').split('\n');
   while (out.length > 0 && out[out.length - 1] === '') out.pop();
   return { code: r.status ?? 1, out, err: r.stderr ?? '' };
@@ -149,6 +162,117 @@ for (const [name, families] of Object.entries(MIGRATED)) {
       continue;
     }
     ok(`${label} run [${want.join(' ')}]`);
+  }
+}
+
+/* ─── 第二节：图形设备那一格（**判的是那一帧表面**，不是 stdout） ──────────────
+ * `(gfxframe PATH W H FB)` 有三份实现（backend-js 的 `$gfx_frame`、interp 的 `gfxFrame`、
+ * C 的 `omni_gfx_frame`）。三条腿各跑一趟同一份例子，判四件事：
+ *   1. stdout 上只有那一行**指针**（像素不走 stdout —— 这是这一层的全部要点）；
+ *   2. 表面的头一行与字节数对得上（`#rgba W H\n` + W*H*4）；
+ *   3. **不是全黑**（"什么都没画"也能满足上面两条）；
+ *   4. 三条腿**逐字节相同**。
+ *
+ * 两份例子走的是两套宿主 API，落的是同一块帧缓冲：
+ *   * `.kc` = EvalDraw 的 2D（`cls`/`setcol`/`moveto`/`lineto`/`drawsph`/`drawcone`）；
+ *   * `.pss` = PolyDraw 的 **GL 立即模式**（`glBegin`/`glVertex`/`glColor` + 矩阵栈）——
+ *     它多一层变换与三角形光栅化（`gl-rt.js`），所以值得单独一格。
+ */
+const GFX_OUT = '.omni-cache/gfx/frame.rgba';
+const GFX_CASES = [
+  { who: 'evaldraw+2d', file: 'ext/evaldraw/examples/draw2d.kc', w: 320, h: 240 },
+  { who: 'polydraw+gl', file: 'ext/polydraw/examples/02-gl.pss', w: 320, h: 240 },
+  /* jnc（C 那一侧）：同一格 op 的**指针那一档** —— 帧缓冲是 `int fb[N]`（一槽一个
+     0xRRGGBB），不是 `(arr real)`。库是普通的 jnc 代码（`ext/jnc/lib/ege.jnc`），
+     只有"交出一帧"那一句走方言。 */
+  { who: 'jnc+ege', file: 'ext/jnc/examples/01-shapes.jnc', w: 320, h: 240 },
+  /* **宿主设备那条路**（`OMNI_GFX=host`：画图落成 `(gfxcall "名字" …)`，设备在宿主那一侧）。
+     判的是"搬家不改语义"：同一份 `.kc` 走这条路，与上头 `evaldraw+2d`（生成出来的 CPU
+     光栅器）出来的表面**逐字节相同**。这条路才是往后的默认 —— GPU 那两档设备（WebGL2 /
+     本机 OpenGL）挂在同一格全局上（`docs/design/eval-realtime-gpu.md`）。 */
+  {
+    who: 'evaldraw+host',
+    file: 'ext/evaldraw/examples/draw2d.kc',
+    w: 320,
+    h: 240,
+    env: { OMNI_GFX: 'host' },
+  },
+  /* **帧循环那一格**（`OMNI_FRAMES=3`：设备说"还画不画下一帧"，产物自己 while）。
+     判三件事：stdout 上**三行**指针（一帧一行）、`static` 跨帧活（圆的半径 = 帧数×20，
+     三帧之后是 60 —— 非黑格数对得上）、三条腿逐字节相同。 */
+  {
+    who: 'evaldraw+frames',
+    file: 'ext/evaldraw/examples/frames.kc',
+    w: 320,
+    h: 240,
+    env: { OMNI_GFX: 'host', OMNI_FRAMES: '3' },
+    frames: 3,
+  },
+  /* **输入那一族**（`mousx`/`mousy`/`bstatus`/`keystatus[k]`，还有"写回去消掉一次点击"）。
+     CPU 这一档没有窗口，所以来源是 `OMNI_MOUSE=x,y,按键位` 与 `OMNI_KEYS=扫描码,…` ——
+     输入在这一趟里是常量，于是三条腿仍然逐字节相同。例子里四格都留了痕（见 probes）。 */
+  {
+    who: 'evaldraw+input',
+    file: 'ext/evaldraw/examples/input.kc',
+    w: 320,
+    h: 240,
+    env: { OMNI_GFX: 'host', OMNI_MOUSE: '200,80,1', OMNI_KEYS: '0xc8' },
+    /* 挑几格像素：`[x, y, r, g, b]` —— 判的是"输入真的进到图里了"。 */
+    probes: [
+      [200, 80, 255, 190, 60],      /* 实心圆（左键按着）盖在十字上 -> 鼠标位置与 bstatus 都活 */
+      [150, 20, 255, 255, 255],     /* 方向键上那条白线 -> keystatus[0xc8] 活 */
+      [40, 200, 16, 24, 32],        /* 绿点**没画** -> `bstatus--` 写回设备生效了 */
+    ],
+  },
+];
+const gfxLegs = [['js', []], ['interp', ['--backend', 'interp']], ['c', ['--backend', 'c']]];
+for (const G of GFX_CASES) {
+  if (only.length > 0 && !only.some((x) => 'gfx'.includes(x) || G.file.includes(x) || G.who.includes(x))) continue;
+  const seen = [];
+  for (const [leg, flags] of gfxLegs) {
+    const label = `${G.who}(${leg})`;
+    const got = omni(['run', ...flags, G.file], G.env);
+    /* 一帧一行指针：帧循环那一档跑几帧就有几行。 */
+    const want = new Array(G.frames === undefined ? 1 : G.frames)
+      .fill(`#gfx rgba ${GFX_OUT} ${G.w} ${G.h}`);
+    if (got.code !== 0) { no(label, `退出码 ${got.code}：${got.err.split('\n').slice(-2).join(' ')}`); continue; }
+    if (JSON.stringify(got.out) !== JSON.stringify(want)) {
+      no(label, `stdout 期望 ${JSON.stringify(want)} 得到 ${JSON.stringify(got.out)}`);
+      continue;
+    }
+    const buf = readFileSync(join(ROOT, GFX_OUT));
+    const head = `#rgba ${G.w} ${G.h}\n`;
+    const size = head.length + G.w * G.h * 4;
+    if (buf.length !== size || buf.subarray(0, head.length).toString('latin1') !== head) {
+      no(label, `表面 期望 ${size} 字节、头一行 ${JSON.stringify(head)}，`
+        + `得到 ${buf.length} 字节、${JSON.stringify(buf.subarray(0, head.length).toString('latin1'))}`);
+      continue;
+    }
+    const px = buf.subarray(head.length);
+    let lit = 0;
+    for (let i = 0; i < px.length; i += 4) {
+      if (px[i] !== 0 || px[i + 1] !== 0 || px[i + 2] !== 0) lit++;
+    }
+    if (lit === 0) { no(label, '表面整幅全黑 —— 图元一格都没落进帧缓冲'); continue; }
+    /* 挑出来的那几格像素（有 `probes` 的例子才判）：证明**这一格输入真的影响了图**，
+       不是"画了点什么就算过"。 */
+    let bad = null;
+    for (const [x, y, r, g, b] of G.probes ?? []) {
+      const o = (y * G.w + x) * 4;
+      if (px[o] !== r || px[o + 1] !== g || px[o + 2] !== b) {
+        bad = `(${x},${y}) 期望 ${r},${g},${b} 得到 ${px[o]},${px[o + 1]},${px[o + 2]}`;
+        break;
+      }
+    }
+    if (bad !== null) { no(label, `像素 ${bad}`); continue; }
+    seen.push([leg, buf]);
+    ok(`${label} 表面 [${buf.length} 字节，${lit} 格非黑`
+      + `${G.probes === undefined ? '' : `，${G.probes.length} 格像素对得上`}]`);
+  }
+  for (let i = 1; i < seen.length; i++) {
+    const [leg, buf] = seen[i];
+    if (buf.equals(seen[0][1])) ok(`${G.who} ${seen[0][0]}/${leg} 逐字节相同`);
+    else no(`${G.who} ${seen[0][0]}/${leg}`, '两条腿的表面不是同一份字节');
   }
 }
 

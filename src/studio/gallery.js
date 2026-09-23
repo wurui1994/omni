@@ -83,6 +83,22 @@ export const GALLERY = [
     note: '内联 SVG + 原生控件联动',
   },
 
+  /* ---- gfx：图形设备那一族（`ext/js/lib/ege.js`）。跑一趟，把那一帧表面贴到 canvas 上 ----
+     与 `svg` 那一族的差别在"图在哪儿"：这边 stdout 上只有一行指针，像素在表面文件里。
+     `.js` 在**两条腿上都跑得动**（单体 HTML 里也是），所以这几格首页上一直摆着。 */
+  {
+    path: 'ext/js/examples/01-shapes.js', kind: 'gfx', title: 'EasyX 的第一课',
+    note: 'initgraph / bar / circle / fillpoly —— BGI 那套名字，像素落在内存里',
+  },
+  {
+    path: 'ext/js/examples/02-mandelbrot.js', kind: 'gfx', title: '十一万次 putpixel',
+    note: '384×288 一格一格算逃逸次数，跨出程序的只有一帧表面',
+  },
+  {
+    path: 'ext/js/examples/03-lissajous.js', kind: 'gfx', title: 'Lissajous 三条',
+    note: 'polyline 接出来的曲线，Bresenham 画在设备上',
+  },
+
   /* ---- svg：跑一趟，stdout 本身就是一张 SVG（`std/plot.omni` 那一层） ---- */
   {
     path: 'ext/omni/examples/koch.omni', kind: 'svg', title: 'Koch 雪花',

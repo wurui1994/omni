@@ -246,8 +246,62 @@ export function drawKindOf(out) {
   const s = String(out ?? '').trimStart();
   if (s.startsWith('%!PS')) return 'eps';
   if (s.startsWith('<?xml') || s.startsWith('<svg')) return 'svg';
+  /* **图形设备**（`ext/js/lib/ege.js` / `ext/jnc/lib/ege.jnc`）：stdout 上只有一行指针
+     `#gfx rgba <路径> <宽> <高>`，图在那份表面文件里（w*h*4 的裸 RGBA）。
+     认的是这一行，不是后缀 —— 哪门语言印的都一样。 */
+  if (gfxRef(s) !== null) return 'gfx';
   return null;
 }
+
+/**
+ * 一趟输出里那行**设备指针**：`#gfx rgba <路径> <宽> <高>` -> `{ path, w, h }`。
+ *
+ * 为什么图不走 stdout：这一格是图形设备。`putpixel` 一百万次落在内存里那块 RGBA 上，
+ * 跨出程序的只有**一帧表面**；stdout 上那一行说的是"表面在哪儿"。
+ * 从前这儿是一份"绘图命令表"（每笔一行），那在 `.frag` 级的小图上还行，
+ * 一张 384×288 的 Mandelbrot 就是十一万行 —— 图像这一档不能那么算。
+ */
+export function gfxRef(out) {
+  const m = /(?:^|\n)#gfx rgba (\S+) (\d+) (\d+)\s*(?:\n|$)/.exec(String(out ?? ''));
+  if (m === null) return null;
+  return { path: m[1], w: Number(m[2]), h: Number(m[3]) };
+}
+
+/**
+ * 把一份裸 RGBA 表面贴到 canvas 上（`putImageData` 一次）。
+ *
+ * `bytes` 是**一个字符一个字节**的串（封闭 ABI 的 `readBinary` 那个口径），
+ * 或者一格 `Uint8Array` —— 两种都收：服务那侧走 base64 解出来的串，
+ * 单体那侧从内存里那张表直接拿到串。
+ */
+export function rgbaDraw(canvas, bytes, w, h) {
+  canvas.width = w;
+  canvas.height = h;
+  const g = canvas.getContext('2d');
+  const img = g.createImageData(w, h);
+  const d = img.data;
+  const n = Math.min(d.length, w * h * 4);
+  if (typeof bytes === 'string') {
+    for (let i = 0; i < n; i++) d[i] = bytes.charCodeAt(i) & 255;
+  } else {
+    for (let i = 0; i < n; i++) d[i] = bytes[i];
+  }
+  g.putImageData(img, 0, 0);
+  return { w, h };
+}
+
+/** 表面文件的头（`#rgba <宽> <高>\n`）切掉，回 `{ w, h, body }`。 */
+export function rgbaSplit(text) {
+  const s = String(text ?? '');
+  const nl = s.indexOf('\n');
+  const m = nl < 0 ? null : /^#rgba (\d+) (\d+)$/.exec(s.slice(0, nl));
+  if (m === null) return null;
+  return { w: Number(m[1]), h: Number(m[2]), body: s.slice(nl + 1) };
+}
+
+
+
+
 
 /**
  * 一趟输出里**有没有图、图是哪几块**（`{ kind, blocks, rest }`）。
@@ -262,6 +316,8 @@ export function drawKindOf(out) {
 export function drawBlocks(out) {
   const s = String(out ?? '');
   if (s.trimStart().startsWith('%!PS')) return { kind: 'eps', blocks: [s], rest: '' };
+  /* 设备那一族不在这儿抠块：stdout 上只有一行指针，图在表面文件里（见 `gfxRef`）。 */
+  if (gfxRef(s) !== null) return { kind: 'gfx', blocks: [], rest: s, ref: gfxRef(s) };
   const blocks = [];
   let rest = '';
   let i = 0;

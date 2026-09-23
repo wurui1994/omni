@@ -31,6 +31,7 @@
 
 import { OmniError } from '../source/diag.js';
 import { utf8Bytes } from '../host/utf8.js';
+import { env } from '../host/native.js';
 import {
   COND, addImm, addReg, andImm, andReg, asrv, asrImm, blr, br, cmpImm, cmnImm, cmpReg, cset, csinc,
   eorImm,
@@ -188,8 +189,12 @@ const MATH1 = {
 };
 
 /** `OMNI_EMIT_STAT=1` 的账本：MIR op 名 -> `{n: 机器指令条数, k: 这种 op 出现几次}`。
- *  关着的时候是 `null`，一条判断都不多做。印出来的地方在 `emitStatDump`。 */
-export const EMIT_STAT = process.env.OMNI_EMIT_STAT === '1' ? new Map() : null;
+ *  关着的时候是 `null`，一条判断都不多做。印出来的地方在 `emitStatDump`。
+ *
+ *  读环境走封闭 ABI 的 `env`，不是 `process.env`（ADR-0011 决策 2）。这一句在**模块作用域**：
+ *  浏览器那条腿上没有 `process`，写成 `process.env` 的话整份 module script 在这儿就中断，
+ *  后面 `window.__OMNI_LOCAL` / `__OMNI_RENDER` 一格都装不上（单体 HTML 白屏）。 */
+export const EMIT_STAT = env('OMNI_EMIT_STAT') === '1' ? new Map() : null;
 
 /** 把 `EMIT_STAT` 印出来（按条数从多到少）。**要看的是最后那一列"每条 op 摊几条指令"** ——
  *  一条 `MSTORE` 理应是一条 `str`，摊到 2.5 就说明操作数没在寄存器里。 */

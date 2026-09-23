@@ -211,6 +211,12 @@ body {
 .svg-list { display: flex; flex-direction: column; gap: 12px; width: 100%; padding: 8px 0; }
 .svg-list .svg-wrap { height: auto; padding: 0 16px; }
 .gl-canvas { width: 100%; height: 100%; display: block; }
+/* 图形设备那一帧表面（`rgbaDraw` 贴上去的）：**按原尺寸居中、不拉伸** —— 那是真像素，
+   拉伸出来的图和程序画的不是同一张。放大时不插值（`pixelated`），看得见一格一格。 */
+.gfx-canvas {
+  display: block; margin: auto; max-width: 100%; max-height: 100%;
+  image-rendering: pixelated; background: #000;
+}
 /* 尺寸写死在源码里的那几份（vispy 那一族冲的是 128²，见 render.js 的 `glslSizeOf`）：
    **按原尺寸居中**，别拉伸 —— 拉伸就不是 `omni run … -o out.png` 出的那张图了。 */
 .gl-canvas.fixed { width: auto; height: auto; max-width: 100%; max-height: 100%; margin: auto; }

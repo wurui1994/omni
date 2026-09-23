@@ -31,7 +31,16 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const ENTRY = 'src/studio/browser-main.js';
 
 /** **换腿**：这个 id 被拼进去的时候，用的是右边那份文件。 */
-const SWAP = { 'src/core/host/native.js': 'src/core/host/browser.js' };
+const SWAP = {
+  'src/core/host/native.js': 'src/core/host/browser.js',
+  /* 内建语言那张表有三份实现，接缝与 `cli.js` 的 `readModule` 换 `--fat` 时同一处：
+   *   `lang/builtin.js`      迟装 —— 靠 `createRequire`（`node:module`），只给 node 那条腿
+   *   `lang/builtin-fat.js`  一次全装 —— 八门语言四个目标全是**静态 import**
+   *   `lang/builtin-web.js`  fat 再加上 `ext/` 里那三格 JS 扩展（lua / gsl-shell / tiny）
+   * 浏览器这条腿上既没有 `require` 也没有 `dlopen`，而这份打包器只认静态 import，
+   * 所以换成 web 那一份。代价明写：八门语言 + 三格扩展全进这份 HTML（体积账见 `--split`）。 */
+  'src/core/lang/builtin.js': 'src/core/lang/builtin-web.js',
+};
 
 /**
  * **同一格宿主只许有一份**：`browser.js` 里有几格 `native.js` 上没有的东西
@@ -62,13 +71,38 @@ const ALIAS = { 'src/core/host/browser.js': 'src/core/host/native.js' };
  * 两处用同一对定义就没有这一类。
  */
 const AT = '(?:^|(?<=\\n)|(?<=\\*/))';
-const FROM_SRC = `${AT}([ \\t]*)(import|export)\\s+([^;]*?)\\s+from\\s*['"]([^'"]+)['"]\\s*;?`;
+/* 子句只有两种形状：`{ … }` 与 `* as ns`。**必须这么钉死**，不能写成"到 from 之前的
+ * 随便什么" —— 那一版把 `export const ROOT = {`（`cli/cmds.js` 顶层那格）当成子句的开头，
+ * 一路吞过几十行帮助文本，撞上里头教人用的那句 `… from 'omni-lang/build';`，
+ * 然后报"`omni-lang/build` 不是相对路径"，而那份文件里一条 node 依赖都没有。 */
+const CLAUSE = '(\\{[^{}]*\\}|\\*\\s+as\\s+[A-Za-z_$][\\w$]*|[A-Za-z_$][\\w$]*)';
+const FROM_SRC = `${AT}([ \\t]*)(import|export)\\s+${CLAUSE}\\s+from\\s*['"]([^'"]+)['"]\\s*;?`;
 const BARE_SRC = `${AT}([ \\t]*)import\\s*['"]([^'"]+)['"]\\s*;`;
+
+/**
+ * 这一处匹配**真的是一条顶层 import** 吗 —— 还是某个字符串里长得像的一段？
+ *
+ * 判据只有一条：真的那条**贴着行首**（这棵树里的顶层 import 一律不缩进）。缩进了的只有
+ * 一种情形算真的：紧跟在块注释收尾之后（`lang/jnc/value.js` 那种一行两件事）。
+ *
+ * 为什么要这一格：`cli/cmds.js` 的帮助文本里印着一句 `import { Build } from
+ * 'omni-lang/build';`（教人怎么在自己项目里用我们这个包）—— 它缩进两格躺在模板串里。
+ * 少了这一判，打包器把它当成一条真 import，报的是"`omni-lang/build` 不是相对路径"，
+ * 而那份文件里一条 node 依赖都没有。
+ */
+function atTopLevel(text, idx, ind) {
+  if (ind.length === 0) return true;
+  return text.slice(0, idx).endsWith('*/');
+}
 
 function depsOf(text) {
   const out = [];
-  for (const m of text.matchAll(new RegExp(FROM_SRC, 'g'))) out.push(m[4]);
-  for (const m of text.matchAll(new RegExp(BARE_SRC, 'g'))) out.push(m[2]);
+  for (const m of text.matchAll(new RegExp(FROM_SRC, 'g'))) {
+    if (atTopLevel(text, m.index, m[1])) out.push(m[4]);
+  }
+  for (const m of text.matchAll(new RegExp(BARE_SRC, 'g'))) {
+    if (atTopLevel(text, m.index, m[1])) out.push(m[2]);
+  }
   return out;
 }
 
@@ -127,28 +161,45 @@ function collect(entry) {
 /**
  * 一份 ESM 改成"登记表里的一格函数体"。
  *
- * 五种形状（我们的代码里只有这五种）：
+ * 七种形状（我们的代码里只有这七种）：
  *   `import { a, b as c } from '…'`   -> `const { a, b: c } = __req('…')`
  *   `import * as ns from '…'`         -> `const ns = __req('…')`
+ *   `import x from '…'`               -> `const x = __req('…').default`
  *   `export { a, b } from '…'`        -> re-export：拿进来再登记出去
  *   `export function f` / `export class C` / `export const x` / `export let x`
  *   `export { a, b as c }`            -> 尾部登记
+ *   `export default <表达式>;`         -> `__e.default = <表达式>;`
  *
- * `export default` **不认**（我们的代码里一处都没有，认了反而多一条会分叉的路）。
- * 前两条的正则与扫依赖那一步**共用** `FROM_SRC` / `BARE_SRC`（见上面那段账）。
+ * 默认那两格从前**不认**，理由写的是"我们的代码里一处都没有"。现在有了：
+ * `src/lang/jnc/features/*.js` 那六份（一个特性一份 `export default feature({…})`，
+ * `features/index.js` 按默认名字把它们收起来）。所以这儿认下来 —— 拒的话就得去改那门
+ * 语言的写法，而那与"能不能装进一份 HTML"毫无关系。
+ *
+ * 前三条的正则与扫依赖那一步**共用** `FROM_SRC` / `BARE_SRC`（见上面那段账）。
  */
 function toRegistryBody(id, src) {
   const names = new Set();     /* 要登记出去的本地名 -> 导出名（同名居多） */
   const alias = new Map();     /* 导出名 -> 本地名 */
-  let out = src;
+  /* 开头那行 `#!/usr/bin/env node` 去掉：它在文件头上是合法的（node 与 shell 都认），
+     可这儿每份模块被包进一个函数体，`#` 在那儿是硬语法错 —— `cli.js` 就有这一行，
+     踩出来的样子是拼好的那份在第 152574 行报 `Invalid or unexpected token`。 */
+  let out = src.startsWith('#!') ? src.slice(src.indexOf('\n') + 1) : src;
 
   /* 1) `import … from '…'` 与 `export … from '…'` */
   out = out.replace(new RegExp(FROM_SRC, 'g'),
-    (all, ind, kw, clause, spec) => {
+    (all, ind, kw, clause, spec, offset, whole) => {
+      /* 字符串里长得像 import 的那种原样留着（判据与扫依赖那一步**同一格**）。 */
+      if (!atTopLevel(whole, offset, ind)) return all;
       const to = resolveId(SWAP[id] ?? id, spec);
       const req = `__req(${JSON.stringify(to)})`;
       const star = clause.match(/^\*\s+as\s+([A-Za-z_$][\w$]*)$/);
       if (star !== null) return `${ind}const ${star[1]} = ${req};`;
+      /* 默认导入：`import fields from './fields.js'`（jnc 那几份特性）。 */
+      const bare = clause.match(/^[A-Za-z_$][\w$]*$/);
+      if (bare !== null) {
+        if (kw === 'export') throw new Error(`${id}: 不认的 export 形状 —— ${all.trim()}`);
+        return `${ind}const ${clause} = ${req}.default;`;
+      }
       const braced = clause.match(/^\{([\s\S]*)\}$/);
       if (braced === null) {
         throw new Error(`${id}: 不认的 import 形状 —— ${all.trim()}`);
@@ -169,7 +220,8 @@ function toRegistryBody(id, src) {
 
   /* 2) 只为副作用的 `import '…';`（`mir/opt/index.js` 里那七条 pass） */
   out = out.replace(new RegExp(BARE_SRC, 'g'),
-    (all, ind, spec) => `${ind}__req(${JSON.stringify(resolveId(SWAP[id] ?? id, spec))});`);
+    (all, ind, spec, offset, whole) => (atTopLevel(whole, offset, ind)
+      ? `${ind}__req(${JSON.stringify(resolveId(SWAP[id] ?? id, spec))});` : all));
 
   /* 3) `export function f` / `export class C` / `export const|let|var x` */
   out = out.replace(
@@ -193,11 +245,23 @@ function toRegistryBody(id, src) {
     return '';
   });
 
-  /* 这一格是**闸**，不是装饰：漏掉一条 export 的表现是拼出来那份当场 SyntaxError，
-     而那时错误指着一个五万行的临时文件。在这儿指名道姓地报，省掉那一趟。 */
-  const left = new RegExp(`${AT}\\s*export\\s[^\\n]*`);
-  if (left.test(out)) {
-    throw new Error(`${id}: 还剩一条没摊平的 export —— ${out.match(left)[0].trim()}`);
+  /* 5) `export default <表达式>;` —— 登记成 `default` 那一格（jnc 的六份特性用它）。
+     摆在 3)、4) 之后：`export default function f(){}` 这种写法这棵树里没有，真出现了
+     下面那道闸会指名道姓地报。 */
+  out = out.replace(new RegExp(`${AT}([ \\t]*)export\\s+default\\s+`, 'g'),
+    (all, ind) => `${ind}__e.default = `);
+
+  /* 这一格是**闸**，不是装饰：漏掉一条 import/export 的表现是拼出来那份当场 SyntaxError，
+     而那时错误指着一个五万行的临时文件。在这儿指名道姓地报，省掉那一趟。
+     `import` 那一半是后来补的：子句钉死成三种形状之后，没认出来的那条会**安静地留在
+     原地**，而留下的 `import` 在登记表函数体里是硬语法错。
+     判"是不是真的一条"用的还是 `atTopLevel` —— `cli/cmds.js` 的帮助文本里印着一句
+     教人怎么用这个包的 `import { Build } from 'omni-lang/build';`，那是数据。 */
+  const left = new RegExp(`${AT}([ \\t]*)(?:export|import)\\s[^\\n]*`, 'g');
+  for (const m of out.matchAll(left)) {
+    if (atTopLevel(out, m.index, m[1])) {
+      throw new Error(`${id}: 还剩一条没摊平的 import/export —— ${m[0].trim()}`);
+    }
   }
 
   const reg = [...alias.entries()].map(([ex, local]) => `__e.${ex} = ${local};`).join(' ');
@@ -244,10 +308,33 @@ function uiScript(src) {
 const VFS_ROOTS = [
   { path: 'docs', exts: ['.md'] },
   { path: 'ext', exts: ['.grammar'] },
+  /* 扩展的**自述**（`ext/<名字>/omni-ext.json`）：`ext.js` 的 `scanExts` 读它才知道
+     "有这么一门语言"。代码由 `lang/builtin-web.js` 静态带进来，这一格是它的那半份数据。 */
+  { path: 'ext', exts: ['.json'] },
+  /* 自家那几门前端的语法也在源码树里（`frontend-asy/asy.grammar` 88KB 三份合计）——
+     `.asy` / `.jnc` / `.glsl` 在页面上跑起来第一件事就是读它。少了这一格，报的是
+     "找不到 asy 语法文件（试过 …四条路…）"。
+     `.tab` 是 asy 那张**内建绑定表**（`frontend-asy/builtins.tab`）—— 同一类东西：
+     不是代码，是前端启动就要读的数据。 */
+  { path: 'src/core', exts: ['.grammar', '.tab'] },
+  /* asy 的那套库（`asy_builtins.asy` 584KB + settings + gsl + version）：asy 的前端
+     一上来就 import 它们。**主语言那几份 `.omni` 库一起带**（turtle / plot / num …
+     加起来 68KB）—— `.omni` 的例子现在也是真跑的，不再只是"看得见、编辑得了"。 */
+  { path: 'src/lib', exts: ['.asy', '.omni'] },
+  /* `.pss` / `.kc` 是 EVAL 那两门（polydraw / evaldraw）—— 它们与上面那几门同一条路
+     （`lower/langs.js` 登记、`ext/polydraw/polydraw.grammar` 由上面那格 `.grammar` 带上）。 */
   { path: 'ext', exts: ['.go', '.nim', '.v', '.lua', '.mojo', '.cpp', '.bas', '.awk',
-    '.ss', '.lisp', '.asy', '.jnc', '.js', '.sx', '.html', '.omni'], only: ['examples'] },
-  /* **`src/lib/*.omni` 不带**：单体这一份跑不了 `.omni`（`browser-main.js` 只挂图那条腿），
-     带上那几份库也没人读得着 —— `.omni` 的例子在这儿只是**看得见、编辑得了**。 */
+    '.ss', '.lisp', '.asy', '.jnc', '.js', '.sx', '.html', '.omni', '.pss', '.kc'], only: ['examples'] },
+  /* tiny 那格扩展的例子在 `ext/tiny/tests/`（它没有 examples 目录）—— 一共两三份，
+     整格带上比给"哪些目录算例子"再开一条规矩便宜。 */
+  { path: 'ext/tiny', exts: ['.tiny'] },
+  /* **图形库那一份**（`ext/js/lib/ege.js`）：它不在 `examples` 底下，而例子第一行就
+     `import … from '../lib/ege.js'` —— 少了这一格，页面上那三格 gfx 例子报的是
+     "no such module"，而库的代码就在同一份 HTML 里。 */
+  { path: 'ext/js/lib', exts: ['.js'] },
+  /* **C 那一侧的同一套库**（`ext/jnc/lib/ege.jnc`）：例子第一行就 `import "../lib/ege.jnc"`
+     —— 与上面那一格同一笔账（库不在 `examples` 底下）。 */
+  { path: 'ext/jnc/lib', exts: ['.jnc'] },
   { path: 'tests', exts: ['.go', '.sx', '.asy', '.wat', '.js', '.jnc', '.frag'],
     only: ['cases', 'draw'] },
 ];
@@ -275,6 +362,45 @@ function collectVfs() {
   };
   for (const spec of VFS_ROOTS) walk(spec.path, spec, 0);
   return files;
+}
+
+/**
+ * **把构好的 LR 表一起打包进去**（不然页面上每门语言第一趟都要现构一张）。
+ *
+ * 为什么值得：构表在 GLSL 那份语法上量到 **559ms**、go 那份 300ms 上下 —— 而它在
+ * `glr/load.js` 里是**内容寻址缓存**的：键是 `TABLE_FORMAT|语法正文`，落在
+ * `<缓存根>/glr/<键的哈希>/table.txt`。浏览器那条腿的缓存根是内存里那棵 `.omni-cache`
+ * （`host/browser.js` 的 ENV），刷新页面就空 —— 于是"换一门语言"在页面上就是一次
+ * 半秒到一秒的停顿，而那张表**与源码无关**、打包时就能算好。
+ *
+ * 做法：在这儿（node 上）把每份语法过一遍 `loadGrammarTable`，它会把表写进本机的
+ * 缓存；然后按**同一个哈希目录名**塞进 VFS。两条腿算出来的键逐字节相同（纯函数），
+ * 所以页面上那一问直接命中。
+ *
+ * `.y` / `.ebnf` 那两族不在这儿：它们先要转成 `(grammar …)` 文本，而这条腿上还没有
+ * 哪门语言从那儿来。真有了的话这儿会**静静地不命中**（页面照旧现构），不会算错。
+ */
+async function collectGlrTables(files) {
+  const { loadGrammarTable } = await import('../src/core/glr/load.js');
+  const grammars = Object.keys(files).filter((p) => p.endsWith('.grammar'));
+  let bytes = 0;
+  let n = 0;
+  for (const g of grammars) {
+    let r = null;
+    try {
+      r = loadGrammarTable(join(ROOT, g));
+    } catch {
+      continue;                     /* 这份语法自己不成立 —— 那是它那门语言的事，不在这儿报 */
+    }
+    if (r === null || r === undefined || r.cachePath === undefined) continue;
+    const segs = r.cachePath.split('/');
+    const key = `.omni-cache/glr/${segs[segs.length - 2]}/table.txt`;
+    if (files[key] !== undefined) continue;
+    files[key] = readFileSync(r.cachePath, 'utf8');
+    bytes += files[key].length;
+    n += 1;
+  }
+  return { n, bytes };
 }
 
 /**
@@ -308,6 +434,12 @@ function main() {
     + `${toRegistryBody(id, text.get(id))}};\n`);
 
   const vfs = collectVfs();
+  return { outPath, order, mods, vfs };
+}
+
+async function build() {
+  const { outPath, order, mods, vfs } = main();
+  const tabs = await collectGlrTables(vfs);
   const html = readFileSync(join(ROOT, 'src', 'studio', 'index.html'), 'utf8');
   const css = readFileSync(join(ROOT, 'src', 'studio', 'studio.css'), 'utf8');
   const ui = uiScript(readFileSync(join(ROOT, 'src', 'studio', 'studio.js'), 'utf8'));
@@ -357,7 +489,8 @@ function main() {
   writeFileSync(join(ROOT, outPath), body);
   const kb = (body.length / 1024).toFixed(0);
   process.stderr.write(`bundle-studio: ${outPath} —— ${order.length} 份模块、`
-    + `${Object.keys(vfs).length} 份文件、${kb} KB\n`);
+    + `${Object.keys(vfs).length} 份文件（含 ${tabs.n} 张构好的 LR 表 `
+    + `${(tabs.bytes / 1024).toFixed(0)} KB）、${kb} KB\n`);
 }
 
-main();
+await build();

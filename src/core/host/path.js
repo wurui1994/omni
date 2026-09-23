@@ -5,7 +5,16 @@
 // 分叉点；写在这里，node 直接跑它、降级之后也是同一份代码，两边不可能不一致。
 //
 // 只做 posix 语义（仓库的目标平台是 macOS / Linux）。唯一碰宿主的地方是 resolve 里的
-// process.cwd()，那个在封闭 ABI 里是 js_proc_cwd。
+// "当前目录"，它**问封闭 ABI 的 `cwd()`**（`host/native.js` 那一格，降级之后是
+// `js_proc_cwd`）。
+//
+// 从前这儿直接写 `process.cwd()`。那在 node 上没事、编成产物也没事（那个名字有 ABI
+// 对照），可**浏览器那条腿上根本没有 `process`** —— 而它又不能只是"少一格"：
+// `module/load.js` 的 `LIB_DIR` 是 `resolve(installDir(), '..', '..', 'lib')` 算出来的，
+// 于是页面上 `std/turtle.omni` 被解析成 `/Users/…/src/lib/turtle.omni`（判据那趟拿到的是
+// node 的 cwd），而内联的那张表按仓库相对路径存 —— 报的是 `no such module`。
+// 问 `cwd()` 之后两条腿各自答自己的（浏览器那格是空串，于是结果就是仓库相对的绝对形）。
+import { cwd } from './native.js';
 
 export function isAbsolute(p) {
   return p.startsWith("/");
@@ -78,7 +87,7 @@ export function resolve(...parts) {
       break;
     }
   }
-  if (!abs) out = out === "" ? process.cwd() : `${process.cwd()}/${out}`;
+  if (!abs) out = out === "" ? cwd() : `${cwd()}/${out}`;
   return `/${normalizeParts(split(out), false).join("/")}`;
 }
 

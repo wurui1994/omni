@@ -28,7 +28,8 @@ export const TREE_ROOTS = [
      （那个目录没有 `omni-ext.json`，所以它不是一格扩展，只是例子 —— 见 `ext.js` 里
      "不自述的目录不算扩展"那一句）。 */
   { name: '例子', path: 'ext', exts: ['.go', '.nim', '.v', '.lua', '.mojo', '.cpp', '.bas',
-    '.awk', '.ss', '.lisp', '.asy', '.jnc', '.js', '.sx', '.html', '.omni'], only: 'examples' },
+    '.awk', '.ss', '.lisp', '.asy', '.jnc', '.js', '.sx', '.html', '.omni', '.pss', '.kc'],
+    only: 'examples' },
   { name: '判据', path: 'tests', exts: ['.go', '.sx', '.asy', '.wat', '.js', '.jnc', '.frag',
     '.omni'],
     /* `only` 收一串：`cases` 是各腿的判据例子，**`draw` 是 asy 真出图的那些** ——
@@ -55,6 +56,10 @@ export const LANG_OF = {
   '.js': 'js', '.mjs': 'js', '.jnc': 'jancy', '.wat': 'wat', '.frag': 'glsl', '.vert': 'glsl',
   '.md': 'markdown', '.json': 'json', '.css': 'css', '.html': 'html',
   '.grammar': 'lisp',
+  /* EVAL 两门（PolyDraw / EvalDraw）：**标签就用后缀本身** —— 递给 `/api/run` 的
+     `lang` 在"编辑器里改过"那一档会拼成 `__new/live.<lang>`，标签不是后缀的话
+     CLI 认不出那份临时文件（`serve.js` 的 `runRequest`）。 */
+  '.pss': 'pss', '.kc': 'kc',
 };
 
 export const extOf = (p) => (p.lastIndexOf('.') < 0 ? '' : p.slice(p.lastIndexOf('.')));

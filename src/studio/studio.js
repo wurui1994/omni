@@ -10,7 +10,7 @@
 /* 纯函数那一半（高亮 / markdown / EPS -> SVG）住在 `render.js` —— 那一份一个 DOM 都不碰，
  * 于是判据能在 node 里直接 import 它（`tests/serve/run.js`）。 */
 import {
-  highlight, mdToHtml, epsToSvg, drawKindOf, drawBlocks, glslSource, glslVertex, glslSizeOf,
+  highlight, mdToHtml, epsToSvg, drawKindOf, drawBlocks, gfxRef, rgbaDraw, glslSource, glslVertex, glslSizeOf,
   glslDeclType, STD_LIBS, GALLERY, esc,
   labStats, labConflictsHtml, labRulesHtml, labTreeHtml, labTreeSexpr,
   labSexprEq, labExtOfGrammar, LAB_EMIT_FORMATS,
@@ -335,8 +335,9 @@ function glslThumb(src, px) {
  * 它是首页：一屏卡片，每格一张真跑出来的图，点一下进 IDE 打开那份源码。
  * 上哪几格由 `gallery.js` 那张策展的清单说 —— **没有图的例子不上首页**。
  *
- * 缩略图怎么来（三种腿各一种，都是现成的那一套）：
+ * 缩略图怎么来（四种腿各一种，都是现成的那一套）：
  *   asy   —— 真跑一趟（`/api/run`），EPS 翻成 SVG
+ *   gfx   —— 真跑一趟，再把那一帧**表面**取回来贴到 canvas 上（`/api/gfx`）
  *   glsl  —— 离屏 WebGL2 截一张 PNG（`glslThumb`）
  *   html  —— 就是一份网页，`<iframe srcdoc sandbox>`
  *
@@ -346,6 +347,18 @@ function glslThumb(src, px) {
 async function galleryThumb(card, g) {
   const box = card.querySelector('.shot');
   try {
+    if (g.kind === 'gfx') {
+      /* 图形设备那一族：stdout 上只有一行指针，像素在表面文件里。 */
+      const r = await post('/api/run', { path: g.path });
+      const ref = gfxRef(r.stdout ?? '');
+      if (ref === null) throw new Error(r.stderr || '这一格没交出表面');
+      const s = await gfxSurface(ref);
+      const cv = el('canvas', 'gfx-canvas');
+      box.textContent = '';
+      box.append(cv);
+      rgbaDraw(cv, s.bytes, s.w, s.h);
+      return;
+    }
     if (g.kind === 'asy' || g.kind === 'svg') {
       /* asy 那几格走**默认那条出口**（EPS，页面自己翻）—— 与 IDE 那一页不勾「SVG 出图」
          时同一条路。首页上这几格都是纯路径的二维图，两条出口画出来一样；位图那一族
@@ -385,12 +398,14 @@ async function galleryThumb(card, g) {
 function renderGallery() {
   const host = $('#gallery-grid');
   if (host === null || host.childElementCount > 0) return;    /* 只铺一次 */
-  /* **单体 HTML 那一份只跑得了图那条腿**（`browser-main.js` 里写着哪几个后缀）——
-     asy 与 omni 的卡片在那儿只会是一排红字。展示模式的正事是"好看的例子摆出来"，
-     所以那两类**不摆**，改在标题下面说一句为什么（`#gallery-note`）。
-     判据：`tests/studio/run.js` 里那份"单体里画廊摆的全是它跑得动的"。 */
+  /* **单体 HTML 那一份跑得动哪几类**：图那条腿 + `.js`（`browser-main.js` 走的是整台
+     `runCli`，`.js` 在页面上一样跑）。asy 与 omni 那两类在那儿只会是一排红字 ——
+     展示模式的正事是"好看的例子摆出来"，所以那两类**不摆**，改在标题下面说一句为什么
+     （`#gallery-note`）。判据：`tests/studio/run.js` 里那份"单体里画廊摆的全是它跑得动的"。 */
   const offline = typeof window.__OMNI_LOCAL === 'function';
-  const list = offline ? GALLERY.filter((g) => g.kind === 'glsl' || g.kind === 'html') : GALLERY;
+  const list = offline
+    ? GALLERY.filter((g) => g.kind === 'glsl' || g.kind === 'html' || g.kind === 'gfx')
+    : GALLERY;
   const note = $('#gallery-note');
   if (note !== null && offline) {
     note.hidden = false;
@@ -411,7 +426,7 @@ function renderGallery() {
       /* **点进来就跑一趟**（首页上那张图正是跑出来的）：不跑的话进了 IDE 只剩一屏源码，
          而刚刚明明看着那张图 —— 那一下最奇怪。md / glsl / html 那三种的预览是源码本身，
          `openFile` 已经画好了，不必再跑。 */
-      if (g.kind === 'asy' || g.kind === 'svg') run();
+      if (g.kind === 'asy' || g.kind === 'svg' || g.kind === 'gfx') run();
     };
     host.append(card);
     jobs.push([card, g]);
@@ -645,6 +660,27 @@ function renderPreview(kind, payload) {
     return;
   }
   if (kind === 'glsl') glslRun(payload, host);
+  /* **图形设备**：`payload` 是 `{ w, h, bytes }`（一帧裸 RGBA）。一次 `putImageData`，
+     不铺 DOM —— 十一万个像素当不成十一万个元素。canvas 的 CSS 尺寸交给样式表，
+     所以这儿只设位图尺寸（`rgbaDraw` 里）。 */
+  if (kind === 'gfx') {
+    const cv = el('canvas', 'gfx-canvas');
+    host.textContent = '';
+    host.append(cv);
+    rgbaDraw(cv, payload.bytes, payload.w, payload.h);
+  }
+}
+
+/**
+ * 去取一帧**表面**（`#gfx rgba <路径> <宽> <高>` 那一行指的东西）。
+ *
+ * 为什么另开一格路由而不是让 `/api/file` 收：那一格回的是**文本**（UTF-8 解过的），
+ * 而表面是字节 —— 过一遍 UTF-8 解码，`0x80`-`0xff` 那些字节就全变成 U+FFFD 了。
+ * `/api/gfx` 回的是"一个字符一个字节"的串（与封闭 ABI 的 `readBinary` 同一个口径）。
+ */
+async function gfxSurface(ref) {
+  const r = await api(`/api/gfx?path=${encodeURIComponent(ref.path)}`);
+  return { w: r.w ?? ref.w, h: r.h ?? ref.h, bytes: r.bytes ?? '' };
 }
 
 /**
@@ -795,6 +831,8 @@ function paint(text) {
  */
 async function openFile(path, row) {
   await stash();
+  /* 换文件先把页面那格帧循环停掉 —— 不停的话上一份 `.kc` 会一直在预览区里画。 */
+  glStop();
   for (const r of $('#tree-body').querySelectorAll('.row.on')) r.classList.remove('on');
   if (row) row.classList.add('on');
   setStatus('读…', '');
@@ -868,7 +906,30 @@ async function stash() {
 
 /** 能跑的那几门（别的只展示 —— 比如 `.md`）。 */
 const RUNNABLE = new Set(['omni', 'sx', 'go', 'c', 'asy', 'js', 'lua', 'nim', 'v', 'mojo',
-  'cpp', 'awk', 'scheme', 'lisp', 'basic', 'jancy', 'wat']);
+  'cpp', 'awk', 'scheme', 'lisp', 'basic', 'jancy', 'wat', 'pss', 'kc']);
+
+/**
+ * **EVAL 两门（`.pss` / `.kc`）在页面里直通 WebGL2** 的那一格设备。
+ *
+ * 一页**只有一格**（WebGL 上下文个位数就到上限，每跑一趟建一格的话几趟之后
+ * 早先那几格会被悄悄回收）—— 所以这儿存着，换文件/重跑只 `reset()`。
+ *
+ * 只有"就在本页跑"那一档能这样（单体 HTML）：`omni serve` 那一档产物在 node 那侧的
+ * 工人里跑，页面的设备它碰不到 —— 那时照旧走"取回一帧表面"那条路（`gfxSurface`）。
+ */
+let GLDEV = null;
+const GL_LANGS = new Set(['pss', 'kc']);
+function glDevice() {
+  if (GLDEV !== null) return GLDEV;
+  if (typeof window.__OMNI_INSTALL_GL !== 'function') return null;
+  const canvas = el('canvas', 'gfx-canvas');
+  GLDEV = { dev: window.__OMNI_INSTALL_GL(canvas, 320, 240), canvas };
+  return GLDEV;
+}
+/** 停掉页面那格帧循环（换文件、跑别的语言都要它 —— 不停的话上一份脚本一直在画）。 */
+function glStop() {
+  if (GLDEV !== null) GLDEV.dev.stop();
+}
 
 /** 关掉窄屏那个抽屉（连遮罩一起）。`main` 里把遮罩挂上来。 */
 let DRAWER_MASK = null;
@@ -927,6 +988,27 @@ async function run() {
   /* asy 的出口：勾着就走**原生 SVG**（`-f svg`），不勾是 EPS 由这一页翻。
      旗子进 argv 那一格在服务那侧带白名单（`serve.js` 的 `RUN_FORMATS`）。 */
   const format = S.lang === 'asy' && $('#asy-svg').checked ? 'svg' : undefined;
+  /**
+   * **EVAL 两门直通 GPU 那一格**：设备先摆好（画布挂进"预览"栏、状态回初值、
+   * `OMNI_GFX=host` 让画图落成 `(gfxcall …)`），然后才跑 —— 产物一跑起来就往这格
+   * 上下文上画，而且帧循环（rAF）在页面这边转着，所以它是**活的**，不是一张图。
+   */
+  const live = GL_LANGS.has(S.lang) && typeof window.__OMNI_LOCAL === 'function'
+    ? glDevice()
+    : null;
+  if (live !== null) {
+    live.dev.reset();
+    const box = $('#preview');
+    box.textContent = '';
+    box.classList.remove('empty');
+    box.append(live.canvas);
+    if (globalThis.process !== undefined && globalThis.process.env !== undefined) {
+      globalThis.process.env.OMNI_GFX = 'host';
+    }
+    showPreviewTab(true);
+  } else {
+    glStop();
+  }
   try {
     const r = await post('/api/run', {
       path: S.path,
@@ -952,7 +1034,19 @@ async function run() {
        所以用 `drawBlocks` 整块抠。`cases/` 底下那些算术例子照旧一张图都没有，
        那时候**不点亮"预览"栏、也不切过去**。 */
     const dr = drawBlocks(r.stdout ?? '');
-    if (dr.kind !== null) {
+    /* 直通 GPU 那一档：图**已经在那格 canvas 上**（stdout 上一行指针都没有 ——
+       交出一帧 = 交换缓冲，不是写表面文件），所以这儿什么都不用挂、更不许收掉。 */
+    if (live !== null) {
+      showPreviewTab(true);
+    } else if (dr.kind === 'gfx') {
+      let s = null;
+      try { s = await gfxSurface(dr.ref); } catch { s = null; }
+      if (my !== S.seq) return;
+      if (s !== null) {
+        renderPreview('gfx', s);
+        showPreviewTab(true);
+      }
+    } else if (dr.kind !== null) {
       renderPreview(dr.kind, dr.kind === 'svg' ? dr.blocks : r.stdout);
       showPreviewTab(true);
     } else if (previewKind(S.lang) === null) {

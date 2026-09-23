@@ -35,7 +35,8 @@ import {
 import { statModel, statTable, statDot, statJson } from './cli/statgraph.js';
 import { layerModel, layerTable, countNodes, stepTable, kindStat, kindTable } from './cli/layers.js';
 import { linkJs } from './frontend-js/link.js';
-import { lowerJs } from './frontend-js/lower.js';import { lowerWat } from './frontend-wat/lower.js';
+import { lowerJs } from './frontend-js/lower.js';
+import { lowerWat } from './frontend-wat/lower.js';
 import { genArm64Module as genArm64 } from './arm64/from_mir.js';
 import { genModule as genX64 } from './x64/from_mir.js';
 import { writeObject } from './link/macho.js';
@@ -2832,14 +2833,31 @@ function selfCC() {
 }
 
 /**
+ * 问一次 `uname`。回**它印的那一行**；两种"没答案"分得清：
+ *   `''`    有子进程可这台机器没有 `uname`（真 Windows 的 cmd）
+ *   `null`  **这条腿上根本没有子进程**（浏览器；`host/browser.js` 的 `spawn` 当场抛）
+ *
+ * 为什么要分：`hostOs()` 把"没有 uname"读成 Windows，那条推断在 node 上是对的，
+ * 可在页面里是假的 —— 那儿只是没有 `fork`。三个问平台的地方（`hostArch` /
+ * `hostIsDarwin` / `hostOs`）共用这一格，别各写一个 try。
+ */
+function unameOut(flag) {
+  try {
+    const r = spawn('uname', [flag], 'c');
+    return r[0] === 0 ? r[1].trim() : '';
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 本机是哪个架构。与 `hostIsDarwin` 同一条路子（问一次 `uname` 记住）——
  * `process.arch` 不在封闭 ABI 里（ADR-0011 决策 2），这份源码要能被自己编译。
  */
 let ARCH_CACHE = '';
 function hostArch() {
   if (ARCH_CACHE === '') {
-    const r = spawn('uname', ['-m'], 'c');
-    const m = r[0] === 0 ? r[1].trim() : '';
+    const m = unameOut('-m') ?? '';
     ARCH_CACHE = (m === 'arm64' || m === 'aarch64') ? 'arm64' : 'x86_64';
   }
   return ARCH_CACHE;
@@ -2941,8 +2959,7 @@ function isTcc(cc) {
 let DARWIN_CACHE = 0;
 function hostIsDarwin() {
   if (DARWIN_CACHE === 0) {
-    const r = spawn('uname', ['-s'], 'c');
-    DARWIN_CACHE = (r[0] === 0 && r[1].trim() === 'Darwin') ? 1 : 2;
+    DARWIN_CACHE = unameOut('-s') === 'Darwin' ? 1 : 2;
   }
   return DARWIN_CACHE === 1;
 }
@@ -2959,13 +2976,19 @@ function hostIsDarwin() {
  * `uname -s` 认不出来的（MSYS 那一族印 `MINGW64_NT-…`、Cygwin 印 `CYGWIN_NT-…`）
  * 归到 `win32`；`uname` 本身跑不起来（真 Windows 的 cmd）也归它 —— 那三家里
  * 只有 Windows 会让 `uname` 缺席。
+ *
+ * **浏览器那条腿上根本没有子进程**（`host/browser.js` 的 `spawn` 当场抛），所以这儿
+ * 接住它、记成 `linux`。为什么是"接住"而不是"报出去"：这一格被 `discoverPlugins` 与
+ * `omni c` 那一组的默认值问到，而页面上跑一份 `.go` 也会路过它 —— 真要链接、真要装
+ * 插件的那几档在这条腿上自己就会明着拒（那才是该响的地方）。记成哪一个都不影响答案：
+ * 页面上没有 `.o`、没有链接器、没有 `.dylib`。
  */
 let OS_CACHE = '';
 function hostOs() {
   if (OS_CACHE === '') {
-    const r = spawn('uname', ['-s'], 'c');
-    const s = r[0] === 0 ? r[1].trim() : '';
-    if (s === 'Darwin') OS_CACHE = 'osx';
+    const s = unameOut('-s');
+    if (s === null) OS_CACHE = 'linux';          /* 没有子进程的腿（浏览器）：见上 */
+    else if (s === 'Darwin') OS_CACHE = 'osx';
     else if (s === 'Linux') OS_CACHE = 'linux';
     else OS_CACHE = 'win32';
   }

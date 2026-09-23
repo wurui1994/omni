@@ -17,7 +17,7 @@
 //   - 相对路径不能逃出包根：../../ 爬到包外面就不再是这个包的一部分了
 //   - 禁止环：报出整条环路径，而不是给一个半初始化的模块
 
-import { readText, exists, realPath, readDir, installDir, env } from '../host/native.js';
+import { readText, exists, realPath, readDir, installDir, env, cwd } from '../host/native.js';
 import { join, dirname, resolve, relative, isAbsolute, basename } from '../host/path.js';
 import { dataDir } from '../host/data.js';
 import { SourceFile, OmniError } from '../source/diag.js';
@@ -55,7 +55,7 @@ const fail = (msg) => { throw new ResolveError(msg); };
  * 照原样印进诊断，别的机器上没法对照，快照测试也立刻失效。所以一律显示 cwd 相对路径。
  */
 function display(p) {
-  const rel = relative(process.cwd(), p);
+  const rel = relative(cwd(), p);
   return rel && !rel.startsWith('..') ? rel : p;
 }
 
@@ -233,7 +233,7 @@ export function loadProgram({ path, text, mode, diags, state, templates }) {
   let entryFile = null;
   if (!onDisk) entryFile = new SourceFile(path, text ?? '');
   // 入口的包根 = 它自己所在的目录。相对导入不能爬到入口目录之外：入口在哪，包就在哪。
-  const root = onDisk ? dirname(real) : process.cwd();
+  const root = onDisk ? dirname(real) : cwd();
   // 增量加载时会话根固定是模块 0：后一批要看得见前一批的顶层名字，而可见性规则是按模块 id 判的
   const sessionRoot = state !== undefined;
   if (sessionRoot && nextId === 0) nextId = 1;
