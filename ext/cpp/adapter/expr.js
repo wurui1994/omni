@@ -9,7 +9,7 @@
 //     `first` / `second`，那是 C++ 自己的名字）。
 
 import { tag, kids, leaf, part, unquote } from '../../../src/core/lower/cst.js';
-import { cUnescape, fmtToIR } from '../../../src/core/lower/fmt.js';
+import { cUnescape, fmtToIR, fmtToStmts } from '../../../src/core/lower/fmt.js';
 import {
   INT, REAL, STR, BOOL, arrOf, dictOf, named, typeOf,
 } from '../../../src/core/lower/ty-of.js';
@@ -392,14 +392,13 @@ function callOf(x, C) {
 }
 
 /**
- * `printf(格式, 实参…)` / `puts(串)` → 一格 `print`。
+ * `printf(格式, 实参…)` / `puts(串)` → 几行 `print` / `write`。
  *
- * 格式那一层**走公共层那一份**（`src/core/lower/fmt.js` 的 `fmtToIR` —— 与 jancy 的
- * `printf` 共用同一张转换表、同一个 `readSpec`）。这一份只管三样：解转义、
- * **bool 按 `%d` 印成 1 / 0**（C++ 的规矩，不是 true / false）、以及"末尾那个换行归 `print`"。
+ * 格式那一层**走公共层那一份**（`src/core/lower/fmt.js` 的 `fmtToStmts` —— 与 jancy 的
+ * `printf` 共用同一张转换表、同一个 `readSpec`）：按 `\n` 切段，带换行的段发 `print`
+ * （它自带换行），末段没有换行时发 `write`。所以 `printf("abc")` 与多行格式串都成立。
  *
- * 方言的 `print` 自带换行，所以格式串必须**正好以一个换行收尾**；不是那样的当场报
- * （要不带换行地写一段是 `write`，公共 IR 这一层还没有那一格）。
+ * 这一份自己只管两样：解转义、以及 **bool 按 `%d` 印成 1 / 0**（C++ 的规矩，不是 true / false）。
  */
 export function printArgs(name, rawArgs, C) {
   if (name === 'puts') {
@@ -409,12 +408,7 @@ export function printArgs(name, rawArgs, C) {
   if (fmtTok === undefined || tag(fmtTok) !== 'str') {
     throw new Error('cpp->IR: printf 的格式串不是字面量 —— 那要运行期的格式化（还没接）');
   }
-  const raw = cUnescape(unquote(leaf(kids(fmtTok)[0])));
-  if (!raw.endsWith('\n')) {
-    throw new Error(`cpp->IR: 这个格式串不以换行收尾：${JSON.stringify(raw)}`
-      + '（方言的 print 自带换行，"不换行地写一段"这一层还没有）');
-  }
-  const fmt = raw.slice(0, -1);
+  const fmt = cUnescape(unquote(leaf(kids(fmtTok)[0])));
   /* `printf("%d\n", x == y)`：C++ 里 bool 按 `%d` 印的是 1 / 0。方言的 `toint` 只吃 real，
      所以这一格在交给公共层**之前**用三目摊成 int。 */
   const args = rawArgs.slice(1).map((a) => {
@@ -424,7 +418,7 @@ export function printArgs(name, rawArgs, C) {
       kind: 'if-expr', type: INT, cond: v, then: { kind: 'int', value: 1 }, else_: { kind: 'int', value: 0 },
     };
   });
-  return [{ kind: 'print', values: [fmtToIR(fmt, args, C.tyCtx(), 'cpp->IR', C.fresh)] }];
+  return fmtToStmts(fmt, args, C.tyCtx(), 'cpp->IR', C.fresh);
 }
 
 /** 条件位置上的那一格（C++ 里"非零为真"）。 */

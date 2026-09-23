@@ -15,7 +15,7 @@ import {
   INT, REAL, STR, BOOL, arrOf, dictOf, named, typeOf,
 } from '../../../src/core/lower/ty-of.js';
 import { foldIntConst, intLit } from '../../../src/core/lower/cfam.js';
-import { cUnescape, fmtToIR } from '../../../src/core/lower/fmt.js';
+import { cUnescape, fmtToIR, fmtToStmts } from '../../../src/core/lower/fmt.js';
 import { mathConst, mathCall, hostCall } from './stdlib.js';
 
 const OPS = new Map([
@@ -583,21 +583,17 @@ export function sprintfOf(rawArgs, C) {
 }
 
 /**
- * `fmt.Printf` = `Sprintf` 再印一趟。方言的 `print` **自带换行**，所以格式串必须
- * 正好以一个换行收尾 —— 不是那样的当场报（"不换行地写一段"公共 IR 这一层还没有）。
+ * `fmt.Printf` = 格式串切成几段再印（公共层 `fmtToStmts`）：带换行的段发 `print`、
+ * 末段没有换行时发 `write` —— 所以 `Printf("abc")` 与多行格式串都成立。
  */
-export function printfOf(rawArgs, C) {
+export function printfStmts(rawArgs, C) {
   const fmtTok = rawArgs[0];
   if (fmtTok === undefined || tag(fmtTok) !== 'str') {
     throw new Error('go->IR: `Printf` 的格式串不是字面量 —— 那要运行期的格式化（还没接）');
   }
-  const raw = cUnescape(unquote(leaf(kids(fmtTok)[0])));
-  if (!raw.endsWith('\n')) {
-    throw new Error(`go->IR: 这个格式串不以换行收尾：${JSON.stringify(raw)}`
-      + '（方言的 print 自带换行，"不换行地写一段"这一层还没有）');
-  }
+  const fmt = cUnescape(unquote(leaf(kids(fmtTok)[0])));
   const args = rawArgs.slice(1).map((a) => exprOf(a, C));
-  return fmtToIR(raw.slice(0, -1), args, C.tyCtx(), 'go->IR', C.fresh);
+  return fmtToStmts(fmt, args, C.tyCtx(), 'go->IR', C.fresh);
 }
 
 function callOf(x, C) {  const fnTok = kids(x)[0];

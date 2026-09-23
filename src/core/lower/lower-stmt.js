@@ -41,6 +41,14 @@ export function lowerStmt(stmt, ctx) {
     case 'switch': return lowerSwitch(stmt, ctx);
     case 'print': return lowerPrint(stmt, ctx);
     /**
+     * **不带换行地写一段**（`{ kind: 'write', values: [E] }` → `(write E)`）。方言里本来就有
+     * 这一格（jancy 那条路的 `fmtRun` 一直在发），标准 IR 这一侧一直缺 —— 于是
+     * `printf("abc")`（末尾没有换行）在 adapter 那条路上只能当场报。
+     * 与 `print` 的差别只有"末尾补不补那个换行"。
+     */
+    case 'write':
+      return sx.op('write', ctx.lowerExpr(stmt.values[0], ctx));
+    /**
      * **语句形的内建**（`{ kind: 'builtin-stmt', name, args }`）：方言里有几格算子只当语句用
      * （`(dset d k v)` / `(aset a i v)` / `(apush a v)` / `(fldset o f v)`）——
      * 包进 `(expr …)` 会被当表达式读，那一侧当场报"不认识的表达式 'dset'"（量出来的）。

@@ -17,7 +17,7 @@ import {
 } from '../../../src/core/lower/ty-of.js';
 import {
   exprOf, condOf, typeOfTok, retTypeOf, retOf, paramsOf, nameOf, zeroExpr, valueOf,
-  coerce, dgetOr, argsFor, tyArg, ifaceType, PRINTS, printfOf,
+  coerce, dgetOr, argsFor, tyArg, ifaceType, PRINTS, printfStmts,
 } from './expr.js';
 import {
   ifaceMethodToks, ifaceMethodSig, ifaceFields, boxMemoName, boxOf,
@@ -724,7 +724,7 @@ function exprStmts(inner, C) {
       const m = String(leaf(kids(fnTok)[1]));
       if (PRINTS.has(m)) {
         /* `fmt.Printf` = `Sprintf` 再印一趟（换行归 `print`，见 `printfOf`）。 */
-        if (m === 'Printf') return [{ kind: 'print', values: [printfOf(as, C)] }];
+        if (m === 'Printf') return printfStmts(as, C);
         return printStmts(as.map((a) => exprOf(a, C)), C);
       }
       /* 别的库函数**照普通调用走**（`sort.Float64s(xs)` 那一族）—— `exprOf` 那边接。 */

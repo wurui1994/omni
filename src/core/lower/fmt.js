@@ -488,20 +488,19 @@ function cutToIR(piece, n, fresh) {
 }
 
 /**
- * `fmt` 那句话 + 那几格实参 → **一格标准 IR 的串表达式**（`(bin "+" …)` 串起来）。
- * `fmt` 要**已经解过转义**（调用方先过 `cUnescape`）。`who` 是报错时的前缀。
- * `fresh(前缀)` 给一个没用过的名字 —— 宽度与 `%.Ns` 要落临时量，没给就当场报。
- *
- * 实参给多给少都**当场报**：C 那边多给的会悄悄丢掉、少给的读到垃圾，两样都是
- * "答案静默地错"，所以这儿不跟着糊弄。
+ * 走一遍格式串，答**若干段**：`[{ parts, nl }]`。`split` 为真时按 `\n` 切段
+ * （带换行的段 `nl` 为真）—— `printf` 那一侧要这个；`Sprintf` 那一侧 `split` 为假，
+ * 换行就是串里的一个字符，整条只有一段。
  */
-export function fmtToIR(fmt, args, tyCtx, who, fresh = null) {
-  const parts = [];
+function fmtWalk(fmt, args, tyCtx, who, fresh, split) {
+  const segs = [];
+  let parts = [];
   let lit = '';
   let ai = 0;
   const flushLit = () => {
     if (lit !== '') { parts.push(strIR(lit)); lit = ''; }
   };
+  const endSeg = (nl) => { flushLit(); segs.push({ parts, nl }); parts = []; };
   const need = (what) => {
     if (fresh === null) {
       throw new Error(`${who}: ${what} 要一格临时量，可这个调用点没给取名字的口子`);
@@ -510,6 +509,7 @@ export function fmtToIR(fmt, args, tyCtx, who, fresh = null) {
   };
   for (let i = 0; i < fmt.length; i += 1) {
     const c = fmt[i];
+    if (c === '\n' && split) { endSeg(true); continue; }
     if (c !== '%') { lit += c; continue; }
     if (fmt[i + 1] === '%') { lit += '%'; i += 1; continue; }
     const spec = readSpec(fmt, i);
@@ -544,11 +544,42 @@ export function fmtToIR(fmt, args, tyCtx, who, fresh = null) {
     ai += 1;
     i = spec.end;
   }
-  flushLit();
+  endSeg(false);
   if (ai < args.length) {
     throw new Error(`${who}: 格式串只用了 ${ai} 格实参，给了 ${args.length} 格`
       + `（${JSON.stringify(fmt)}）`);
   }
-  if (parts.length === 0) return strIR('');
-  return parts.reduce(catIR);
+  return segs;
+}
+
+/** 一段里那几块拼成一格串（一块都没有就是空串）。 */
+const joinIR = (parts) => (parts.length === 0 ? strIR('') : parts.reduce(catIR));
+
+/**
+ * `fmt` 那句话 + 那几格实参 → **一格标准 IR 的串表达式**（`(bin "+" …)` 串起来）。
+ * `fmt` 要**已经解过转义**（调用方先过 `cUnescape`）。`who` 是报错时的前缀。
+ * `fresh(前缀)` 给一个没用过的名字 —— 宽度与 `%.Ns` 要落临时量，没给就当场报。
+ *
+ * 实参给多给少都**当场报**：C 那边多给的会悄悄丢掉、少给的读到垃圾，两样都是
+ * "答案静默地错"，所以这儿不跟着糊弄。
+ */
+export function fmtToIR(fmt, args, tyCtx, who, fresh = null) {
+  return joinIR(fmtWalk(fmt, args, tyCtx, who, fresh, false)[0].parts);
+}
+
+/**
+ * `printf` 那一侧：`fmt` → **几行语句**。按 `\n` 切段 —— 带换行的段发 `print`
+ * （它自带换行），末段没有换行时发 `write`。空段又带换行就是 `printf("\n")`。
+ *
+ * 这与 sx 那一半的 `fmtRun(mode='stmt')` 是同一条口径（那一份发的是 sx 文字）。
+ */
+export function fmtToStmts(fmt, args, tyCtx, who, fresh = null) {
+  const segs = fmtWalk(fmt, args, tyCtx, who, fresh, true);
+  const out = [];
+  segs.forEach((seg, i) => {
+    const last = i === segs.length - 1;
+    if (last && !seg.nl && seg.parts.length === 0) return;      // 末尾那一段是空的：不发
+    out.push({ kind: seg.nl ? 'print' : 'write', values: [joinIR(seg.parts)] });
+  });
+  return out;
 }
