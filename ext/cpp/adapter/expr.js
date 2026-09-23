@@ -272,6 +272,18 @@ export function exprOf(x, C) {
         ? { kind: 'real', value: v } : { kind: 'int', value: v };
     }
     case 'str': return { kind: 'string', value: unquote(leaf(kids(x)[0])) };
+    /**
+     * **字符字面量**（`'A'` / `'\n'` / `'\0'`）在 C++ 里就是**一格整数**（它的编码），
+     * 所以这儿直接落成 `(int 65)`。转义走公共层那份 `cUnescape`（与格式串同一台机器）。
+     */
+    case 'ch': {
+      const raw = String(leaf(kids(x)[0]));
+      const body = cUnescape(raw.slice(1, -1));
+      if (body.length !== 1) {
+        throw new Error(`cpp->IR: 这一格字符字面量还没接：${raw}（多字符的那一档）`);
+      }
+      return { kind: 'int', value: body.charCodeAt(0) };
+    }
     /* 树上的布尔字面量有两种形状：`(true)` / `(false)`，与"当成一格名字读"（见 `case 'n'`）。 */
     case 'true': return { kind: 'bool', value: true };
     case 'false': return { kind: 'bool', value: false };
@@ -455,6 +467,15 @@ export function exprOf(x, C) {
       }
       return v;
     }
+    /**
+     * **`sizeof` 有意不接**（当场报，不猜）：方言里没有内存布局这件事，整数也不是四个字节
+     * （公共层那格 int 是 64 位）—— 答一个 4 出来就是**在撒谎**，而且那个谎会顺着
+     * `sizeof(xs)/sizeof(xs[0])` 这种写法一路传成错的长度。要数组长度就用 `alen`
+     * （这一门里是 `v.size()`）。
+     */
+    case 'sizeof': case 'sizeof-pack':
+      throw new Error('cpp->IR: `sizeof` 有意不接 —— 方言里没有内存布局（整数也不是 4 字节），'
+        + '答一个数出来就是撒谎；要数组长度请用 `.size()`');
     case 'call': return callOf(x, C);
     /* `[捕获](形参){ 体 }` —— 落成公共层现成的闭包（真正那一趟在 index.js 的 `C.lambda`）。 */
     case 'lambda': return C.lambda(x);

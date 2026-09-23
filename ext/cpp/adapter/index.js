@@ -196,7 +196,34 @@ function seedRefByName(t, C) {
   for (const k of kids(t)) seedRefByName(k, C);
 }
 
-/** 一格体里**声明过的局部量**（名字都 ref 过）。 */
+/**
+ * **这格条件里有没有"要先跑几句"的东西**（`block-expr` —— `i--` 当值用就是它）。
+ *
+ * 为什么要问：公共层把条件里那几句**提到循环之前**，于是 `while (i--)` 的那一下自减
+ * 只跑了一趟 —— 条件永远为真，程序**静默地死循环**（比答错更难发现）。
+ * 问出来之后改写成"永真循环 + 体最前面 `if (!条件) break`"（见 `case 'while'`）：
+ * 那样条件那几句每趟都在体里跑，而 `continue` 回到体的开头正好就是"重新判条件"。
+ * 闭包里头的不算（那是另一格函数的体，不在这一趟求值里）。
+ */
+function needsStmts(e) {
+  if (e === null || e === undefined || typeof e !== 'object') return false;
+  if (Array.isArray(e)) return e.some(needsStmts);
+  if (e.kind === 'closure') return false;
+  if (e.kind === 'block-expr') return true;
+  return Object.values(e).some(needsStmts);
+}
+
+/** 一格 `if (!条件) break;` —— 上面那条改写用它。 */
+function breakUnless(cond) {
+  return {
+    kind: 'if',
+    cond: { kind: 'unop', op: '!', operand: cond },
+    then: [{ kind: 'break', label: null }],
+    else_: null,
+  };
+}
+
+
 function declaredLocals(bodyTok, C) {
   const out = new Set();
   const walk = (t) => {
@@ -784,6 +811,39 @@ export function cppToIR(tree) {
         });
       }
       C.statics.set(`${C.ref(rec.name)}_${st.name}`, g);
+    }
+  }
+  /**
+   * **文件作用域的量**（`int g = 5;` / `const int K = 10;` / `int xs[3] = {…};`）——
+   * 从前整格**丢掉**：读它的地方报"未声明的变量"。落法与 `static` 局部量／`static` 数据成员
+   * 同一手：发一格模块级的量（名字照写着的），初值摆在 `main` 体的最前面（方言的
+   * `(global 名字 类型)` 按设计零初始化、不带初值）。
+   *
+   * 这一趟要**排在函数体之前**（那些体里会读这些名字），而且要跳过三样不是"量"的东西：
+   * 函数声明（`int later(int);` —— 声明符是 `(fn …)`）、`static` 成员的类外定义
+   * （`int Counter::total = 0;` —— 名字是 `(qual …)`，上面那一段已经收过）、
+   * 以及 `extern`（只是声明，没有这格量）。
+   */
+  for (const d of kids(tree)) {
+    if (tag(d) !== 'decl') continue;
+    const specs = part(d, 'specs');
+    if (specs === undefined) continue;
+    const words = kids(specs).filter((y) => tag(y) === null).map((y) => String(leaf(y)));
+    if (words.includes('typedef') || words.includes('extern')) continue;
+    if (kids(specs).some((y) => tag(y) === 'class' || tag(y) === 'elaborated' || tag(y) === 'enum')) continue;
+    const it = part(d, 'init');
+    if (it === undefined) continue;
+    for (const dd of kids(it)) {
+      const nmTok = kids(dd)[0];
+      if (nmTok === undefined || tag(nmTok) === 'fn' || tag(nmTok) === 'qual') continue;
+      const one = declOf(dd, specs, C);
+      if (one === null) continue;                       // `static` 那一格自己发过了
+      decls.push({ kind: 'global', name: one.name, type: one.type });
+      if (one.init !== null && one.init !== undefined) {
+        staticSets.push({
+          kind: 'assign', target: { kind: 'name', name: one.name }, value: one.init,
+        });
+      }
     }
   }
   /**
@@ -1529,7 +1589,17 @@ function collectClass(cls, C, asName = null) {
         continue;
       }
       if (mn !== undefined) {
-        fields.push({ name: nameOf(mn), type: typeOfSpecs(ms, C, kids(kids(mi)[0])[0]) ?? INT });
+        /**
+         * **类里写着的默认成员初值**（C++11 的 `int a = 7;`）：记下那格表达式 ——
+         * 造对象时用它而不是零值（`zeroField`）。从前整格丢掉：`D d;` 之后 `d.a` 是 0
+         * 而 `c++` 给 7（**答案静默地错**）。
+         */
+        const dTok = part(kids(mi)[0], 'init');
+        fields.push({
+          name: nameOf(mn),
+          type: typeOfSpecs(ms, C, kids(kids(mi)[0])[0]) ?? INT,
+          dflt: dTok === undefined ? undefined : kids(dTok)[0],
+        });
       }
       continue;
     }
@@ -1954,6 +2024,8 @@ function vtZeroRecord(type, C) {
  * 照 `zeroFor` 那条走的话开的是 0 格，`xs[0] = 10` 就越界了。
  */
 function zeroField(fld, C) {
+  /* 类里写着默认初值的那几格用它（C++11 的 `int a = 7;`）—— 不是零值。 */
+  if (fld.dflt !== undefined) return wrapNarrow(exprOf(fld.dflt, C), fld.type);
   if (fld.type.kind === 'arr' && fld.size !== undefined) {
     return {
       kind: 'builtin',
@@ -2060,6 +2132,14 @@ export function stmtsOf(x, C) {
       C.push();
       const body = kids(x).slice(1).flatMap((s) => stmtsOf(s, C));
       C.pop();
+      /* 条件里有"要先跑几句"的东西（`while (i--)`）—— 改写，见 `needsStmts`。 */
+      if (needsStmts(cond)) {
+        return [{
+          kind: 'while',
+          cond: { kind: 'bool', value: true },
+          body: [breakUnless(cond), ...body],
+        }];
+      }
       return [{ kind: 'while', cond, body }];
     }
     /**
@@ -2107,6 +2187,12 @@ export function stmtsOf(x, C) {
       const post = postTok === undefined || tag(postTok) === null ? null : stmtsOf(postTok, C)[0];
       const body = rest.flatMap((s) => stmtsOf(s, C));
       C.pop();
+      /* 条件里有"要先跑几句"的东西（`for (; i--; )`）—— 挪到体的最前面，见 `needsStmts`。 */
+      if (cond !== null && needsStmts(cond)) {
+        return [{
+          kind: 'for', init, cond: null, post, body: [breakUnless(cond), ...body],
+        }];
+      }
       return [{ kind: 'for', init, cond, post, body }];
     }
     /**
@@ -2630,7 +2716,7 @@ function declOf(dd, specs, C) {
    */
   if (type !== null && type.kind === 'named' && ctorTok === undefined && initTok === undefined
     && (C.tyCtx().fields.get(type.name) ?? [])
-      .some((f) => ['named', 'arr', 'map'].includes(f.type.kind))) {
+      .some((f) => ['named', 'arr', 'map'].includes(f.type.kind) || f.dflt !== undefined)) {
     C.bind(name, type);
     return { kind: 'let', name, type, init: vtZeroRecord(type, C) };
   }
@@ -2787,3 +2873,16 @@ function declOf(dd, specs, C) {
 //      新机器都没加，只补 `toreal`（方言那一格只收 real）。程序自己定义了同名函数时不抢。
 //      `abs` / `labs` 是**整数**上的（不在那张表里）：摊成"先存一格临时量、再一格三目"——
 //      不许把实参写两遍，它可能带副作用；实参本来是 real 的那一档转给 `fabs`。
+//  20. **最外层与副作用那四格**（`globals.cpp`）：
+//      ①**文件作用域的量**（`int g = 5;`）落成模块级的量，初值摆在 `main` 体最前面
+//      （与 `static` 那两格同一手）；那一趟要跳过函数声明、`static` 成员的类外定义、`extern`；
+//      ②**字符字面量**（`'A'`）就是一格整数（它的编码），转义走公共层 `cUnescape`；
+//      ③**条件里带副作用**（`while (i--)` / `for (; i--; )`）：公共层把条件里那几句**提到
+//      循环之前** —— 自减只跑一趟、条件永远为真、程序**静默地死循环**。现在这一档改写成
+//      "永真循环 + 体最前面 `if (!条件) break`"（`needsStmts` 认出来）—— `continue` 回到体的
+//      开头正好就是 C 里"重新判条件"；
+//      ④**类里的默认成员初值**（C++11 的 `int a = 7;`）记在字段上（`dflt`），造对象时用它
+//      而不是零值 —— 连"字段全是标量就发 `init: null`"那条快路也要跟着改。
+//  21. **`sizeof` 有意不接**（当场报）：方言里没有内存布局这件事，整数也不是四个字节，
+//      答一个 4 出来就是**撒谎**，而那个谎会顺着 `sizeof(xs)/sizeof(xs[0])` 一路传成错的
+//      长度。要数组长度就用 `.size()`（落 `alen`）。
