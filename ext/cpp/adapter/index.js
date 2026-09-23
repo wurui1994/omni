@@ -673,14 +673,33 @@ export function cppToIR(tree) {
     try {
       const rec = collectClass(t.clsTok, C, inst);
       if (rec.virtuals.size > 0) throw new Error('cpp->IR: 类模板 + 虚函数还没接');
-      if (rec.bases.length > 0) throw new Error('cpp->IR: 类模板 + 继承还没接');
       if (rec.declared.size > 0 || rec.declaredCtors.size > 0 || rec.dtorDeclared === true) {
         throw new Error('cpp->IR: 类模板里"只声明不给体"（体写在类外）还没接');
       }
+      /**
+       * **类模板 + 继承**：基类必须是**已经登记过的普通类**（第一遍收的那些）。
+       * 摊平走的是同一份 `flatten` —— 字段接在前面、方法按名字继承、析构串成链。
+       * 基类那侧有虚函数就当场报：虚那条路是"整块合成一格记录"，而这一格是第二、三遍
+       * 中间现造出来的，`planVirtuals` 那一趟早过去了。
+       */
+      if (rec.bases.length > 0) {
+        for (const bn of rec.bases) {
+          const base = C.records.get(bn);
+          if (base === undefined) throw new Error(`cpp->IR: 基类 ${bn} 没有登记过`);
+          if (base.virtuals.size > 0 || C.vtIdRef.has(C.ref(bn))) {
+            throw new Error('cpp->IR: 类模板 + 虚函数（基类那侧）还没接');
+          }
+          if (C.ctemplates.has(bn)) {
+            throw new Error('cpp->IR: 基类本身是类模板（`Derived : Base<T>`）还没接');
+          }
+        }
+        flatten(rec, C, new Set());
+      } else {
+        /* 没有继承，析构链就是它自己那一格。 */
+        rec.dchain = rec.dtor !== null ? [rec.name] : [];
+      }
       rec.done = true;
       rec.flat = true;
-      /* 析构**只有自己那一格**（没有继承，所以链就是它自己）。 */
-      rec.dchain = rec.dtor !== null ? [rec.name] : [];
       C.records.set(inst, rec);
       C.storage.set(inst, inst);
       C.storageRef.set(C.ref(inst), C.ref(inst));
@@ -713,8 +732,9 @@ export function cppToIR(tree) {
         }
         return s;
       });
-      if (rec.dtor !== null) {
-        C.fns.set(dtorName(C.ref(inst), C.ref(inst)), {
+      /* 析构按**链**登记（自己先、再一层层往基类走）—— 与非模板那条路同一条。 */
+      for (const owner of (rec.dchain ?? [])) {
+        C.fns.set(dtorName(C.ref(inst), C.ref(owner)), {
           params: [{ name: 'this', type: selfType }], ret: { kind: 'void' },
         });
       }
@@ -724,13 +744,14 @@ export function cppToIR(tree) {
       ctorSigs.forEach((s, i) => {
         decls.push(C.isolate(() => ctorDecl({ ...s, ret: selfType }, rec, rec.ctors[i], C)));
       });
-      if (rec.dtor !== null) {
+      for (const owner of (rec.dchain ?? [])) {
         const s = {
-          name: dtorName(C.ref(inst), C.ref(inst)),
+          name: dtorName(C.ref(inst), C.ref(owner)),
           params: [{ name: 'this', type: selfType }],
           ret: { kind: 'void' },
         };
-        decls.push(C.isolate(() => fnDecl(s, rec.dtor, C, C.ref(inst))));
+        /* 体是 `owner` 的、接收者是这格实例 —— 字段已经摊平，所以同一份体逐字成立。 */
+        decls.push(C.isolate(() => fnDecl(s, C.records.get(owner).dtor, C, C.ref(inst))));
       }
     } finally {
       t.tparams.forEach((p, i) => {
@@ -2127,8 +2148,10 @@ function declOf(d, specs, C) {
 //      `virtual ~X()` 上的 `virtual` 这条腿上没有意义（没有 `delete`，对象都是作用域里的，
 //      静态类型定得死），所以照普通析构收。
 //      类里"只声明不给体、体写在类外"那一档**接了**（`attachOutline`；类模板上还没有）。
-//   7. 类模板接**构造与析构**（`ctmpl2.cpp`）；**继承与虚函数**当场报；
-//      模板的默认实参与特化没接；类模板里"体写在类外"也当场报。
+//   7. 类模板接**构造、析构与继承**（`ctmpl2.cpp`；继承摊平走同一份 `flatten`，析构串链）。
+//      **虚函数**当场报（自己写了 `virtual` 或基类那侧有 —— 虚那条路是"整块合成一格记录"，
+//      而实例是第二、三遍中间现造的，`planVirtuals` 早过去了）；基类本身是类模板
+//      （`Derived : Base<T>`）、模板的默认实参与特化、类模板里"体写在类外"也都当场报。
 //   8. lambda 的捕获：按值（`[x]` / `[=]`）与**按引用**（`[&x]` / `[&]`）都接了 ——
 //      后者与出参走同一台机器：那格量装进一格盒子，闭包**按值捕盒子**（记录本来就是
 //      引用），体里读写落成 `(field (cap x) v)`。只接"这个函数体里声明过的局部量"

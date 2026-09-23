@@ -6,8 +6,9 @@
 // （公共层那格 `{ kind: 'scope' }`）。单态化那半本来就把类型形参摆进 `C.aliases`
 // 再读一遍树，所以这一刀只是把"发签名 + 发体"那两趟补齐，没有新机制。
 //
-// 钉住四件事：成员初始化表在两种实参类型上各跑一次、方法照旧、两格实例的析构**互不相干**，
-// 以及析构的次序（量之间逆序 —— `b` 先走）。
+// 钉住六件事：成员初始化表在两种实参类型上各跑一次、方法照旧、两格实例的析构**互不相干**、
+// 析构的次序（量之间逆序）、**类模板 + 继承**（基类的字段与方法都摊进来：`c.id` 与
+// `c.tag()`），以及**析构串成链**（`~Cell` 完了再跑 `~Tag`）。
 #include <stdio.h>
 
 template <class T>
@@ -28,6 +29,35 @@ struct Holder {
   }
 };
 
+/* **类模板 + 继承**：基类得是已经登记过的普通类，摊平走的是同一份 `flatten`
+   （字段接在前面、方法按名字继承、**析构串成链**）。基类那侧有虚函数当场报 ——
+   虚那条路是"整块合成一格记录"，而实例是第二、三遍中间现造的，那一趟早过去了。 */
+struct Tag {
+  int id;
+  int tag() {
+    return id * 100;
+  }
+  ~Tag() {
+    printf("~Tag %d\n", id);
+  }
+};
+
+template <class T>
+struct Cell : Tag {
+  T v;
+  Cell(T x) : v(x) {
+  }
+  T get() {
+    return v;
+  }
+  int both() {
+    return tag() + id;
+  }
+  ~Cell() {
+    printf("~Cell\n");
+  }
+};
+
 int main() {
   Holder<int> a(5);
   a.bump(3);
@@ -35,5 +65,8 @@ int main() {
   printf("%d\n", a.n);
   Holder<double> b(1.5);
   printf("%.2f\n", b.get());
+  Cell<int> c(7);
+  c.id = 2;
+  printf("%d %d %d\n", c.get(), c.tag(), c.both());
   return 0;
 }
