@@ -159,6 +159,35 @@ function borrowedLocals(fnTok, C) {
   return out;
 }
 
+/**
+ * **把"哪个方法名借哪几格实参"按名字记下来**（`&` 在声明符上，不用类型也看得出来）。
+ *
+ * 给**类模板**用：实例是第二、三遍中间才现造的，而降体之前那趟扫树（`borrowedLocals`）
+ * 比它早 —— 等实例造好了再登记就来不及（那格局部量的声明已经发成裸标量了）。
+ * `refByName` 本来就是并集近似（多装一格盒子不会错），所以在收模板的时候先按树填上。
+ */
+function seedRefByName(t, C) {
+  if (t === null || t === undefined || !isList(t)) return;
+  if (tag(t) === 'fn') {
+    const nm = kids(t)[0];
+    const ps = part(t, 'params');
+    if (nm !== undefined && tag(nm) === 'n' && ps !== undefined) {
+      const idxs = new Set();
+      kids(ps).filter((y) => tag(y) === 'p').forEach((p, i) => {
+        const pn = kids(p).find((y) => tag(y) === 'ptr');
+        if (pn !== undefined
+          && kids(pn).some((y) => tag(y) === null && String(leaf(y)) === '&')) idxs.add(i);
+      });
+      if (idxs.size > 0) {
+        const key = nameOf(nm);
+        if (!C.refByName.has(key)) C.refByName.set(key, new Set());
+        for (const i of idxs) C.refByName.get(key).add(i);
+      }
+    }
+  }
+  for (const k of kids(t)) seedRefByName(k, C);
+}
+
 /** 一格体里**声明过的局部量**（名字都 ref 过）。 */
 function declaredLocals(bodyTok, C) {
   const out = new Set();
@@ -649,6 +678,8 @@ export function cppToIR(tree) {
     const clsKids = kids(cls).flatMap((y) => (tag(y) === null && isList(y) ? groupItems(y) : [y]));
     const cn = clsKids.find((y) => tag(y) === 'n');
     C.ctemplates.set(nameOf(cn), { tparams, clsTok: cls });
+    /* 类模板里的方法出参：实例造得比扫树晚，所以在这儿先按树把"借哪几格"记下来。 */
+    seedRefByName(cls, C);
   }
 
   /* ---- 第一遍：typedef 与 struct/class ------------------------------------- */
@@ -817,7 +848,9 @@ export function cppToIR(tree) {
       rec.ovlT = overloadedByType(rec);
       const sigs = rec.methods.map((m) => sigOf(m.tok, selfType, methodName(rec, m, C)));
       sigs.forEach((s, i) => {
-        noRefParams(s, `${inst}::${rec.methods[i].name}`);
+        /* 出参：与非模板那条路同一条（`refByName` 在收模板那会儿已经按树填过了）。 */
+        const mRef = new Set(s.params.flatMap((p, k) => (p.ref === true ? [k - 1] : [])));
+        if (mRef.size > 0) C.refSig.set(s.name, mRef);
         C.fns.set(s.name, { params: s.params, ret: s.ret });
         regMethOvl(rec, rec.methods[i], s, C);
       });
@@ -2443,7 +2476,11 @@ function declOf(d, specs, C) {
 //      `virtual ~X()` 上的 `virtual` 这条腿上没有意义（没有 `delete`，对象都是作用域里的，
 //      静态类型定得死），所以照普通析构收。
 //      类里"只声明不给体、体写在类外"那一档**接了**（`attachOutline`；类模板上还没有）。
-//   7. 类模板接**构造、析构与继承**（`ctmpl2.cpp`；继承摊平走同一份 `flatten`，析构串链）。
+//   7. 类模板接**构造、析构、继承与方法上的出参**（`ctmpl2.cpp`；继承摊平走同一份
+//      `flatten`，析构串链）。出参那一格的坑是**时序** —— 实例是第二、三遍中间才现造的，
+//      而降体之前那趟扫树比它早，所以"哪个方法名借哪几格"在**收模板**那会儿就按树记下
+//      （`seedRefByName`，`refByName` 本来就是并集近似）。**构造上的出参**还没接
+//      （那一格要按类名查，而声明形写的是 `Holder<int>` —— 名字还没定下来）。
 //      **虚函数**当场报（自己写了 `virtual` 或基类那侧有 —— 虚那条路是"整块合成一格记录"，
 //      而实例是第二、三遍中间现造的，`planVirtuals` 早过去了）；基类本身是类模板
 //      （`Derived : Base<T>`）、模板的默认实参与特化、类模板里"体写在类外"也都当场报。

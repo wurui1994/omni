@@ -27,6 +27,12 @@ struct Holder {
     v = v + d;
     n = n + 1;
   }
+  /* **类模板的方法上的出参**（`T& out`）：落法与非模板那条路同一条，可**时序**是这一格
+     自己的坑 —— 实例是第二、三遍中间才现造的，而降体之前那趟扫树（`borrowedLocals`）比它
+     早；所以"哪个方法名借哪几格"在**收模板**那会儿就按树记下来（`seedRefByName`）。 */
+  void take(T& out) {
+    out = v;
+  }
 };
 
 /* **类模板 + 继承**：基类得是已经登记过的普通类，摊平走的是同一份 `flatten`
@@ -68,5 +74,10 @@ int main() {
   Cell<int> c(7);
   c.id = 2;
   printf("%d %d %d\n", c.get(), c.tag(), c.both());
+  int got = 0;
+  a.take(got);
+  double gotd = 0.0;
+  b.take(gotd);
+  printf("%d %.2f\n", got, gotd);
   return 0;
 }
