@@ -224,6 +224,27 @@ function breakUnless(cond) {
 }
 
 
+/**
+ * **声明符里那格 `(fn …)`** —— 返回类型带 `&` / `*` 时它**埋在一层 `ptr` 底下**
+ * （`Acc& add(int x)` 的声明符是 `(ptr & (fn (n add) (params …)))`）。
+ *
+ * 只看一层的后果很难看：那一格成员既不算"函数"也读不出名字，于是**方法整个消失** ——
+ * 调用点报"`.add()` 这一格方法还没接"，而病因在收集那一头。这是"声明符上的修饰有没有
+ * 人看"那一类的第五次。
+ */
+function fnOf(tok) {
+  if (tok === null || tok === undefined || !isList(tok)) return undefined;
+  const direct = part(tok, 'fn') ?? kids(tok).find((y) => tag(y) === 'fn');
+  if (direct !== undefined) return direct;
+  for (const k of kids(tok)) {
+    if (tag(k) === 'ptr' || tag(k) === 'paren') {
+      const got = fnOf(k);
+      if (got !== undefined) return got;
+    }
+  }
+  return undefined;
+}
+
 function declaredLocals(bodyTok, C) {
   const out = new Set();
   const walk = (t) => {
@@ -256,11 +277,12 @@ function noRefParams(s, who) {
  * 为什么落在**被调方**而不是每个调用点：调用点有八九处（自由函数、方法、虚方法的分派、
  * 构造、模板实例、lambda…），而"进门第一句"只有一处 —— 少八处就少八处漏。
  * 接收者（`this`）与借出去的那几格（`ref`）不拷：前者本来就是引用语义，后者的整个意义
- * 就是要改到调用者那一格。
+ * 就是要改到调用者那一格。写成 `T&` 的记录（`byRef`）也不拷 —— 那一格要的就是调用者那份。
  */
 function byValueCopies(sig, C) {
   return sig.params
-    .filter((p) => p.name !== 'this' && p.ref !== true && p.type.kind === 'named')
+    .filter((p) => p.name !== 'this' && p.ref !== true && p.byRef !== true
+      && p.type.kind === 'named')
     .map((p) => ({
       kind: 'assign',
       target: { kind: 'name', name: p.name },
@@ -299,7 +321,7 @@ function copyIfLv(v, type, C) {
 
 /** 一份函数的形参类型标记（`int_real`）—— 与造模板实例名时用的是同一份 `tyTag`。 */
 function paramTags(fnTok, C) {
-  const f = kids(fnTok).find((y) => tag(y) === 'fn');
+  const f = fnOf(fnTok);
   return readParams(part(f, 'params'), C).map((p) => tyTag(p.type)).join('_');
 }
 
@@ -358,7 +380,7 @@ function pickAmong(label, cands, argTypes) {
 
 /** 一份构造函数（或方法）收几个实参。 */
 function ctorArity(ctorTok) {
-  const f = kids(ctorTok).find((y) => tag(y) === 'fn');
+  const f = fnOf(ctorTok);
   const ps = f === undefined ? undefined : part(f, 'params');
   return ps === undefined ? 0 : kids(ps).filter((y) => tag(y) === 'p').length;
 }
@@ -716,7 +738,7 @@ export function cppToIR(tree) {
     const inner = kids(d).find((y) => tag(y) === 'func' || tag(y) === 'decl');
     if (inner === undefined) throw new Error('cpp->IR: 这格 template 里什么都没有');
     if (tag(inner) === 'func') {
-      const f = kids(inner).find((y) => tag(y) === 'fn');
+      const f = fnOf(inner);
       C.templates.set(nameOf(kids(f)[0]), { tparams, fnTok: inner });
       continue;
     }
@@ -869,7 +891,7 @@ export function cppToIR(tree) {
 
   /* ---- 第二遍：函数签名（含方法与析构）------------------------------------- */
   const sigOf = (fnTok, selfType, forcedName) => {
-    const f = kids(fnTok).find((y) => tag(y) === 'fn');
+    const f = fnOf(fnTok);
     const nmTok = kids(f)[0];
     const params = readParams(part(f, 'params'), C);
     const ret = typeOfSpecs(part(fnTok, 'specs'), C) ?? { kind: 'void' };
@@ -1202,7 +1224,7 @@ export function cppToIR(tree) {
   /** 实参类型 → 类型形参的绑定（**只认"形参的类型就是那个形参名"**那一档）。 */
   C.deduce = (name, argTypes) => {
     const t = C.templates.get(name);
-    const f = kids(t.fnTok).find((y) => tag(y) === 'fn');
+    const f = fnOf(t.fnTok);
     const ps = part(f, 'params');
     const plist = ps === undefined ? [] : kids(ps).filter((y) => tag(y) === 'p');
     return t.tparams.map((tp) => {
@@ -1231,7 +1253,7 @@ export function cppToIR(tree) {
   const topSig = new Map();
   const fnSeen = new Map();
   for (const f of topFns) {
-    const fTok = kids(f).find((y) => tag(y) === 'fn');
+    const fTok = fnOf(f);
     const n = C.ref(nameOf(kids(fTok)[0]));
     fnSeen.set(n, (fnSeen.get(n) ?? 0) + 1);
   }
@@ -1542,9 +1564,12 @@ function collectClass(cls, C, asName = null) {
        * `virtual int area() = 0;` → `(decl (specs "virtual" …) (init (d (fn (n area) …) (init (num 0)))))`。
        * 不认它的后果是"多出一格叫 null 的字段"（`nameOf` 读 `(fn …)` 答 null）—— 静默地错。
        */
-      if (mn !== undefined && tag(mn) === 'fn') {
+      /* 返回类型带 `&` / `*` 的那一档，`(fn …)` 埋在一层 `ptr` 底下（见 `fnOf`）。 */
+      const mfn = mn === undefined ? undefined
+        : (tag(mn) === 'fn' ? mn : (tag(mn) === 'ptr' ? fnOf(mn) : undefined));
+      if (mfn !== undefined) {
         const zero = kids(kids(mi)[0]).find((y) => tag(y) === 'init');
-        const head = kids(mn)[0];
+        const head = kids(mfn)[0];
         if (zero === undefined) {
           /**
            * **类里只声明、体写在类外**（`int bump();` + `int Counter::bump() { … }`）。
@@ -1604,7 +1629,7 @@ function collectClass(cls, C, asName = null) {
       continue;
     }
     if (tag(m) === 'func') {
-      const f = part(m, 'fn') ?? kids(m).find((y) => tag(y) === 'fn');
+      const f = fnOf(m);
       const head = f === undefined ? undefined : kids(f)[0];
       if (head !== undefined && tag(head) === 'dtor') { dtor = m; continue; }
       /* **构造函数**：名字与类同名、而且**没有返回类型那一格**。 */
@@ -1649,7 +1674,7 @@ function collectClass(cls, C, asName = null) {
 function attachOutline(topFns, C) {
   const rest = [];
   for (const fnTok of topFns) {
-    const f = kids(fnTok).find((y) => tag(y) === 'fn');
+    const f = fnOf(fnTok);
     const head = f === undefined ? undefined : kids(f)[0];
     if (head === undefined || tag(head) !== 'qual') { rest.push(fnTok); continue; }
     const owner = nameOf(kids(head)[0]);
@@ -2886,3 +2911,14 @@ function declOf(dd, specs, C) {
 //  21. **`sizeof` 有意不接**（当场报）：方言里没有内存布局这件事，整数也不是四个字节，
 //      答一个 4 出来就是**撒谎**，而那个谎会顺着 `sizeof(xs)/sizeof(xs[0])` 一路传成错的
 //      长度。要数组长度就用 `.size()`（落 `alen`）。
+//  22. **方法链那三格**（`chain.cpp`）：①返回类型带 `&` 时 `(fn …)` 埋在一层 `ptr` 底下，
+//      收类的那一趟只看第一层 —— 那格方法**整格没被收**，而报错落在调用点（"`.add()` 还没
+//      接"）；现在统一走 `fnOf(声明符)`（往 `ptr` / `paren` 底下找，这是"声明符上的修饰有没有
+//      人看"这一类的第五次）；②`*this` 与 `this` 是同一样东西（记录本来就是引用语义，没有
+//      "解引用"这道手续）；③**记录上的 `T&` 形参**从前与"按值收"同路、进门拷一份，函数改的
+//      是副本、调用者那格**一点没变**（第十四个"答案静默地错"）—— 记录是引用语义，这一格
+//      要做的只有"别拷"（`byRef`，`const T&` 也走这儿：从前是白拷一趟）。
+//  23. **函数当值用（函数指针）有意还没接**：`int apply(int (*f)(int), int v)` 与
+//      `apply(twice, 21)` 两头都报（"未声明的函数 `f`" / "未声明的变量 `twice`"）——
+//      方言这侧有现成的闭包（lambda 走的就是它），所以这一格该落成"具名函数 → 一格闭包值"，
+//      但要连着 `readParams` 里那格 `(ptr (paren (fn …)))` 的声明符一起做，另开一刀。

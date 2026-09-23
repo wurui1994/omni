@@ -220,6 +220,15 @@ export function readParams(paramsTok, C) {
     if (pn !== undefined && tag(pn) === 'array') {
       return { name: C.ref(pname), type: arrOf(type) };
     }
+    /**
+     * **记录上的 `T&`**（`void bump(Acc& a)`）：声明符上那个 `&` 从前**没人看** ——
+     * 于是这一格与"按值收"走同一条路，进门第一句拷了一份，函数改的是副本、
+     * 调用者那格记录**一点没变**（第十四个"答案静默地错"）。记录本来就是引用语义，
+     * 所以这一格要做的只有一件事：**别拷**。`const T&` 也走这儿（拷不拷都对，但白拷一趟）。
+     */
+    if (amp && type.kind === 'named') {
+      return { name: C.ref(pname), type, byRef: true };
+    }
     return { name: C.ref(pname), type };
   });
 }
@@ -400,7 +409,13 @@ export function exprOf(x, C) {
       if (tag(inner) === 'n' && C.refNames.has(C.ref(nameOf(inner)))) {
         return { kind: 'field', obj: { kind: 'name', name: C.ref(nameOf(inner)) }, name: 'v' };
       }
-      throw new Error('cpp->IR: `*p` 只接"按指针收的出参"那一格（真指针还没接）');
+      /**
+       * **`*this`**（`Acc& add(int x) { …; return *this; }` —— 链式调用那一手）：
+       * 这条腿上记录是引用语义，所以"那个对象自己"就是 `this` —— 一格恒等。
+       * 于是 `a.add(2).add(5)` 落成两次普通的方法调用，图上一格新东西也没加。
+       */
+      if (tag(inner) === 'this') return thisNode(C);
+      throw new Error('cpp->IR: `*p` 只接"按指针收的出参"与 `*this` 那两格（真指针还没接）');
     }
     /* `p.x` 与 `this->tag` —— 同一格字段。 */
     case 'dot': case 'arrow':
