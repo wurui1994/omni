@@ -299,9 +299,13 @@ export function cppToIR(tree) {
       const rec = collectClass(t.clsTok, C, inst);
       if (rec.virtuals.size > 0) throw new Error('cpp->IR: 类模板 + 虚函数还没接');
       if (rec.bases.length > 0) throw new Error('cpp->IR: 类模板 + 继承还没接');
-      if (rec.ctors.length > 0) throw new Error('cpp->IR: 类模板 + 构造函数还没接');
+      if (rec.declared.size > 0 || rec.declaredCtors.size > 0 || rec.dtorDeclared === true) {
+        throw new Error('cpp->IR: 类模板里"只声明不给体"（体写在类外）还没接');
+      }
       rec.done = true;
       rec.flat = true;
+      /* 析构**只有自己那一格**（没有继承，所以链就是它自己）。 */
+      rec.dchain = rec.dtor !== null ? [rec.name] : [];
       C.records.set(inst, rec);
       C.storage.set(inst, inst);
       C.storageRef.set(C.ref(inst), C.ref(inst));
@@ -311,10 +315,40 @@ export function cppToIR(tree) {
       rec.ovl = overloadedNames(rec);
       const sigs = rec.methods.map((m) => sigOf(m.tok, selfType, methodName(rec, m, C)));
       sigs.forEach((s) => C.fns.set(s.name, { params: s.params, ret: s.ret }));
+      /**
+       * **构造与析构**：签名要在体之前全登记好（构造函数体里可能调自己这个类的方法，
+       * 而方法体里也可能造一格自己）。落法与非模板那条路**同一条** —— 构造是一格交记录的
+       * 普通函数 `Holder__int__ctor1`、析构挂在公共层的作用域出口上。
+       */
+      const ctorSigs = (rec.ctors ?? []).map((ct) => {
+        const nm = ctorName(C.ref(inst), ctorArity(ct));
+        if (C.fns.has(nm)) {
+          throw new Error(`cpp->IR: ${inst} 有两份收 ${ctorArity(ct)} 个实参的构造函数`
+            + '（按实参**类型**挑那一档还没接）');
+        }
+        const s = sigOf(ct, undefined, nm);
+        C.fns.set(nm, { params: s.params, ret: selfType });
+        return s;
+      });
+      if (rec.dtor !== null) {
+        C.fns.set(dtorName(C.ref(inst), C.ref(inst)), {
+          params: [{ name: 'this', type: selfType }], ret: { kind: 'void' },
+        });
+      }
       rec.methods.forEach((m, i) => {
         decls.push(C.isolate(() => fnDecl(sigs[i], m.tok, C, C.ref(inst))));
       });
-      if (rec.dtor !== null) throw new Error('cpp->IR: 类模板 + 析构函数还没接');
+      ctorSigs.forEach((s, i) => {
+        decls.push(C.isolate(() => ctorDecl({ ...s, ret: selfType }, rec, rec.ctors[i], C)));
+      });
+      if (rec.dtor !== null) {
+        const s = {
+          name: dtorName(C.ref(inst), C.ref(inst)),
+          params: [{ name: 'this', type: selfType }],
+          ret: { kind: 'void' },
+        };
+        decls.push(C.isolate(() => fnDecl(s, rec.dtor, C, C.ref(inst))));
+      }
     } finally {
       t.tparams.forEach((p, i) => {
         if (saved[i] === undefined) C.aliases.delete(p); else C.aliases.set(p, saved[i]);
@@ -1318,7 +1352,7 @@ function declOf(d, specs, C) {
 //      `virtual ~X()` 上的 `virtual` 这条腿上没有意义（没有 `delete`，对象都是作用域里的，
 //      静态类型定得死），所以照普通析构收。
 //      类里"只声明不给体、体写在类外"那一档**接了**（`attachOutline`；类模板上还没有）。
-//   7. 类模板只接"没有继承、没有虚函数、没有构造/析构"那一档（别的当场报）；
-//      模板的默认实参与特化没接。
+//   7. 类模板接**构造与析构**（`ctmpl2.cpp`）；**继承与虚函数**当场报；
+//      模板的默认实参与特化没接；类模板里"体写在类外"也当场报。
 //   8. lambda 的捕获**一律按值**：`[&]` / `[&x]` 当场报（按引用要"把借走的局部量提上去"
 //      那台机器，go 那侧的 `promote`）；`mutable`、`[this]`、泛型 lambda 也没接。
