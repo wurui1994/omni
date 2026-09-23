@@ -52,5 +52,9 @@ int main() {
   int w = 6;
   printf("[%*d][%*d][%-*d]\n", w, 42, -w, 42, w, 42);
   printf("[%.*f][%.*s][%*.*f]\n", 3, 3.14159, 2, "abcd", 9, 2, 3.14159);
+  // 长度修饰（`%lld` / `%lu`）：这条腿上整数只有一格宽度，所以它只要"读得认得"就对了
+  long long big = 1234567;
+  unsigned long u = 42;
+  printf("[%lld][%lu][%08lld]\n", big, u, big);
   return 0;
 }
