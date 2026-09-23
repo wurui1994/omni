@@ -19,7 +19,7 @@
 // **像素算法与 `ext/polydraw/gfx-rt.js` 逐句相同**（Bresenham、中点画圆、沿线铺圆）——
 // 那是有意的：换路之后同一份例子的表面要**逐字节相同**，这条才是"搬家不改语义"的判据。
 
-import { writeBinary, mkdirAll, stdout, env, nowMs } from './native.js';
+import { writeBinary, mkdirAll, stdout, stderr, env, nowMs } from './native.js';
 import { pngFromRgba, surfaceKind } from './png.js';
 
 /** 设备的那几格状态。**一格进程一格设备**（EVAL 的宿主本来就是这个形状）。 */
@@ -30,9 +30,30 @@ const D = {
      `frames` 是这一趟要画几帧（`OMNI_FRAMES`，默认 1）、`dirty` 是"这一帧动过没有"
      —— 没动过就不重复写表面（脚本自己调 `refresh()` 之后帧末那一次就免了）。 */
   fno: 0, frames: -1, dirty: false,
+  /* **两个模式**（`--mode`，`docs/design/eval-realtime-gpu.md` 第 7 节）：
+     `render` 是默认 —— 离屏画定几帧、klock 是"帧号/60"的确定性时钟；
+     `view` 是"有窗口地跑"，那一档在这条腿上没有窗口（任务 #24），只把时钟换成墙上时间。
+     `only` 是 `--frame N`（只交出第 N 帧，照 c_impl 的 `polydraw-render`），-1 = 每帧都交。 */
+  mode: '', only: -1,
+  /* 性能那几格（`--perf`）：一帧的墙上时间是两次 `nextframe` 之间那一段。 */
+  perf: -1, tPrev: 0, tSum: 0, tMin: 0, tMax: 0, tn: 0,
   /* 输入那几格（`mousx`/`mousy`/`bstatus`/`keystatus[256]`）。`keys` 是"还没开"的记号。 */
   mx: 0, my: 0, bst: 0, keys: null,
 };
+
+/** 一格整数旗子（环境变量那一档，读不出数就用默认）。 */
+function intEnv(name, dflt) {
+  const v = env(name);
+  if (v === undefined || v === null || v === '') return dflt;
+  const n = Math.trunc(Number(v));
+  return Number.isFinite(n) ? n : dflt;
+}
+
+/** `render`（默认）还是 `view` —— `OMNI_GFX_MODE`（CLI 的 `--mode` 落成它）。 */
+function modeOf() {
+  if (D.mode === '') D.mode = env('OMNI_GFX_MODE') === 'view' ? 'view' : 'render';
+  return D.mode;
+}
 
 /**
  * **输入那一族的来源**：CPU 这一档没有窗口，所以从环境变量读一次 ——
@@ -75,11 +96,12 @@ const clamp255 = (v) => {
 };
 const rgb = (r, g, b) => clamp255(r) * 65536 + clamp255(g) * 256 + clamp255(b);
 
-/** 第一次画之前自动开一块（EVAL 的脚本里没有"开设备"那一句 —— 窗口是宿主给的）。 */
+/** 第一次画之前自动开一块（EVAL 的脚本里没有"开设备"那一句 —— 窗口是宿主给的）。
+ *  尺寸：默认 320×240，`--w`/`--h`（`OMNI_GFX_W`/`OMNI_GFX_H`）能换。 */
 function need(w, h) {
   if (D.on) return;
-  D.w = w;
-  D.h = h;
+  D.w = intEnv('OMNI_GFX_W', w);
+  D.h = intEnv('OMNI_GFX_H', h);
   /* **普通数组**（不是 Int32Array）：这一份要能被我们自己那台 JS 前端降级，
      子集里还没有 TypedArray（`feedback_check_self_gate.md` 那条纪律：撞上就扩，
      但这一格用普通数组没有代价 —— 它不在热路径的最内层）。 */
@@ -197,6 +219,53 @@ export function gfxSetOut(p) { D.out = p; }
 export function gfxOpen(w = 320, h = 240) { D.on = false; need(w, h); }
 
 /**
+ * 帧循环那几格旗子读一次（第一次问 `nextframe` 的时候）。
+ *
+ * 两条互斥的算法：`--frame N`（`OMNI_GFX_FRAME`）是"走到第 N 帧、**只交出那一帧**"
+ * —— 照 c_impl 的 `polydraw-render`（脚本靠 `numframes` 动画，要看第 30 帧就得把前 30 帧
+ * 真跑过去）；没给就照 `OMNI_FRAMES`（默认 1）每帧都交。
+ */
+function frameSetup() {
+  const one = intEnv('OMNI_GFX_FRAME', -1);
+  D.only = one;
+  const n = one >= 0 ? one + 1 : intEnv('OMNI_FRAMES', 1);
+  D.frames = n > 0 ? n : 1;
+  D.perf = env('OMNI_GFX_PERF') === '1' ? 1 : 0;
+}
+
+/** 一帧末：记一笔时间，再看这一帧要不要交出去。 */
+function frameEnd() {
+  const dt = nowMs() - D.tPrev;
+  D.tSum += dt;
+  D.tn += 1;
+  if (D.tn === 1 || dt < D.tMin) D.tMin = dt;
+  if (dt > D.tMax) D.tMax = dt;
+  if (D.dirty && (D.only < 0 || D.fno - 1 === D.only)) present();
+}
+
+/** 一位小数（`toFixed` 不在我们那套 JS 子集里 —— 而且这一格三条腿都要有同一份）。 */
+function ms1(v) {
+  const r = Math.round(v * 10) / 10;
+  const w = Math.trunc(r);
+  return `${w}.${Math.round((r - w) * 10)}`;
+}
+
+/**
+ * 这一趟的**性能账**（`--perf` / `OMNI_GFX_PERF=1` 才印，落在 **stderr** 上）。
+ *
+ * 为什么不落 stdout：那一股上只许有指针行（判据按行比）。格式与 Studio 那一侧
+ * 显示的是同一组数（帧数 / 总时间 / 每帧平均 / 最快最慢 / fps）。
+ */
+function perfReport() {
+  if (D.perf !== 1 || D.tn === 0) return;
+  D.perf = 2;
+  const avg = D.tSum / D.tn;
+  stderr(`#perf gfx ${modeOf()} frames=${D.tn} total=${ms1(D.tSum)}ms`
+    + ` avg=${ms1(avg)}ms min=${ms1(D.tMin)}ms max=${ms1(D.tMax)}ms`
+    + ` fps=${ms1(avg > 0 ? 1000 / avg : 0)}\n`);
+}
+
+/**
  * **一格宿主调用**：名字 + 一串 double 实参，回一个 double（EVAL 的宿主面就是这个形状）。
  *
  * 认不出的名字**当场炸**，并把这一格设备有哪些名字说出来 —— 不许静默回 0
@@ -243,19 +312,21 @@ export function gfxCall(name, args) {
      */
     case 'nextframe/0': {
       need(320, 240);
-      if (D.frames < 0) {
-        const f = env('OMNI_FRAMES');
-        const k = f === undefined || f === null || f === '' ? 1 : Math.trunc(Number(f));
-        D.frames = Number.isFinite(k) && k > 0 ? k : 1;
-      }
-      if (D.fno > 0 && D.dirty) present();
-      if (D.fno >= D.frames) return 0;
+      if (D.frames < 0) frameSetup();
+      if (D.fno > 0) frameEnd();
+      if (D.fno >= D.frames) { perfReport(); return 0; }
       D.fno += 1;
+      D.tPrev = nowMs();
       return 1;
     }
     case 'numframes/0': need(320, 240); return D.fno > 0 ? D.fno - 1 : 0;
-    /* `klock()`：秒（EVAL 里它是"从开机起的秒数"，脚本拿它算帧间隔）。 */
-    case 'klock/0': return nowMs() / 1000;
+    /**
+     * `klock()`：秒。**render 模式下是确定性时钟**（帧号 / 60，照 c_impl 的
+     * `pdrl_set_clock_scale(ctx, 1/60)`）—— 离屏画一帧要出一份能逐字节比的图，
+     * 墙上时间在那儿是噪声。`view` 模式（有窗口地跑）才是真墙上时间。
+     */
+    case 'klock/0':
+      return modeOf() === 'view' ? nowMs() / 1000 : (D.fno > 0 ? D.fno - 1 : 0) / 60;
     case 'xres/0': need(320, 240); return D.w;
     case 'yres/0': need(320, 240); return D.h;
     /* ── 输入那一族（读四格、写两格）。写的两格照说明书：`bstatus` 与 `keystatus[k]`

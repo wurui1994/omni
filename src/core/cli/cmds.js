@@ -15,7 +15,10 @@ import { TCC_HELP } from './cmd-tcc.js';
 
 /* ---- 与语言无关的那几格开关，好几条命令共用。 */
 const F_OUT = { name: '-o', arity: 1, value: 'NAME', brief: '产物落在哪儿' };
-const F_MODE = { name: '--mode', arity: 1, value: 'M', brief: 'mixed|dynamic|static（ADR-0008）' };
+const F_MODE = {
+  name: '--mode', arity: 1, value: 'M',
+  brief: 'mixed|dynamic|static（ADR-0008）；EVAL 两门（.pss/.kc）上是 render|view，默认 render',
+};
 const F_WORK = { name: '--work', arity: 1, value: 'DIR', brief: '生成的中间文件留在这儿' };
 const F_BACKEND = {
   name: '--backend', arity: 1, value: 'B',
@@ -387,7 +390,15 @@ uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开
         { name: '--size', arity: 1, value: 'N[xM]', brief: '（glsl）画布大小，默认 256' },
         { name: '--set', arity: 1, value: 'NAME=v,…', brief: '（glsl）给一个 uniform 赋值，可重复' },
         { name: '--tex', arity: 1, value: 'NAME=W,H,v,…',
-          brief: '（glsl）给一个采样器一张图：宽、高、W×H×4 个 RGBA 分量，可重复' }],
+          brief: '（glsl）给一个采样器一张图：宽、高、W×H×4 个 RGBA 分量，可重复' },
+        /* **EVAL 两门（.pss / .kc）那一族**：照 c_impl 的 polydraw-render 的旗子。
+         * `--mode` 与类型模式共用名字（取值不重叠：render|view vs mixed|dynamic|static）。 */
+        { name: '--frame', arity: 1, value: 'N',
+          brief: '（EVAL）走到第 N 帧、**只交出那一帧**（前 N 帧照样真跑）' },
+        { name: '--w', arity: 1, value: 'W', brief: '（EVAL）画布宽，默认 320' },
+        { name: '--h', arity: 1, value: 'H', brief: '（EVAL）画布高，默认 240' },
+        { name: '--perf', arity: 0,
+          brief: '（EVAL）每帧耗时与 fps 印到 stderr（#perf gfx …）' }],
     },
     {
       name: 'build', key: 'build', usage: 'FILE -o NAME',

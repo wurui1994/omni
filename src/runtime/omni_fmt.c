@@ -347,6 +347,11 @@ static int g_gon = 0;
 /* 帧循环那三格（与 host/gfx-cpu.js 的 D.fno / D.frames / D.dirty 一一对应）。 */
 static int64_t g_gfno = 0, g_gframes = -1;
 static int g_gdirty = 0;
+/* 模式与性能那几格（与 host/gfx-cpu.js 的 D.mode / D.only / D.perf / D.t* 一一对应）：
+   mode 0=还没读 1=render 2=view；only 是 --frame N（-1 = 每帧都交）。 */
+static int g_gmode = 0, g_gperf = -1;
+static int64_t g_gonly = -1, g_gtn = 0;
+static double g_gtprev = 0.0, g_gtsum = 0.0, g_gtmin = 0.0, g_gtmax = 0.0;
 /* 输入那几格（与 host/gfx-cpu.js 的 D.mx / D.my / D.bst / D.keys 一一对应）。
    这一档没有窗口，来源是 OMNI_MOUSE=x,y,按键位 与 OMNI_KEYS=0xc8,0x1d（按住的扫描码）。 */
 static double g_gmx = 0.0, g_gmy = 0.0, g_gkeys[256];
@@ -379,6 +384,32 @@ static void gfx_input(void) {
 
 static int64_t gfx_rnd(double v) { return (int64_t)floor(v + 0.5); }
 
+/* 一格整数旗子（与 host/gfx-cpu.js 的 intEnv 一字不差）。 */
+static int64_t gfx_int_env(const char *name, int64_t dflt) {
+  const char *v = getenv(name);
+  if (v == NULL || v[0] == '\0') return dflt;
+  char *e = NULL;
+  long k = strtol(v, &e, 10);
+  if (e == v) return dflt;
+  return (int64_t)k;
+}
+
+/* render（默认）还是 view —— OMNI_GFX_MODE（CLI 的 --mode 落成它）。 */
+static int gfx_mode(void) {
+  if (g_gmode == 0) {
+    const char *m = getenv("OMNI_GFX_MODE");
+    g_gmode = (m != NULL && strcmp(m, "view") == 0) ? 2 : 1;
+  }
+  return g_gmode;
+}
+
+/* 墙上时间（毫秒）—— 性能那几格用它，与 JS 那侧的 nowMs 同语义。 */
+static double gfx_now_ms(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
 static int64_t gfx_clamp255(double v) {
   int64_t i = gfx_rnd(v);
   return i < 0 ? 0 : (i > 255 ? 255 : i);
@@ -390,8 +421,9 @@ static int64_t gfx_rgb(double r, double g, double b) {
 
 static void gfx_need(void) {
   if (g_gon) return;
-  g_gw = 320;
-  g_gh = 240;
+  /* 尺寸：默认 320×240，--w/--h（OMNI_GFX_W/OMNI_GFX_H）能换。 */
+  g_gw = gfx_int_env("OMNI_GFX_W", 320);
+  g_gh = gfx_int_env("OMNI_GFX_H", 240);
   g_gfb = (int64_t *)calloc((size_t)(g_gw * g_gh), sizeof(int64_t));
   if (g_gfb == NULL) omni_errorf("gfxcall: 开不出 %lldx%lld 的帧缓冲", (long long)g_gw, (long long)g_gh);
   g_gon = 1;
@@ -468,6 +500,36 @@ static void gfx_present(void) {
   g_gdirty = 0;
 }
 
+/* 帧循环那几格旗子读一次（与 host/gfx-cpu.js 的 frameSetup 一字不差）。 */
+static void gfx_frame_setup(void) {
+  g_gonly = gfx_int_env("OMNI_GFX_FRAME", -1);
+  int64_t n = g_gonly >= 0 ? g_gonly + 1 : gfx_int_env("OMNI_FRAMES", 1);
+  g_gframes = n > 0 ? n : 1;
+  const char *p = getenv("OMNI_GFX_PERF");
+  g_gperf = (p != NULL && strcmp(p, "1") == 0) ? 1 : 0;
+}
+
+/* 一帧末：记一笔时间，再看这一帧要不要交出去。 */
+static void gfx_frame_end(void) {
+  double dt = gfx_now_ms() - g_gtprev;
+  g_gtsum += dt;
+  g_gtn += 1;
+  if (g_gtn == 1 || dt < g_gtmin) g_gtmin = dt;
+  if (dt > g_gtmax) g_gtmax = dt;
+  if (g_gdirty && (g_gonly < 0 || g_gfno - 1 == g_gonly)) gfx_present();
+}
+
+/* 这一趟的性能账（--perf / OMNI_GFX_PERF=1 才印，落 stderr）——
+   一位小数，与 host/gfx-cpu.js 的 perfReport 同一个格式。 */
+static void gfx_perf_report(void) {
+  if (g_gperf != 1 || g_gtn == 0) return;
+  g_gperf = 2;
+  double avg = g_gtsum / (double)g_gtn;
+  fprintf(stderr, "#perf gfx %s frames=%lld total=%.1fms avg=%.1fms min=%.1fms max=%.1fms fps=%.1f\n",
+          gfx_mode() == 2 ? "view" : "render", (long long)g_gtn,
+          g_gtsum, avg, g_gtmin, g_gtmax, avg > 0.0 ? 1000.0 / avg : 0.0);
+}
+
 double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a2,
                      double a3, double a4, double a5, double a6, double a7, double a8) {
   char *nm = omni_cstr(name);
@@ -507,20 +569,20 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
      "还画不画下一帧" —— 于是循环在设备里。这一档画 OMNI_FRAMES 帧（默认 1）。 */
   if (!strcmp(nm, "nextframe") && argc == 0) {
     gfx_need();
-    if (g_gframes < 0) {
-      const char *f = getenv("OMNI_FRAMES");
-      long k = (f == NULL || f[0] == '\0') ? 1 : strtol(f, NULL, 10);
-      g_gframes = k > 0 ? (int64_t)k : 1;
-    }
-    if (g_gfno > 0 && g_gdirty) gfx_present();
-    if (g_gfno >= g_gframes) return 0.0;
+    if (g_gframes < 0) gfx_frame_setup();
+    if (g_gfno > 0) gfx_frame_end();
+    if (g_gfno >= g_gframes) { gfx_perf_report(); return 0.0; }
     g_gfno += 1;
+    g_gtprev = gfx_now_ms();
     return 1.0;
   }
   if (!strcmp(nm, "numframes") && argc == 0) { gfx_need(); return (double)(g_gfno > 0 ? g_gfno - 1 : 0); }
-  /* `klock()`：秒。这一格与 JS 那侧同语义（"从某个起点起的秒数"），**不要求两侧同值**
-     —— 脚本拿它算帧间隔，判据里不许依赖它（表面判据用 numframes）。 */
-  if (!strcmp(nm, "klock") && argc == 0) return (double)clock() / (double)CLOCKS_PER_SEC;
+  /* `klock()`：秒。**render 模式下是确定性时钟**（帧号 / 60，照 c_impl 的 1/60 clock scale）
+     —— 与 host/gfx-cpu.js 那一格一字不差，所以三条腿仍然逐字节相同。view 模式才是墙上时间。 */
+  if (!strcmp(nm, "klock") && argc == 0) {
+    return gfx_mode() == 2 ? gfx_now_ms() / 1000.0
+                           : (double)(g_gfno > 0 ? g_gfno - 1 : 0) / 60.0;
+  }
   if (!strcmp(nm, "xres") && argc == 0) { gfx_need(); return (double)g_gw; }
   if (!strcmp(nm, "yres") && argc == 0) { gfx_need(); return (double)g_gh; }
   /* 输入那一族（与 host/gfx-cpu.js 的那几格一字不差）：这一档没有窗口，来源是

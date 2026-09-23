@@ -4678,6 +4678,66 @@ function timeoutBudgetS(name, dflt) {
   return (t === '' || !(n >= 0) || n === Infinity) ? dflt : n;
 }
 
+/**
+ * **EVAL 两门语言（`.pss` / `.kc`）的那几格图形旗子 -> 设备读的那几格环境变量。**
+ *
+ * 为什么走环境变量而不是"传参进去"：设备有三份实现（`host/gfx-cpu.js` 给 js 与 interp
+ * 两条腿、`runtime/omni_fmt.c` 给 C 腿、`studio/gfx-gl.js` 给浏览器），而 C 腿是**另一个
+ * 进程**里的一份产物 —— 环境变量是这四条腿唯一都认的那格口径，而且它**不进产物缓存的
+ * 印记**（同一份编好的东西换个旗子再跑就换个行为，与 `.asy` 的出图设置同一条规矩）。
+ *
+ * 旗子照 c_impl 的 `polydraw-render` / `polydraw-view`（`/Users/wurui/Documents/polydraw`）：
+ *
+ *   omni run x.pss                        render（默认）：画一帧，落 .omni-cache/gfx/frame.png
+ *   omni run x.pss --frame 30 -o out.png  走到第 30 帧、**只交出那一帧**（前 30 帧真跑过去）
+ *   omni run x.pss --w 640 --h 480        画布尺寸（默认 320×240）
+ *   omni run x.pss --perf                 每帧耗时与 fps 印到 stderr（`#perf gfx …`）
+ *   omni run x.pss --mode view            有窗口地跑 —— **这条腿上还没有窗口**（任务 #24），
+ *                                         当场说清楚；浏览器里的 Studio 就是 view 那一档
+ *
+ * `--mode` 这格名字与类型模式（`mixed|dynamic|static`，ADR-0008）共用 —— 取值不重叠，
+ * 所以只认 `render`/`view` 这两个值，别的原样留给那一档。
+ */
+function applyGfxFlags(verb, path, rest) {
+  if (verb !== 'run' || path === undefined || path === null) return;
+  if (!(path.endsWith('.pss') || path.endsWith('.kc'))) return;
+  const val = (n) => {
+    const i = rest.indexOf(n);
+    return i >= 0 && rest[i + 1] !== undefined ? rest[i + 1] : undefined;
+  };
+  const num = (n, name) => {
+    const v = val(n);
+    if (v === undefined) return;
+    const k = Number(v);
+    if (!Number.isFinite(k) || k < 0) throw new OmniError(`${n} 要一个非负的数，拿到 ${v}`);
+    setEnv(name, String(Math.trunc(k)));
+  };
+  const m = val('--mode');
+  if (m === 'view') {
+    throw new OmniError('--mode view 要一格窗口，而这条腿上还没有本机 OpenGL 设备'
+      + '（任务 #24，docs/design/eval-realtime-gpu.md 第 2.2 节）——'
+      + ' 现在能实时看的是 `omni serve` 那一页（浏览器 WebGL2 直通 GPU）；'
+      + ' 离屏出图用默认的 `--mode render`');
+  }
+  if (m === 'render') setEnv('OMNI_GFX_MODE', 'render');
+  num('--frame', 'OMNI_GFX_FRAME');
+  num('--w', 'OMNI_GFX_W');
+  num('--h', 'OMNI_GFX_H');
+  const o = val('-o');
+  if (o !== undefined) setEnv('OMNI_GFX_OUT', o);
+  if (rest.includes('--perf')) setEnv('OMNI_GFX_PERF', '1');
+  /* **这几格旗子是"设备在宿主那一侧"那条路的**（帧循环、画布尺寸、输入、性能账都在设备里）。
+     给了其中任何一格就把那条路打开（`OMNI_GFX=host`）—— 不打开的话旗子会静默没效果：
+     默认那条路是**生成出来的 CPU 光栅器**（`ext/polydraw/gfx-rt.js`），它只画一帧、
+     尺寸在脚本里。已经明说 `OMNI_GFX=` 的照旧听用户的。
+     GL 立即模式那一族在宿主的 CPU 备选上没有（只有 GPU 那两档设备有）——
+     那时设备会自己报出"这格设备上没有 glbegin"，见 docs/design/eval-realtime-gpu.md。 */
+  const touched = m === 'render' || rest.includes('--perf')
+    || ['--frame', '--w', '--h'].some((f) => rest.includes(f));
+  const cur = env('OMNI_GFX');
+  if (touched && (cur === undefined || cur === null || cur === '')) setEnv('OMNI_GFX', 'host');
+}
+
 function armDevDeadline(verb, rest) {
   /* 发布那一档没有时限（生成出来的程序里那一格也由 `--release` 关掉）。 */
   if (rest.includes('--release') || env('OMNI_RELEASE') === '1') return;
@@ -5131,6 +5191,10 @@ function main(argv) {
    * （`node.key`）—— 一条腿都不能漏，漏掉的那条就是「挂在终端上，十几分钟一个字节的
    * 信息都没有」。跑一个程序默认 30s、编译这一趟默认 300s，两个预算分开算。 */
   armDevDeadline(node.key, rest);
+  /* EVAL 两门语言那几格图形旗子（`--mode`/`--frame`/`--w`/`--h`/`-o`/`--perf`）落成设备
+     读的环境变量。摆在这儿的理由与上面那句一样：`--backend` 会把 `run` 换成另一条 case，
+     而这几格旗子对三条腿都管用（C 那条是子进程，环境变量跟着过去）。 */
+  applyGfxFlags(node.key, path, rest);
   /**
    * **借来的那些语言也是这条链的前端**，与 `.c` 同一条规矩（前端按扩展名选）。
    *

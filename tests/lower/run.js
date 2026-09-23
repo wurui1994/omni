@@ -225,6 +225,17 @@ const GFX_CASES = [
       [40, 200, 16, 24, 32],        /* 绿点**没画** -> `bstatus--` 写回设备生效了 */
     ],
   },
+  /* **CLI 那几格旗子**（`--frame N` / `--w` / `--h`，照 c_impl 的 `polydraw-render`）：
+     判的是"走到第 2 帧、**只交出那一帧**"（所以 stdout 上只有一行指针，而不是三行）
+     加上画布尺寸真换了（160×120）。这几格旗子隐含 `OMNI_GFX=host`（设备那条路）——
+     三条腿仍然逐字节相同，因为 klock 在 render 模式下是"帧号/60"的确定性时钟。 */
+  {
+    who: 'evaldraw+cli',
+    file: 'ext/evaldraw/examples/frames.kc',
+    w: 160,
+    h: 120,
+    args: ['--frame', '2', '--w', '160', '--h', '120'],
+  },
 ];
 const gfxLegs = [['js', []], ['interp', ['--backend', 'interp']], ['c', ['--backend', 'c']]];
 for (const G of GFX_CASES) {
@@ -232,7 +243,7 @@ for (const G of GFX_CASES) {
   const seen = [];
   for (const [leg, flags] of gfxLegs) {
     const label = `${G.who}(${leg})`;
-    const got = omni(['run', ...flags, G.file], G.env);
+    const got = omni(['run', ...flags, G.file, ...(G.args ?? [])], G.env);
     /* 一帧一行指针：帧循环那一档跑几帧就有几行。 */
     const want = new Array(G.frames === undefined ? 1 : G.frames)
       .fill(`#gfx png ${GFX_OUT} ${G.w} ${G.h}`);
