@@ -17,6 +17,15 @@ import {
 } from '../host/native.js';
 import { pickLang, treeRoot, LANGS } from './langs.js';
 import { lower } from './lower.js';
+/* **图形设备**：`GFX_CPU` 这一格一被引用，`host/gfx-cpu.js` 就把 **CPU 备选**那一档装在
+   `globalThis.__OMNI_GFX` 上。浏览器那边页面会把它换成 **WebGL2** 那一档 —— 同一格全局、
+   同一张名字表（`docs/design/eval-realtime-gpu.md` 第 2.2 节）。
+   为什么装在这条路上：`.pss` / `.kc` 两门从这儿进来，而设备必须在**跑起来之前**就位。 */
+import { GFX_CPU } from '../host/gfx-cpu.js';
+
+/* 谁跑谁装：这一句把 CPU 备选那一档摆上去，**已经有设备就不动**（浏览器那边页面
+   先装了 WebGL2，那一格才是默认）。 */
+if (globalThis.__OMNI_GFX === undefined) globalThis.__OMNI_GFX = GFX_CPU;
 
 /** 一份路径的目录（宿主那侧不供这一格）。 */
 const dirOf = (p) => (p.lastIndexOf('/') >= 0 ? p.slice(0, p.lastIndexOf('/')) : '.');
@@ -52,8 +61,14 @@ export function sxTextOf(path, argv = []) {
   }
   const { tb, g } = loadGrammarTable(`${treeRoot()}/${lang.grammar}`);
   const diags = new Diagnostics();
+  /* 主文件的**原文**：有几门语言的 adapter 除了树还要它 —— `.pss` 后半那些
+     `@v` / `@f` 区段是着色器原文，词法层整段跳过去了（那不是这门语言的语法），
+     可"把原文交给设备"这件事还是得有人做。 */
+  let mainSrc = '';
   const treeOf = (p) => {
-    const toks = lexText(g.lex, new SourceFile(p, readText(p)), diags);
+    const text = readText(p);
+    if (p === path) mainSrc = text;
+    const toks = lexText(g.lex, new SourceFile(p, text), diags);
     if (toks === null || diags.hasErrors()) return null;
     const t = glrParse(tb, toks, diags);
     return t === null || diags.hasErrors() ? null : t;
@@ -107,7 +122,7 @@ export function sxTextOf(path, argv = []) {
   if (!load(path, tree)) { stderr(diags.format()); return null; }
 
   try {
-    const ir = lang.toIR(tree, { also });
+    const ir = lang.toIR(tree, { also, src: mainSrc });
     return lower(ir, lang.hooks ?? {});
   } catch (err) {
     throw new OmniError(`${path}：${lang.name} 这一格还没接住 —— ${err.message}`);

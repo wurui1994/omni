@@ -346,6 +346,29 @@ int64_t omni_run_proc(omni_str cmd);
 struct omni_arr_f64_s;
 omni_str omni_r3_render(omni_str path, struct omni_arr_f64_s *nums);
 
+/* `(gfxframe PATH W H FB)`（omni_fmt.c）：**把一帧交出去** —— 帧缓冲 FB（一格一个打包好
+   的 0xRRGGBB 的 double）按 W×H 写成一份 `#rgba <W> <H>\n` + 裸 RGBA 的表面文件，
+   回写进去的字节数。图形设备那一层唯一的出口（图元全在内存里画，一趟只过一帧）。
+   第二个 struct 参数与上面那一条同一个写法（标签已在上面声明过，不必再写一次）。 */
+int64_t omni_gfx_frame(omni_str path, int64_t w, int64_t h, struct omni_arr_f64_s *fb);
+/* 同一格的**指针那一档**（jnc/C 那一侧：`int fb[N]` 是一段 int 槽，一槽 8 字节、
+   装一个打包好的 0xRRGGBB）。出来的表面与上面那一档逐字节相同。 */
+int64_t omni_gfx_framep(omni_str path, int64_t w, int64_t h, int64_t *fb);
+
+/* `(gfxcall "名字" 实参…)`（omni_gfx.c）：**图形设备的宿主面** —— EVAL 两门语言
+   （`.pss` / `.kc`）的宿主调用全从这一格过去。签名是**平的**（名字 + 实参个数 +
+   九格 double，不足的调用方补 0）：变参在 run-llvm 那条腿与我们自己那台 C 前端上
+   都是另一笔账，而这一格不值得。口径与刀法见 docs/design/eval-realtime-gpu.md。 */
+double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a2,
+                     double a3, double a4, double a5, double a6, double a7, double a8);
+/* `(gfxframefn …)`：把每帧那一格函数交给设备（平签名：一格 `void *`）。
+   这条腿上**记下不用** —— CPU 备选与本机 OpenGL 那两档自己有帧循环；要"页面驱动"的
+   只有浏览器那一档。 */
+double omni_gfx_frame_fn(void *f);
+/* `(gfxdef 种类 名字 内容)`：往设备上登记一格有名字的串（着色器原文 / 名字表）。
+   CPU 备选那一档**记下不用** —— 真去 `glsetshader` 才报"这一档没有可编程管线"。 */
+double omni_gfx_def(omni_str kind, omni_str name, omni_str text);
+
 /* omni_math.c —— 转手 libm（那份文件的头注里写了逐字节/容差的分界） */
 double omni_r_sqrt(double x);
 double omni_r_pow(double x, double y);

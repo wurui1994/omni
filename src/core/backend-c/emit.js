@@ -2826,6 +2826,28 @@ class CEmitter {
       // `(r3render PATH)`：三维那一档的光栅化（runtime/omni_r3.c，照 reference 的
       // glrender.cc/renderBase.cc/tile.h 与两份 glsl 转写）。C 与 LLVM 两条腿的权威。
       case 'r3_render': return `omni_r3_render(${a[0]}, ${a[1]})`;
+      // `(gfxframe PATH W H FB)`：把一帧交出去（表面文件，runtime/omni_fmt.c 里
+      // omni_write_text 旁边那一格）。
+      case 'gfx_frame': return `omni_gfx_frame(${a[0]}, ${a[1]}, ${a[2]}, ${a[3]})`;
+      /* 指针那一档（jnc/C 那一侧的 `int fb[N]`）。运行时的**真符号一律是平的**
+         （omni.h 那段头注：不按值收发 omni_ptr），所以这儿先过一次解引用检查拿地址 ——
+         那一句顺带把"空指针 / 第一格越界"挡掉。**后面几格的范围它查不到**：裸地址上
+         没有长度，长度由调用方的 W×H 负责（与 `(unsafe …)` 那一档同一条口径）。 */
+      case 'gfx_framep':
+        return `omni_gfx_framep(${a[0]}, ${a[1]}, ${a[2]}, (int64_t *)${this.ptrChk(e.args[3], 8)})`;
+      /* `(gfxcall "名字" 实参…)`：图形设备的宿主面。**平签名**（名字 + 个数 + 九格 double，
+         不足的补 0）—— 变参在这条腿与 LLVM 那条腿上都是另一笔账，而这一格值不着。 */
+      case 'gfx_call': {
+        const vs = a.slice(1);
+        while (vs.length < 9) vs.push('0.0');
+        return `omni_gfx_call(${a[0]}, ${a.length - 1}, ${vs.join(', ')})`;
+      }
+      /* `(gfxframefn …)`：把每帧那一格函数交给设备（平签名：一格 `void *`）。
+         这条腿上**记下不用** —— CPU 备选与本机 OpenGL 那两档自己有循环。 */
+      case 'gfx_frame_fn': return `omni_gfx_frame_fn((void *)${e.func})`;
+      /* `(gfxdef 种类 名字 内容)`：往设备上登记一格有名字的串（着色器原文 / 名字表）。
+         CPU 备选那一档**记下不用** —— 真去 `glsetshader` 才报"这一档没有可编程管线"。 */
+      case 'gfx_def': return `omni_gfx_def(${a[0]}, ${a[1]}, ${a[2]})`;
       // 分配器的作用域（omni_mem.c 的 mark/release）。release 回 0 只是为了让它
       // 在方言里是个表达式 —— 调用方把它当语句用。
       case 'arena_mark': return 'omni_arena_mark()';

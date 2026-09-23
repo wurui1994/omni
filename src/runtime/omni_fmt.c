@@ -3,6 +3,10 @@
 #include "omni.h"
 /* omni_run_proc 要 WIFEXITED/WEXITSTATUS —— omni.h 里那批标准头不含它。 */
 #include <sys/wait.h>
+/* omni_gfx_frame 的 `mkdir -p` 要 mkdir（同上：omni.h 里没有这一个头）。 */
+#include <sys/stat.h>
+/* 图形设备的 `klock()` 要 clock()/CLOCKS_PER_SEC。 */
+#include <time.h>
 
 omni_str omni_str_int(int64_t v) { return omni_str_fmt("%lld", (long long)v); }
 omni_str omni_str_real(double v) { return omni_str_fmt("%.6g", v); }
@@ -102,6 +106,347 @@ int64_t omni_write_text(omni_str path, omni_str text) {
   }
   if (fclose(f) != 0) omni_errorf("cannot write '%s': %s", p, strerror(errno));
   return n;
+}
+
+/* `mkdir -p`（`(gfxframe …)` 的表面默认落在 `.omni-cache/gfx/` 下，那一层可能还不在）。
+   做不到就不管：真正的报错留给下面的 fopen —— 它的话（带 strerror）比这儿的清楚。 */
+static void omni_mkdir_p(const char *dir) {
+  char buf[4096];
+  size_t n = strlen(dir);
+  if (n == 0 || n >= sizeof buf) return;
+  memcpy(buf, dir, n + 1);
+  for (size_t i = 1; i < n; i++) {
+    if (buf[i] != '/') continue;
+    buf[i] = '\0';
+    mkdir(buf, 0777);
+    buf[i] = '/';
+  }
+  mkdir(buf, 0777);
+}
+
+/* `(gfxframe PATH W H FB)`：**把一帧交出去** —— 帧缓冲 FB（一格一个打包好的 0xRRGGBB
+   的 double）按 W×H 写成一份 `#rgba <W> <H>\n` + 裸 RGBA（alpha 恒 255）的表面文件，
+   回写进去的字节数。
+
+   这是**第三份实现**（另两份：backend-js/prelude.js 的 `$gfx_frame`、
+   interp/builtin.js 的 `gfxFrame`），三份要逐字节一致。一格颜色的读法刻意**不用位运算**：
+   走 `fmod(trunc(v), 16777216)` 再绕回非负，与 JS 那两条腿（double 上取模）逐位同值 ——
+   位运算那一族在 JS 里会先把 double 截到 32 位，`setcol` 收到 -1 时两边就分岔了。 */
+/* 两档的公共那一半（定义在下面 —— C 里用在前、定义在后要先声明一句）。 */
+static int64_t omni_gfx_emit(omni_str path, int64_t w, int64_t h,
+                             struct omni_arr_f64_s *fb, const int64_t *ip);
+
+int64_t omni_gfx_frame(omni_str path, int64_t w, int64_t h, struct omni_arr_f64_s *fb) {
+  int64_t n = w * h;
+  int64_t len = fb == NULL ? 0 : fb->len;
+  if (len < n) {
+    omni_errorf("gfxframe: framebuffer too small: %lld < %lld", (long long)len, (long long)n);
+  }
+  return omni_gfx_emit(path, w, h, fb, NULL);
+}
+
+/* `(gfxframe …)` 的**指针那一档**（jnc/C 那一侧：`int fb[N]` 是一段 int 槽，一槽 8 字节、
+   装一个打包好的 0xRRGGBB）。范围查不了（裸指针上没有长度）—— 那一格由方言那侧的类型
+   与调用方自己负责，这儿只查空。 */
+int64_t omni_gfx_framep(omni_str path, int64_t w, int64_t h, int64_t *fb) {
+  if (fb == NULL) omni_errorf("gfxframe: null framebuffer");
+  return omni_gfx_emit(path, w, h, NULL, fb);
+}
+
+/* 两档共用的那一半。`fb` 与 `ip` 恰有一个非空（C 里没有闭包，所以两样都传进来）。
+   **整数那一档走整数取模**（不过 double）：JS 那两条腿上 int 是 BigInt，也走 BigInt 取模 ——
+   于是超出 24 位的值在三条腿上是同一个字节。 */
+static int64_t omni_gfx_emit(omni_str path, int64_t w, int64_t h,
+                             struct omni_arr_f64_s *fb, const int64_t *ip) {
+  if (w <= 0 || h <= 0) {
+    omni_errorf("gfxframe: bad frame size: %lldx%lld", (long long)w, (long long)h);
+  }
+  int64_t n = w * h;
+  char *p = omni_cstr(path);
+  char *cut = strrchr(p, '/');
+  if (cut != NULL && cut != p) {
+    char dir[4096];
+    size_t dn = (size_t)(cut - p);
+    if (dn < sizeof dir) {
+      memcpy(dir, p, dn);
+      dir[dn] = '\0';
+      omni_mkdir_p(dir);
+    }
+  }
+  FILE *f = fopen(p, "wb");
+  if (!f) omni_errorf("cannot write '%s': %s", p, strerror(errno));
+  char head[64];
+  int hl = snprintf(head, sizeof head, "#rgba %lld %lld\n", (long long)w, (long long)h);
+  if (fwrite(head, 1, (size_t)hl, f) != (size_t)hl) {
+    fclose(f);
+    omni_errorf("cannot write '%s': %s", p, strerror(errno));
+  }
+  unsigned char *row = (unsigned char *)malloc((size_t)w * 4);
+  if (row == NULL) {
+    fclose(f);
+    omni_errorf("gfxframe: out of memory for a %lld-pixel row", (long long)w);
+  }
+  for (int64_t y = 0; y < h; y++) {
+    for (int64_t x = 0; x < w; x++) {
+      int64_t k = y * w + x;
+      int64_t v;
+      if (ip != NULL) {
+        v = ip[k] % 16777216;
+        if (v < 0) v += 16777216;
+      } else {
+        double m = fmod(trunc(fb->items[k]), 16777216.0);
+        if (!isfinite(m)) m = 0.0;
+        if (m < 0.0) m += 16777216.0;
+        v = (int64_t)m;
+      }
+      row[x * 4 + 0] = (unsigned char)((v / 65536) % 256);
+      row[x * 4 + 1] = (unsigned char)((v / 256) % 256);
+      row[x * 4 + 2] = (unsigned char)(v % 256);
+      row[x * 4 + 3] = 255;
+    }
+    if (fwrite(row, 1, (size_t)w * 4, f) != (size_t)w * 4) {
+      free(row);
+      fclose(f);
+      omni_errorf("cannot write '%s': %s", p, strerror(errno));
+    }
+  }
+  free(row);
+  if (fclose(f) != 0) omni_errorf("cannot write '%s': %s", p, strerror(errno));
+  return (int64_t)hl + n * 4;
+}
+
+/* ---------------------------------------------------------------- 图形设备（CPU 备选）
+ *
+ * `(gfxcall "名字" 实参…)` 在这条腿上的落点。三档设备里的**备选**那一档 ——
+ * 默认应当是真 GPU（`docs/design/eval-realtime-gpu.md` 第 2.2 节：本机 OpenGL、
+ * 浏览器 WebGL2）；这一份是没有 GL 时、以及 `--gfx=cpu` 时跑的那一份。
+ *
+ * **像素算法与 `src/core/host/gfx-cpu.js` 逐句相同**（Bresenham、中点画圆、沿线铺圆、
+ * 四舍五入取整）：两侧出来的表面要逐字节相同，那是"同一个设备两份实现"的判据。 */
+
+static int64_t *g_gfb = NULL;         /* 一格一个 0xRRGGBB；用 int64 是为了直接喂 omni_gfx_emit */
+static int64_t g_gw = 0, g_gh = 0;
+static int64_t g_gcol = 0xffffff;
+static double g_gx = 0.0, g_gy = 0.0;
+static int g_gon = 0;
+/* 帧循环那三格（与 host/gfx-cpu.js 的 D.fno / D.frames / D.dirty 一一对应）。 */
+static int64_t g_gfno = 0, g_gframes = -1;
+static int g_gdirty = 0;
+/* 输入那几格（与 host/gfx-cpu.js 的 D.mx / D.my / D.bst / D.keys 一一对应）。
+   这一档没有窗口，来源是 OMNI_MOUSE=x,y,按键位 与 OMNI_KEYS=0xc8,0x1d（按住的扫描码）。 */
+static double g_gmx = 0.0, g_gmy = 0.0, g_gkeys[256];
+static int64_t g_gbst = 0;
+static int g_ginput = 0;
+
+/* 把 OMNI_MOUSE / OMNI_KEYS 读一次（strtod 认十进制、strtol 带 0 认 0x 前缀）。 */
+static void gfx_input(void) {
+  if (g_ginput) return;
+  g_ginput = 1;
+  for (int i = 0; i < 256; i++) g_gkeys[i] = 0.0;
+  const char *m = getenv("OMNI_MOUSE");
+  if (m != NULL && m[0] != '\0') {
+    char *p = (char *)m;
+    g_gmx = strtod(p, &p);
+    if (*p == ',') { p++; g_gmy = strtod(p, &p); }
+    if (*p == ',') { p++; g_gbst = (int64_t)strtol(p, &p, 0); }
+  }
+  const char *k = getenv("OMNI_KEYS");
+  if (k != NULL && k[0] != '\0') {
+    char *p = (char *)k;
+    while (*p != '\0') {
+      long c = strtol(p, &p, 0);
+      if (c >= 0 && c < 256) g_gkeys[c] = 1.0;
+      while (*p != '\0' && *p != ',') p++;
+      if (*p == ',') p++;
+    }
+  }
+}
+
+static int64_t gfx_rnd(double v) { return (int64_t)floor(v + 0.5); }
+
+static int64_t gfx_clamp255(double v) {
+  int64_t i = gfx_rnd(v);
+  return i < 0 ? 0 : (i > 255 ? 255 : i);
+}
+
+static int64_t gfx_rgb(double r, double g, double b) {
+  return gfx_clamp255(r) * 65536 + gfx_clamp255(g) * 256 + gfx_clamp255(b);
+}
+
+static void gfx_need(void) {
+  if (g_gon) return;
+  g_gw = 320;
+  g_gh = 240;
+  g_gfb = (int64_t *)calloc((size_t)(g_gw * g_gh), sizeof(int64_t));
+  if (g_gfb == NULL) omni_errorf("gfxcall: 开不出 %lldx%lld 的帧缓冲", (long long)g_gw, (long long)g_gh);
+  g_gon = 1;
+  g_gcol = 0xffffff;
+  g_gx = 0.0;
+  g_gy = 0.0;
+}
+
+static void gfx_px(double x, double y, int64_t c) {
+  int64_t xi = gfx_rnd(x), yi = gfx_rnd(y);
+  if (xi < 0 || yi < 0 || xi >= g_gw || yi >= g_gh) return;
+  g_gfb[yi * g_gw + xi] = c;
+  g_gdirty = 1;
+}
+
+static void gfx_line(double x0, double y0, double x1, double y1, int64_t c) {
+  int64_t x = gfx_rnd(x0), y = gfx_rnd(y0), xe = gfx_rnd(x1), ye = gfx_rnd(y1);
+  int64_t dx = xe > x ? xe - x : x - xe;
+  int64_t dy = ye > y ? ye - y : y - ye;
+  int64_t sx = x > xe ? -1 : 1, sy = y > ye ? -1 : 1, err = dx - dy;
+  for (;;) {
+    gfx_px((double)x, (double)y, c);
+    if (x == xe && y == ye) return;
+    int64_t e2 = 2 * err;
+    if (e2 > -dy) { err -= dy; x += sx; }
+    if (e2 < dx) { err += dx; y += sy; }
+  }
+}
+
+static void gfx_disc(double cx, double cy, double r, int64_t c) {
+  int64_t ri = gfx_rnd(r);
+  for (int64_t dy = -ri; dy <= ri; dy++) {
+    int64_t dx = (int64_t)floor(sqrt((double)(ri * ri - dy * dy)));
+    for (int64_t x = -dx; x <= dx; x++) gfx_px(cx + (double)x, cy + (double)dy, c);
+  }
+}
+
+static void gfx_circ(double cx, double cy, double r, int64_t c) {
+  int64_t x = gfx_rnd(r), y = 0, err = 1 - x;
+  while (x >= y) {
+    gfx_px(cx + (double)x, cy + (double)y, c);
+    gfx_px(cx + (double)y, cy + (double)x, c);
+    gfx_px(cx + (double)x, cy - (double)y, c);
+    gfx_px(cx + (double)y, cy - (double)x, c);
+    gfx_px(cx - (double)x, cy + (double)y, c);
+    gfx_px(cx - (double)y, cy + (double)x, c);
+    gfx_px(cx - (double)x, cy - (double)y, c);
+    gfx_px(cx - (double)y, cy - (double)x, c);
+    y += 1;
+    if (err < 0) err += 2 * y + 1;
+    else { x -= 1; err += 2 * (y - x) + 1; }
+  }
+}
+
+static void gfx_cone(double x0, double y0, double r0, double x1, double y1, double r1, int64_t c) {
+  double dx = x1 - x0, dy = y1 - y0;
+  int64_t n = (int64_t)floor(sqrt(dx * dx + dy * dy) + 1.0);
+  for (int64_t i = 0; i <= n; i++) {
+    double t = (double)i / (double)n;
+    gfx_disc(x0 + t * dx, y0 + t * dy, r0 + t * (r1 - r0), c);
+  }
+}
+
+/* `refresh()`：交出这一帧 —— 写表面文件 + stdout 上印一行指针（与 JS 那一侧一字不差）。 */
+static void gfx_present(void) {
+  if (!g_gon) return;
+  const char *p = getenv("OMNI_GFX_OUT");
+  if (p == NULL || p[0] == '\0') p = ".omni-cache/gfx/frame.rgba";
+  omni_gfx_emit(omni_str_new(p, (int64_t)strlen(p)), g_gw, g_gh, NULL, g_gfb);
+  printf("#gfx rgba %s %lld %lld\n", p, (long long)g_gw, (long long)g_gh);
+  g_gdirty = 0;
+}
+
+double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a2,
+                     double a3, double a4, double a5, double a6, double a7, double a8) {
+  char *nm = omni_cstr(name);
+  (void)a6; (void)a7; (void)a8;
+  if (!strcmp(nm, "cls") && argc == 3) {
+    gfx_need();
+    int64_t c = gfx_rgb(a0, a1, a2);
+    for (int64_t i = 0; i < g_gw * g_gh; i++) g_gfb[i] = c;
+    return 0.0;
+  }
+  if (!strcmp(nm, "setcol") && argc == 3) { gfx_need(); g_gcol = gfx_rgb(a0, a1, a2); return 0.0; }
+  if (!strcmp(nm, "setcol") && argc == 1) { gfx_need(); g_gcol = ((int64_t)a0) & 0xffffff; return 0.0; }
+  if (!strcmp(nm, "setpix") && argc == 2) { gfx_need(); gfx_px(a0, a1, g_gcol); return 0.0; }
+  if (!strcmp(nm, "moveto") && argc == 2) { gfx_need(); g_gx = a0; g_gy = a1; return 0.0; }
+  if (!strcmp(nm, "lineto") && argc == 2) {
+    gfx_need();
+    gfx_line(g_gx, g_gy, a0, a1, g_gcol);
+    g_gx = a0;
+    g_gy = a1;
+    return 0.0;
+  }
+  /* `drawsph(x,y,r)`：半径为负是描边（evaldraw_ref.md）。 */
+  if (!strcmp(nm, "drawsph") && argc == 3) {
+    gfx_need();
+    if (a2 < 0) gfx_circ(a0, a1, -a2, g_gcol);
+    else gfx_disc(a0, a1, a2, g_gcol);
+    return 0.0;
+  }
+  if (!strcmp(nm, "drawcone") && argc == 6) {
+    gfx_need();
+    gfx_cone(a0, a1, a2, a3, a4, a5, g_gcol);
+    return 0.0;
+  }
+  if (!strcmp(nm, "rgb") && argc == 3) return (double)gfx_rgb(a0, a1, a2);
+  if (!strcmp(nm, "refresh") && argc == 0) { gfx_need(); gfx_present(); return 0.0; }
+  /* **帧循环那一格**（与 host/gfx-cpu.js 的 nextframe 一字不差）：产物自己 while 着问它
+     "还画不画下一帧" —— 于是循环在设备里。这一档画 OMNI_FRAMES 帧（默认 1）。 */
+  if (!strcmp(nm, "nextframe") && argc == 0) {
+    gfx_need();
+    if (g_gframes < 0) {
+      const char *f = getenv("OMNI_FRAMES");
+      long k = (f == NULL || f[0] == '\0') ? 1 : strtol(f, NULL, 10);
+      g_gframes = k > 0 ? (int64_t)k : 1;
+    }
+    if (g_gfno > 0 && g_gdirty) gfx_present();
+    if (g_gfno >= g_gframes) return 0.0;
+    g_gfno += 1;
+    return 1.0;
+  }
+  if (!strcmp(nm, "numframes") && argc == 0) { gfx_need(); return (double)(g_gfno > 0 ? g_gfno - 1 : 0); }
+  /* `klock()`：秒。这一格与 JS 那侧同语义（"从某个起点起的秒数"），**不要求两侧同值**
+     —— 脚本拿它算帧间隔，判据里不许依赖它（表面判据用 numframes）。 */
+  if (!strcmp(nm, "klock") && argc == 0) return (double)clock() / (double)CLOCKS_PER_SEC;
+  if (!strcmp(nm, "xres") && argc == 0) { gfx_need(); return (double)g_gw; }
+  if (!strcmp(nm, "yres") && argc == 0) { gfx_need(); return (double)g_gh; }
+  /* 输入那一族（与 host/gfx-cpu.js 的那几格一字不差）：这一档没有窗口，来源是
+     OMNI_MOUSE / OMNI_KEYS，所以三条腿仍然逐字节相同。写的两格照 polydraw.txt:381/:388。 */
+  if (!strcmp(nm, "mousx") && argc == 0) { gfx_input(); return g_gmx; }
+  if (!strcmp(nm, "mousy") && argc == 0) { gfx_input(); return g_gmy; }
+  if (!strcmp(nm, "bstatus") && argc == 0) { gfx_input(); return (double)g_gbst; }
+  if (!strcmp(nm, "setbstatus") && argc == 1) { gfx_input(); g_gbst = (int64_t)a0; return 0.0; }
+  if (!strcmp(nm, "keystatus") && argc == 1) {
+    gfx_input();
+    int64_t k = (int64_t)a0;
+    return (k >= 0 && k < 256) ? g_gkeys[k] : 0.0;
+  }
+  if (!strcmp(nm, "setkeystatus") && argc == 2) {
+    gfx_input();
+    int64_t k = (int64_t)a0;
+    if (k >= 0 && k < 256) g_gkeys[k] = a1;
+    return 0.0;
+  }
+  omni_errorf("这格设备（CPU 备选）上没有 '%s'（%lld 个实参）—— 有的是 "
+              "cls/setcol/setpix/moveto/lineto/drawsph/drawcone/rgb/refresh/"
+              "nextframe/numframes/klock/xres/yres/mousx/mousy/bstatus/keystatus；"
+              "GL 立即模式与可编程管线（着色器）只有 GPU 那两档设备有"
+              "（见 docs/design/eval-realtime-gpu.md）",
+              nm, (long long)argc);
+  return 0.0;
+}
+
+/* `(gfxframefn …)`：把每帧那一格函数交给设备。这条腿上**记下不用** ——
+   CPU 备选（上面那一摊）与本机 OpenGL 那一档自己有帧循环（`nextframe` 那一格）。
+   留着这个符号是为了"一格 op 四条腿都认得"：少了它 `--backend c` 会当场报。 */
+static void *g_gframefn = NULL;
+
+double omni_gfx_frame_fn(void *f) {
+  g_gframefn = f;
+  return 0.0;
+}
+
+/* `(gfxdef 种类 名字 内容)`：往设备上登记一格有名字的串。CPU 备选这一档**记下不用**
+   —— 可编程管线那一族在这儿没有落点（真去 `glsetshader` 才报，报里说清是哪一格）。
+   留着这个符号是为了"一格 op 四条腿都认得"。 */
+double omni_gfx_def(omni_str kind, omni_str name, omni_str text) {
+  (void)kind; (void)name; (void)text;
+  return 0.0;
 }
 
 /* `(runproc CMD)`：`/bin/sh -c CMD`，回退出码。子进程的两个流都丢掉 —— 这一层的

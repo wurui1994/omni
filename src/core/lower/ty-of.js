@@ -59,6 +59,10 @@ export function typeOf(e, ctx) {
       return sig === undefined ? INT : sig.ret;
     }
     case 'if-expr': return e.type ?? typeOf(e.then, ctx);
+    /** 三目那一格（`(sel c a b)`）：**两支同型**，所以问 then 就够。
+     *  从前这儿没有这一支，于是它落到最后那个 `INT` 上 —— 症状是 polydraw 那门语言里
+     *  `printf("%g", min(3,5))` 被格式串那台机器当整数，发出 `(toreal …)` 而参数已经是 real。 */
+    case 'ternary': return e.type ?? typeOf(e.then, ctx);
     case 'block-expr': return typeOf(e.value, ctx);
     /* 下标那一格（数组的元素 / 字典的值）—— **赋值的左边**要靠它算目标类型。 */
     case 'index': {
@@ -116,6 +120,8 @@ function builtinType(e, ctx) {
     case 'sfix': case 'ssci': case 'sgen': case 'sgenk': case 'sbase': return STR;
     /* `(chr 码位)` 交的是**一个字符的串**（`printf("%c")` 走它）。 */
     case 'chr': return STR;
+    /* `(gfxcall "名字" …)`：图形设备的宿主面 —— 回的是 real（那一面只有 double）。 */
+    case 'gfxcall': return REAL;
     case 'anew': return e.args[0].type ?? arrOf(INT);
     case 'dnew': return e.args[0].type ?? dictOf(INT);
     case 'cnew': case 'new': return e.args[0].type ?? INT;

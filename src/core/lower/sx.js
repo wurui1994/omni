@@ -40,6 +40,28 @@ export const SX_ARITY = {
   lib: 1, cabi: 3,
   /* `(fail 串)` —— **停下来**（断言不成立那一路：方言里没有 assert，按口径拼）。 */
   fail: 1,
+  /* **把一帧交出去**（`(gfxframe PATH W H FB)`）：图形设备那一层唯一的出口 —— 帧缓冲
+     FB（`(arr real)`，一格一个打包好的 0xRRGGBB）按 W×H 写成 `#rgba <w> <h>\n` + 裸 RGBA。
+     图元全在内存里画，一趟只过一帧（putpixel **不走 stdout** —— 那是几百万行）。
+     提供者不止一门：EVAL 那两门（polydraw / evaldraw）的 2D 落这一格，往后 c / js
+     两侧的 ege 库也是同一格 —— 所以摆在公共这一层。 */
+  gfxframe: 4,
+  /* **图形设备的宿主面**（`(gfxcall "名字" 实参…)` -> real）：EVAL 两门语言的宿主调用
+     全从这一格过去（画图、矩阵、着色器、纹理、输入）。名字是字面串、实参是 real。
+     设备有三档（浏览器 WebGL2 / 本机 OpenGL / CPU 备选），**默认是 GPU** ——
+     口径在 `docs/design/eval-realtime-gpu.md`。 */
+  gfxcall: [1, Infinity],
+  /* **把"每帧那一格函数"交给设备**（`(gfxframefn (str "名字"))`）：名字是**编译期的串**，
+     发射那一侧直接把函数引用交出去（不走函数值/闭包那一层）。
+     谁用它：浏览器那一档 —— 页面拿到帧函数之后用 `requestAnimationFrame` 反复调它
+     （产物在主线程里同步跑，`while` 会把页面卡死）。本机那两档照旧靠 `nextframe` 驱动。 */
+  gfxframefn: 1,
+  /* **往设备上登记一格有名字的串**（`(gfxdef 种类 名字 内容)` -> int）：
+     种类 `vert`/`frag`/`geom` 是**着色器原文**（`.pss` 后半那些 `@v` / `@f` 区段），
+     种类 `name` 是一格**内部到的字符串常量**（`glgetuniformloc("x")` 那种名字，
+     `名字` 是它的下标）—— 于是运行期的宿主调用仍然只收 double（`gfxcall` 那一格）。
+     三个实参都是串，而且都是**编译期就知道的**：登记发在入口里，一趟只做一次。 */
+  gfxdef: 3,
   brk: [0, 1], cont: [0, 1], print: 1, write: 1,
   /* 字符串那一族 */
   tostr: 1, slen: 1, sfind: 2, ssub: 3, srep: 2, supper: 1,

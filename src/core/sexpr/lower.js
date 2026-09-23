@@ -2402,6 +2402,135 @@ class CoreLowerer {
       }
       return { kind: 'Builtin', name: 'r3_render', args: [c, nu], argType: STRING, type: STRING };
     }
+    // `(gfxframe PATH W H FB)`：**把一帧交出去** —— 图形设备那一层唯一的出口。
+    // FB 是帧缓冲（`(arr real)`，长度至少 W*H，一格一个打包好的 `0xRRGGBB`），按 W×H 写成
+    // 一份 `#rgba <W> <H>\n` + 裸 RGBA（alpha 恒 255）的**表面文件**，回写进去的字节数。
+    //
+    // 为什么要有这一格（而不是拿现成的 `(writetext P S)`）：
+    //   1. `writetext` 按 UTF-8 写 —— 大于 127 的字节会被编成两个字节，图当场就坏了；
+    //   2. 在语言里逐像素拼串本身就是一大笔（320×240 要拼 30 万格串），而这一格是
+    //      一趟 memcpy 级的循环；
+    //   3. **一趟只过一帧**：图元（putpixel/line/circle）全在内存里画，stdout 上只留一行
+    //      指针（`#gfx rgba <路径> <宽> <高>`）—— 几百万次 putpixel 不该变成几百万行输出。
+    // 表面格式与 `ext/js/lib/ege.js` 一字不差，所以 Studio 贴 canvas（`/api/gfx`）与原生那侧
+    // 贴窗口两边都不用改。四条腿都要**真实现**（不像 r3render 那样在 JS 腿上回空串 ——
+    // 那会让页面上没有图）。
+    if (h === 'gfxframe') {
+      if (n.items.length !== 5) return this.err(n, '(gfxframe PATH W H FB)');
+      const p = this.expr(n.items[1]);
+      if (p === null) return null;
+      if (p.type.k !== 'string') {
+        return this.err(n.items[1], `(gfxframe PATH W H FB) 的路径要是 string，这里是 ${coreTypeText(p.type)}`);
+      }
+      const w = this.expr(n.items[2]);
+      const ht = this.expr(n.items[3]);
+      if (w === null || ht === null) return null;
+      if (w.type.k !== 'int') {
+        return this.err(n.items[2], `(gfxframe PATH W H FB) 的宽要是 int，这里是 ${coreTypeText(w.type)}`);
+      }
+      if (ht.type.k !== 'int') {
+        return this.err(n.items[3], `(gfxframe PATH W H FB) 的高要是 int，这里是 ${coreTypeText(ht.type)}`);
+      }
+      const fb = this.expr(n.items[4]);
+      if (fb === null) return null;
+      /* **帧缓冲有两种形状**，因为两侧的语言本来就有两种内存：
+         `(arr real)` 是数组那一族（EVAL 两门、asy、go 那些）；
+         `(ptr int)` / `(ptr (blk int N))` 是**指针那一族**（jnc/C 那一侧 —— 那边
+         `int fb[N]` 就是一段 int 槽，每槽 8 字节、装一个打包好的 0xRRGGBB）。
+         两种落成两格 Builtin，出来的表面**逐字节相同**（判据在 tests/lower/run.js 第二节）。 */
+      if (fb.type.k === 'arr' && fb.type.elem.k === 'real') {
+        return { kind: 'Builtin', name: 'gfx_frame', args: [p, w, ht, fb], argType: STRING, type: INT };
+      }
+      const pt = fb.type.k === 'ptr' || fb.type.k === 'tptr' ? fb.type.target : null;
+      if (pt !== null && (pt.k === 'int' || (pt.k === 'blk' && pt.el.k === 'int'))) {
+        return { kind: 'Builtin', name: 'gfx_framep', args: [p, w, ht, fb], argType: STRING, type: INT };
+      }
+      return this.err(n.items[4], '(gfxframe PATH W H FB) 的帧缓冲要是 (arr real) 或 (ptr int)，'
+        + `这里是 ${coreTypeText(fb.type)}`);
+    }
+    // `(gfxcall "名字" 实参…)`：**图形设备的宿主面**（回 real）。EVAL 两门语言
+    // （`.pss` / `.kc`）的宿主调用全从这一格过去 —— 画图、矩阵、着色器、纹理、输入。
+    //
+    // 为什么是**一格变长 op**、而不是几十格算子：EVAL 的宿主面本来就是"名字 + 定数个
+    // double 实参 + 回一个 double"（`polydraw.c:2070` 的 `myext[]` 交给 `kasm87addext`
+    // 的正是这个形状）。名字是**字面串**，所以每条腿上的分派是一次查表。
+    //
+    // 设备有三档，**默认是真 GPU**（浏览器 WebGL2 / 本机 OpenGL），CPU 光栅器只是
+    // 备选（`--gfx=cpu`）—— 口径与刀法在 `docs/design/eval-realtime-gpu.md`。
+    // 各条腿怎么找到设备：JS 那一族是宿主装上的 `globalThis.__OMNI_GFX`，
+    // C 那条腿是运行时里的 `omni_gfx_call`。
+    if (h === 'gfxcall') {
+      if (n.items.length < 2) return this.err(n, '(gfxcall "名字" 实参…)');
+      const nm2 = this.expr(n.items[1]);
+      if (nm2 === null) return null;
+      if (nm2.type.k !== 'string') {
+        return this.err(n.items[1], `(gfxcall "名字" …) 的名字要是 string，这里是 ${coreTypeText(nm2.type)}`);
+      }
+      const as = [];
+      for (const it of n.items.slice(2)) {
+        const v = this.expr(it);
+        if (v === null) return null;
+        if (v.type.k !== 'real') {
+          return this.err(it, `(gfxcall "名字" 实参…) 的实参要是 real（宿主面只收 double），`
+            + `这里是 ${coreTypeText(v.type)} —— 要转就自己写 (toreal …)`);
+        }
+        as.push(v);
+      }
+      /* **最多九个实参**：EVAL 宿主面里元数最大的是 `GLULOOKAT(,,,,,,,,)`（9 格）。
+         定上限的理由是 ABI —— 各条腿上这一格是**平签名**（`omni_gfx_call(名字, 个数,
+         a0..a8)`），不走变参：变参在 LLVM 那条腿与我们自己那台 C 前端上都是另一笔账。 */
+      if (as.length > 9) {
+        return this.err(n, `(gfxcall "名字" 实参…) 最多九个实参（这里 ${as.length} 个）——`
+          + ' 宿主面里元数最大的是 gluLookAt 的 9 格');
+      }
+      return { kind: 'Builtin', name: 'gfx_call', args: [nm2, ...as], argType: STRING, type: REAL };
+    }
+    // `(gfxframefn (str "名字"))`：**把"每帧那一格函数"交给设备**。名字是**编译期的串**，
+    // 所以这一格不走函数值/闭包那一层 —— 发射那一侧直接把函数引用交出去
+    // （`Builtin` 上挂 `func`，与 `Call` 同一格字段）。
+    //
+    // 谁用它：**浏览器那一档**。那边产物是在主线程同步跑的，`while ((gfxcall "nextframe"))`
+    // 会把页面卡死 —— 所以页面拿着帧函数用 `requestAnimationFrame` 反复调它（每帧之间
+    // 让出控制权）。本机那两档（CPU 备选 / OpenGL）照旧靠 `nextframe` 自己驱动，
+    // 这一格在它们那儿是**记下不用**。口径见 `docs/design/eval-realtime-gpu.md` 第 3 节。
+    if (h === 'gfxframefn') {
+      if (n.items.length !== 2) return this.err(n, '(gfxframefn (str "函数名"))');
+      const s = n.items[1];
+      const fname = isList(s) && head(s) === 'str' && isStr(s.items[1])
+        ? s.items[1].value : null;
+      if (fname === null) {
+        return this.err(n, '(gfxframefn …) 的名字要是一格**字符串字面量**（编译期就要知道它）');
+      }
+      const d = this.funcs.get(fname);
+      if (d === undefined) return this.err(n, `没有叫 '${fname}' 的函数`);
+      if (d.params.length !== 0) {
+        return this.err(n, `'${fname}' 要是**无参**的（每帧那一格函数不收实参），`
+          + `这里有 ${d.params.length} 个形参`);
+      }
+      return {
+        kind: 'Builtin', name: 'gfx_frame_fn', args: [], func: d.mangled, argType: INT, type: INT,
+      };
+    }
+    // `(gfxdef 种类 名字 内容)`：**往设备上登记一格有名字的串**（回 int）。
+    //
+    // 为什么要这一格：宿主面那一格（`gfxcall`）是**平的 double 签名** —— 着色器原文与
+    // `glgetuniformloc("名字")` 那种字符串实参过不去。于是把"串"全挪到**入口里登记一次**：
+    //   * `种类 = vert|frag|geom`：`.pss` 后半那些 `@v` / `@f` 区段的原文（名字是区段名）；
+    //   * `种类 = name`：一格内部到的字符串常量（名字是它的下标，内容是那个串）。
+    // 运行期照旧只发 `(gfxcall "glsetshader" 下标 下标)` 这种全 double 的调用。
+    if (h === 'gfxdef') {
+      if (n.items.length !== 4) return this.err(n, '(gfxdef 种类 名字 内容)');
+      const ds = [];
+      for (const it of n.items.slice(1)) {
+        const v = this.expr(it);
+        if (v === null) return null;
+        if (v.type.k !== 'string') {
+          return this.err(it, `(gfxdef 种类 名字 内容) 三格都要是 string，这里是 ${coreTypeText(v.type)}`);
+        }
+        ds.push(v);
+      }
+      return { kind: 'Builtin', name: 'gfx_def', args: ds, argType: STRING, type: INT };
+    }
     // `(arenamark)` / `(arenarelease E)`：分配器的"作用域"。C 那条腿是 arena
     // （bump 指针、永不单独释放），于是**回标量的深递归**会把垃圾一路堆上去 ——
     // 量到过：asy 的面片求界（四叉递归、每层新建 15 个数组）在 BezierPatch 上堆到

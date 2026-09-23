@@ -874,6 +874,100 @@ function $run_proc(cmd) {
 // glrender.cc/renderBase.cc 与两份 glsl 转写）。这条腿回空串 = "这儿没有光栅化器"，
 // 调用方会走 gs 那条旧路。等 C 那份定稿再照抄成 JS，届时两边要逐字节对上。
 function $r3_render(p, nums) { return ""; }
+// (gfxframe PATH W H FB)：把一帧交出去 —— 帧缓冲（一格一个打包好的 0xRRGGBB 的 double）
+// 按 W×H 写成 "#rgba <W> <H>" 那一行加换行、后面跟裸 RGBA 的**表面文件**，回写进去的字节数。
+// （这份文件是 String.raw 的模板，注释里**不许出现反引号** —— 会把宿主文件切开。）
+// **这一格必须真实现**（与上面那个 r3render 正相反）：Studio 的 canvas 贴的就是这份表面，
+// 这条腿回空就等于"页面上没有图"。
+// 一路走 latin1（一个字符一个字节）：浏览器那条腿上 node:fs 是内存 VFS 的门面、Buffer
+// 就是串（host/browser.js 的 NODE_FACADE），中间过一遍 UTF-8 就把大于 127 的字节改了。
+function $gfx_frame(p, w, h, fb) {
+  const wi = typeof w === "number" ? w : Number(w);
+  const hi = typeof h === "number" ? h : Number(h);
+  const n = wi * hi;
+  const len = fb === null || fb === undefined ? 0 : fb.length;
+  if (len < n) $rt_error("gfxframe: framebuffer too small: " + len + " < " + n);
+  return $gfx_emit(p, wi, hi, fb);
+}
+// 指针那一档（jnc/C 那一侧：int fb[N] 是一段 int 槽，一槽 8 字节、装一个打包好的 0xRRGGBB）。
+// 指针的宿主表示是 [addr, base, end]（fat）或一个数（thin）—— 见上面 $pnew 那一段。
+function $gfx_framep(p, w, h, fp) {
+  const wi = typeof w === "number" ? w : Number(w);
+  const hi = typeof h === "number" ? h : Number(h);
+  const n = wi * hi;
+  const addr = typeof fp === "number" ? fp : fp[0];
+  if (addr === 0) $rt_error("gfxframe: null framebuffer");
+  if (typeof fp !== "number" && addr + n * 8 > fp[2]) {
+    $rt_error("gfxframe: framebuffer too small: " + Math.floor((fp[2] - addr) / 8) + " < " + n);
+  }
+  const cols = [];
+  for (let i = 0; i < n; i++) cols.push($mdv.getBigInt64(addr + i * 8, true));
+  return $gfx_emit(p, wi, hi, cols);
+}
+// 两档共用的那一半：一帧 -> 表面文件。**这儿是三条腿必须一致的那段字节。**
+function $gfx_emit(p, wi, hi, cols) {
+  if (wi <= 0 || hi <= 0) $rt_error("gfxframe: bad frame size: " + wi + "x" + hi);
+  const rows = ["#rgba " + wi + " " + hi + "\n"];
+  for (let y = 0; y < hi; y++) {
+    let row = "";
+    for (let x = 0; x < wi; x++) {
+      const v = $gfx_pack24(cols[y * wi + x]);
+      row = row + String.fromCharCode((v - v % 65536) / 65536)
+        + String.fromCharCode((v % 65536 - v % 256) / 256)
+        + String.fromCharCode(v % 256) + String.fromCharCode(255);
+    }
+    rows.push(row);
+  }
+  const body = rows.join("");
+  const cut = p.lastIndexOf("/");
+  try {
+    const fs = $node("node:fs");
+    if (cut > 0) fs.mkdirSync(p.slice(0, cut), { recursive: true });
+    fs.writeFileSync(p, Buffer.from(body, "latin1"));
+  } catch (e) {
+    $rt_error("cannot write '" + p + "': " + (e && e.code ? e.code : String(e)));
+  }
+  return body.length;
+}
+// (gfxcall "名字" 实参…)：**图形设备的宿主面**（EVAL 两门语言：画图 / 矩阵 / 着色器 /
+// 纹理 / 输入全从这一格过去）。设备由宿主装在 globalThis.__OMNI_GFX 上：
+// 浏览器是 WebGL2（默认）、node 是 CPU 备选（host/gfx-cpu.js）；没人装就当场报 ——
+// 不静默不画。口径见 docs/design/eval-realtime-gpu.md。
+function $gfx_call(name, args) {
+  const d = globalThis.__OMNI_GFX;
+  if (d === undefined || d === null) {
+    $rt_error("这份产物里没有图形设备（宿主要装上 globalThis.__OMNI_GFX）：" + name);
+  }
+  return d.call(name, args);
+}
+// (gfxframefn …)：把每帧那一格函数交给设备。**浏览器那一档用它做 rAF 循环** ——
+// 那边产物是在主线程同步跑的，while 会把页面卡死；别的设备（CPU 备选 / 本机 OpenGL）
+// 自己有循环，这一格在它们那儿就是记下不用（没有 setFrame 就当没这回事）。
+function $gfx_frame_fn(f) {
+  const d = globalThis.__OMNI_GFX;
+  if (d !== undefined && d !== null && typeof d.setFrame === "function") d.setFrame(f);
+  return 0;
+}
+// (gfxdef 种类 名字 内容)：往设备上登记一格有名字的串（着色器原文 / 名字表）。
+// 登记本身**不许报** —— 接不住着色器的设备（CPU 备选）要等脚本真去 glsetshader 才报，
+// 那时候报的是"这一档没有可编程管线"，比"登记失败"说得清。
+function $gfx_def(kind, name, text) {
+  const d = globalThis.__OMNI_GFX;
+  if (d !== undefined && d !== null && typeof d.def === "function") d.def(kind, name, text);
+  return 0;
+}
+// 一格颜色：取整、绕进 0..0xFFFFFF。**不用位运算** —— 那一族在 double 上先截到 32 位，
+// 而这儿要与 C 那条腿（int64 取模）逐位一致。int 那一档是 BigInt，走 BigInt 取模。
+function $gfx_pack24(c) {
+  if (typeof c === "bigint") {
+    const b = ((c % 16777216n) + 16777216n) % 16777216n;
+    return Number(b);
+  }
+  const t = Number(c);
+  const i = t < 0 ? Math.ceil(t) : Math.floor(t);
+  const v = i % 16777216;
+  return v < 0 ? v + 16777216 : v;
+}
 // ---------------------------------------------------------------- 容器
 // list -> Array，dict -> Map（插入序，ADR-0006 的硬约束），set -> Set
 // 键的显示形式（只在 "key not found" 那句里用，冷路径）要**按静态类型**给：int 换成

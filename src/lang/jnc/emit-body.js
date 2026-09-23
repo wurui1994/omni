@@ -168,6 +168,20 @@ export function makeCtx(env) {
         }
         if (ls !== undefined) return ls;
       }
+      /**
+       * **`gfxframe(路径, 宽, 高, 帧缓冲)` 也是一句语句**：图形设备那一层唯一的出口
+       * （方言里的 `(gfxframe …)`，回的那个字节数这一侧不要）。与 print 同一条口径 ——
+       * 源码里自己写了同名函数的那一格先赢（钩子答 `undefined`，往下照常路走）。
+       */
+      if (key === 'gfxframe') {
+        const n0 = env.acctSeen?.() ?? 0;
+        const ls = env.gfxFrame?.(node, ind, ctx);
+        if (ls === null) {
+          if ((env.acctSeen?.() ?? 0) === n0) env.acct('gfxframe 这一格还拼不出来（里头没记账 —— 这一层的 bug）');
+          return null;
+        }
+        if (ls !== undefined) return ls;
+      }
     }
     if (h === 'assign') {
       const n0 = env.acctSeen?.() ?? 0;

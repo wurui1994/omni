@@ -109,6 +109,11 @@ const omni_jit_sym OMNI_JIT_SYMS[] = {
   { "omni_trunc", (void *)omni_trunc },
   { "omni_write_string", (void *)omni_write_string },
   { "omni_write_text", (void *)omni_write_text },
+  { "omni_gfx_frame", (void *)omni_gfx_frame },
+  { "omni_gfx_framep", (void *)omni_gfx_framep },
+  { "omni_gfx_call", (void *)omni_gfx_call },
+  { "omni_gfx_frame_fn", (void *)omni_gfx_frame_fn },
+  { "omni_gfx_def", (void *)omni_gfx_def },
 
   /* ---- 运行时的**变量**：要的是那格存储的地址，不是它现在的值。arena 的两个游标就是
          这一类（`omni_alloc` 的快路径在 IR 里原地重建，于是它直接读写这两格）。

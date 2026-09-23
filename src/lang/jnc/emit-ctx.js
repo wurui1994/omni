@@ -3238,6 +3238,40 @@ export function makeFnEnv(o) {
       }
       return [`${' '.repeat(ind)}(write ${v.code})`];
     },
+    /**
+     * **`gfxframe(路径, 宽, 高, 帧缓冲)`：也是一句语句** —— 图形设备那一层唯一的出口
+     * （方言里的 `(gfxframe PATH W H FB)`）。这一侧的帧缓冲是 `int fb[W*H]`：一槽 8 字节、
+     * 装一个打包好的 `0xRRGGBB`；出来的是一份 `#rgba <W> <H>` + 裸 RGBA 的**表面文件**，
+     * stdout 上只留一行指针（几百万次 putpixel 不该变成几百万行输出）。
+     *
+     * 图元那一套（EasyX/BGI 形状的 `putpixel`/`line`/`circle`）是**普通的 jnc 代码**，
+     * 不在这一层 —— 见 `ext/jnc/lib/ege.jnc`。这一格只管"把一帧交出去"。
+     *
+     * 它在方言里回"写进去的字节数"，这一侧不要那个值，所以裹一层 `(expr …)`。
+     * 源码里自己写了同名函数的那一格先赢（答 `undefined`，调用方照常路走）。
+     * 类型那一半由方言那侧再查一遍（`sexpr/lower.js` 的 gfxframe 那一段）—— 这儿只挡
+     * "明显不是指针"那一类，不抄第二份规则。
+     */
+    gfxFrame: (node, ind) => {
+      if (fns.has('gfxframe') || names.has('gfxframe') || globals.has('gfxframe')) return undefined;
+      const args = allInChain(named(node)?.args, 'args-add', 'args');
+      if (args.length !== 4) {
+        acct(`gfxframe 收 4 个实参（路径, 宽, 高, 帧缓冲），这里给了 ${args.length}`); return null;
+      }
+      const p = emitExpr(args[0], T.string, ctxRef);
+      const w = emitExpr(args[1], T.i64, ctxRef);
+      const h = emitExpr(args[2], T.i64, ctxRef);
+      const fb = emitExpr(args[3], null, ctxRef);
+      if (p === null || w === null || h === null || fb === null) return null;
+      if (p.type?.k !== 'string') {
+        acct(`gfxframe 的路径要一格字符串（这里是 ${p.type?.k ?? '?'}）`); return null;
+      }
+      if (fb.type?.k !== 'ptr' && fb.type?.k !== 'tptr') {
+        acct(`gfxframe 的帧缓冲要一格 int*（一槽一个 0xRRGGBB，这里是 ${fb.type?.k ?? '?'}）`);
+        return null;
+      }
+      return [`${' '.repeat(ind)}(expr (gfxframe ${p.code} ${w.code} ${h.code} ${fb.code}))`];
+    },
     /** `printf("%d %d\n", a, b)` → 按 `\n` 切段，每段一条 `(print …)`；`%d` 那一格是 `(tostr 值)`。 */
     printf: (node, ind, ctx) => {
       const args = allInChain(named(node)?.args, 'args-add', 'args');

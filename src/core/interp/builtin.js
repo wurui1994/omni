@@ -11,7 +11,7 @@
 // 语言子集里的东西：不用 TextEncoder（自己按 UTF-8 编）、不用 new Function、不用正则字面量
 // 以外的正则。
 
-import { stdout, stdoutBytes, typeTag, fmtReal, fmtRealG, fmtFixed, fmtSci, fmtGen, reprReal, callJsOp, readText, writeText, spawn, env } from '../host/native.js';
+import { stdout, stdoutBytes, typeTag, fmtReal, fmtRealG, fmtFixed, fmtSci, fmtGen, reprReal, callJsOp, readText, writeText, writeBinary, mkdirAll, spawn, env } from '../host/native.js';
 import { JS_ABI, JS_MEMBERS } from '../hir/js_abi.js';
 import { OmniError } from '../source/diag.js';
 
@@ -1184,6 +1184,35 @@ export function applyBuiltin(I, e, a) {
     // 回空串 = "这儿没有光栅化器"，调用方（asy 侧的 asy__r3hexfn）会走 gs 那条旧路。
     // 等 C 那份定稿再照抄成 JS，届时两边要逐字节对上。
     case 'r3_render': return '';
+    // `(gfxframe PATH W H FB)`：把一帧交出去。**这一格三条腿都要真实现** —— 与 r3render
+    // 正相反：那一格的权威在 C，这一格是图形设备的唯一出口，少哪条腿哪条腿上就没有图。
+    case 'gfx_frame': return gfxFrame(a[0], a[1], a[2], a[3]);
+    /* 指针那一档（jnc/C 那一侧的 `int fb[N]`）—— 与上面出来的表面逐字节相同。 */
+    case 'gfx_framep': return gfxFrameP(a[0], a[1], a[2], a[3]);
+    /* `(gfxcall "名字" 实参…)`：图形设备的宿主面。**这条腿与 backend-js 那条腿用的是
+       同一格设备**（宿主装在 `globalThis.__OMNI_GFX` 上：浏览器 WebGL2、node 是
+       `host/gfx-cpu.js` 那一档）—— 所以这儿不是"第三份实现"，是同一份。 */
+    case 'gfx_call': {
+      const dev = globalThis.__OMNI_GFX;
+      if (dev === undefined || dev === null) {
+        rtError(`这一趟里没有图形设备（宿主要装上 globalThis.__OMNI_GFX）：${a[0]}`);
+      }
+      return dev.call(a[0], a.slice(1));
+    }
+    /* `(gfxframefn …)`：把每帧那一格函数交给设备。**这条腿上是记下不用** ——
+       解释器这边帧循环靠 `(gfxcall "nextframe")` 自己驱动（那一格设备说画几帧）；
+       要 rAF 那种"页面驱动"的只有浏览器那一档，而那一档跑的是 backend-js 的产物。 */
+    case 'gfx_frame_fn': return 0n;
+    /* `(gfxdef 种类 名字 内容)`：往设备上登记一格有名字的串。设备接得住就交过去
+       （与 backend-js 那条腿同一格设备），接不住就当没这回事 —— 登记不报，
+       真去用（`glsetshader`）才报。 */
+    case 'gfx_def': {
+      const dev = globalThis.__OMNI_GFX;
+      if (dev !== undefined && dev !== null && typeof dev.def === 'function') {
+        dev.def(a[0], a[1], a[2]);
+      }
+      return 0n;
+    }
     // arena 的作用域：这条腿（JS 宿主）有 GC，是空操作
     case 'arena_mark': return -1n;
     case 'arena_release': return 0n;
@@ -1298,6 +1327,95 @@ function writeTextOrFail(p, t) {
     rtError(`cannot write '${p}': ${e && e.code !== undefined ? e.code : String(e)}`);
   }
   return BigInt(new TextEncoder().encode(t).length);
+}
+
+/**
+ * `(gfxframe PATH W H FB)`：帧缓冲 -> 一份 `#rgba <W> <H>\n` + 裸 RGBA 的**表面文件**，
+ * 回写进去的字节数。
+ *
+ * 这一格是**第三份实现**（另两份：`backend-js/prelude.js` 的 `$gfx_frame`、
+ * `runtime/omni_gfx.c` 的 `omni_gfx_frame`），三份要逐字节一致 —— 判据就是同一份程序
+ * 在两条腿上跑出来的两份表面比大小与内容。
+ *
+ * 一格颜色是**一个 double**，取整后按 `0xRRGGBB` 读（负数与超出 24 位的先绕回来 ——
+ * 三条腿同一条规矩，不然 `setcol` 收到 -1 时两边会不一样）。alpha 恒 255。
+ */
+function gfxFrame(p, w, h, fb) {
+  const wi = Number(w);
+  const hi = Number(h);
+  const n = wi * hi;
+  const len = fb === null || fb === undefined ? 0 : fb.length;
+  if (len < n) rtError(`gfxframe: framebuffer too small: ${len} < ${n}`);
+  return gfxEmit(p, wi, hi, fb);
+}
+
+/**
+ * `(gfxframe PATH W H FB)` 的**指针那一档**（jnc/C 那一侧：`int fb[N]` 是一段 int 槽，
+ * 一槽 8 字节、装一个打包好的 0xRRGGBB）。与上面那一档出来的表面**逐字节相同**。
+ *
+ * 指针的宿主表示：fat 是 `[addr, base, end]`、thin 是一个数（见这份文件里 ptrNew 的头注）。
+ * 范围检查按 int 槽报，与 `ptrChk` 同一条口径。
+ */
+function gfxFrameP(p, w, h, fp) {
+  const wi = Number(w);
+  const hi = Number(h);
+  const n = wi * hi;
+  const addr = typeof fp === 'number' ? fp : fp[0];
+  if (addr === 0) rtError('gfxframe: null framebuffer');
+  if (typeof fp !== 'number' && addr + n * 8 > fp[2]) {
+    rtError(`gfxframe: framebuffer too small: ${Math.floor((fp[2] - addr) / 8)} < ${n}`);
+  }
+  const cols = [];
+  let i = 0;
+  while (i < n) {
+    cols.push(ptrDv.getBigInt64(addr + i * 8, true));
+    i = i + 1;
+  }
+  return gfxEmit(p, wi, hi, cols);
+}
+
+/** 两档共用的那一半：一帧 -> 表面文件。**这儿是三条腿必须一致的那段字节。** */
+function gfxEmit(p, wi, hi, cols) {
+  if (wi <= 0 || hi <= 0) rtError(`gfxframe: bad frame size: ${wi}x${hi}`);
+  const rows = [`#rgba ${wi} ${hi}\n`];
+  let y = 0;
+  while (y < hi) {
+    let row = '';
+    let x = 0;
+    while (x < wi) {
+      const v = gfxPack24(cols[y * wi + x]);
+      const hi8 = (v - v % 65536) / 65536;
+      const mid = (v % 65536 - v % 256) / 256;
+      row = row + String.fromCharCode(hi8) + String.fromCharCode(mid)
+        + String.fromCharCode(v % 256) + String.fromCharCode(255);
+      x = x + 1;
+    }
+    rows.push(row);
+    y = y + 1;
+  }
+  const body = rows.join('');
+  const dir = p.lastIndexOf('/');
+  try {
+    if (dir > 0) mkdirAll(p.slice(0, dir));
+    writeBinary(p, body);
+  } catch (e) {
+    rtError(`cannot write '${p}': ${e && e.code !== undefined ? e.code : String(e)}`);
+  }
+  return BigInt(body.length);
+}
+
+/** 一格颜色：取整、绕进 0..0xFFFFFF。**不用位运算** —— 那一族在 double 上先截到 32 位。
+ *  int 那一档（指针那条路上的槽）是 BigInt，**走 BigInt 取模**：超出 24 位的值先绕回来
+ *  再落成 double，于是与 C 那条腿的整数取模逐位同值。 */
+function gfxPack24(c) {
+  if (typeof c === 'bigint') {
+    const b = ((c % 16777216n) + 16777216n) % 16777216n;
+    return Number(b);
+  }
+  const t = Number(c);
+  const i = t < 0 ? Math.ceil(t) : Math.floor(t);
+  const v = i % 16777216;
+  return v < 0 ? v + 16777216 : v;
 }
 
 /**

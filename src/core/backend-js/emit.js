@@ -1041,6 +1041,18 @@ class JsEmitter {
       case 'write_text': return `$write_text(${a[0]}, ${a[1]})`;
       case 'run_proc': return `$run_proc(${a[0]})`;
       case 'r3_render': return `$r3_render(${a[0]}, ${a[1]})`;
+      // `(gfxframe PATH W H FB)`：把一帧交出去（表面文件）。**这条腿必须真实现** ——
+      // Studio 的 canvas 贴的就是它写出来的那份表面。
+      case 'gfx_frame': return `$gfx_frame(${a[0]}, ${a[1]}, ${a[2]}, ${a[3]})`;
+      case 'gfx_framep': return `$gfx_framep(${a[0]}, ${a[1]}, ${a[2]}, ${a[3]})`;
+      /* `(gfxcall "名字" 实参…)`：图形设备的宿主面。设备由宿主装在
+         `globalThis.__OMNI_GFX` 上（浏览器是 WebGL2、node 是 CPU 备选）。 */
+      case 'gfx_call': return `$gfx_call(${a[0]}, [${a.slice(1).join(', ')}])`;
+      /* `(gfxframefn …)`：把每帧那一格函数交给设备（`e.func` 已经是最终的 JS 标识符）。
+         浏览器那一档用它做 rAF 循环；别的设备记下不用。 */
+      case 'gfx_frame_fn': return `$gfx_frame_fn(${e.func})`;
+      /* `(gfxdef 种类 名字 内容)`：往设备上登记一格有名字的串（着色器原文 / 名字表）。 */
+      case 'gfx_def': return `$gfx_def(${a[0]}, ${a[1]}, ${a[2]})`;
       // JS 有 GC，arena 那一套是空操作
       case 'arena_mark': return '-1';
       case 'arena_release': return `((${a[0]}), 0)`;
