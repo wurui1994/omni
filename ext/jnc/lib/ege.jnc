@@ -10,12 +10,13 @@
 // 往那块里写（Bresenham 画线、中点画圆）。`putpixel` 调一百万次就是往数组里写一百万次 ——
 // 一个字节都不过 stdout。
 //
-// 一趟只有**一帧表面**跨出去：`closegraph()` 走方言那一格 `gfxframe(路径, 宽, 高, 帧缓冲)`
-// （见 `src/core/sexpr/lower.js` 的 gfxframe 那一段），写成
+// 一趟只有**一帧图**跨出去：`closegraph()` 走方言那一格 `gfxframe(路径, 宽, 高, 帧缓冲)`
+// （见 `src/core/sexpr/lower.js` 的 gfxframe 那一段），按落点后缀写一份 **PNG**（默认）
+// 或裸表面（`.rgba` 那个备选）：
 //
 //     #rgba <宽> <高>\n<w*h*4 个字节>
 //
-// stdout 上只留一行指针 `#gfx rgba <路径> <宽> <高>` —— Studio 见着它就去读那份表面贴 canvas。
+// stdout 上只留一行指针 `#gfx <种类> <路径> <宽> <高>` —— Studio 见着它就去读那份文件贴 canvas。
 //
 // 坐标与 EasyX 一致：左上角原点、y 往下、单位是像素。颜色是 `0xRRGGBB`。
 //
@@ -155,14 +156,14 @@ void fillcircle(int cx, int cy, int r) {
 // ---------------------------------------------------------------- 交出这一帧
 
 /**
- * 把这一帧交出去：方言那一格 `gfxframe(路径, 宽, 高, 帧缓冲)` 写表面文件，
- * stdout 上只印一行**指针**。
+ * 把这一帧交出去：方言那一格 `gfxframe(路径, 宽, 高, 帧缓冲)` 按落点后缀写 PNG
+ * （默认）或裸表面（`.rgba`），stdout 上只印一行**指针**。
  *
- * 名字照 BGI（`closegraph`）—— 设备关了，图在那份表面里。
- * 路径与 `ext/js/lib/ege.js` 的默认一致（`.omni-cache/gfx/frame.rgba`），所以 Studio
+ * 名字照 BGI（`closegraph`）—— 设备关了，图在那份文件里。
+ * 路径与 `ext/js/lib/ege.js` 的默认一致（`.omni-cache/gfx/frame.png`），所以 Studio
  * 与原生那侧的窗口两边都不用改。
  */
 void closegraph() {
-    gfxframe(".omni-cache/gfx/frame.rgba", g_w, g_h, g_fb);
-    printf("#gfx rgba .omni-cache/gfx/frame.rgba %d %d\n", g_w, g_h);
+    gfxframe(".omni-cache/gfx/frame.png", g_w, g_h, g_fb);
+    printf("#gfx png .omni-cache/gfx/frame.png %d %d\n", g_w, g_h);
 }

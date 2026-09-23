@@ -7,7 +7,7 @@
 //
 // 跑一趟（离屏那一档：`OMNI_FRAMES` 说画几帧，默认 1）：
 //   OMNI_GFX=host OMNI_FRAMES=3 omni run ext/evaldraw/examples/frames.kc
-//   -> 三行 `#gfx rgba …`（一帧一行指针），最后那一帧里圆的半径是 60
+//   -> 三行 `#gfx png …`（一帧一行指针），最后那一帧里圆的半径是 60
 //
 // 口径见 docs/design/eval-realtime-gpu.md 第 3 节。
 

@@ -10,7 +10,8 @@
 /* 纯函数那一半（高亮 / markdown / EPS -> SVG）住在 `render.js` —— 那一份一个 DOM 都不碰，
  * 于是判据能在 node 里直接 import 它（`tests/serve/run.js`）。 */
 import {
-  highlight, mdToHtml, epsToSvg, drawKindOf, drawBlocks, gfxRef, rgbaDraw, glslSource, glslVertex, glslSizeOf,
+  highlight, mdToHtml, epsToSvg, drawKindOf, drawBlocks, gfxRef, rgbaDraw, pngToRgba,
+  glslSource, glslVertex, glslSizeOf,
   glslDeclType, STD_LIBS, GALLERY, esc,
   labStats, labConflictsHtml, labRulesHtml, labTreeHtml, labTreeSexpr,
   labSexprEq, labExtOfGrammar, LAB_EMIT_FORMATS,
@@ -672,14 +673,19 @@ function renderPreview(kind, payload) {
 }
 
 /**
- * 去取一帧**表面**（`#gfx rgba <路径> <宽> <高>` 那一行指的东西）。
+ * 去取一帧图（`#gfx <种类> <路径> <宽> <高>` 那一行指的东西），回 `{ w, h, bytes }`
+ * —— `bytes` 一律是裸 RGBA（`rgbaDraw` 收的那种），PNG 在这儿解开。
  *
  * 为什么另开一格路由而不是让 `/api/file` 收：那一格回的是**文本**（UTF-8 解过的），
- * 而表面是字节 —— 过一遍 UTF-8 解码，`0x80`-`0xff` 那些字节就全变成 U+FFFD 了。
+ * 而图是字节 —— 过一遍 UTF-8 解码，`0x80`-`0xff` 那些字节就全变成 U+FFFD 了。
  * `/api/gfx` 回的是"一个字符一个字节"的串（与封闭 ABI 的 `readBinary` 同一个口径）。
  */
 async function gfxSurface(ref) {
   const r = await api(`/api/gfx?path=${encodeURIComponent(ref.path)}`);
+  if (r.kind === 'png') {
+    const p = pngToRgba(r.bytes ?? '');
+    return { w: p.w, h: p.h, bytes: p.body };
+  }
   return { w: r.w ?? ref.w, h: r.h ?? ref.h, bytes: r.bytes ?? '' };
 }
 

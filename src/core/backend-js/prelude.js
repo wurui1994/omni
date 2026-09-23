@@ -905,9 +905,66 @@ function $gfx_framep(p, w, h, fp) {
   return $gfx_emit(p, wi, hi, cols);
 }
 // 两档共用的那一半：一帧 -> 表面文件。**这儿是三条腿必须一致的那段字节。**
+// PNG（8 位 RGBA、filter 0、zlib stored）。产物拿不到 host/png.js（那是编译器自己那条腿），
+// 所以这儿有一份同样的字节 —— 不引 zlib 的理由写在 host/png.js 的头注里：stored 逐字节确定，
+// 压缩器换一版字节就变，"三条腿逐字节相同"那条判据就没了。
+let $PNG_CRC = null;
+function $png_crc_tab() {
+  if ($PNG_CRC !== null) return $PNG_CRC;
+  const t = [];
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) !== 0 ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    t.push(c >>> 0);
+  }
+  $PNG_CRC = t;
+  return t;
+}
+function $png_crc(s) {
+  const t = $png_crc_tab();
+  let c = 0xffffffff;
+  for (let i = 0; i < s.length; i++) c = (t[(c ^ s.charCodeAt(i)) & 0xff] ^ (c >>> 8)) >>> 0;
+  return (c ^ 0xffffffff) >>> 0;
+}
+function $png_adler(s) {
+  let a = 1;
+  let b = 0;
+  for (let i = 0; i < s.length; i++) { a = (a + s.charCodeAt(i)) % 65521; b = (b + a) % 65521; }
+  return (b * 65536 + a) >>> 0;
+}
+function $png_be32(v) {
+  const n = v >>> 0;
+  return String.fromCharCode((n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255);
+}
+function $png_chunk(ty, data) {
+  return $png_be32(data.length) + ty + data + $png_be32($png_crc(ty + data));
+}
+function $png_zlib(raw) {
+  const out = ["\u0078\u0001"];
+  let i = 0;
+  while (i < raw.length) {
+    const n = Math.min(65535, raw.length - i);
+    const last = i + n >= raw.length ? 1 : 0;
+    out.push(String.fromCharCode(last, n & 255, (n >>> 8) & 255, (~n) & 255, ((~n) >>> 8) & 255));
+    out.push(raw.slice(i, i + n));
+    i = i + n;
+  }
+  out.push($png_be32($png_adler(raw)));
+  return out.join("");
+}
+function $png_bytes(rgba, w, h) {
+  const ihdr = $png_be32(w) + $png_be32(h) + String.fromCharCode(8, 6, 0, 0, 0);
+  const rows = [];
+  for (let y = 0; y < h; y++) {
+    rows.push("\u0000");
+    rows.push(rgba.slice(y * w * 4, (y + 1) * w * 4));
+  }
+  return "\u0089PNG\u000d\u000a\u001a\u000a" + $png_chunk("IHDR", ihdr)
+    + $png_chunk("IDAT", $png_zlib(rows.join(""))) + $png_chunk("IEND", "");
+}
 function $gfx_emit(p, wi, hi, cols) {
   if (wi <= 0 || hi <= 0) $rt_error("gfxframe: bad frame size: " + wi + "x" + hi);
-  const rows = ["#rgba " + wi + " " + hi + "\n"];
+  const rows = [];
   for (let y = 0; y < hi; y++) {
     let row = "";
     for (let x = 0; x < wi; x++) {
@@ -918,7 +975,10 @@ function $gfx_emit(p, wi, hi, cols) {
     }
     rows.push(row);
   }
-  const body = rows.join("");
+  const raw = rows.join("");
+  // 默认 PNG；落点后缀是 .rgba 才走裸表面那个备选出口。
+  const body = p.endsWith(".rgba") ? "#rgba " + wi + " " + hi + "\n" + raw
+    : $png_bytes(raw, wi, hi);
   const cut = p.lastIndexOf("/");
   try {
     const fs = $node("node:fs");

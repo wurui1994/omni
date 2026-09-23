@@ -153,9 +153,120 @@ int64_t omni_gfx_framep(omni_str path, int64_t w, int64_t h, int64_t *fb) {
   return omni_gfx_emit(path, w, h, NULL, fb);
 }
 
+/* ---------------------------------------------------------------- PNG（默认出口）
+ *
+ * 8 位 RGBA、filter 0（每行前头一个 0 字节）、zlib **stored**（deflate 的未压缩块）。
+ * 不引 zlib：stored 的那点格式自己写比接一个库短，而且**逐字节确定** ——
+ * 压缩器换一版字节就变，"三条腿逐字节相同"那条判据就没了。
+ * 与 `src/core/host/png.js` 是同一套字节（那份是 JS 那两条腿的）。 */
+
+static uint32_t g_pngcrc[256];
+static int g_pngcrc_ready = 0;
+
+static void png_crc_init(void) {
+  for (uint32_t n = 0; n < 256; n++) {
+    uint32_t c = n;
+    for (int k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+    g_pngcrc[n] = c;
+  }
+  g_pngcrc_ready = 1;
+}
+
+static uint32_t png_crc_upd(uint32_t c, const unsigned char *p, size_t n) {
+  if (!g_pngcrc_ready) png_crc_init();
+  for (size_t i = 0; i < n; i++) c = g_pngcrc[(c ^ p[i]) & 0xFF] ^ (c >> 8);
+  return c;
+}
+
+static uint32_t png_adler(const unsigned char *p, size_t n) {
+  uint32_t a = 1, b = 0;
+  for (size_t i = 0; i < n; i++) {
+    a = (a + p[i]) % 65521u;
+    b = (b + a) % 65521u;
+  }
+  return (b << 16) | a;
+}
+
+static void png_be32(unsigned char *d, uint32_t v) {
+  d[0] = (unsigned char)(v >> 24);
+  d[1] = (unsigned char)(v >> 16);
+  d[2] = (unsigned char)(v >> 8);
+  d[3] = (unsigned char)v;
+}
+
+/* 一格 chunk：长度 + 类型 + 数据 + CRC（CRC 算的是"类型 + 数据"）。回写出去几个字节。 */
+static size_t png_chunk(FILE *f, const char *ty, const unsigned char *d, size_t n) {
+  unsigned char hdr[8];
+  png_be32(hdr, (uint32_t)n);
+  memcpy(hdr + 4, ty, 4);
+  uint32_t c = png_crc_upd(0xFFFFFFFFu, (const unsigned char *)ty, 4);
+  if (n > 0) c = png_crc_upd(c, d, n);
+  unsigned char tail[4];
+  png_be32(tail, c ^ 0xFFFFFFFFu);
+  if (fwrite(hdr, 1, 8, f) != 8) return 0;
+  if (n > 0 && fwrite(d, 1, n, f) != n) return 0;
+  if (fwrite(tail, 1, 4, f) != 4) return 0;
+  return 12 + n;
+}
+
+/* 一帧 RGBA（第 0 行在上）-> 一份 PNG。回写出去几个字节，出错回 0。 */
+static int64_t png_write(FILE *f, const unsigned char *rgba, int64_t w, int64_t h) {
+  static const unsigned char sig[8] = { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
+  if (fwrite(sig, 1, 8, f) != 8) return 0;
+  int64_t total = 8;
+  unsigned char ihdr[13];
+  png_be32(ihdr, (uint32_t)w);
+  png_be32(ihdr + 4, (uint32_t)h);
+  ihdr[8] = 8; ihdr[9] = 6; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+  size_t k = png_chunk(f, "IHDR", ihdr, 13);
+  if (k == 0) return 0;
+  total += (int64_t)k;
+  /* 原始数据（每行一个 filter 字节 + 一行 RGBA），再包成 stored 的 zlib 流。 */
+  size_t rawn = (size_t)h * (1 + (size_t)w * 4);
+  unsigned char *raw = (unsigned char *)malloc(rawn);
+  if (raw == NULL) return 0;
+  for (int64_t y = 0; y < h; y++) {
+    unsigned char *dst = raw + (size_t)y * (1 + (size_t)w * 4);
+    dst[0] = 0;
+    memcpy(dst + 1, rgba + (size_t)y * (size_t)w * 4, (size_t)w * 4);
+  }
+  size_t nblk = (rawn + 65534) / 65535;
+  if (nblk == 0) nblk = 1;
+  size_t zn = 2 + nblk * 5 + rawn + 4;
+  unsigned char *z = (unsigned char *)malloc(zn);
+  if (z == NULL) { free(raw); return 0; }
+  size_t zi = 0;
+  z[zi++] = 0x78; z[zi++] = 0x01;
+  size_t off = 0;
+  while (off < rawn || rawn == 0) {
+    size_t n = rawn - off > 65535 ? 65535 : rawn - off;
+    z[zi++] = (unsigned char)(off + n >= rawn ? 1 : 0);
+    z[zi++] = (unsigned char)(n & 255);
+    z[zi++] = (unsigned char)((n >> 8) & 255);
+    z[zi++] = (unsigned char)(~n & 255);
+    z[zi++] = (unsigned char)((~n >> 8) & 255);
+    memcpy(z + zi, raw + off, n);
+    zi += n;
+    off += n;
+    if (rawn == 0) break;
+  }
+  png_be32(z + zi, png_adler(raw, rawn));
+  zi += 4;
+  free(raw);
+  k = png_chunk(f, "IDAT", z, zi);
+  free(z);
+  if (k == 0) return 0;
+  total += (int64_t)k;
+  k = png_chunk(f, "IEND", NULL, 0);
+  if (k == 0) return 0;
+  return total + (int64_t)k;
+}
+
 /* 两档共用的那一半。`fb` 与 `ip` 恰有一个非空（C 里没有闭包，所以两样都传进来）。
    **整数那一档走整数取模**（不过 double）：JS 那两条腿上 int 是 BigInt，也走 BigInt 取模 ——
-   于是超出 24 位的值在三条腿上是同一个字节。 */
+   于是超出 24 位的值在三条腿上是同一个字节。
+
+   **默认写 PNG**；落点后缀是 `.rgba` 才走裸表面那个备选出口。 */
 static int64_t omni_gfx_emit(omni_str path, int64_t w, int64_t h,
                              struct omni_arr_f64_s *fb, const int64_t *ip) {
   if (w <= 0 || h <= 0) {
@@ -173,46 +284,50 @@ static int64_t omni_gfx_emit(omni_str path, int64_t w, int64_t h,
       omni_mkdir_p(dir);
     }
   }
-  FILE *f = fopen(p, "wb");
-  if (!f) omni_errorf("cannot write '%s': %s", p, strerror(errno));
-  char head[64];
-  int hl = snprintf(head, sizeof head, "#rgba %lld %lld\n", (long long)w, (long long)h);
-  if (fwrite(head, 1, (size_t)hl, f) != (size_t)hl) {
-    fclose(f);
-    omni_errorf("cannot write '%s': %s", p, strerror(errno));
+  size_t plen = strlen(p);
+  int as_rgba = plen >= 5 && strcmp(p + plen - 5, ".rgba") == 0;
+  unsigned char *pix = (unsigned char *)malloc((size_t)n * 4);
+  if (pix == NULL) {
+    omni_errorf("gfxframe: out of memory for a %lldx%lld frame", (long long)w, (long long)h);
   }
-  unsigned char *row = (unsigned char *)malloc((size_t)w * 4);
-  if (row == NULL) {
-    fclose(f);
-    omni_errorf("gfxframe: out of memory for a %lld-pixel row", (long long)w);
-  }
-  for (int64_t y = 0; y < h; y++) {
-    for (int64_t x = 0; x < w; x++) {
-      int64_t k = y * w + x;
-      int64_t v;
-      if (ip != NULL) {
-        v = ip[k] % 16777216;
-        if (v < 0) v += 16777216;
-      } else {
-        double m = fmod(trunc(fb->items[k]), 16777216.0);
-        if (!isfinite(m)) m = 0.0;
-        if (m < 0.0) m += 16777216.0;
-        v = (int64_t)m;
-      }
-      row[x * 4 + 0] = (unsigned char)((v / 65536) % 256);
-      row[x * 4 + 1] = (unsigned char)((v / 256) % 256);
-      row[x * 4 + 2] = (unsigned char)(v % 256);
-      row[x * 4 + 3] = 255;
+  for (int64_t k = 0; k < n; k++) {
+    int64_t v;
+    if (ip != NULL) {
+      v = ip[k] % 16777216;
+      if (v < 0) v += 16777216;
+    } else {
+      double m = fmod(trunc(fb->items[k]), 16777216.0);
+      if (!isfinite(m)) m = 0.0;
+      if (m < 0.0) m += 16777216.0;
+      v = (int64_t)m;
     }
-    if (fwrite(row, 1, (size_t)w * 4, f) != (size_t)w * 4) {
-      free(row);
-      fclose(f);
+    pix[k * 4 + 0] = (unsigned char)((v / 65536) % 256);
+    pix[k * 4 + 1] = (unsigned char)((v / 256) % 256);
+    pix[k * 4 + 2] = (unsigned char)(v % 256);
+    pix[k * 4 + 3] = 255;
+  }
+  FILE *f = fopen(p, "wb");
+  if (!f) { free(pix); omni_errorf("cannot write '%s': %s", p, strerror(errno)); }
+  int64_t wrote = 0;
+  if (as_rgba) {
+    char head[64];
+    int hl = snprintf(head, sizeof head, "#rgba %lld %lld\n", (long long)w, (long long)h);
+    if (fwrite(head, 1, (size_t)hl, f) != (size_t)hl
+        || fwrite(pix, 1, (size_t)n * 4, f) != (size_t)n * 4) {
+      free(pix); fclose(f);
+      omni_errorf("cannot write '%s': %s", p, strerror(errno));
+    }
+    wrote = (int64_t)hl + n * 4;
+  } else {
+    wrote = png_write(f, pix, w, h);
+    if (wrote == 0) {
+      free(pix); fclose(f);
       omni_errorf("cannot write '%s': %s", p, strerror(errno));
     }
   }
-  free(row);
+  free(pix);
   if (fclose(f) != 0) omni_errorf("cannot write '%s': %s", p, strerror(errno));
-  return (int64_t)hl + n * 4;
+  return wrote;
 }
 
 /* ---------------------------------------------------------------- 图形设备（CPU 备选）
@@ -344,9 +459,12 @@ static void gfx_cone(double x0, double y0, double r0, double x1, double y1, doub
 static void gfx_present(void) {
   if (!g_gon) return;
   const char *p = getenv("OMNI_GFX_OUT");
-  if (p == NULL || p[0] == '\0') p = ".omni-cache/gfx/frame.rgba";
+  if (p == NULL || p[0] == '\0') p = ".omni-cache/gfx/frame.png";
   omni_gfx_emit(omni_str_new(p, (int64_t)strlen(p)), g_gw, g_gh, NULL, g_gfb);
-  printf("#gfx rgba %s %lld %lld\n", p, (long long)g_gw, (long long)g_gh);
+  /* 指针那一行把种类带上（默认 png、`.rgba` 是备选）—— 与 host/gfx-cpu.js 一字不差。 */
+  size_t pl = strlen(p);
+  const char *kind = (pl >= 5 && strcmp(p + pl - 5, ".rgba") == 0) ? "rgba" : "png";
+  printf("#gfx %s %s %lld %lld\n", kind, p, (long long)g_gw, (long long)g_gh);
   g_gdirty = 0;
 }
 

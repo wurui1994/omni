@@ -1105,7 +1105,7 @@ export function evalToIR(cst, host, src = '') {
     const W = 320;
     const H = 240;
     decls.unshift(...gfxGlobalDecls());
-    decls.push(...gfxFnDecls(W, H), gfxPresentDecl('.omni-cache/gfx/frame.rgba'));
+    decls.push(...gfxFnDecls(W, H), gfxPresentDecl('.omni-cache/gfx/frame.png'));
     if (C.needGL) {
       decls.unshift(...glGlobalDecls());
       decls.push(...glFnDecls());

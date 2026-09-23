@@ -13,6 +13,7 @@
 
 import { stdout, stdoutBytes, typeTag, fmtReal, fmtRealG, fmtFixed, fmtSci, fmtGen, reprReal, callJsOp, readText, writeText, writeBinary, mkdirAll, spawn, env } from '../host/native.js';
 import { JS_ABI, JS_MEMBERS } from '../hir/js_abi.js';
+import { pngFromRgba, surfaceKind } from '../host/png.js';
 import { OmniError } from '../source/diag.js';
 
 // int64 的下界。写成 "最大负数再减一"：`**` 不在语言子集里，而 -9223372036854775808n
@@ -1374,10 +1375,15 @@ function gfxFrameP(p, w, h, fp) {
   return gfxEmit(p, wi, hi, cols);
 }
 
-/** 两档共用的那一半：一帧 -> 表面文件。**这儿是三条腿必须一致的那段字节。** */
+/**
+ * 两档共用的那一半：一帧 -> 图。**这儿是三条腿必须一致的那段字节。**
+ *
+ * 默认写 **PNG**（8 位 RGBA、filter 0、zlib stored —— 见 `host/png.js` 的头注）；
+ * 落点后缀是 `.rgba` 才走裸表面那个备选出口。
+ */
 function gfxEmit(p, wi, hi, cols) {
   if (wi <= 0 || hi <= 0) rtError(`gfxframe: bad frame size: ${wi}x${hi}`);
-  const rows = [`#rgba ${wi} ${hi}\n`];
+  const rows = [];
   let y = 0;
   while (y < hi) {
     let row = '';
@@ -1393,7 +1399,8 @@ function gfxEmit(p, wi, hi, cols) {
     rows.push(row);
     y = y + 1;
   }
-  const body = rows.join('');
+  const raw = rows.join('');
+  const body = surfaceKind(p) === 'rgba' ? `#rgba ${wi} ${hi}\n${raw}` : pngFromRgba(raw, wi, hi);
   const dir = p.lastIndexOf('/');
   try {
     if (dir > 0) mkdirAll(p.slice(0, dir));

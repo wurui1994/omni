@@ -6,7 +6,7 @@
 // 与 `ext/js/examples/02-mandelbrot.js` 是同一幅图、同一套 API。
 //
 //   omni run ext/jnc/examples/02-mandelbrot.jnc
-//   -> #gfx rgba .omni-cache/gfx/frame.rgba 320 240
+//   -> #gfx png .omni-cache/gfx/frame.png 320 240
 
 import "../lib/ege.jnc"
 

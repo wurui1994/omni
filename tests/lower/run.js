@@ -22,6 +22,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LANGS } from '../../src/core/lower/langs.js';
+import { pngToRgba } from '../../src/studio/render.js';
 import {
   BASICS, INTMATH, LOOPEXIT, DICT, UNARY, RECORD, INDEX, SLICE, CONV, VALUES, MUT,
   DEFER, BLOCKRET, METHOD, ASSERTOK, STRCAT, NUMSTR, NAMEDARG, CASEFOR, CASERANGE,
@@ -169,16 +170,16 @@ for (const [name, families] of Object.entries(MIGRATED)) {
  * `(gfxframe PATH W H FB)` 有三份实现（backend-js 的 `$gfx_frame`、interp 的 `gfxFrame`、
  * C 的 `omni_gfx_frame`）。三条腿各跑一趟同一份例子，判四件事：
  *   1. stdout 上只有那一行**指针**（像素不走 stdout —— 这是这一层的全部要点）；
- *   2. 表面的头一行与字节数对得上（`#rgba W H\n` + W*H*4）；
+ *   2. 那一帧是**一份能解开的 PNG**（默认出口），IHDR 里的宽高与指针那行一致；
  *   3. **不是全黑**（"什么都没画"也能满足上面两条）；
- *   4. 三条腿**逐字节相同**。
+ *   4. 三条腿**逐字节相同**（PNG 是 filter 0 + stored 的，编码那一层也是确定的）。
  *
  * 两份例子走的是两套宿主 API，落的是同一块帧缓冲：
  *   * `.kc` = EvalDraw 的 2D（`cls`/`setcol`/`moveto`/`lineto`/`drawsph`/`drawcone`）；
  *   * `.pss` = PolyDraw 的 **GL 立即模式**（`glBegin`/`glVertex`/`glColor` + 矩阵栈）——
  *     它多一层变换与三角形光栅化（`gl-rt.js`），所以值得单独一格。
  */
-const GFX_OUT = '.omni-cache/gfx/frame.rgba';
+const GFX_OUT = '.omni-cache/gfx/frame.png';
 const GFX_CASES = [
   { who: 'evaldraw+2d', file: 'ext/evaldraw/examples/draw2d.kc', w: 320, h: 240 },
   { who: 'polydraw+gl', file: 'ext/polydraw/examples/02-gl.pss', w: 320, h: 240 },
@@ -234,21 +235,24 @@ for (const G of GFX_CASES) {
     const got = omni(['run', ...flags, G.file], G.env);
     /* 一帧一行指针：帧循环那一档跑几帧就有几行。 */
     const want = new Array(G.frames === undefined ? 1 : G.frames)
-      .fill(`#gfx rgba ${GFX_OUT} ${G.w} ${G.h}`);
+      .fill(`#gfx png ${GFX_OUT} ${G.w} ${G.h}`);
     if (got.code !== 0) { no(label, `退出码 ${got.code}：${got.err.split('\n').slice(-2).join(' ')}`); continue; }
     if (JSON.stringify(got.out) !== JSON.stringify(want)) {
       no(label, `stdout 期望 ${JSON.stringify(want)} 得到 ${JSON.stringify(got.out)}`);
       continue;
     }
     const buf = readFileSync(join(ROOT, GFX_OUT));
-    const head = `#rgba ${G.w} ${G.h}\n`;
-    const size = head.length + G.w * G.h * 4;
-    if (buf.length !== size || buf.subarray(0, head.length).toString('latin1') !== head) {
-      no(label, `表面 期望 ${size} 字节、头一行 ${JSON.stringify(head)}，`
-        + `得到 ${buf.length} 字节、${JSON.stringify(buf.subarray(0, head.length).toString('latin1'))}`);
+    /* 默认出口是 PNG：解开它（页面那一格同一份解码器 —— 判据与 UI 不许各解一套）。
+       解得开这件事本身就把"签名 / IHDR / stored 流 / filter 0"全判了。 */
+    let px = null;
+    try {
+      const img = pngToRgba(buf.toString('latin1'));
+      if (img.w !== G.w || img.h !== G.h) throw new Error(`${img.w}x${img.h} != ${G.w}x${G.h}`);
+      px = Buffer.from(img.body, 'latin1');
+    } catch (e) {
+      no(label, `那一帧不是我们这一档 PNG：${String(e.message ?? e)}`);
       continue;
     }
-    const px = buf.subarray(head.length);
     let lit = 0;
     for (let i = 0; i < px.length; i += 4) {
       if (px[i] !== 0 || px[i + 1] !== 0 || px[i + 2] !== 0) lit++;
@@ -266,7 +270,7 @@ for (const G of GFX_CASES) {
     }
     if (bad !== null) { no(label, `像素 ${bad}`); continue; }
     seen.push([leg, buf]);
-    ok(`${label} 表面 [${buf.length} 字节，${lit} 格非黑`
+    ok(`${label} 一帧 PNG [${buf.length} 字节，${lit} 格非黑`
       + `${G.probes === undefined ? '' : `，${G.probes.length} 格像素对得上`}]`);
   }
   for (let i = 1; i < seen.length; i++) {

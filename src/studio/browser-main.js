@@ -96,18 +96,21 @@ async function localApi(path, init) {
     if (safePath('', rel) === null && !exists(rel)) throw new Error(`${rel} 不在白名单里`);
     return { path: rel, lang: langOf(rel), text: readText(rel) };
   }
-  /** **一帧表面**（图形设备那一族）—— 与 `serve.js` 的 `/api/gfx` 同一个形状。
-   *  这条腿上表面就在内存里那张表里（`writeBinary` 落进去的），所以只是读出来切个头。 */
+  /** **一帧图**（图形设备那一族）—— 与 `serve.js` 的 `/api/gfx` 同一个形状。
+   *  默认是 PNG（原样把字节交出去，页面自己解 —— `render.js` 的 `pngToRgba`）；
+   *  `.rgba` 那个备选出口才切头报 `w`/`h`。这条腿上图就在内存里那张表里（`writeBinary` 落进去的）。 */
   if (route === '/api/gfx') {
     const rel = params.get('path') ?? '';
-    if (rel.includes('..') || !rel.startsWith('.omni-cache/gfx/') || !rel.endsWith('.rgba')) {
-      throw new Error('只认 .omni-cache/gfx/ 底下的 .rgba');
+    const png = rel.endsWith('.png');
+    if (rel.includes('..') || !rel.startsWith('.omni-cache/gfx/') || !(png || rel.endsWith('.rgba'))) {
+      throw new Error('只认 .omni-cache/gfx/ 底下的 .png 或 .rgba');
     }
     const raw = readBinary(rel);
+    if (png) return { kind: 'png', bytes: raw };
     const nl = raw.indexOf('\n');
     const m = nl < 0 ? null : /^#rgba (\d+) (\d+)$/.exec(raw.slice(0, nl));
     if (m === null) throw new Error('这份表面没有 #rgba 头');
-    return { w: Number(m[1]), h: Number(m[2]), bytes: raw.slice(nl + 1) };
+    return { kind: 'rgba', w: Number(m[1]), h: Number(m[2]), bytes: raw.slice(nl + 1) };
   }
   if (route === '/api/run' || route === '/api/emit') {
     if (Array.isArray(body.argv) && body.argv.length > 0) return runArgv(body.argv);

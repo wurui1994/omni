@@ -380,27 +380,34 @@ export function startServer(opts) {
         return json(res, 200, { path: rel, lang: langOf(rel), text });
       }
       /**
-       * **一帧表面**（图形设备那一族）：`GET /api/gfx?path=.omni-cache/gfx/frame.rgba`。
+       * **一帧图**（图形设备那一族）：`GET /api/gfx?path=.omni-cache/gfx/frame.png`。
        *
-       * 回的是 `{ w, h, bytes }`，`bytes` 是**一个字符一个字节**的串（latin1）——
-       * 与封闭 ABI 的 `readBinary` 同一个口径。`/api/file` 那一格不能用：它 UTF-8 解码，
-       * 0x80-0xff 会全变成 U+FFFD，图就花了。
+       * 默认是 **PNG**（回 `{ kind:'png', bytes }`，原样把字节交出去，页面自己解 ——
+       * 我们只写 filter 0 + stored 那一档，见 `render.js` 的 `pngToRgba`）；
+       * `.rgba` 那个备选出口回 `{ kind:'rgba', w, h, bytes }`。
+       * `bytes` 一律是**一个字符一个字节**的串（latin1）—— 与封闭 ABI 的 `readBinary`
+       * 同一个口径。`/api/file` 那一格不能用：它 UTF-8 解码，0x80-0xff 会全变成 U+FFFD。
        *
-       * 闸：只认 `.omni-cache/gfx/` 底下的 `.rgba`。那不在 `TREE_ROOTS` 里（它是产物，
-       * 不是源码），所以这一格自己关门 —— 放开整个 `.omni-cache` 等于把缓存交出去。
+       * 闸：只认 `.omni-cache/gfx/` 底下的 `.png` / `.rgba`。那不在 `TREE_ROOTS` 里
+       * （它是产物，不是源码），所以这一格自己关门 —— 放开整个 `.omni-cache` 等于把缓存交出去。
        */
       if (path === '/api/gfx') {
         const rel = url.searchParams.get('path') ?? '';
-        if (rel.includes('..') || !rel.startsWith('.omni-cache/gfx/') || !rel.endsWith('.rgba')) {
-          return json(res, 400, { error: '只认 .omni-cache/gfx/ 底下的 .rgba' });
+        const png = rel.endsWith('.png');
+        if (rel.includes('..') || !rel.startsWith('.omni-cache/gfx/')
+          || !(png || rel.endsWith('.rgba'))) {
+          return json(res, 400, { error: '只认 .omni-cache/gfx/ 底下的 .png 或 .rgba' });
         }
         const abs = join(root, rel);
         if (!exists(abs)) return json(res, 404, { error: 'not found' });
         const raw = readBinary(abs);
+        if (png) return json(res, 200, { kind: 'png', bytes: raw });
         const nl = raw.indexOf('\n');
         const m = nl < 0 ? null : /^#rgba (\d+) (\d+)$/.exec(raw.slice(0, nl));
         if (m === null) return json(res, 400, { error: '这份表面没有 #rgba 头' });
-        return json(res, 200, { w: Number(m[1]), h: Number(m[2]), bytes: raw.slice(nl + 1) });
+        return json(res, 200, {
+          kind: 'rgba', w: Number(m[1]), h: Number(m[2]), bytes: raw.slice(nl + 1),
+        });
       }
       if (path === '/api/run' && req.method === 'POST') {
         const body = JSON.parse(await readBody(req));

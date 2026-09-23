@@ -11,27 +11,29 @@
  * 字节（Bresenham 画线、中点画圆、扫描线填多边形）。`putpixel` 调一百万次就是往数组里
  * 写一百万次 —— 一个字节都不过 stdout。
  *
- * 一趟只有**一帧表面**跨边界（`closegraph` / `present`）：写成一份
+ * 一趟只有**一帧图**跨边界（`closegraph` / `present`）：默认写成一份 **PNG**
+ * （8 位 RGBA、filter 0、zlib stored —— `src/core/host/png.js`），落在
+ * `OMNI_GFX_OUT`（默认 `.omni-cache/gfx/frame.png`）。落点后缀换成 `.rgba` 就走备选出口，
+ * 那一份是裸表面：
  *
  *     #rgba <宽> <高>\n<w*h*4 个字节>
  *
- * 落在 `OMNI_GFX_OUT`（默认 `.omni-cache/gfx/frame.rgba`）。走的是封闭 ABI 的
- * `writeBinary`（ADR-0011 决策 17），所以四条腿上都是同一句话：node 写真文件、
- * 浏览器写进内存里那张表、原生产物写真文件。
+ * 走的是封闭 ABI 的 `writeBinary`（ADR-0011 决策 17），所以四条腿上都是同一句话：
+ * node 写真文件、浏览器写进内存里那张表、原生产物写真文件。
  *
- * stdout 上只留**一行指针**：`#gfx rgba <路径> <宽> <高>`。那不是图，是"图在哪儿" ——
- * Studio 见着它就去读那份表面，`putImageData` 一次贴到 canvas 上；本机那侧
- * （`ext/jnc/examples/gfxview.jnc`）把同一份表面 `glTexImage2D` 贴进 glfw 窗口。
+ * stdout 上只留**一行指针**：`#gfx <种类> <路径> <宽> <高>`。那不是图，是"图在哪儿" ——
+ * Studio 见着它就去读那份文件贴到 canvas 上；本机那侧（`ext/jnc/examples/gfxview.jnc`）
+ * 把同一帧 `glTexImage2D` 贴进 glfw 窗口。
  *
- * 为什么表面是**裸 RGBA** 而不是 PNG：这一格是设备，两头都是程序 ——
- * 浏览器那边 `putImageData` 直接吃裸字节，glfw 那边 `glTexImage2D` 也直接吃裸字节，
- * 中间夹一层 PNG 编解码是白搭的两份代码。PNG / SVG 是**备选出口**（给人看、给别的工具看），
- * 不在这条主路上。
+ * 为什么默认是 **PNG**：图最后总要有人看 —— 双击能开、`magick compare` 直接吃。
+ * 裸表面留着当备选：程序对程序那一头（`putImageData` / `glTexImage2D`）直接吃裸字节，
+ * 而且"逐字节相同"那条判据在它上头没有编码那一层要担心。
  *
  * 坐标与 EasyX 一致：左上角原点、y 往下、单位是像素。颜色是 `0xRRGGBB` 的整数
  * （`RGB(r,g,b)` 拼一格）。
  */
 import { writeBinary, mkdirAll, env } from '../../../src/core/host/native.js';
+import { pngFromRgba, surfaceKind } from '../../../src/core/host/png.js';
 
 /* 设备状态。BGI 那套 API 本来就是"有一块当前设备"的形状 —— 所以这儿是模块级的几格。 */
 let W = 0;
@@ -268,24 +270,26 @@ export function fillpoly(pts) {
  * 把这一帧交给设备。`closegraph()` 就是它 —— 分两个名字是因为动画那一档要在循环里调
  * （`present()` 每帧一次），而 `closegraph()` 是 BGI 里"收工"那一句。
  *
- * 落点：`OMNI_GFX_OUT`，默认 `.omni-cache/gfx/frame.rgba`。
+ * 落点：`OMNI_GFX_OUT`，默认 `.omni-cache/gfx/frame.png`（后缀换 `.rgba` 走裸表面那个备选）。
  * stdout 上只印一行指针 —— 图本身不走 stdout。
  */
 export function present() {
-  const path = env('OMNI_GFX_OUT') ?? '.omni-cache/gfx/frame.rgba';
+  const path = env('OMNI_GFX_OUT') ?? '.omni-cache/gfx/frame.png';
   const slash = path.lastIndexOf('/');
   if (slash > 0) mkdirAll(path.slice(0, slash));
   /* 字节口径：封闭 ABI 的 `writeBinary` 吃的是**一个字符一个字节**的串（latin1）。
      一格一格接会把串拼成天文数字次，所以按行收成数组再 join —— 一帧 640x480 是 480 段。 */
-  const rows = [`#rgba ${W} ${H}\n`];
+  const rows = [];
   const stride = W * 4;
   for (let y = 0; y < H; y++) {
     const out = [];
     for (let i = y * stride; i < (y + 1) * stride; i++) out.push(String.fromCharCode(FB[i]));
     rows.push(out.join(''));
   }
-  writeBinary(path, rows.join(''));
-  console.log(`#gfx rgba ${path} ${W} ${H}`);
+  const raw = rows.join('');
+  const kind = surfaceKind(path);
+  writeBinary(path, kind === 'rgba' ? `#rgba ${W} ${H}\n${raw}` : pngFromRgba(raw, W, H));
+  console.log(`#gfx ${kind} ${path} ${W} ${H}`);
   return undefined;
 }
 

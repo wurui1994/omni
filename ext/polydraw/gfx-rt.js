@@ -8,9 +8,10 @@
 //
 // 模块级一格 `(arr real)`：`gfx_fb`，长度 `w*h`，每格装一个 `0xRRGGBB` 的数。
 // 画图元 = 往那块里写数（Bresenham 画线、中点画圆），**一个字节都不过 stdout**。
-// `gfx_present` 把这一帧拼成 `#rgba <w> <h>\n` + 裸字节，走封闭 ABI 的 `js_fs_write_bytes`
-// 落盘，stdout 上只印一行指针 `#gfx rgba <路径> <宽> <高>` —— 与 `ext/js/lib/ege.js`
-// **同一个表面格式**，所以 Studio 贴 canvas、glfw 贴窗口两边都不用改。
+// `gfx_present` 把这一帧交给方言那一格 `(gfxframe …)`，它按落点后缀写 **PNG**（默认）
+// 或裸表面（`#rgba <w> <h>\n` + 裸字节，`.rgba` 那个备选），
+// stdout 上只印一行指针 `#gfx <种类> <路径> <宽> <高>` —— 与 `ext/js/lib/ege.js`
+// **同一个出口**，所以 Studio 贴 canvas、glfw 贴窗口两边都不用改。
 //
 // ## 口径
 //
@@ -50,7 +51,8 @@ export const EVALDRAW_2D = new Map([
 
 /**
  * 交出这一帧：帧缓冲整块过 `(gfxframe PATH W H FB)`（那一格在公共层，`lower/sx.js`），
- * stdout 上只印一行指针 `#gfx rgba <路径> <宽> <高>`。
+ * stdout 上只印一行指针 `#gfx <种类> <路径> <宽> <高>`。种类**按落点的后缀**：
+ * 默认 `png`（编码那一层在 `(gfxframe …)` 那一格里），`.rgba` 是备选那个裸表面。
  *
  * **不在语言里拼字节串**：那要 320×240 次串拼接，而且 `(writetext …)` 按 UTF-8 写 ——
  * 大于 127 的字节会被编成两个字节，图当场就坏。宽高按运行期的 `gfx_w`/`gfx_h` 报
@@ -58,6 +60,7 @@ export const EVALDRAW_2D = new Map([
  */
 export function gfxPresentDecl(path) {
   const sint = (e) => bi('tostr', [ix(e)]);
+  const kind = path.endsWith('.rgba') ? 'rgba' : 'png';
   return {
     kind: 'fn',
     name: 'gfx_present',
@@ -68,7 +71,7 @@ export function gfxPresentDecl(path) {
       ex(bi('gfxframe', [str(path), ix(nm('gfx_w')), ix(nm('gfx_h')), nm('gfx_fb')])),
       {
         kind: 'print',
-        values: [bin('+', bin('+', bin('+', str(`#gfx rgba ${path} `), sint(nm('gfx_w'))),
+        values: [bin('+', bin('+', bin('+', str(`#gfx ${kind} ${path} `), sint(nm('gfx_w'))),
           str(' ')), sint(nm('gfx_h')))],
       },
       ret(num(0)),

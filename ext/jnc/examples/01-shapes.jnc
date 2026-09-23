@@ -4,7 +4,7 @@
 //
 // 跑一趟：
 //   omni run ext/jnc/examples/01-shapes.jnc
-//   -> #gfx rgba .omni-cache/gfx/frame.rgba 320 240
+//   -> #gfx png .omni-cache/gfx/frame.png 320 240
 //
 // stdout 上只有那一行**指针**；像素在那份表面文件里（320*240*4 字节的裸 RGBA），
 // Studio 贴 canvas、本机 glfw 贴窗口都吃这个格式。

@@ -247,14 +247,16 @@ export function drawKindOf(out) {
   if (s.startsWith('%!PS')) return 'eps';
   if (s.startsWith('<?xml') || s.startsWith('<svg')) return 'svg';
   /* **图形设备**（`ext/js/lib/ege.js` / `ext/jnc/lib/ege.jnc`）：stdout 上只有一行指针
-     `#gfx rgba <路径> <宽> <高>`，图在那份表面文件里（w*h*4 的裸 RGBA）。
+     `#gfx <种类> <路径> <宽> <高>`，图在那份文件里（默认 PNG、`.rgba` 是裸表面备选）。
      认的是这一行，不是后缀 —— 哪门语言印的都一样。 */
   if (gfxRef(s) !== null) return 'gfx';
   return null;
 }
 
 /**
- * 一趟输出里那行**设备指针**：`#gfx rgba <路径> <宽> <高>` -> `{ path, w, h }`。
+ * 一趟输出里那行**设备指针**：`#gfx <种类> <路径> <宽> <高>` -> `{ kind, path, w, h }`。
+ *
+ * 种类只有两格：`png`（默认出口）与 `rgba`（裸表面那个备选）。
  *
  * 为什么图不走 stdout：这一格是图形设备。`putpixel` 一百万次落在内存里那块 RGBA 上，
  * 跨出程序的只有**一帧表面**；stdout 上那一行说的是"表面在哪儿"。
@@ -262,9 +264,9 @@ export function drawKindOf(out) {
  * 一张 384×288 的 Mandelbrot 就是十一万行 —— 图像这一档不能那么算。
  */
 export function gfxRef(out) {
-  const m = /(?:^|\n)#gfx rgba (\S+) (\d+) (\d+)\s*(?:\n|$)/.exec(String(out ?? ''));
+  const m = /(?:^|\n)#gfx (png|rgba) (\S+) (\d+) (\d+)\s*(?:\n|$)/.exec(String(out ?? ''));
   if (m === null) return null;
-  return { path: m[1], w: Number(m[2]), h: Number(m[3]) };
+  return { kind: m[1], path: m[2], w: Number(m[3]), h: Number(m[4]) };
 }
 
 /**
@@ -297,6 +299,77 @@ export function rgbaSplit(text) {
   const m = nl < 0 ? null : /^#rgba (\d+) (\d+)$/.exec(s.slice(0, nl));
   if (m === null) return null;
   return { w: Number(m[1]), h: Number(m[2]), body: s.slice(nl + 1) };
+}
+
+/**
+ * 一份 PNG -> `{ w, h, body }`（`body` 就是 `rgbaDraw` 收的那种裸 RGBA 串）。
+ *
+ * **只认我们自己写的那一档**：8 位 RGBA、filter 0、zlib **stored**
+ * （`src/core/host/png.js` 与 `src/runtime/omni_fmt.c` 里那两份同算法的编码器）。
+ * 别的一律当场报 —— 这条路上的图只有设备写的那一种，与其半懂不懂地解出一张花屏，
+ * 不如把"格式不是我们那一档"这件事说出来。
+ *
+ * 为什么不用 blob + `<img>`（浏览器自带解码器）：那条路是**异步**的，而页面这边
+ * 三处用图的地方（画廊缩略图、预览栏、判据）都已经在"一帧裸 RGBA 贴 canvas"那条
+ * 同步路上了。解一份 stored 的 PNG 就是切块 + 每行丢掉一个 0 字节，比分叉一条
+ * 异步路便宜。
+ */
+export function pngToRgba(bytes) {
+  const s = String(bytes ?? '');
+  const SIG = '\u0089PNG\u000d\u000a\u001a\u000a';
+  if (s.slice(0, 8) !== SIG) throw new Error('png: 签名不对');
+  const be = (i) => ((s.charCodeAt(i) << 24) | (s.charCodeAt(i + 1) << 16)
+    | (s.charCodeAt(i + 2) << 8) | s.charCodeAt(i + 3)) >>> 0;
+  let w = 0;
+  let h = 0;
+  let z = '';
+  let i = 8;
+  while (i + 8 <= s.length) {
+    const n = be(i);
+    const ty = s.slice(i + 4, i + 8);
+    const data = s.slice(i + 8, i + 8 + n);
+    if (ty === 'IHDR') {
+      w = be(i + 8);
+      h = be(i + 12);
+      const bits = s.charCodeAt(i + 16);
+      const color = s.charCodeAt(i + 17);
+      const inter = s.charCodeAt(i + 20);
+      if (bits !== 8 || color !== 6 || inter !== 0) {
+        throw new Error(`png: 只认 8 位 RGBA 非隔行（拿到 ${bits}/${color}/${inter}）`);
+      }
+    } else if (ty === 'IDAT') {
+      z += data;
+    } else if (ty === 'IEND') {
+      break;
+    }
+    i += n + 12;
+  }
+  if (w === 0 || h === 0) throw new Error('png: 没有 IHDR');
+  /* zlib：两字节头，之后是若干 **stored** 块（每块 5 字节头：BFINAL/BTYPE + LEN + ~LEN）。 */
+  const raw = [];
+  let p = 2;
+  for (;;) {
+    if (p + 5 > z.length) throw new Error('png: zlib 流断了');
+    const b0 = z.charCodeAt(p);
+    if (((b0 >> 1) & 3) !== 0) throw new Error('png: 只认 stored 的 deflate 块');
+    const n = z.charCodeAt(p + 1) | (z.charCodeAt(p + 2) << 8);
+    raw.push(z.slice(p + 5, p + 5 + n));
+    p += 5 + n;
+    if ((b0 & 1) !== 0) break;
+  }
+  const body = raw.join('');
+  /* 每行前头那一个字节是 filter（我们只写 0）—— 丢掉它，剩下的就是裸 RGBA。 */
+  const stride = w * 4;
+  if (body.length !== h * (stride + 1)) {
+    throw new Error(`png: 行字节数不对：${body.length} != ${h}*(${stride}+1)`);
+  }
+  const rows = [];
+  for (let y = 0; y < h; y++) {
+    const o = y * (stride + 1);
+    if (body.charCodeAt(o) !== 0) throw new Error(`png: 第 ${y} 行的 filter 不是 0`);
+    rows.push(body.slice(o + 1, o + 1 + stride));
+  }
+  return { w, h, body: rows.join('') };
 }
 
 

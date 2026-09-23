@@ -201,8 +201,8 @@ const CASES = [
   'tests/asy/cases/01-arith.asy',
   'ext/omni/examples/koch.omni',
   /* **图形设备那一族**（`ext/js/lib/ege.js`）：stdout 上只有一行指针
-     （`#gfx rgba …`），像素在表面文件里 —— 两条腿上那一行要逐字节相同，
-     而"表面真在那儿"由后头真浏览器那一节判（它把表面取回来贴 canvas）。 */
+     （`#gfx png …`），像素在那份 PNG 里 —— 两条腿上那一行要逐字节相同，
+     而"图真在那儿"由后头真浏览器那一节判（它把那一帧取回来解开贴 canvas）。 */
   'ext/js/examples/01-shapes.js',
   'ext/js/examples/03-lissajous.js',
   /* **EVAL 那两门**（polydraw `.pss` / evaldraw `.kc`，同一份语法两张宿主表）：
@@ -302,9 +302,10 @@ for (const c of CASES) {
       }
       /**
        * **图形设备那一格在真浏览器里是真跑通的**：跑一份例子，按它印出来的那行
-       * 指针去 `/api/gfx` 取表面，再判"字节数正好是 w*h*4、而且不是一张全黑"。
+       * 指针去 `/api/gfx` 取那一帧，**解开那份 PNG**（页面那一格解码器，
+       * `render.pngToRgba`），再判"像素正好是 w*h*4 个字节、而且不是一张全黑"。
        *
-       * 为什么要判"不全黑"：表面是设备的产物，长度对、头对，都可能是一张没画上东西的
+       * 为什么要判"不全黑"：图是设备的产物，长度对、头对，都可能是一张没画上东西的
        * 空画布（`putpixel` 的裁剪写错一个符号就是那样）。
        *
        * **两份例子走的是两条不同的路**，所以两格都要判：
@@ -316,15 +317,17 @@ for (const c of CASES) {
         ['ext/evaldraw/examples/draw2d.kc', '方言的 gfxframe']]) {
         const gp = 'async () => { const r = await window.__OMNI_LOCAL("/api/run",'
           + ` { body: JSON.stringify({ argv: ["run", ${JSON.stringify(f)}] }) });`
-          + ' const m = /#gfx rgba (\\S+) (\\d+) (\\d+)/.exec(r.stdout || "");'
+          + ' const m = /#gfx (png|rgba) (\\S+) (\\d+) (\\d+)/.exec(r.stdout || "");'
           + ' if (m === null) return { err: (r.stderr || "没印指针").slice(0, 200) };'
-          + ' const s = await window.__OMNI_LOCAL("/api/gfx?path=" + encodeURIComponent(m[1]));'
-          + ' let nz = 0; for (let i = 0; i < s.bytes.length; i += 4)'
-          + '   if ((s.bytes.charCodeAt(i) | s.bytes.charCodeAt(i+1) | s.bytes.charCodeAt(i+2)) > 40) nz++;'
-          + ' return { w: s.w, h: s.h, n: s.bytes.length, nz }; }';
+          + ' const s = await window.__OMNI_LOCAL("/api/gfx?path=" + encodeURIComponent(m[2]));'
+          + ' const img = s.kind === "png" ? window.__OMNI_RENDER.pngToRgba(s.bytes)'
+          + '   : { w: s.w, h: s.h, body: s.bytes };'
+          + ' let nz = 0; for (let i = 0; i < img.body.length; i += 4)'
+          + '   if ((img.body.charCodeAt(i) | img.body.charCodeAt(i+1) | img.body.charCodeAt(i+2)) > 40) nz++;'
+          + ' return { kind: s.kind, w: img.w, h: img.h, n: img.body.length, nz }; }';
         const gr = JSON.parse(await pw([S, '--raw', 'eval', gp]));
-        ok(`真浏览器里图形设备交出了一帧表面（${why}）`, gr.err === undefined
-          && gr.n === gr.w * gr.h * 4 && gr.nz > 1000,
+        ok(`真浏览器里图形设备交出了一帧图（${why}）`, gr.err === undefined
+          && gr.kind === 'png' && gr.n === gr.w * gr.h * 4 && gr.nz > 1000,
         JSON.stringify(gr).slice(0, 200));
       }
       /**

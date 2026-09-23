@@ -11,7 +11,7 @@
 //
 // 跑一趟：
 //   omni run ext/polydraw/examples/02-gl.pss
-//   -> #gfx rgba .omni-cache/gfx/frame.rgba 320 240
+//   -> #gfx png .omni-cache/gfx/frame.png 320 240
 //
 // stdout 上只有那一行**指针**，像素在那份表面文件里。
 //

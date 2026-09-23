@@ -1,7 +1,7 @@
 // BGI/EasyX 的第一课：开设备、换笔、画几个形状、把这一帧交出去。
 //
 //   omni run ext/js/examples/01-shapes.js
-//   -> #gfx rgba .omni-cache/gfx/frame.rgba 480 320
+//   -> #gfx png .omni-cache/gfx/frame.png 480 320
 //
 // stdout 上只有那一行**指针**；图在那份表面文件里（480*320*4 字节的 RGBA）。
 // Studio 见着这一行就把表面贴到 canvas 上；本机那侧贴进 glfw 窗口。

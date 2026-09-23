@@ -20,11 +20,12 @@
 // 那是有意的：换路之后同一份例子的表面要**逐字节相同**，这条才是"搬家不改语义"的判据。
 
 import { writeBinary, mkdirAll, stdout, env, nowMs } from './native.js';
+import { pngFromRgba, surfaceKind } from './png.js';
 
 /** 设备的那几格状态。**一格进程一格设备**（EVAL 的宿主本来就是这个形状）。 */
 const D = {
   w: 0, h: 0, fb: null, col: 0xffffff, x: 0, y: 0, on: false,
-  out: '.omni-cache/gfx/frame.rgba',
+  out: '.omni-cache/gfx/frame.png',
   /* 帧循环那三格：`fno` 是已经开始画的帧数（脚本里的 `numframes` = fno-1，第一帧是 0）、
      `frames` 是这一趟要画几帧（`OMNI_FRAMES`，默认 1）、`dirty` 是"这一帧动过没有"
      —— 没动过就不重复写表面（脚本自己调 `refresh()` 之后帧末那一次就免了）。 */
@@ -167,9 +168,9 @@ function cone(x0, y0, r0, x1, y1, r1, c) {
   }
 }
 
-/** 这一帧的表面字节（`#rgba <w> <h>\n` + 裸 RGBA，alpha 恒 255）—— latin1 一字符一字节。 */
-export function gfxSurfaceBytes() {
-  const rows = [`#rgba ${D.w} ${D.h}\n`];
+/** 这一帧的**裸 RGBA**（一字符一字节、第 0 行在上、alpha 恒 255）—— 两个出口都从它来。 */
+function rgbaBytes() {
+  const rows = [];
   for (let y = 0; y < D.h; y++) {
     let row = '';
     for (let x = 0; x < D.w; x++) {
@@ -181,6 +182,11 @@ export function gfxSurfaceBytes() {
     rows.push(row);
   }
   return rows.join('');
+}
+
+/** 备选那个出口的字节（`#rgba <w> <h>\n` + 裸 RGBA）。 */
+export function gfxSurfaceBytes() {
+  return `#rgba ${D.w} ${D.h}\n${rgbaBytes()}`;
 }
 
 /** 设备现在多大（`xres` / `yres` 那两格量、与贴 canvas 那一侧都要问它）。 */
@@ -293,14 +299,21 @@ function outPath() {
   return p === undefined || p === null || p === '' ? D.out : p;
 }
 
-/** CPU 备选那一档的"交出一帧"：写表面文件 + stdout 上印一行指针。 */
+/**
+ * CPU 备选那一档的"交出一帧"：写图 + stdout 上印一行指针。
+ *
+ * **默认写 PNG**（`.omni-cache/gfx/frame.png`）—— 双击能开、`magick`/`compare` 直接吃；
+ * 落点后缀是 `.rgba` 才走裸表面那个备选出口（它没有编码那一层，逐字节判据最直接）。
+ * 指针那一行把种类也带上：`#gfx png <路径> <宽> <高>` / `#gfx rgba …`。
+ */
 function present() {
   if (!D.on) return;
   const p = outPath();
   const cut = p.lastIndexOf('/');
   if (cut > 0) mkdirAll(p.slice(0, cut));
-  writeBinary(p, gfxSurfaceBytes());
-  stdout(`#gfx rgba ${p} ${D.w} ${D.h}\n`);
+  const kind = surfaceKind(p);
+  writeBinary(p, kind === 'rgba' ? gfxSurfaceBytes() : pngFromRgba(rgbaBytes(), D.w, D.h));
+  stdout(`#gfx ${kind} ${p} ${D.w} ${D.h}\n`);
   D.dirty = false;
 }
 
