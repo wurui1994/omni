@@ -386,6 +386,14 @@ export const VIRT = ['9', '10', '0', '9', '10', '0', '18', '20', '10'];
  */
 export const CTMPL = ['7', '14', '1.5', '3', '4', '7', '18'];
 
+/**
+ * **cpp 的 lambda**（`ext/cpp/examples/lambda.cpp`）。落成公共层现成的闭包
+ * （`(cfn …)` + `(mkclo …)` + `(cap …)`，与 go 的匿名函数同一台机器）。
+ * 第四行是最要紧的一格：**按值捕获之后改原来那格量不影响闭包**（base 改成 100，还是 15）。
+ * 最后一行是捕获闭包（compose 借走另外两格 lambda）。期望输出由 `c++` 给。
+ */
+export const LAMBDA = ['5', '15', '17', '15', '12', '16'];
+
 const C = (name, grammar, file, expect) => ({ name, grammar, file, expect });
 
 /**
@@ -596,6 +604,10 @@ export const CASES = [
   // `Box<int>` 落成一格叫 `Box__int` 的普通记录、方法叫 `Box__int_get`，
   // 于是字段读写、方法分派、发体一格都不用另写。期望输出由 `c++` 给。
   ...fam('ctmpl', CTMPL, ['cpp']),
+  // 第六十个家族：**lambda**（cpp 独一份）。这一族一格新节点都没加 —— 公共降级器本来就有
+  // 闭包那一格（`{ kind: 'closure' }` / `make-closure` / `capture`），go 的匿名函数走的就是它。
+  // 这一门只做三样：读捕获表、**返回类型从体里第一句 return 推**、局部量里装着函数就按值调。
+  ...fam('lambda', LAMBDA, ['cpp']),
 ];
 
 

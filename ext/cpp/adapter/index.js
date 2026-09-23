@@ -14,7 +14,7 @@ import {
 } from '../../../src/core/lower/cst.js';
 import { INT, arrOf, named, typeOf } from '../../../src/core/lower/ty-of.js';
 import {
-  exprOf, condOf, typeOfSpecs, printArgs, nameOf, tyArg, vcallName,
+  exprOf, condOf, typeOfSpecs, printArgs, nameOf, tyArg, vcallName, readParams,
 } from './expr.js';
 
 /** 析构函数的名字。 */
@@ -98,6 +98,8 @@ export function cppToIR(tree) {
     scoped: [],
     /** 正在降的这格方法的**接收者类型名**（裸写字段名 = `this->` 那一格靠它）。 */
     self: null,
+    /** 正在降的这格 lambda 借走了哪几格量（名字 → 类型）—— 体里它们落成 `(cap …)`。 */
+    capNames: new Map(),
     fresh: (p) => { tmpN += 1; return `${p}${tmpN}`; },
     ref: (n) => {
       if (!names.has(n)) {
@@ -205,12 +207,7 @@ export function cppToIR(tree) {
   const sigOf = (fnTok, selfType, forcedName) => {
     const f = kids(fnTok).find((y) => tag(y) === 'fn');
     const nmTok = kids(f)[0];
-    const ps = part(f, 'params');
-    const params = (ps === undefined ? [] : kids(ps).filter((y) => tag(y) === 'p')).map((p) => {
-      const pn = kids(p).find((y) => tag(y) === 'n' || tag(y) === 'ptr' || tag(y) === 'array');
-      const pname = pn === undefined ? 'x' : nameOf(tag(pn) === 'n' ? pn : kids(pn)[kids(pn).length - 1]);
-      return { name: C.ref(pname), type: typeOfSpecs(part(p, 'specs'), C, pn) ?? INT };
-    });
+    const params = readParams(part(f, 'params'), C);
     const ret = typeOfSpecs(part(fnTok, 'specs'), C) ?? { kind: 'void' };
     const name = forcedName ?? C.ref(nameOf(nmTok));
     const all = selfType === undefined ? params : [{ name: 'this', type: selfType }, ...params];
@@ -283,6 +280,84 @@ export function cppToIR(tree) {
     }
     return C.recType(inst);
   };
+  /**
+   * **一格 lambda** → 公共层现成的闭包（`{ kind: 'closure' }` + `make-closure` + `capture`，
+   * 与 go 的匿名函数走同一台机器）。图上一格新节点也没加。
+   *
+   * 三条是这一门自己的：
+   *   1. **捕获一律按值**。`[x]` 照抄、`[=]` 扫体里的自由名字（只收"这儿真有这格局部量"的）；
+   *      `[&]` / `[&x]` **当场报** —— 按引用要"把局部量提上去"那台机器（go 那侧的 promote）。
+   *   2. **返回类型从体里第一句 `return` 推**（C++ 的 `auto` 推导；写了 `-> T` 也认）。
+   *   3. 体要换一格干净的作用域（`C.isolate`）—— 不换就会直接看见外层的局部量，
+   *      于是该落成 `(cap …)` 的那几格落成了裸名字，**答案静默地错**。
+   */
+  C.lambda = (tok) => {
+    const name = C.fresh('__lam');
+    const params = readParams(kids(tok).find((y) => tag(y) === 'params'), C);
+    const body = part(tok, 'body');
+    const capsTok = kids(tok).find((y) => tag(y) === 'captures');
+    const wanted = [];
+    let all = false;
+    for (const c of (capsTok === undefined ? [] : kids(capsTok))) {
+      if (tag(c) === 'c') { wanted.push(String(leaf(kids(c)[0]))); continue; }
+      if (tag(c) === 'by-value-all') { all = true; continue; }
+      throw new Error(`cpp->IR: lambda 的这一格捕获还没接：${tag(c)}`
+        + '（按引用捕获要"把借走的局部量提上去"那台机器）');
+    }
+    const pnames = new Set(params.map((p) => p.name));
+    if (all) {
+      for (const n of freeNames(body)) {
+        if (pnames.has(C.ref(n))) continue;
+        if (C.tyCtx().env.get(C.ref(n)) === undefined) continue;   // 不是局部量（全局 / 函数名）
+        if (!wanted.includes(n)) wanted.push(n);
+      }
+    }
+    const caps = wanted.map((n) => {
+      const flat = C.ref(n);
+      const t = C.tyCtx().env.get(flat) ?? C.capNames.get(flat);
+      if (t === undefined) throw new Error(`cpp->IR: lambda 捕获了 ${n}，可是这儿没有这格量`);
+      return { name: flat, type: t };
+    });
+    /* 造点上那几格实参 —— **在换作用域之前**算（外面一层自己也可能在一格 lambda 里）。 */
+    const capArgs = caps.map((c) => (
+      C.tyCtx().env.get(c.name) === undefined && C.capNames.has(c.name)
+        ? { kind: 'capture', name: c.name, type: c.type }
+        : { kind: 'name', name: c.name }));
+    const outer = { caps: C.capNames, self: C.self, scoped: C.scoped };
+    C.capNames = new Map(caps.map((c) => [c.name, c.type]));
+    C.self = null;
+    C.scoped = [];
+    let stmts;
+    let ret;
+    try {
+      C.isolate(() => {
+        C.push();
+        for (const p of params) C.bind(p.name, p.type);
+        stmts = kids(body).flatMap((s) => stmtsOf(s, C));
+        const rv = firstReturn(stmts);
+        ret = rv === null ? { kind: 'void' } : typeOf(rv, C.tyCtx());
+        C.pop();
+      });
+    } finally {
+      C.capNames = outer.caps;
+      C.self = outer.self;
+      C.scoped = outer.scoped;
+    }
+    const retTok = kids(tok).find((y) => tag(y) === 'ret');
+    if (retTok !== undefined) {
+      ret = typeOfSpecs(part(kids(retTok)[0], 'specs') ?? kids(kids(retTok)[0])[0], C) ?? ret;
+    }
+    decls.push({
+      kind: 'closure', name, caps, params, ret, body: stmts,
+    });
+    return {
+      kind: 'make-closure',
+      name,
+      caps: capArgs,
+      type: { kind: 'fn-type', params: params.map((p) => p.type), ret },
+    };
+  };
+
   /** 实参类型 → 类型形参的绑定（**只认"形参的类型就是那个形参名"**那一档）。 */
   C.deduce = (name, argTypes) => {
     const t = C.templates.get(name);
@@ -409,8 +484,43 @@ function vcallDecls(C) {
 }
 
 /**
+ * 体里**第一句交了值的 `return`** 那格表达式（lambda 的返回类型从它推）。
+ * 要往 if / while / for / block / scope 里走 —— 不走的话 `[](int x){ if (…) return 1; return 2; }`
+ * 会算成"什么都不交"，那是静默地错。
+ */
+function firstReturn(stmts) {
+  for (const s of stmts) {
+    if (s === null || s === undefined) continue;
+    if (s.kind === 'return') return s.values.length === 0 ? null : s.values[0];
+    for (const key of ['then', 'else_', 'body', 'stmts']) {
+      const sub = s[key];
+      if (!Array.isArray(sub)) continue;
+      const v = firstReturn(sub);
+      if (v !== null) return v;
+    }
+  }
+  return null;
+}
+
+/**
+ * 一棵树里出现过的名字（`(n X)`）。`[=]` 那一格用它猜"借走了哪几格量" ——
+ * 会多收几个（字段名、函数名也长这样），所以调用点还要再过一道"这儿真有这格局部量"。
+ * 多捕一格按值的量不改变答案，少捕一格才会错，所以宁可多收。
+ */
+function freeNames(tok) {
+  const out = [];
+  const walk = (t) => {
+    if (t === null || t === undefined) return;
+    if (tag(t) === 'n') { out.push(nameOf(t)); return; }
+    if (!isList(t)) return;
+    for (const k of kids(t)) walk(k);
+  };
+  walk(tok);
+  return out;
+}
+
+/**
  * 一格 `(class …)` → `{ name, bases, fields, methods, dtor, ctor, virtuals }`。
- *
  * `asName` 给了就用它当记录名（**类模板的实例**走这一格：同一棵树按不同的 `T` 读两遍，
  * 名字是 `Box__int` / `Box__real`）。字段与形参的类型走 `typeOfSpecs`，所以类型形参
  * 只要在 `C.aliases` 里绑着，这一份一个字都不用改。
@@ -953,7 +1063,7 @@ function declOf(d, specs, C) {
 }
 
 // ---- 这一批明说的不足（不猜）----------------------------------------------------
-//   1. **异常与 lambda**还没接（当场报）。
+//   1. **异常**还没接（当场报）。
 //   2. `printf` 只接"一格转换 + 换行"与纯文本（见 expr.js 的 printArgs）。
 //   3. 引用（`T&`）当值收（例子里只用它传结构 —— 记录本来就是引用语义）；
 //      `&x` 只在记录/列表/字典上成立（标量上当场报，那要真指针）。
@@ -964,3 +1074,5 @@ function declOf(d, specs, C) {
 //   6. 虚函数只接**单继承**（虚函数 + 多继承当场报）；纯虚（`= 0`）与虚析构没接。
 //   7. 类模板只接"没有继承、没有虚函数、没有构造/析构"那一档（别的当场报）；
 //      模板的默认实参与特化没接。
+//   8. lambda 的捕获**一律按值**：`[&]` / `[&x]` 当场报（按引用要"把借走的局部量提上去"
+//      那台机器，go 那侧的 `promote`）；`mutable`、`[this]`、泛型 lambda 也没接。

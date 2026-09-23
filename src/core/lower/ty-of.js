@@ -79,6 +79,9 @@ export function typeOf(e, ctx) {
       const t = typeOf(e.fn, ctx);
       return t.kind === 'fn-type' ? t.ret : INT;
     }
+    /* 闭包那两格（`(mkclo …)` 造出来的值、体里读一格捕获）—— 类型是**写在节点上**的。 */
+    case 'make-closure': return e.type ?? INT;
+    case 'capture': return e.type ?? INT;
     case 'builtin': return builtinType(e, ctx);
     /* `(rmath …)` 交的一律是 real。 */
     case 'rmath': return REAL;

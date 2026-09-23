@@ -91,8 +91,20 @@ export function typeOfSpecs(specs, C, declTok) {
   return INT;
 }
 
-/** `(targs (type (specs …)) …)` → 那几格实参类型。 */
-function targTypes(tid, C) {
+/**
+ * 一格 `(params (p (specs …) (n x)) …)` → `[{ name, type }]`。
+ * 函数、方法、构造函数、**lambda** 四处共用这一份（名字那一格可能裹在 `ptr` / `array` 里）。
+ */
+export function readParams(paramsTok, C) {
+  const ps = paramsTok === undefined ? [] : kids(paramsTok).filter((y) => tag(y) === 'p');
+  return ps.map((p) => {
+    const pn = kids(p).find((y) => tag(y) === 'n' || tag(y) === 'ptr' || tag(y) === 'array');
+    const pname = pn === undefined ? 'x' : nameOf(tag(pn) === 'n' ? pn : kids(pn)[kids(pn).length - 1]);
+    return { name: C.ref(pname), type: typeOfSpecs(part(p, 'specs'), C, pn) ?? INT };
+  });
+}
+
+/** `(targs (type (specs …)) …)` → 那几格实参类型。 */function targTypes(tid, C) {
   const targs = part(tid, 'targs');
   return (targs === undefined ? [] : kids(targs))
     .map((a) => typeOfSpecs(part(a, 'specs') ?? kids(a)[0], C) ?? INT);
@@ -150,6 +162,13 @@ export function exprOf(x, C) {
        * 顺序是硬的：**局部量与形参先查**（同名的局部量遮住字段，C++ 就是这么定的）。
        */
       const flat = C.ref(n);
+      /**
+       * **lambda 体里借走的那几格量**落成 `(cap …)`：那一层的作用域栈是换空过的
+       * （见 index.js 的 `C.lambda`），所以"环境里没有、捕获表里有"就是一格捕获。
+       */
+      if (C.tyCtx().env.get(flat) === undefined && C.capNames.has(flat)) {
+        return { kind: 'capture', name: flat, type: C.capNames.get(flat) };
+      }
       if (C.self !== null && C.tyCtx().env.get(flat) === undefined
         && (C.tyCtx().fields.get(C.self) ?? []).some((f) => f.name === n)) {
         return { kind: 'field', obj: { kind: 'name', name: 'this' }, name: n };
@@ -235,6 +254,8 @@ export function exprOf(x, C) {
       return v;
     }
     case 'call': return callOf(x, C);
+    /* `[捕获](形参){ 体 }` —— 落成公共层现成的闭包（真正那一趟在 index.js 的 `C.lambda`）。 */
+    case 'lambda': return C.lambda(x);
     case 'qual': {
       /* `std::something` 当值用（这一批只有 `std::make_pair` 那一处，在 callOf 里）。 */
       throw new Error(`cpp->IR: \`${kids(x).map((k) => (tag(k) === 'n' ? nameOf(k) : '?')).join('::')}\` 当值用还没接`);
@@ -360,6 +381,11 @@ function callOf(x, C) {
   if (C.templates.has(name)) {
     const inst = C.instantiate(name, C.deduce(name, args.map((a) => typeOf(a, C.tyCtx()))));
     return { kind: 'call', fn: { kind: 'name', name: inst }, args };
+  }
+  /* **局部量或捕获里装着函数** —— 通过值调（`(callfn v …)`）。 */
+  const fv = C.tyCtx().env.get(C.ref(name)) ?? C.capNames.get(C.ref(name));
+  if (fv !== undefined && fv.kind === 'fn-type') {
+    return { kind: 'call-value', fn: exprOf(fn, C), args };
   }
   return { kind: 'call', fn: { kind: 'name', name: C.ref(name) }, args };
 }
