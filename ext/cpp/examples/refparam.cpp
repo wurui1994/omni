@@ -31,6 +31,12 @@ void scale(double& r, double k) {
   r = r * k;
 }
 
+/* **按指针收的出参**（`int*` + `*p` + 调用点 `&y`）落成同一台机器 —— 那是 C 那半边
+   的写法，真实代码里与 `T&` 一样常见。指针只接这一种用法，别的当场报。 */
+void addTo(int* p, int d) {
+  *p = *p + d;
+}
+
 int main() {
   int y = 5;
   bump(y, 3);
@@ -45,5 +51,8 @@ int main() {
   double r = 2.0;
   scale(r, 1.5);
   printf("%.2f\n", r);
+  int c = 10;
+  addTo(&c, 7);
+  printf("%d\n", c);
   return 0;
 }

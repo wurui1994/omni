@@ -62,7 +62,8 @@ function borrowedLocals(fnTok, C) {
         const idx = C.refSig.get(C.ref(nameOf(fn)));
         if (idx !== undefined) {
           kids(as).forEach((a, i) => {
-            if (idx.has(i) && tag(a) === 'n') out.add(C.ref(nameOf(a)));
+            const inner = tag(a) === 'addrof' ? kids(a)[0] : a;
+            if (idx.has(i) && tag(inner) === 'n') out.add(C.ref(nameOf(inner)));
           });
         }
       }
@@ -1434,6 +1435,8 @@ function lhsOf(t, C) {
   if (tag(t) === 'dot' || tag(t) === 'arrow') {
     return { kind: 'field', obj: exprOf(kids(t)[0], C), name: nameOf(kids(t)[1]) };
   }
+  /* `*p = …` —— 按指针收的出参（`exprOf` 的 `case 'deref'` 把它落成盒子那一格字段）。 */
+  if (tag(t) === 'deref') return exprOf(t, C);
   if (tag(t) === 'index') {
     return { kind: 'index', obj: exprOf(kids(t)[0], C), index: exprOf(kids(t)[1], C) };
   }
@@ -1618,11 +1621,12 @@ function declOf(d, specs, C) {
 //      长度修饰（`%lld` / `%lu` / `%08lld` 那一族）**读得对、印得也对** —— 量过一趟与
 //      `c++` 逐字节相同：这条腿上整数只有一格宽度，所以"按几位读"那件事现在没有区别；
 //      真要按位截断得等定宽整数回卷那一格（见第 4 条）。
-//   3. 引用（`T&`）：记录 / 列表 / 字典上照原样收（本来就是引用语义）；**标量上装进一格
-//      盒子**（`__ref_int`，`refparam.cpp`）—— 只接**自由函数**的形参，而且借出去的那个
-//      实参只能是"一格装着盒子的量"；方法 / 构造 / lambda 的形参、重载 + `T&`、
-//      以及把字段或数组元素借出去，全当场报。
-//      `&x`（取地址当值用）只在记录/列表/字典上成立（标量上当场报，那要真指针）。
+//   3. 引用（`T&`）与**按指针收的出参**（`T*` + `*p` + 调用点 `&y`）落成同一样东西：
+//      记录 / 列表 / 字典照原样收（本来就是引用语义）；**标量装进一格盒子**
+//      （`__ref_int`，`refparam.cpp`）。只接**自由函数**的形参，借出去的那个实参只能是
+//      "一格装着盒子的量"；方法 / 构造 / lambda 的形参、重载 + `T&`、把字段或数组元素
+//      借出去，全当场报。指针也**只有这一种用法** —— 指针算术、指向数组的指针都当场报。
+//      `&x`（取地址当值用）只在记录/列表/字典上成立。
 //   4. 整数那一族只有一格宽度：定宽类型（`int8_t` …）的位宽表在
 //      `src/core/lower/cfam.js` 的 `C_INT_BITS`（与 jancy 共用一张），**回卷还没接**。
 //   5. **自由函数、方法与构造函数**都按实参**类型**重载（`fnovl.cpp` / `methov2.cpp` /

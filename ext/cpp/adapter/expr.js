@@ -108,9 +108,12 @@ export function readParams(paramsTok, C) {
     const type = typeOfSpecs(part(p, 'specs'), C, pn) ?? INT;
     const amp = pn !== undefined && tag(pn) === 'ptr'
       && kids(pn).some((y) => tag(y) === null && String(leaf(y)) === '&');
+    /* `int* x` 这一格与 `int& x` 落成同一样东西（装盒子）；`char*` 是串，不在这儿。 */
+    const star = pn !== undefined && tag(pn) === 'ptr'
+      && kids(pn).some((y) => tag(y) === null && String(leaf(y)) === '*');
     const scalar = type.kind === 'int' || type.kind === 'real'
       || type.kind === 'bool' || type.kind === 'string';
-    if (amp && scalar) {
+    if ((amp || (star && type.kind !== 'string')) && scalar) {
       return { name: C.ref(pname), type: C.refBox(type), ref: true, of: type };
     }
     return { name: C.ref(pname), type };
@@ -213,6 +216,18 @@ export function exprOf(x, C) {
         throw new Error(`cpp->IR: \`&\` 用在 ${t.kind} 上还没接（记录/列表/字典本来就是引用）`);
       }
       return v;
+    }
+    /**
+     * `*p` —— 这条腿上**指针只有"出参"那一种用法**（`void bump(int* x)`）：那一格形参
+     * 装在盒子里（与 `T&` 同一台机器，见 index.js 的 `refBox`），所以 `*x` 就是盒子里
+     * 那格字段。别的（真指针算术、指向数组）当场报。
+     */
+    case 'deref': {
+      const inner = kids(x)[0];
+      if (tag(inner) === 'n' && C.refNames.has(C.ref(nameOf(inner)))) {
+        return { kind: 'field', obj: { kind: 'name', name: C.ref(nameOf(inner)) }, name: 'v' };
+      }
+      throw new Error('cpp->IR: `*p` 只接"按指针收的出参"那一格（真指针还没接）');
     }
     /* `p.x` 与 `this->tag` —— 同一格字段。 */
     case 'dot': case 'arrow':
@@ -393,11 +408,13 @@ function callOf(x, C) {
   const rsig = C.refSig.get(C.ref(name));
   const args = rawArgs.map((a, i) => {
     if (rsig === undefined || !rsig.has(i)) return exprOf(a, C);
-    if (tag(a) !== 'n' || !C.refNames.has(C.ref(nameOf(a)))) {
+    /* 借出去的那一格写法有两种：`f(y)`（`T&`）与 `f(&y)`（`T*`）—— 交的都是盒子。 */
+    const inner = tag(a) === 'addrof' ? kids(a)[0] : a;
+    if (tag(inner) !== 'n' || !C.refNames.has(C.ref(nameOf(inner)))) {
       throw new Error(`cpp->IR: \`${name}\` 的第 ${i + 1} 格实参要按引用借出去，`
         + '可这儿给的不是一格局部量（字段 / 数组元素 / 临时值上还没接）');
     }
-    return { kind: 'name', name: C.ref(nameOf(a)) };
+    return { kind: 'name', name: C.ref(nameOf(inner)) };
   });
   if (name === 'printf' || name === 'puts') {
     throw new Error(`cpp->IR: \`${name}\` 在表达式位置上（它不交值）`);
