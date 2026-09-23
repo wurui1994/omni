@@ -262,6 +262,9 @@ export function exprOf(x, C) {
        */
       const lv = C.lvAlias.get(flat);
       if (lv !== undefined) return lv;
+      /* 函数里的 `static` 局部量其实是一格**模块级的量**（几次调用之间留着）。 */
+      const sl = C.statLocals.get(flat);
+      if (sl !== undefined) return { kind: 'name', name: sl };
       /**
        * **lambda 体里借走的那几格量**落成 `(cap …)`：那一层的作用域栈是换空过的
        * （见 index.js 的 `C.lambda`），所以"环境里没有、捕获表里有"就是一格捕获。

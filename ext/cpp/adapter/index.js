@@ -441,6 +441,15 @@ export function cppToIR(tree) {
     /** 名字 → 它其实是哪一格地方（区间 for 按引用走那一格：`v` 就是 `xs[i]`）。 */
     lvAlias: new Map(),
     /**
+     * **函数里的 `static` 局部量 → 那格模块级的量**（这个函数一份，几次调用之间**留着**）。
+     * 从前 `static` 当修饰丢掉 → 发成普通局部量、每次进门重新初始化，`counter()` 老答 1
+     * （**答案静默地错**）。表按函数清空（见 `fnDecl`）—— 名字只在那个体里有效。
+     */
+    statLocals: new Map(),
+    /** `static` 局部量要发的模块级量（`{ name, type }`）与它们的初值语句。 */
+    statGlobals: [],
+    statInits: [],
+    /**
      * **方法名（没缀类名的那个） → 哪几格实参是借出去的**。降体之前那一趟扫树
      * （`borrowedLocals`）手上还没有类型，认不出 `a.set(y)` 里 `a` 是哪个类 ——
      * 所以按**名字**近似。多装了盒子不会错（读写一律走 `.v`），只是白装一格。
@@ -1303,11 +1312,18 @@ export function cppToIR(tree) {
     }
   }
   for (const f of topFns) decls.push(fnDecl(topSig.get(f), f, C));
+  /**
+   * **函数里的 `static` 局部量**：那几格模块级的量要摆在**最前面**（模块里的量得先声明
+   * 再被用到），初值（非零的那几格）与 `static` 数据成员一起摆在 `main` 体的最前面。
+   */
+  for (let i = C.statGlobals.length - 1; i >= 0; i -= 1) {
+    decls.unshift({ kind: 'global', name: C.statGlobals[i].name, type: C.statGlobals[i].type });
+  }
   /* `static` 成员的初值摆在 `main` 体的最前面（见上面那一段）。 */
-  if (staticSets.length > 0) {
+  if (staticSets.length > 0 || C.statInits.length > 0) {
     const mainDecl = decls.find((d) => d.kind === 'fn' && d.name === 'main');
     if (mainDecl === undefined) throw new Error('cpp->IR: 有 static 成员可没有 main');
-    mainDecl.body = [...staticSets, ...mainDecl.body];
+    mainDecl.body = [...staticSets, ...C.statInits, ...mainDecl.body];
   }
   for (const d of vcallDecls(C)) decls.push(d);
 
@@ -1810,6 +1826,9 @@ function fnDecl(sig, fnTok, C, selfName = null) {
   const outerSelf = C.self;
   const outerRefs = C.refNames;
   const outerRet = C.retType;
+  /* `static` 局部量那张表按函数清空 —— 名字只在这个体里指那格模块级的量。 */
+  const outerStat = C.statLocals;
+  C.statLocals = new Map();
   /**
    * **这一格函数里哪几个名字装在盒子里**：引用形参，加上"体里被借出去"的那几格局部量
    * （`borrowedLocals` 先扫一趟树 —— 声明那一句要发成盒子，所以得在降体**之前**知道）。
@@ -1830,6 +1849,7 @@ function fnDecl(sig, fnTok, C, selfName = null) {
   C.self = outerSelf;
   C.refNames = outerRefs;
   C.retType = outerRet;
+  C.statLocals = outerStat;
   C.pop();
   return {
     kind: 'fn',
@@ -2013,8 +2033,17 @@ export function stmtsOf(x, C) {
       if (specs !== undefined && kids(specs).some((y) => tag(y) === 'class' || tag(y) === 'elaborated')) return [];
       if (specs !== undefined && kids(specs).some((y) => tag(y) === null && String(leaf(y)) === 'typedef')) return [];
       const out = [];
-      for (const d of kids(x).filter((y) => tag(y) === 'init')) {
-        out.push(declOf(d, specs, C));
+      /**
+       * **一句里可以有好几个声明符**（`int a = 1, b = 2;`）——它们都在**同一格** `init`
+       * 里（每个一格 `(d …)`）。从前只取了第一格，`b` 根本没声明（方言报"未声明的变量"）；
+       * 这是"覆盖还是追加"那个形状的又一次：**只取第一格**。
+       */
+      for (const it of kids(x).filter((y) => tag(y) === 'init')) {
+        for (const dd of kids(it)) {
+          /* `static` 局部量交回 null —— 它落成一格模块级的量，这儿没有语句要发。 */
+          const one = declOf(dd, specs, C);
+          if (one !== null) out.push(one);
+        }
       }
       return out;
     }
@@ -2278,14 +2307,57 @@ function assignOf(x, C) {
 }
 
 /** 一格 `(init (d 名字 [(init 值)]))` → 一条 `let`。 */
-function declOf(d, specs, C) {
-  const dd = kids(d)[0];
+function declOf(dd, specs, C) {
   const nameTok = kids(dd)[0];
   const initTok = part(dd, 'init');
   const isArray = tag(nameTok) === 'array';
-  const bare = tag(nameTok) === 'n' ? nameTok : kids(nameTok).find((y) => tag(y) === 'n');
+  /**
+   * 名字可能埋在**好几层**声明符底下（`int m[2][3]` 是 `(array (array (n m) 2) 3)`）——
+   * 只看一层的话 `nameOf` 答 null，那格量会发成一格叫 `null` 的东西（而 `m` 根本不存在）。
+   */
+  const deepName = (t) => {
+    if (!isList(t)) return undefined;
+    if (tag(t) === 'n') return t;
+    for (const k of kids(t)) {
+      const got = deepName(k);
+      if (got !== undefined) return got;
+    }
+    return undefined;
+  };
+  const bare = tag(nameTok) === 'n' ? nameTok : deepName(nameTok);
   const name = C.ref(nameOf(bare));
   let type = typeOfSpecs(specs, C, nameTok);
+
+  /**
+   * **函数里的 `static` 局部量**：一格模块级的量（这个函数一份，几次调用之间**留着**）。
+   * 从前 `static` 当修饰丢掉 —— 发成普通局部量、每次进门重新初始化，于是 `counter()`
+   * 老答 1（**答案静默地错**，与 `static` 数据成员那一格同一个形状）。
+   *
+   * 初值只接**字面量**：方言的 `(global 名字 类型)` 按设计零初始化、不带初值，非零的那一档
+   * 摆在 `main` 体的最前面（与 `static` 数据成员同一手）。要跑一段才算出来的初值当场报 ——
+   * C++ 那边是"第一次走到才初始化"，伪造不出来。
+   */
+  if (specs !== undefined
+    && kids(specs).some((y) => tag(y) === null && String(leaf(y)) === 'static')) {
+    if (type === null) throw new Error(`cpp->IR: \`static auto ${name}\` 还没接`);
+    const g = C.fresh(`__st_${name}`);
+    C.statGlobals.push({ name: g, type });
+    C.statLocals.set(name, g);
+    C.bind(g, type);
+    if (initTok !== undefined) {
+      const v0 = wrapNarrow(exprOf(kids(initTok)[0], C), type);
+      if (!['int', 'real', 'bool', 'str'].includes(v0.kind)) {
+        throw new Error(`cpp->IR: \`static ${name}\` 的初值要跑一段才算得出来 —— 还没接`
+          + '（C++ 那边是"第一次走到才初始化"）');
+      }
+      const zero = (v0.kind === 'int' || v0.kind === 'real') ? v0.value === 0
+        : (v0.kind === 'bool' ? v0.value === false : v0.value === '');
+      if (!zero) {
+        C.statInits.push({ kind: 'assign', target: { kind: 'name', name: g }, value: v0 });
+      }
+    }
+    return null;
+  }
 
   /* `auto t = …`：类型从初值取。 */
   if (type === null) {
@@ -2320,6 +2392,80 @@ function declOf(d, specs, C) {
   }
 
   if (isArray) {
+    /**
+     * **多维数组**（`int m[2][3];`）：树上是套起来的 `array`，**外层那格带的是最后那一维**
+     * （`(array (array (n m) 2) 3)`）。落成"列表的列表" —— 外层 `anew` 之后要现搭一段
+     * `while` 把每一格填上一个内层 `anew`，不然那几格是 null（`m[0][0] = 1` 运行期报
+     * "null reference"）。这与"元素是记录"那一格是同一手，只是填进去的东西不同。
+     */
+    const dims = [];
+    let at = nameTok;
+    while (tag(at) === 'array') {
+      const dTok = kids(at).find((y) => tag(y) === 'num');
+      dims.unshift(dTok === undefined ? 0 : Number(leaf(kids(dTok)[0])));
+      at = kids(at)[0];
+    }
+    if (dims.length > 1) {
+      if (initTok !== undefined) {
+        throw new Error('cpp->IR: 多维数组带初值（`= {{…}}`）还没接');
+      }
+      if (type.kind === 'named') {
+        throw new Error('cpp->IR: 多维数组的元素是记录 —— 还没接');
+      }
+      let ty = type;
+      const tys = [];
+      for (let i = dims.length - 1; i >= 0; i -= 1) { ty = arrOf(ty); tys[i] = ty; }
+      C.bind(name, tys[0]);
+      /** 第 `level` 维：发一格 `anew`，再（除了最内那维）把格子一个个填上内层的 `anew`。 */
+      const mk = (level, out) => {
+        const tmp = C.fresh('arr');
+        C.bind(tmp, tys[level]);
+        out.push({
+          kind: 'let',
+          name: tmp,
+          type: tys[level],
+          init: {
+            kind: 'builtin',
+            name: 'anew',
+            args: [tyArg(tys[level]), { kind: 'int', value: dims[level] }],
+          },
+        });
+        if (level + 1 < dims.length && dims[level] > 0) {
+          const idx = C.fresh('ai');
+          C.bind(idx, INT);
+          const body = [];
+          const inner = mk(level + 1, body);
+          body.push({
+            kind: 'assign',
+            target: { kind: 'index', obj: { kind: 'name', name: tmp }, index: { kind: 'name', name: idx } },
+            value: inner,
+          });
+          body.push({
+            kind: 'assign',
+            target: { kind: 'name', name: idx },
+            value: {
+              kind: 'binop', op: '+', left: { kind: 'name', name: idx }, right: { kind: 'int', value: 1 },
+            },
+          });
+          out.push({
+            kind: 'let', name: idx, type: INT, init: { kind: 'int', value: 0 },
+          });
+          out.push({
+            kind: 'while',
+            cond: {
+              kind: 'binop', op: '<', left: { kind: 'name', name: idx }, right: { kind: 'int', value: dims[level] },
+            },
+            body,
+          });
+        }
+        return { kind: 'name', name: tmp };
+      };
+      const stmts = [];
+      const top = mk(0, stmts);
+      return {
+        kind: 'let', name, type: tys[0], init: { kind: 'block-expr', stmts, value: top },
+      };
+    }
     const elem = type;
     const arrTy = arrOf(elem);
     C.bind(name, arrTy);
@@ -2621,3 +2767,13 @@ function declOf(d, specs, C) {
 //      那句检查，而 C++ 里 do-while 的 `continue` 是**跳到条件那一句**（轻则少判一次，重则
 //      死循环）；②"体 + while(条件){体}" —— 体发两份，副作用跟着来两遍。
 //      `||` 在方言里是短路的，所以第一趟不去求那个条件。
+//  17. **声明那一句上的三格**（`declmix.cpp`）：
+//      ①**一句里好几个声明符**（`int a = 1, b = 2;`）—— 它们在树上是**同一格** `init` 里的
+//      好几格 `(d …)`，从前只取第一格（后面那几个名字根本没声明）；
+//      ②**多维数组**（`int m[2][3]`）—— 树上套起来的 `array`、**外层带最后那一维**，名字埋在
+//      两层声明符底下（所以 `deepName` 要往里找）。落成"列表的列表"：外层 `anew` 之后现搭
+//      一段 `while` 把每格填上内层 `anew`（不填是 null）。带初值（`= {{…}}`）与元素是记录
+//      的当场报；
+//      ③**函数里的 `static` 局部量** —— 落成一格模块级的量（这个函数一份，`C.statLocals`
+//      按函数清空），非零初值摆在 `main` 体最前面（与 `static` 数据成员同一手）。
+//      初值要跑一段才算得出来的当场报（C++ 那边是"第一次走到才初始化"）。

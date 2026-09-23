@@ -26,7 +26,7 @@ import {
   BASICS, INTMATH, LOOPEXIT, DICT, UNARY, RECORD, INDEX, SLICE, CONV, VALUES, MUT,
   DEFER, BLOCKRET, METHOD, ASSERTOK, STRCAT, NUMSTR, NAMEDARG, CASEFOR, CASERANGE,
   CTIF, MEMBER, BLOCKSCOPE, BITS, CHARLIT, CTCONST, DECLS, ENUMVAL, FNVAL, FORIN,
-  HOIST, LITNONE, MATCH, METHOD2, OPTRES, POINTER, POSINIT, PUSH, INHERIT, OPOVER, TMPL, CTOR, VIRT, CTMPL, LAMBDA, FMT, FORMAT, POSTEST, CTOR2, METHOV, PUREVIRT, DTORCHAIN, MIXVIRT, OUTLINE, CTMPL2, FNOVL, METHOV2, CTOR3, REFPARAM, STATICMEM, BYVALUE, ARRFIELD, RANGEFOR, SWBREAK, NARROW, ENUMDO,
+  HOIST, LITNONE, MATCH, METHOD2, OPTRES, POINTER, POSINIT, PUSH, INHERIT, OPOVER, TMPL, CTOR, VIRT, CTMPL, LAMBDA, FMT, FORMAT, POSTEST, CTOR2, METHOV, PUREVIRT, DTORCHAIN, MIXVIRT, OUTLINE, CTMPL2, FNOVL, METHOV2, CTOR3, REFPARAM, STATICMEM, BYVALUE, ARRFIELD, RANGEFOR, SWBREAK, NARROW, ENUMDO, DECLMIX,
 } from '../lib/cases.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -55,7 +55,7 @@ const FAMILIES = {
   ctmpl: CTMPL, lambda: LAMBDA, fmt: FMT, format: FORMAT, postest: POSTEST,
   ctor2: CTOR2, methov: METHOV, purevirt: PUREVIRT, dtorchain: DTORCHAIN, mixvirt: MIXVIRT,
   outline: OUTLINE, ctmpl2: CTMPL2, fnovl: FNOVL, methov2: METHOV2, ctor3: CTOR3, refparam: REFPARAM, staticmem: STATICMEM, byvalue: BYVALUE, arrfield: ARRFIELD, rangefor: RANGEFOR,
-  swbreak: SWBREAK, narrow: NARROW, enumdo: ENUMDO,
+  swbreak: SWBREAK, narrow: NARROW, enumdo: ENUMDO, declmix: DECLMIX,
 };
 const MIGRATED = {
   awk: ['basics', 'intmath', 'loopexit', 'dict', 'unary'],
@@ -73,11 +73,11 @@ const MIGRATED = {
      按口径拼成 `if !cond then print + fail`）三样是这门语言带进来的。 */
   mojo: ['assertok', 'basics', 'conv', 'defer', 'dict', 'index', 'intmath', 'loopexit',
     'method', 'record', 'slice', 'values'],
-  /* cpp：三十五个家族。`defer` 在这门语言里是 `~Say()`（RAII，与 freebasic 同一手，
+  /* cpp：三十六个家族。`defer` 在这门语言里是 `~Say()`（RAII，与 freebasic 同一手，
      出口那一半交给公共层的 `{ kind: 'scope' }`）；`printf` 只接"一格转换 + 换行"
      （见 adapter/expr.js 的 printArgs）。`inherit` 与 `opover` 两族的期望输出是
      本机 `c++ -std=c++17` 给的，不是我们自己编的。 */
-  cpp: ['arrfield', 'basics', 'byvalue', 'conv', 'ctmpl', 'ctmpl2', 'ctor', 'ctor2', 'ctor3', 'defer', 'dict', 'dtorchain', 'enumdo', 'fmt',
+  cpp: ['arrfield', 'basics', 'byvalue', 'conv', 'ctmpl', 'ctmpl2', 'ctor', 'ctor2', 'ctor3', 'declmix', 'defer', 'dict', 'dtorchain', 'enumdo', 'fmt',
     'fnovl',
     'index', 'inherit', 'intmath', 'methov', 'methov2', 'mixvirt', 'outline',
     'lambda', 'loopexit', 'narrow', 'swbreak', 'opover', 'purevirt', 'rangefor', 'record', 'refparam', 'staticmem', 'tmpl', 'values', 'virt'],
