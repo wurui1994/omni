@@ -256,34 +256,71 @@ export function cppToIR(tree) {
       if (!C.copyDone.has(nm)) {
         C.copyDone.add(nm);
         const fs = recFields.get(type.name) ?? [];
-        for (const f of fs) {
-          if (f.type.kind === 'arr' || f.type.kind === 'map') {
-            throw new Error(`cpp->IR: 按值拷 ${type.name} 还没接`
-              + `（字段 ${f.name} 是列表/字典 —— 那要连里头一起拷）`);
-          }
-        }
         const src = { kind: 'name', name: 'src' };
+        const pre = [];
+        /**
+         * 一格字段怎么拷：记录再递归拷一层；**列表要连里头一起拷**（发一段
+         * `anew` + `while` —— 方言没有"拷一份列表"的内建，那就现搭一格循环）；
+         * 字典当场报（方言里没有能装下键列表的类型，拷不了）。
+         */
+        const copyValue = (read, t, out) => {
+          if (t.kind === 'named') {
+            return { kind: 'call', fn: { kind: 'name', name: C.recCopy(t) }, args: [read] };
+          }
+          if (t.kind === 'map') {
+            throw new Error(`cpp->IR: 按值拷 ${type.name} 还没接`
+              + '（字段是字典 —— 方言里没有能装下键列表的类型，拷不了）');
+          }
+          if (t.kind !== 'arr') return read;
+          const dst = C.fresh('cp');
+          const idx = C.fresh('ci');
+          const len = { kind: 'builtin', name: 'alen', args: [read] };
+          out.push({
+            kind: 'let',
+            name: dst,
+            type: t,
+            init: { kind: 'builtin', name: 'anew', args: [tyArg(t), len] },
+          });
+          out.push({
+            kind: 'let', name: idx, type: INT, init: { kind: 'int', value: 0 },
+          });
+          const body = [];
+          const one = copyValue({ kind: 'index', obj: read, index: { kind: 'name', name: idx } }, t.elem, body);
+          body.push({
+            kind: 'assign',
+            target: { kind: 'index', obj: { kind: 'name', name: dst }, index: { kind: 'name', name: idx } },
+            value: one,
+          });
+          body.push({
+            kind: 'assign',
+            target: { kind: 'name', name: idx },
+            value: {
+              kind: 'binop', op: '+', left: { kind: 'name', name: idx }, right: { kind: 'int', value: 1 },
+            },
+          });
+          out.push({
+            kind: 'while',
+            cond: {
+              kind: 'binop', op: '<', left: { kind: 'name', name: idx }, right: len,
+            },
+            body,
+          });
+          return { kind: 'name', name: dst };
+        };
+        const fields = fs.map((f) => ({
+          name: f.name,
+          value: copyValue({ kind: 'field', obj: src, name: f.name }, f.type, pre),
+        }));
         C.fns.set(nm, { params: [{ name: 'src', type }], ret: type });
         decls.push({
           kind: 'fn',
           name: nm,
           params: [{ name: 'src', type }],
           ret: type,
-          body: [{
+          body: [...pre, {
             kind: 'return',
             values: [{
-              kind: 'new-record',
-              type,
-              ref: true,
-              fields: fs.map((f) => {
-                const read = { kind: 'field', obj: src, name: f.name };
-                return {
-                  name: f.name,
-                  value: f.type.kind === 'named'
-                    ? { kind: 'call', fn: { kind: 'name', name: C.recCopy(f.type) }, args: [read] }
-                    : read,
-                };
-              }),
+              kind: 'new-record', type, ref: true, fields,
             }],
           }],
         });
@@ -1049,6 +1086,21 @@ function collectClass(cls, C, asName = null) {
         pure.add(pn);
         continue;
       }
+      /**
+       * **数组字段**（`int xs[3];`）：从前 `nameOf` 读 `(array (n xs) (num 3))` 答 null ——
+       * 字段表里多出一格叫 `null` 的、而 `xs` 根本不存在（方言报"类 Bag 没有字段 xs"，
+       * 病因不在那儿）。现在收成一格列表字段，**长度也记下来** —— 造对象时要照它开格子。
+       */
+      if (mn !== undefined && tag(mn) === 'array') {
+        const inner = kids(mn).find((y) => tag(y) === 'n');
+        const numTok = kids(mn).find((y) => tag(y) === 'num');
+        fields.push({
+          name: nameOf(inner),
+          type: arrOf(typeOfSpecs(ms, C, inner) ?? INT),
+          size: numTok === undefined ? 0 : Number(leaf(kids(numTok)[0])),
+        });
+        continue;
+      }
       if (mn !== undefined) {
         fields.push({ name: nameOf(mn), type: typeOfSpecs(ms, C, kids(kids(mi)[0])[0]) ?? INT });
       }
@@ -1439,9 +1491,24 @@ function vtZeroRecord(type, C) {
     ref: true,
     fields: fs.map((f) => ({
       name: f.name,
-      value: f.name === VT ? { kind: 'int', value: id } : zeroFor(f.type, C),
+      value: f.name === VT ? { kind: 'int', value: id } : zeroField(f, C),
     })),
   };
+}
+
+/**
+ * 一格**字段**的零值。数组字段要照写着的长度开格子（`int xs[3]` → `anew(T, 3)`）——
+ * 照 `zeroFor` 那条走的话开的是 0 格，`xs[0] = 10` 就越界了。
+ */
+function zeroField(fld, C) {
+  if (fld.type.kind === 'arr' && fld.size !== undefined) {
+    return {
+      kind: 'builtin',
+      name: 'anew',
+      args: [tyArg(fld.type), { kind: 'int', value: fld.size }],
+    };
+  }
+  return zeroFor(fld.type, C);
 }
 
 /** 一格类型的零值（构造函数先造一格全零的记录，再让初始化表与体去改）。 */function zeroFor(t, C) {
@@ -1766,7 +1833,8 @@ function declOf(d, specs, C) {
    * 字段全是标量的照旧（`init: null`）—— 那一档已经全绿，不为这一格去动它。
    */
   if (type !== null && type.kind === 'named' && ctorTok === undefined && initTok === undefined
-    && (C.tyCtx().fields.get(type.name) ?? []).some((f) => f.type.kind === 'named')) {
+    && (C.tyCtx().fields.get(type.name) ?? [])
+      .some((f) => ['named', 'arr', 'map'].includes(f.type.kind))) {
     C.bind(name, type);
     return { kind: 'let', name, type, init: vtZeroRecord(type, C) };
   }
@@ -1815,6 +1883,10 @@ function declOf(d, specs, C) {
 //  10. **记录是值语义**（`byvalue.cpp`）：按值收的记录形参在**被调方进门第一句**拷一份
 //      （`类名__copy`，逐字段、字段是记录再递归拷），拷贝初始化与拷贝赋值也拷。
 //      不拷的两格是有意的：接收者（`this`）与借出去的形参（`T&` / `T*`）。
-//      **记录里有列表/字典时按值拷当场报**（那要连里头一起拷）；返回局部记录不拷
+//      记录里有**列表**的按值拷**接了**（`arrfield.cpp`：现搭一段 `anew` + `while` 逐格拷）；
+//      有**字典**的仍当场报（方言里没有能装下键列表的类型，拷不了）。返回局部记录不拷
 //      （那格量本来就要没了，与 C++ 的省略拷贝对得上）。
-//      字段里套着记录的，声明时现造一格零值子记录（只发 `(let a P)` 那格子记录是 null）。
+//      字段里套着记录 / 列表 / 字典的，声明时现造一格零值记录（只发 `(let a P)` 那几格是 null）。
+//  11. **数组字段**（`int xs[3];`，`arrfield.cpp`）：收成一格列表字段并**记下长度** ——
+//      造对象时照它开格子。从前 `nameOf` 读 `(array …)` 答 null，字段表里多一格叫 `null` 的
+//      而 `xs` 根本不存在。长度只在"字面写着的"那一档有；`int xs[]` 那种开 0 格。
