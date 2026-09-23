@@ -73,5 +73,25 @@ int main() {
   int w = 21;
   dbl(w);
   printf("%d\n", w);
+  /* **`[x = 表达式]`**（C++14 的初始化捕获）：那格量是**新造的** —— 名字只在体里有，
+     值在造闭包那一点上求。落成"多一格按值捕获"，实参就是那个表达式。 */
+  int seedv = 4;
+  auto off = [base2 = seedv * 10](int x) {
+    return x + base2;
+  };
+  seedv = 0;
+  printf("%d\n", off(2));
+  /* **`mutable`**：按值捕的那几格在体里改得动 —— 改的是闭包自己那一份（外头那格看不见，
+     而且几次调用之间**留着**）。落法是出参那台机器反着用：造闭包那一点现搭一格盒子装着
+     抄过来的值，闭包按值捕盒子，体里读写走 `.v`。
+     （两次调用分开写：C++ 里同一句里几个实参的求值次序是不定的。） */
+  int cnt = 10;
+  auto tick = [cnt]() mutable {
+    cnt = cnt + 1;
+    return cnt;
+  };
+  int t1 = tick();
+  int t2 = tick();
+  printf("%d %d %d\n", t1, t2, cnt);
   return 0;
 }

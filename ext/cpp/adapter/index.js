@@ -888,8 +888,11 @@ export function cppToIR(tree) {
     /** 按引用捕的那几格（名字已 ref 过）—— 它们在外头是**盒子**，体里读写走 `.v`。 */
     const refCaps = new Set();
     let allRef = false;
+    /** `[x = 表达式]`（C++14 的初始化捕获）—— 那格量是**新造的**，值在造闭包那一点求。 */
+    const initToks = [];
     for (const c of (capsTok === undefined ? [] : kids(capsTok))) {
       if (tag(c) === 'c') { wanted.push(String(leaf(kids(c)[0]))); continue; }
+      if (tag(c) === 'c-init') { initToks.push(c); continue; }
       if (tag(c) === 'c-ref') {
         const n0 = String(leaf(kids(c)[0]));
         wanted.push(n0);
@@ -938,6 +941,35 @@ export function cppToIR(tree) {
       C.tyCtx().env.get(c.name) === undefined && C.capNames.has(c.name)
         ? { kind: 'capture', name: c.name, type: c.type }
         : { kind: 'name', name: c.name }));
+    /**
+     * **`[x = 表达式]`**：落成"多一格按值捕获" —— 名字只在体里有，实参是那个表达式
+     * （在**外面这层**的作用域里求，所以这几句也要排在换作用域之前）。图上一格新东西没加。
+     */
+    for (const c of initToks) {
+      const nm = C.ref(String(leaf(kids(c)[0])));
+      const v = exprOf(kids(c)[1], C);
+      caps.push({ name: nm, type: typeOf(v, C.tyCtx()) });
+      capArgs.push(v);
+    }
+    /**
+     * **`mutable`**：按值捕的那几格在体里**改得动**，改的是闭包自己那一份（外头那格量
+     * 看不见，而且几次调用之间**留着**）。落法就是出参那台机器反着用：造闭包那一点上现搭
+     * 一格盒子装着抄过来的值，闭包**按值捕盒子**（记录本来就是引用），体里读写走 `.v`。
+     * 一格新东西也没加。记录 / 列表那几格不动（它们在这条腿上本来就是引用语义）。
+     */
+    const mutBox = new Set();
+    if (kids(tok).some((y) => tag(y) === null && String(leaf(y)) === 'mutable')) {
+      caps.forEach((c, i) => {
+        if (refCaps.has(c.name) || c.name === 'this') return;
+        if (!['int', 'real', 'bool', 'string'].includes(c.type.kind)) return;
+        const box = C.refBox(c.type);
+        capArgs[i] = {
+          kind: 'new-record', type: box, ref: true, fields: [{ name: 'v', value: capArgs[i] }],
+        };
+        caps[i] = { name: c.name, type: box };
+        mutBox.add(c.name);
+      });
+    }
     const outer = {
       caps: C.capNames, self: C.self, scoped: C.scoped, refs: C.refNames, ret: C.retType,
     };
@@ -951,6 +983,8 @@ export function cppToIR(tree) {
      * 读写必须走 `.v`（落成 `(field (cap x) v)`）。
      */
     C.refNames = refCaps;
+    /* `mutable` 那几格盒子也走 `.v`（与按引用捕的那几格同一张表）。 */
+    for (const n of mutBox) C.refNames.add(n);
     /* lambda 上的**出参**（`[](int& x)`）与按引用捕的那几格同一台机器：体里读写走 `.v`。 */
     for (const p of params) if (p.ref === true) C.refNames.add(p.name);
     /**
@@ -2397,8 +2431,11 @@ function declOf(d, specs, C) {
 //      （哪几格要装是降体之前扫树算的，与"真声明过"求交 —— 全局名字装了盒子会当场报）。
 //      **`[this]`** 也接了（记录是引用语义，"按值捕一格记录"就是它；体里裸写的字段名
 //      照旧当 `this->`，`this` 自己落成一格捕获）。**形参上的 `T&`** 也接了（见第 3 条 ——
-//      名字不进 `refSig`，靠类型认那格盒子）。`mutable`、`[*this]`、`[x = 表达式]`、
-//      泛型 lambda 还没接。
+//      名字不进 `refSig`，靠类型认那格盒子）。**`[x = 表达式]`**（C++14 的初始化捕获）落成
+//      "多一格按值捕获"，实参在**外面那层**的作用域里求。**`mutable`** 是出参那台机器反着
+//      用：造闭包那一点现搭一格盒子装着抄过来的值，体里读写走 `.v` —— 于是"改得动自己那一
+//      份、外头看不见、几次调用之间留着"三条一起成立（记录 / 列表那几格不动，它们本来就是
+//      引用语义）。`[*this]` 与泛型 lambda（`auto` 形参）还没接。
 //   9. **`static` 数据成员**落成一格模块级的量（`类名__成员名`，`staticmem.cpp`）：
 //      一个类一份，初值（类里那句或类外那句 `int C::x = …;`）摆在 `main` 体的最前面 ——
 //      方言的 `(global 名字 类型)` 按设计零初始化，不带初值那一格。
