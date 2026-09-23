@@ -107,11 +107,17 @@ export function lower(module, hooks = {}) {
       lines.push(lowerClosure(decl, ctx));
     }
     if (decl.kind === 'global') {
-      /* 模块级变量。**初值可以没有**（`(global xs (arr int))`）—— 那时初始化落在
-         入口里（adapter 会摆一句 `set`），与 Scheme / awk 那种"顶层语句"的语义对得上。 */
-      const ty = typeToSx(decl.type, hooks);
-      if (decl.init) lines.push(`  (global ${decl.name} ${ty} ${lowerExpr(decl.init, ctx)})`);
-      else lines.push(`  (global ${decl.name} ${ty})`);
+      /**
+       * 模块级变量。**初值只能没有** —— 方言的 `(global 名字 类型)` 按设计零初始化，
+       * 后面多摆一格会当场报（"后面多了 1 格"）。要非零初值就让 adapter 在入口里摆一句
+       * `set`（go / chez / sbcl / cpp 四门都是这么做的）。
+       * 从前这儿有一支 `if (decl.init)` 会发出**方言收不了的那一形**：没人踩到是因为
+       * 四门都没给 init，踩到了报的也是 `.sx` 那一层的错，账不在这儿 —— 所以改成当场报。
+       */
+      if (decl.init !== undefined && decl.init !== null) {
+        throw new Error(`lower: 模块级变量 ${decl.name} 不许带初值 —— 摆一句 set 到入口里`);
+      }
+      lines.push(`  (global ${decl.name} ${typeToSx(decl.type, hooks)})`);
     }
   }
 

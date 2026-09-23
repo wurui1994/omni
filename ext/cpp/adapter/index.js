@@ -214,6 +214,8 @@ export function cppToIR(tree) {
     refBoxDone: new Set(),
     /** 函数名（已 ref 过） → 哪几格形参是借出去的（下标集合）。 */
     refSig: new Map(),
+    /** `类名_成员名`（类名已 ref 过） → 那格 `static` 成员落成的模块级名字。 */
+    statics: new Map(),
     /**
      * **当前函数里哪几格名字装在盒子里**（引用形参 + 被借出去的局部量）。
      * 读写这些名字都要走 `.v`，而在"借出去"的那个实参位置上要交盒子本身。
@@ -380,6 +382,43 @@ export function cppToIR(tree) {
     if (cls === undefined) continue;
     const rec = collectClass(cls, C);
     C.records.set(rec.name, rec);
+  }
+  /**
+   * **`static` 数据成员落成模块级的量**（一个类一份，公共层现成的 `{ kind: 'global' }`）。
+   * 初值有两个来源：类里那句（`static const int LIMIT = 10;`）与类外那句定义
+   * （`int Counter::total = 0;`）—— 后者先扫出来，两者都没有就是零值。
+   */
+  const staticInit = new Map();
+  const staticSets = [];
+  for (const d of kids(tree)) {
+    if (tag(d) !== 'decl') continue;
+    const it = part(d, 'init');
+    const dd = it === undefined ? undefined : kids(it)[0];
+    const nmTok = dd === undefined ? undefined : kids(dd)[0];
+    if (nmTok === undefined || tag(nmTok) !== 'qual') continue;
+    const v = part(dd, 'init');
+    if (v !== undefined) {
+      staticInit.set(`${nameOf(kids(nmTok)[0])}_${nameOf(kids(nmTok)[1])}`, kids(v)[0]);
+    }
+  }
+  for (const [, rec] of C.records) {
+    for (const st of (rec.statics ?? [])) {
+      const g = `${C.ref(rec.name)}__${C.ref(st.name)}`;
+      const tok = st.init !== undefined
+        ? kids(st.init)[0] : staticInit.get(`${rec.name}_${st.name}`);
+      decls.push({ kind: 'global', name: g, type: st.type });
+      /**
+       * 方言的 `(global 名字 类型)` **不带初值**（按设计零初始化），初值要在入口里赋 ——
+       * 所以非零的那几格攒起来，摆在 `main` 体的最前面（C++ 里 static 也是 main 之前
+       * 就初始化好的，这条腿上 main 之前不跑别的东西，两者对得上）。
+       */
+      if (tok !== undefined) {
+        staticSets.push({
+          kind: 'assign', target: { kind: 'name', name: g }, value: exprOf(tok, C),
+        });
+      }
+      C.statics.set(`${C.ref(rec.name)}_${st.name}`, g);
+    }
   }
   /**
    * **体写在类外的那几格搬回类里**（`int Counter::bump() { … }`）—— 要排在摊平与
@@ -740,6 +779,12 @@ export function cppToIR(tree) {
     }
   }
   for (const f of topFns) decls.push(fnDecl(topSig.get(f), f, C));
+  /* `static` 成员的初值摆在 `main` 体的最前面（见上面那一段）。 */
+  if (staticSets.length > 0) {
+    const mainDecl = decls.find((d) => d.kind === 'fn' && d.name === 'main');
+    if (mainDecl === undefined) throw new Error('cpp->IR: 有 static 成员可没有 main');
+    mainDecl.body = [...staticSets, ...mainDecl.body];
+  }
   for (const d of vcallDecls(C)) decls.push(d);
 
   if (!C.fns.has('main')) throw new Error('cpp->IR: 这份源码里没有 `int main()`');
@@ -865,6 +910,8 @@ function collectClass(cls, C, asName = null) {
   const declared = new Set();
   const declaredCtors = new Set();
   let dtorDeclared = false;
+  /** `static` 的数据成员（一个类一份，落成模块级的量）。 */
+  const statics = [];
   let dtor = null;
   const ctors = [];
   for (const m of (members === undefined ? [] : kids(members))) {
@@ -872,6 +919,22 @@ function collectClass(cls, C, asName = null) {
       const ms = part(m, 'specs');
       const mi = part(m, 'init');
       const mn = mi === undefined ? undefined : kids(kids(mi)[0])[0];
+      /**
+       * **`static` 的数据成员不是字段**，是一格模块级的量（一个类只有一份）。
+       * 从前 `static` 在 specs 里被当成修饰丢掉，于是它变成了**每个对象各一份的字段**：
+       * `static const int LIMIT = 10;` 落成一格零值字段，`LIMIT - n` 算出来是 `-n` ——
+       * **答案静默地错**（这一条是"声明符/说明符上的修饰有没有人看"那个形状的第七次）。
+       */
+      const isStatic = ms !== undefined
+        && kids(ms).some((y) => tag(y) === null && String(leaf(y)) === 'static');
+      if (isStatic && mn !== undefined && tag(mn) !== 'fn') {
+        statics.push({
+          name: nameOf(mn),
+          type: typeOfSpecs(ms, C, kids(kids(mi)[0])[0]) ?? INT,
+          init: part(kids(mi)[0], 'init'),
+        });
+        continue;
+      }
       /**
        * **纯虚那一格在树上是 `decl` 不是 `func`**：
        * `virtual int area() = 0;` → `(decl (specs "virtual" …) (init (d (fn (n area) …) (init (num 0)))))`。
@@ -933,7 +996,7 @@ function collectClass(cls, C, asName = null) {
   }
   return {
     name: asName ?? nameOf(nm), bases, fields, methods, dtor, ctors, virtuals, pure,
-    declared, declaredCtors, dtorDeclared,
+    declared, declaredCtors, dtorDeclared, statics,
   };
 }
 
@@ -1437,6 +1500,8 @@ function lhsOf(t, C) {
   }
   /* `*p = …` —— 按指针收的出参（`exprOf` 的 `case 'deref'` 把它落成盒子那一格字段）。 */
   if (tag(t) === 'deref') return exprOf(t, C);
+  /* `Counter::total = …` —— 一格 `static` 成员（模块级的量）。 */
+  if (tag(t) === 'qual') return exprOf(t, C);
   if (tag(t) === 'index') {
     return { kind: 'index', obj: exprOf(kids(t)[0], C), index: exprOf(kids(t)[1], C) };
   }
@@ -1645,3 +1710,7 @@ function declOf(d, specs, C) {
 //      模板的默认实参与特化没接；类模板里"体写在类外"也当场报。
 //   8. lambda 的捕获**一律按值**：`[&]` / `[&x]` 当场报（按引用要"把借走的局部量提上去"
 //      那台机器，go 那侧的 `promote`）；`mutable`、`[this]`、泛型 lambda 也没接。
+//   9. **`static` 数据成员**落成一格模块级的量（`类名__成员名`，`staticmem.cpp`）：
+//      一个类一份，初值（类里那句或类外那句 `int C::x = …;`）摆在 `main` 体的最前面 ——
+//      方言的 `(global 名字 类型)` 按设计零初始化，不带初值那一格。
+//      `static` 的**成员函数**还没接（那要"没有 this 的方法"）。

@@ -201,6 +201,11 @@ export function exprOf(x, C) {
         && (C.tyCtx().fields.get(C.self) ?? []).some((f) => f.name === n)) {
         return { kind: 'field', obj: { kind: 'name', name: 'this' }, name: n };
       }
+      /* 方法体里裸写的 `static` 成员：它不是字段，是一格模块级的量（一个类一份）。 */
+      if (C.self !== null && C.tyCtx().env.get(flat) === undefined) {
+        const g = C.statics.get(`${C.self}_${n}`);
+        if (g !== undefined) return { kind: 'name', name: g };
+      }
       return { kind: 'name', name: flat };
     }
     case 'paren': case 'expr': return exprOf(kids(x)[0], C);
@@ -297,6 +302,12 @@ export function exprOf(x, C) {
     /* `[捕获](形参){ 体 }` —— 落成公共层现成的闭包（真正那一趟在 index.js 的 `C.lambda`）。 */
     case 'lambda': return C.lambda(x);
     case 'qual': {
+      /* `Counter::total` —— 一格 `static` 成员（落成模块级的量）。 */
+      const ps = kids(x);
+      if (ps.length === 2 && tag(ps[0]) === 'n' && tag(ps[1]) === 'n') {
+        const g = C.statics.get(`${C.ref(nameOf(ps[0]))}_${nameOf(ps[1])}`);
+        if (g !== undefined) return { kind: 'name', name: g };
+      }
       /* `std::something` 当值用（这一批只有 `std::make_pair` 那一处，在 callOf 里）。 */
       throw new Error(`cpp->IR: \`${kids(x).map((k) => (tag(k) === 'n' ? nameOf(k) : '?')).join('::')}\` 当值用还没接`);
     }
