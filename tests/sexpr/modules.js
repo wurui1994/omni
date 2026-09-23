@@ -277,33 +277,93 @@ if (process.platform === 'darwin') {
     ['a.asy', 'int f(int x) { return x * 2; }\nwrite(f(21));\n', '42'],
     ['b.asy', 'int f(int x) { return x + 1000; }\nwrite(f(23));\n', '1023'],
     ['c.asy', 'real f(real x) { return x / 4; }\nwrite(f(9.0));\n', '2.25'],
+    /* 运行期出错那一格：在本进程里跑，默认那条"打一行、退 70"会把宿主一起带走 ——
+       所以它必须只回 70，而**后面那个程序照旧跑得对**（撞过：判据跑到一半整个进程没了）。 */
+    ['d.asy', 'file b = input("no-such-file.dat");\nstring s = b;\nwrite(s);\n', ''],
+    ['e.asy', 'write(7 * 6);\n', '42'],
   ];
+  /* **同名结构那一格**（撞过，最难查的一类）：产物里的符号只在"一个程序这一趟链接"里
+     唯一 —— 两个程序各有一个 `struct Box`，两份产物都发 `s_asy__ctor_Box_body`，正文
+     却不同。`g.asy` 先把 `mbox` 那一份装进来（模块，常驻），`h.asy` 的**入口**接着用
+     同名符号盖掉它，再跑一趟 `g.asy`：要是还认"这一份装过了"就会拿到 h 的 Box，答案
+     静默地错（真症状是 `Cannot convert undefined to a BigInt`）。 */
+  writeFileSync(join(w, 'mbox.asy'), 'struct Box {\n  int v;\n  void operator init(int n) { v = n + 100; }\n}\n');
+  const collide = [
+    ['g.asy', 'import mbox;\nwrite(Box(5).v);\n', '105'],
+    ['h.asy', 'struct Box {\n  int v;\n  void operator init(int n) { v = n * 3; }\n}\nwrite(Box(5).v);\n', '15'],
+    ['g.asy', '', '105'],
+  ];
+  for (const [nm, src] of collide) if (src !== '') writeFileSync(join(w, nm), src);
+  const runList = [...progs.map((p) => p[0]), ...collide.map((p) => p[0])];
   for (const [nm, src] of progs) writeFileSync(join(w, nm), src);
   /* 一个进程里连着跑三趟（`OMNI_AS_LIB=1` 之后 `runCli` 可以被 import 而不自己跑）。 */
   const driver = join(w, 'drive.mjs');
   writeFileSync(driver, `process.env.OMNI_AS_LIB = '1';
 process.env.OMNI_TIMEOUT = '0';
+/* asy 的模块是按 CWD 找的（import mbox;），所以驱动得站在那个临时目录里跑；
+   缓存根于是要显式指一下，不然会落到临时目录下面另开一棵。
+   （这几行在生成出来的驱动里 —— 不能带反引号，会把外面那个模板切开。） */
+process.env.OMNI_CACHE_DIR = ${JSON.stringify(join(dirname(fileURLToPath(import.meta.url)), '..', '..', '.omni-cache'))};
+process.chdir(${JSON.stringify(w)});
 const { runCli } = await import(${JSON.stringify(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'core', 'cli.js'))});
 let OUT = [];
 const real = process.stdout.write.bind(process.stdout);
 process.stdout.write = (s) => { OUT.push(typeof s === 'string' ? s : Buffer.from(s).toString('utf8')); return true; };
 const got = [];
-for (const nm of ${JSON.stringify(progs.map((p) => p[0]))}) {
+for (const nm of ${JSON.stringify(runList)}) {
   OUT = [];
   const code = runCli(['run', ${JSON.stringify(w)} + '/' + nm]);
   got.push({ nm, code, out: OUT.join('') });
 }
+/* 顺带核**装载那一层**的两条：①一份产物变出来的可 eval 正文里不许留 import 行，
+   顶层也不许留 const/let（要 var 才能常驻，间接 eval 里只有 var 与函数声明进全局
+   对象）；②盘上**不许**有"按程序拼出来的一大段"（从前攒过 16 份 2.4MB 的 lib-…js，
+   换一个程序就多一份）。
+   —— 这几行在**生成出来的驱动**里，所以不能带反引号（会把外面这个模板切开）。 */
+const { loadableText } = await import(${JSON.stringify(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'core', 'build', 'modules.js'))});
+const fs2 = await import('node:fs');
+const mdir = ${JSON.stringify(join(dirname(fileURLToPath(import.meta.url)), '..', '..', '.omni-cache', 'modules', 'js'))};
+const mains = fs2.readdirSync(mdir).filter((f) => f.startsWith('main-') && f.endsWith('.js'));
+let shape = null;
+if (mains.length > 0) {
+  const t = loadableText(mdir, 'asy_builtins__d935d217.js');
+  const lines = t.split('\\n');
+  shape = {
+    imports: lines.filter((l) => l.startsWith('import ')).length,
+    lexical: lines.filter((l) => l.startsWith('const ') || l.startsWith('let ')).length,
+    blobs: fs2.readdirSync(mdir).filter((f) => f.startsWith('lib-') || f.startsWith('prog-')).length,
+  };
+}
 process.stdout.write = real;
-real(JSON.stringify(got));
+real(JSON.stringify({ got, shape }));
 `);
   const r = spawnSync('node', [driver], { encoding: 'utf8', timeout: 180000 });
-  let got = null;
-  try { got = JSON.parse((r.stdout ?? '').trim()); } catch { got = null; }
-  ok('一个进程里连着跑三个 asy 程序，三个答案都对',
-    got !== null && got.length === 3
-      && got.every((g, i) => g.code === 0 && g.out.trim() === progs[i][2]),
+  let res = null;
+  try { res = JSON.parse((r.stdout ?? '').trim()); } catch { res = null; }
+  const got = res === null ? null : res.got;
+  ok('一个进程里连着跑五个 asy 程序（含一个出错的），答案与退出码都对',
+    got !== null && got.length === 8
+      && got[0].code === 0 && got[0].out.trim() === '42'
+      && got[1].code === 0 && got[1].out.trim() === '1023'
+      && got[2].code === 0 && got[2].out.trim() === '2.25'
+      && got[3].code === 70
+      && got[4].code === 0 && got[4].out.trim() === '42',
     got === null ? `驱动没给出 JSON：${(r.stderr ?? '').trim().split('\n').slice(-3).join(' | ')}`
-      : got.map((g) => `${g.nm}=${JSON.stringify(g.out.trim())}`).join('，'));
+      : got.map((g) => `${g.nm}=${g.code}/${JSON.stringify(g.out.trim())}`).join('，'));
+  /* 同名结构那三趟：g（模块里的 Box）-> h（入口里的同名 Box）-> g 再跑一趟。 */
+  ok('两个程序各有一个同名 struct：常驻的那一份被盖过之后会重装，答案不串味',
+    got !== null && got.length === 8
+      && got[5].code === 0 && got[5].out.trim() === '105'
+      && got[6].code === 0 && got[6].out.trim() === '15'
+      && got[7].code === 0 && got[7].out.trim() === '105',
+    got === null ? '驱动没给出 JSON'
+      : got.slice(5).map((g) => `${g.nm}=${g.code}/${JSON.stringify(g.out.trim())}`).join('，'));
+  ok('装载那一层的形状：没有 import、顶层没有 const/let、盘上没有按程序拼的大段',
+    res !== null && res.shape !== null && res.shape !== undefined
+      && res.shape.imports === 0 && res.shape.lexical === 0 && res.shape.blobs === 0,
+    res === null || res.shape === null || res.shape === undefined ? '驱动没给出形状'
+      : `import ${res.shape.imports} 行、顶层 const/let ${res.shape.lexical} 行、`
+        + `lib-/prog- 那种大段 ${res.shape.blobs} 份`);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

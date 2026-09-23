@@ -157,109 +157,86 @@ function declName(line) {
 }
 
 /**
- * **把一目录模块产物链接成两段脚本**：一段是**库**（常驻），一段是**这个程序**（每趟）。
+ * **一份模块产物 -> 能直接 `eval` 的正文**（`import` 行丢掉、`export ` 去掉、顶层
+ * `const`/`let` 改成 `var`）。一份进一份出：这一格**只看这一份产物**，不看程序。
  *
- * 为什么要这一步：`node` 自己能跑那张 ESM 图，可**那得再起一个进程** —— 量出来
- * 光 `node -e 0` 在这台机器上就要 110ms，而整趟 asy（01-arith）是 227ms。别的语言
- * 都在当前进程里 `eval` 一趟就完（30ms 一档）。驱动这一条是**同步**的，拿不到
- * 异步的 `import()`（见 host/native.js 那段），所以"在本进程里跑"只剩这一条路：
- * 自己把那张图摊平成脚本，交给 `evalJs`。
+ * 为什么要它：`node` 自己能跑那张 ESM 图，可**那得再起一个进程** —— 量出来光
+ * `node -e 0` 在这台机器上就要 110ms，而整趟 asy（01-arith）227ms 里就有这 110ms。
+ * 别的语言都是当前进程里 `eval` 一趟（30ms 一档）。驱动这一条是**同步**的，拿不到
+ * 异步的 `import()`（见 host/native.js 那段），所以"在本进程里跑"只剩这一条：
+ * 把每一份产物各自变成一段脚本，按启动器里的次序 `eval` 过去。
  *
- * 为什么要**分成两段**：一段短程序每趟重新塞进 2.4MB 的库是纯浪费 —— 量到的账是
- * V8 编那份库 35ms、第一趟 `init()` 里的惰性编译 78ms，而**第二趟 `init()` 只要
- * 0.3ms**（库的"真活儿"就这么点，剩下全是编译）。所以库那一段只在**进程里装一次**，
- * 往后每趟只 eval 这个程序自己那一小段（十几 KB）。常驻靠的是一条语言事实：
- * 间接 `eval` 里 `var` 与函数声明进的是**全局对象**（下一趟 eval 看得见），
- * 而 `const` / `let` 只活在那一趟自己的词法环境里 —— 所以库那一段的顶层
- * `const` / `let` 在这儿改写成 `var`（只有顶层那一层，函数体里的一个字不动）。
+ * 为什么 `const`/`let` 要改成 `var`：间接 `eval` 里 `var` 与函数声明进的是**全局对象**
+ * （下一趟 eval 看得见），`const`/`let` 只活在那一趟自己的词法环境里。库那几份要能
+ * **常驻**（一个进程里只装一次），靠的就是这一条。
  *
- * 跨趟的干净由**各家自己的 `init()`** 保证：那本来就是"把这一份的全局清零 + 重设"
- * （`launcherText` 每趟按次序全跑一遍），所以常驻的是**编译结果**，不是上一趟的状态。
+ * 为什么**不**先拼成一大段：拼起来那段文字由"这个程序要哪几份"决定 —— 换一个程序就是
+ * 另一份 2.4MB 的派生品（量到盘上攒了 16 份 `lib-…js`，一份都不该有）。按份来之后，
+ * 派生品与产物一一对应（`<名字>.load.js`），换程序只多装它自己那一份。
  *
- * 这**不是**"把模块合回单体"：每一份产物照旧各自降级、各自缓存、各自按内容做键 ——
- * 变的只有"谁来装载"。两段都是派生品（`lib-…js` / `prog-…js`），与 `main-<入口>.js`
- * 同生共死：那一份重写了，这两份就跟着重写。
- *
- * 同名声明**去重且校验文字**：按模块发射时，同一个蹦床／函数指针盒会在好几份里各发一遍
- * （量到 143 个多行函数 + 286 行单行声明重名，全部逐字节相同）。同名而文字不同就**当场报**
- * —— 那说明两份产物对同一个名字的理解不一样，静默地挑一份是"答案静默地错"。
- * 这一格顺带保住了正确性：程序那一段里重名的声明被**丢掉**（而不是自己新造一格盒子），
- * 不然库读的是一格、程序写的是另一格 —— 那才是真的答案静默地错。
+ * 同名声明**不用去重**：库那几份里同一个蹦床／函数指针盒会各发一遍，而那些重名的声明
+ * **逐字节相同**（量到 143 个多行函数 + 286 行单行声明，全都一样）。分开 eval 时重复的
+ * `var`／函数声明只是"再赋一遍同一个值"，而装载全做完才跑各家的 `init()`。
  */
-export function linkBundle(dir, mainName, perRun) {
-  /* 入口那一份（`main-<入口>.js` -> `<入口>.js`）、启动器自己、外加点名要**每趟重来**的
-     那几份（运行时就是一份：它有二十来格顶层可变状态 —— arena、`$fnOnes` 那张按名字
-     记的表、输出缓冲…… 常驻的话上一个程序的东西会漏给下一个。撞过一次：`$fnOne` 按
-     **裸名字**记（入口单元的名字没有前缀，两个程序都有 `f`），于是第二个程序拿到的是
-     第一个程序的闭包 —— 答案静默地错。运行时那一份末尾本来就有
-     `Object.assign(globalThis, …)`，所以它每趟重来、库那一段照旧看得见。 */
-  const entryFile = `${mainName.slice('main-'.length)}`;
-  const fresh = new Set(perRun === undefined || perRun === null ? [] : perRun);
-  const seen = new Set();
-  const libParts = [];
-  const progParts = [];
-  const libNames = [];
-  const decls = new Map();
-  const take = (name) => {
-    if (seen.has(name)) return;
-    seen.add(name);
-    const isLib = name !== mainName && name !== entryFile && !fresh.has(name);
-    const lines = readText(join(dir, name)).split('\n');
-    const out = [];
-    let i = 0;
-    while (i < lines.length) {
-      const raw = lines[i];
-      /* `import './x.js';` / `import { … } from './x.js';` —— 先把被引的那一份摊进来。 */
-      if (raw.startsWith('import ')) {
-        const a = raw.indexOf("'./");
-        const b = a < 0 ? -1 : raw.indexOf("'", a + 3);
-        if (a >= 0 && b > a) take(raw.slice(a + 3, b));
-        i++;
-        continue;
-      }
-      const line = raw.startsWith('export ') ? raw.slice(7) : raw;
-      const nm = declName(line);
-      if (nm === null) { out.push(line); i++; continue; }
-      /* 一句到底在哪儿收尾：单行的自己就收（`;` 或 `}` 结尾），多行的收到**顶格的 `}`**
-         —— 那是发射层的排版（函数体永远以顶格 `}` 收尾）。 */
-      const body = [line];
-      if (!(line.endsWith(';') || line.endsWith('}'))) {
-        i++;
-        while (i < lines.length) {
-          body.push(lines[i]);
-          if (lines[i] === '}') break;
-          i++;
-        }
-      }
-      i++;
-      const raw2 = body.join('\n');
-      /* 重名要校验的是**产物里那句原文**（下面那一格会把库里的 `const` 改成 `var`，
-         拿改写后的去比会把"同一样东西"误判成"两样东西"）。 */
-      const had = decls.get(nm);
-      if (had !== undefined) {
-        if (had !== raw2) {
-          throw new Error(`链接：\`${nm}\` 在两份产物里不是同一样东西`
-            + ` —— 不许静默挑一份\n旧：${had.slice(0, 120)}\n新：${raw2.slice(0, 120)}`);
-        }
-        continue;
-      }
-      decls.set(nm, raw2);
-      let txt = raw2;
-      /* 库那一段要**常驻**：顶层 `const` / `let` 改成 `var`（间接 eval 里 `var` 与函数
-         声明进全局对象，下一趟 eval 才看得见）。只动这一行的开头，函数体不碰。 */
-      if (isLib) {
-        if (txt.startsWith('const ')) txt = `var ${txt.slice('const '.length)}`;
-        else if (txt.startsWith('let ')) txt = `var ${txt.slice('let '.length)}`;
-      }
-      out.push(txt);
-    }
-    if (isLib) { libParts.push(out.join('\n')); libNames.push(name); } else progParts.push(out.join('\n'));
-  };
-  take(mainName);
-  return {
-    /* 库那一段的身份 = 它由哪几份产物拼起来的（产物名本身就是内容地址）。 */
-    libKey: libNames.join(','),
-    lib: `${libParts.join('\n')}\n`,
-    prog: `${progParts.join('\n')}\n`,
-  };
+export function loadableText(dir, name) {
+  const lines = readText(join(dir, name)).split('\n');
+  const out = [];
+  for (const raw of lines) {
+    if (raw.startsWith('import ')) continue;
+    const line = raw.startsWith('export ') ? raw.slice(7) : raw;
+    if (declName(line) === null) { out.push(line); continue; }
+    let head = line;
+    if (head.startsWith('const ')) head = `var ${head.slice('const '.length)}`;
+    else if (head.startsWith('let ')) head = `var ${head.slice('let '.length)}`;
+    out.push(head);
+  }
+  return `${out.join('\n')}\n`;
 }
+
+/**
+ * 一份可 eval 正文里**每个顶层名字的定义指纹**：`名字 -> 一个整数`。
+ *
+ * 为什么需要它：分开 eval 之后所有产物的顶层名字都落在**同一个全局对象**里，而产物的
+ * 名字只在"一个程序这一趟链接"里唯一 —— 两个程序各有一个 `struct Box`，两份产物就都
+ * 发一个 `s_asy__ctor_Box_body`，正文却不同。谁后装谁赢，于是"这一份进程里已经装过了"
+ * 那条捷径会拿到**别的程序**的定义（撞出来过：28-import 跑出 23-ctor 的 Box 构造函数，
+ * 症状是 `Cannot convert undefined to a BigInt`）。有了指纹就能判"被盖的是不是同一段
+ * 正文"：同一段就什么都没发生，不同段就把被盖那一份标成要重装。
+ *
+ * 指纹算的是**从这一行起、到下一个顶层声明之前**的所有文字（顶层语句会被算进上一格 ——
+ * 宁可多判几次不同：多判只是多装一遍，少判就是静默地跑错人家的函数）。
+ */
+export function declDigest(text) {
+  const out = new Map();
+  let cur = null;
+  let h = 0;
+  for (const line of text.split('\n')) {
+    const nm = declName(line);
+    if (nm !== null) {
+      if (cur !== null) out.set(cur, h);
+      cur = nm;
+      h = 0;
+    }
+    if (cur === null) continue;
+    for (let i = 0; i < line.length; i++) h = (h * 31 + line.charCodeAt(i)) | 0;
+  }
+  if (cur !== null) out.set(cur, h);
+  return out;
+}
+
+/**
+ * 入口那份启动器（`main-<入口>.js`）里按次序列着这个程序要哪几份产物 —— 照原样读回来。
+ * 回 `{ mods, entry }`：`mods` 是 import 行上那些产物文件名（次序就是启动器里的次序，
+ * 依赖在前），`entry` 是入口那一份的文件名。
+ */
+export function moduleOrderOf(dir, mainName) {
+  const mods = [];
+  for (const ln of readText(join(dir, mainName)).split('\n')) {
+    if (!ln.startsWith('import ')) continue;
+    const a = ln.indexOf("'./");
+    const b = a < 0 ? -1 : ln.indexOf("'", a + 3);
+    if (a >= 0 && b > a) mods.push(ln.slice(a + 3, b));
+  }
+  return { mods, entry: mainName.slice('main-'.length) };
+}
+
