@@ -2337,8 +2337,11 @@ function declOf(d, specs, C) {
 //      `int` / `long` 那几格**有意不带**：C++ 里有符号溢出是 UB，没有义务把 UB 学像。
 //      读树那一格要当心：`unsigned char` 是**一格 `btype` 里两个词**（只读第一个词会按 32 位
 //      回卷，还是错的）—— 所以 `typeOfSpecs` 把 `btype` 的 kids 全 flatMap 出来按"合起来的词"查表。
-//      还没补的：借出去的窄形参（`unsigned char&` —— 那格在体里是 `.v`）。定宽类型
-//      （`int8_t` …）的位宽表在 `src/core/lower/cfam.js` 的 `C_INT_BITS`（与 jancy 共用一张）。
+//      还没补的：无（借出去的窄形参也成立 —— 盒子里那格字段照旧带着位宽记号；
+//      那一格从前是坏的：`&` 与 `*` 在树上是同一格 `ptr`，`unsigned char&` 被当成
+//      `char*`（串）→ 出参落成 `__ref_string`。`char*` 现在只认写着 `*` 的那一档）。
+//      定宽类型（`int8_t` …）的位宽表在 `src/core/lower/cfam.js` 的 `C_INT_BITS`
+//      （与 jancy 共用一张）。
 //   5. **自由函数、方法与构造函数**都按实参**类型**重载（`fnovl.cpp` / `methov2.cpp` /
 //      `ctor3.cpp`：名字分三档 —— 没重载不动 / 个数各不相同的缀个数 / 有两份个数一样的
 //      缀类型；挑那一份三处共用 `pickAmong`）。形参一模一样的两份当场报。

@@ -17,8 +17,9 @@
 // 3. `i++` / `++i` **当值用**那一档（语句位置早就有了）：落公共层现成的 `block-expr`
 //    （先跑几句、再交一格值）——`++i` 交的是那格量自己，`i++` 先把旧值存进一格临时量。
 //
-// 钉住十件事：无符号 8 位回卷、有符号 8 位回卷成负数、16 位、32 位、转换时回卷、
-// **窄形参**、**窄返回值**、**lambda 写着的窄返回类型**、`i++` 与 `++i` 当值用。
+// 钉住十一件事：无符号 8 位回卷、有符号 8 位回卷成负数、16 位、32 位、转换时回卷、
+// **窄形参**、**窄返回值**、**lambda 写着的窄返回类型**、**借出去的窄形参**、
+// `i++` 与 `++i` 当值用。
 #include <stdio.h>
 
 void show(unsigned char c) { printf("%d\n", (int)c); }
@@ -26,6 +27,13 @@ void show(unsigned char c) { printf("%d\n", (int)c); }
 unsigned char clamp8(int x) { return x; }
 
 short shrink(int x) { return x; }
+
+/* **借出去的窄形参**（`unsigned char& c`）：盒子里那格字段照旧带着位宽记号，所以回卷
+   穿过盒子也成立。要当心的是 `&` 与 `*` 在树上是**同一格 `ptr`** —— 把这一格也当成
+   `char*`（串）的话它会落成 `__ref_string`，方言当场报。 */
+void bump8(unsigned char& c, int d) {
+  c = c + d;
+}
 
 int main() {
   unsigned char a = 200;
@@ -50,5 +58,8 @@ int main() {
   printf("%d\n", (int)shrink(70000));
   auto lo = [](int v) -> unsigned char { return v; };
   printf("%d\n", (int)lo(300));
+  unsigned char e = 200;
+  bump8(e, 100);
+  printf("%d\n", (int)e);
   return 0;
 }

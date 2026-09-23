@@ -107,8 +107,13 @@ export function typeOfSpecs(specs, C, declTok) {
     }
     return true;
   });
-  /* `char *` / `const char *` → 串（C 里串就是 `char*`）。 */
-  const isPtr = declTok !== undefined && tag(declTok) === 'ptr';
+  /**
+   * `char *` / `const char *` → 串（C 里串就是 `char*`）。**只认写着 `*` 的那一档** ——
+   * `&` 与 `*` 在树上是同一格 `ptr`，把 `unsigned char&` 也当成串的话那格出参会落成
+   * `__ref_string`，方言当场报（这是"声明符上的修饰有没有人看"那一类的又一格）。
+   */
+  const isPtr = declTok !== undefined && tag(declTok) === 'ptr'
+    && kids(declTok).some((y) => tag(y) === null && String(leaf(y)) === '*');
   /**
    * **基本类型那几个词要合起来看**（`unsigned char` / `long long`）。
    * 树上是**一格 `btype` 里好几个词**（语法那条 `builtin-seq`：`(btype unsigned char)`）——
