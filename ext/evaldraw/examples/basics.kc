@@ -1,0 +1,35 @@
+// ext/evaldraw/examples/basics.kc —— 与别的十几门那几份**同一件事**（tests/lower/run.js）
+//
+// 输出必须逐行相同：15 / 120 / 7 / ok。
+//
+// 这一份顺带证明一件事：**EvalDraw 与 PolyDraw 是同一门语言**（Ken 的 EVAL）——
+// 除了后缀与宿主表，这份 `.kc` 与 `ext/polydraw/examples/basics.pss` 走的是同一份语法、
+// 同一份 adapter（`ext/polydraw/adapter.js` 的 `evalToIR`）。
+//
+// EvalDraw 的 `printf` 是**画在画布上**的（配 moveto / setfont），可这一格判据要 stdout，
+// 所以只算不画那一半仍旧按 stdout 判 —— 真的"画在画布上"要等渲染那一刀（任务 #20）。
+()
+{
+   printf("%g\n", sumto(5));
+   printf("%g\n", factr(5));
+   printf("%g\n", MAX2(3, 7));
+   printf("ok\n");
+}
+
+sumto(n)
+{
+   acc = 0;
+   for (i = 1; i <= n; i++) acc = acc + i;
+   acc
+}
+
+factr(n)
+{
+   if (n == 0) { return 1; }
+   return n * factr(n - 1);
+}
+
+max2(a, b)
+{
+   if (a > b) { return a; } else { return b; }
+}

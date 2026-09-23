@@ -1,0 +1,35 @@
+// ext/polydraw/examples/04-shader.pss —— **可编程管线**（`@v` / `@f` 区段 + uniform）
+//
+// PolyDraw 最漂亮的那些例子（`ken/*.pss`、`tigrou/*.pss`）走的就是这条路：宿主脚本只管
+// 挑着色器、喂 uniform、画一格满屏四边形，像素全在 GPU 上算。
+//
+// 这一份用到的四格：
+//   glsetshader("vert","frag")  —— 按名字挑一对着色器（`@v:vert` / `@f:frag`）
+//   glgetuniformloc("t")        —— 拿一格 uniform 的句柄
+//   gluniform1f(句柄, 值)        —— 喂过去
+//   glquad(1)                   —— 满屏四边形（不透明；`glquad(0)` 走 alpha）
+//
+// 着色器原文是**旧式 GLSL**（`ftransform()` / `gl_FragColor`），与真 PolyDraw 一样 ——
+// 浏览器那一档（WebGL2 只认 GLSL ES 300）由设备翻一遍（`src/studio/gfx-gl.js` 的 `toEs300`）。
+//
+// 跑一趟（这一族要真 GPU）：Studio 里打开它按「跑」，或 `OMNI_GFX=host` + 浏览器那一档。
+// CPU 备选那一档**明着拒**：那儿没有可编程管线，报里说清是哪一格。
+
+()
+{
+   glsetshader("vert","frag");
+   gluniform1f(glgetuniformloc("t"), numframes/60);
+   glquad(1);
+}
+@v:vert
+void main() { gl_Position = ftransform(); }
+@f:frag
+uniform float t;
+void main()
+{
+   vec2 p = gl_FragCoord.xy / vec2(320.0, 240.0);
+   float d = length(p - vec2(0.5, 0.5));
+   float r = 0.5 + 0.5*sin(t*3.0 - d*18.0);
+      //三个分量都留一格地板（不落到 0）—— 于是"这一帧铺满了没有"在判据里是数得清的
+   gl_FragColor = vec4(0.1 + 0.9*r, 0.15 + 0.85*p.x, 0.15 + 0.85*(1.0 - p.y), 1.0);
+}

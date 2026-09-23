@@ -1,0 +1,72 @@
+// ext/jnc/examples/03-compute.jnc —— 四样纯计算（stdout 只有几行数）
+//
+// 这一份一个像素都不画：C 这一侧的例子先前几乎全是"指针与结构体那一族"的判据，缺的正是
+// 这种"拿它算点东西"的。四样都**只用整数**，所以四条腿上答案逐字节相同。
+//
+//   omni run ext/jnc/examples/03-compute.jnc
+
+int sieve[10000];
+
+// 埃拉托斯特尼筛：回 [2, n) 里的素数个数，顺带把最后一个记在 g_last 里
+int g_last = 0;
+
+int primes_below(int n) {
+    for (int i = 0; i < n; i++) sieve[i] = 1;
+    sieve[0] = 0;
+    sieve[1] = 0;
+    for (int p = 2; p * p < n; p++) {
+        if (sieve[p] == 0) continue;
+        for (int k = p * p; k < n; k += p) sieve[k] = 0;
+    }
+    int cnt = 0;
+    for (int i = 2; i < n; i++) {
+        if (sieve[i] == 1) { cnt = cnt + 1; g_last = i; }
+    }
+    return cnt;
+}
+
+// Collatz：[1, n] 里链最长的那个数（回它，长度记在 g_len 里）
+int g_len = 0;
+
+int collatz_longest(int n) {
+    int best = 1;
+    int bestLen = 1;
+    for (int i = 1; i <= n; i++) {
+        int x = i;
+        int len = 1;
+        while (x != 1) {
+            if (x % 2 == 0) x = x / 2;
+            else x = 3 * x + 1;
+            len = len + 1;
+        }
+        if (len > bestLen) { bestLen = len; best = i; }
+    }
+    g_len = bestLen;
+    return best;
+}
+
+int gcd(int a, int b) {
+    while (b != 0) { int t = a % b; a = b; b = t; }
+    return a;
+}
+
+// 矩阵乘的校验和：A[i][j] = i+j、B[i][j] = i*j，回 C 全部元素之和
+int matmul_checksum(int n) {
+    int sum = 0;
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            int acc = 0;
+            for (int k = 0; k < n; k++) acc = acc + (i + k) * (k * j);
+            sum = sum + acc;
+        }
+    }
+    return sum;
+}
+
+int main() {
+    printf("primes below 10000: %d (last %d)\n", primes_below(10000), g_last);
+    printf("longest collatz under 10000: %d (%d steps)\n", collatz_longest(10000), g_len);
+    printf("gcd(462, 1071) = %d\n", gcd(462, 1071));
+    printf("matmul checksum (n=40): %d\n", matmul_checksum(40));
+    return 0;
+}

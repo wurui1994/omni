@@ -1,0 +1,51 @@
+// ext/jnc/examples/02-mandelbrot.jnc —— 一百万次 putpixel 也不过 stdout
+//
+// Mandelbrot 集：每个像素一趟迭代（320×240 = 76800 格，最多 60 轮）—— 这是"计算 + 图形"
+// 那一类例子里最老实的一个：算的全在寄存器里，画的全在内存里，跨出去的只有一帧表面。
+//
+// 与 `ext/js/examples/02-mandelbrot.js` 是同一幅图、同一套 API。
+//
+//   omni run ext/jnc/examples/02-mandelbrot.jnc
+//   -> #gfx rgba .omni-cache/gfx/frame.rgba 320 240
+
+import "../lib/ege.jnc"
+
+int main() {
+    initgraph(320, 240);
+    setbkcolor(BLACK);
+    cleardevice();
+
+    int W = getwidth();
+    int H = getheight();
+    int maxit = 60;
+
+    for (int py = 0; py < H; py++) {
+        for (int px = 0; px < W; px++) {
+                // 复平面上那一格：x 落在 [-2.2, 0.8]、y 落在 [-1.2, 1.2]
+                // **整数算术**（这一侧 int 是 32 位）：定点，放大 1000 倍
+            int cx = px * 3000 / W - 2200;
+            int cy = py * 2400 / H - 1200;
+            int zx = 0;
+            int zy = 0;
+            int it = 0;
+            while (it < maxit) {
+                int zx2 = zx * zx / 1000;
+                int zy2 = zy * zy / 1000;
+                if (zx2 + zy2 > 4000) break;
+                int nx = zx2 - zy2 + cx;
+                zy = 2 * zx * zy / 1000 + cy;
+                zx = nx;
+                it = it + 1;
+            }
+            if (it >= maxit) putpixel(px, py, BLACK);
+            else {
+                    // 逃逸得快的偏蓝、慢的偏黄（一格简单的调色）
+                int t = it * 255 / maxit;
+                putpixel(px, py, RGB(t, t * 2 / 3, 255 - t));
+            }
+        }
+    }
+
+    closegraph();
+    return 0;
+}

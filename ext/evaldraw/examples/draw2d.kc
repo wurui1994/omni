@@ -1,0 +1,50 @@
+// ext/evaldraw/examples/draw2d.kc —— EvalDraw 的 2D 那一档，画到**帧缓冲设备**上
+//
+// 用到的那几格（照 `evaldraw_ref.md`）：`cls` 清屏、`setcol` 换色、`moveto`/`lineto` 走笔、
+// `drawsph(x,y,r)` 画圆（**半径为负是描边**）、`drawcone` 粗线、`setpix` 点。
+//
+// 跑一趟：
+//   omni run ext/evaldraw/examples/draw2d.kc
+//   -> #gfx rgba .omni-cache/gfx/frame.rgba 320 240
+//
+// stdout 上只有那一行**指针**；像素在那份表面文件里（320*240*4 字节的裸 RGBA），
+// Studio 贴 canvas、本机 glfw 贴窗口都吃这个格式。
+()
+{
+   cls(16, 24, 32);
+
+   //一排格线
+   setcol(60, 72, 88);
+   for (y = 30; y < 240; y += 30)
+   {
+      moveto(0, y);
+      lineto(319, y);
+   }
+
+   //三个圆：填充、描边（半径为负）、小一点的填充
+   setcol(255, 190, 60);
+   drawsph(80, 80, 30);
+   setcol(255, 220, 130);
+   drawsph(80, 80, -44);
+   setcol(80, 200, 255);
+   drawsph(240, 70, 18);
+
+   //粗线（两头半径不同）
+   setcol(220, 60, 60);
+   drawcone(40, 200, 3, 280, 150, 12);
+
+   //一条折线
+   setcol(40, 220, 140);
+   moveto(20, 150);
+   for (x = 20; x < 300; x += 10)
+   {
+      lineto(x, 150 + sin(x / 24) * 30);
+   }
+
+   //一把点
+   setcol(255, 255, 255);
+   for (i = 0; i < 200; i++)
+   {
+      setpix(10 + i, 20 + sin(i / 8) * 8);
+   }
+}

@@ -1,0 +1,71 @@
+// ext/polydraw/examples/02-gl.pss —— PolyDraw 的 **GL 立即模式**
+//
+// 这一份用的全是固定管线那一档：
+//   glClear / glBegin+glEnd / glVertex / glColor / glPushMatrix / glTranslate /
+//   glRotate / glScale / glPopMatrix
+//
+// **坐标不是 NDC**：PolyDraw 每帧在调脚本之前把 PROJECTION 设成
+// `gluPerspective(gfov, 宽/高, 0.1, 1000)`、MODELVIEW 设成单位（`polydraw.c:3572-3579`）——
+// 所以要先把东西挪到镜头前头（`glTranslate(0,0,-2)`），不然它落在眼睛那一点上。
+// 颜色是 0..1。
+//
+// 跑一趟：
+//   omni run ext/polydraw/examples/02-gl.pss
+//   -> #gfx rgba .omni-cache/gfx/frame.rgba 320 240
+//
+// stdout 上只有那一行**指针**，像素在那份表面文件里。
+//
+// **这条腿上没有**：着色器（@v/@f 那两段）、纹理、深度缓冲 —— 用到就当场报，不静默画错。
+// GPU 那两档设备（浏览器 WebGL2 / 本机 OpenGL）上着色器与深度都有。
+
+()
+{
+   glClear(GL_COLOR_BUFFER_BIT);
+
+      //挪到镜头前头：z=-2 处，视野里的半高是 1.5（fovy≈73.7 度）
+   glTranslate(0, 0, -2);
+
+      //一个三角形：三个顶点三种色，面内按重心插值（GL 的 Gouraud）
+   glBegin(GL_TRIANGLES);
+   glColor(1,0,0); glVertex(-0.9,-0.8);
+   glColor(0,1,0); glVertex( 0.0, 0.9);
+   glColor(0,0,1); glVertex( 0.9,-0.8);
+   glEnd();
+
+      //一圈线（首尾相连）。**抬高一点**（z=+.1）：GPU 那两档设备开着深度测试，
+      //与三角形共面的话谁先画谁赢（GL 的 depthFunc 是 LESS，相等判负）——
+      //共面重叠本来就是"看精度"的写法，例子里不该有
+   glColor(1,1,0);
+   glPushMatrix();
+   glTranslate(0,0,.1);
+   glBegin(GL_LINE_LOOP);
+   for(i=0;i<12;i++)
+   {
+      glVertex(cos(i*PI/6)*.55, sin(i*PI/6)*.55);
+   }
+   glEnd();
+   glPopMatrix();
+
+      //矩阵栈：挪过去、转 30 度、缩小，画一个四边形（再抬高一点，盖在上头）
+   glPushMatrix();
+   glTranslate(.45,-.45,.2);
+   glRotate(30,0,0,1);
+   glScale(.25,.25,1);
+   glColor(0,.8,.9);
+   glBegin(GL_QUADS);
+   glVertex(-1,-1); glVertex(1,-1); glVertex(1,1); glVertex(-1,1);
+   glEnd();
+   glPopMatrix();
+
+      //点：矩阵已经弹回去了（还剩 z=-2 那一格），这一排在最上头
+   glColor(1,1,1);
+   glPushMatrix();
+   glTranslate(0,0,.3);
+   glBegin(GL_POINTS);
+   for(i=0;i<40;i++)
+   {
+      glVertex(i/40*1.8-0.9, -0.95);
+   }
+   glEnd();
+   glPopMatrix();
+}

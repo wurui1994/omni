@@ -1,0 +1,288 @@
+;; ext/polydraw/polydraw.grammar —— PolyDraw 的脚本语言（Ken Silverman 的 EVAL / kasm87）
+;;
+;; 正确性口径：`/Users/wurui/Train/polydraw/polydraw_src/`（`eval.txt` 是说明书、
+;; `eval.c` 是实现）。那棵树里的 `c_impl/` 与 `js_impl/` 只当参考 —— 它们与旧实现有已知偏差。
+;;
+;; ## 这门语言与 C 的差别（说明书 §"EVAL syntax is similar to C syntax"）
+;;
+;;   * **全是 double**，函数体里不许写类型；没有声明语句，赋值即出现。
+;;   * **名字不分大小写** —— `(keyword NAME fold-case …)` 那一格就是为它开的。
+;;   * `^` 是**幂**，不是异或；`%` 是 fmod。
+;;   * 主函数在最前面、**没有名字**：`()` 或 `(x,y,z)` 直接跟函数体。
+;;   * `static name[n]` 声明数组、`enum{a,b=3}` 声明常量、有 `goto` 与 `label:`。
+;;   * 串只能直接写（`printf("%g\n",x)`），装不进变量。
+;;
+;; ## 区段
+;;
+;; 一份 `.pss` 的后半可以是 `@v:` / `@f:` / `@g:` / `@h:` 开头的区段（GLSL 着色器原文，
+;; 见 `tigrou/sphere.pss`）。旧实现是**先切区段再编译**（`polydraw.c` 的 `tsec[]`），
+;; 所以这份语法只管第一段：词法层把第一个 `@` 到文件末尾整段跳掉
+;; （`(or (not "\n") "\n")` 就是"任何字符"），着色器那半由渲染那一侧另外读 ——
+;; 它不是这门语言的语法。
+
+;; ## 现状与还欠什么（2026-09-24）
+;;
+;; **这一份是两门语言共用的**：PolyDraw 的 `.pss` 与 **EvalDraw 的 `.kc`**（Ken 的另一个程序，
+;; 同一门 EVAL）—— 两门在 `langs.js` 里指同一份语法，差别只有各自那张宿主表
+;; （`ext/polydraw/adapter.js` 的 `POLYDRAW_HOST` 与 `ext/evaldraw/adapter.js` 的 `EVALDRAW_HOST`）。
+;;
+;; 读下来的账：`.pss` **52 / 53**（tigrou 28/29、ken 15/15、pyref 9/9）、
+;; `.kc` **141 / 142**（demos + geeky + games + voxes + insts）。一处冲突留给 GLR。
+;;
+;; 两处还欠的，各有一条明写的理由：
+;;
+;;   1. **句中省分号**（`tigrou/particules morphing.pss:49` 的 `glscale(3,3,3)` 换行接下一句）。
+;;      旧实现是递归下降、表达式取最长，那儿没有歧义；LR 这一侧把"分号可省"写成一支之后，
+;;      `vy = a[j] - a[i];` 就有两种读法 —— 量出来是 `balls2k.pss:102` 并发解析爆到 400 条。
+;;      要收它得在词法层做一条"这个换行能不能收尾"的规矩（go 那条 auto-semi 的形状），
+;;      而 `if (c)` 后面换行接 `{` 会被它误伤 —— 那是下一刀要单独量的事。
+;;   2. **预处理**（`evaldraw/geeky/calend.kc:57` 的 `#if 0 … #endif`；`eval.c:79` 的头注也提到
+;;      EVAL 程序里可以 `#define`）。那是**编译前的一遍**，不该塞进语法。
+;;
+;; 另外两处明说的边界：`a()` / `a(,)` 那种**函数指针形参**还没收（`eval.txt` 的那张表里有）；
+;; `$a` 串形参收了形状，但串本身在这门语言里只能直接写，所以它只在 `printf` 那一族上有意义。
+
+(grammar polydraw
+  (tokens NAME NUMBER STRING)
+
+  (start program)
+
+  (lex
+    (skip (+ (set " \t\r\n")))
+    (comment "//" (* (not "\n")))
+    (block-comment "/*" "*/")
+    (skip "@" (* (or (not "\n") "\n")))
+
+    (token NUMBER (+ digit) (? "." (* digit)) (? (or "e" "E") (? (or "+" "-")) (+ digit)))
+    (token NUMBER "." (+ digit) (? (or "e" "E") (? (or "+" "-")) (+ digit)))
+    ;; 十六进制。语料里是键码那一族：`keystatus[0xc8]`、`0xffffff`
+    ;; （EvalDraw 的 `demos/beer.kc:35`；同一门语言，见文件头那句"两家共用"）。
+    (token NUMBER "0" (or "x" "X") (+ hex))
+    (string STRING "\"")
+    (token NAME (or alpha "_") (* (or alnum "_")))
+
+    (keyword NAME fold-case
+      "if" "else" "while" "do" "for" "return" "break" "continue"
+      "goto" "static" "enum")
+
+    ;; 运算符与标点。**长的在前**（`(op …)` 按这一串的次序试，`+=` 要比 `+` 先）。
+    (op "+=" "-=" "*=" "/=" "%=" "==" "!=" "<=" ">=" "&&" "||" "++" "--"
+        "=" "<" ">" "!" ";" "," ":" "&" "$"
+        "{" "}" "(" ")" "[" "]" "+" "-" "*" "/" "%" "^"))
+
+  ;; ── 顶层 ──────────────────────────────────────────────────────────────
+  ;; `static` 与 `enum` **可以摆在主函数前面**（文件级）——`tigrou/balls2k.pss` 头三行就是
+  ;; 一格文件级 `enum{n=175,radius=2};` 接一串 `static ballx[n],…;`，
+  ;; 那些名字整份脚本共用。所以顶层不是"主函数 + 若干函数"，前面还有一段声明。
+  (rule program
+    (-> (pre main fns) (program $*1 $2 $*3) (prefer 2))
+    ;; **整份文件就是主函数体**那一档（说明书：单函数脚本外面那对 `{}` 可省，`()` 也可省）
+    ;; —— `tigrou/cubes reflection.pss` 第一行就是一句调用。与上面那支的歧义由 `(prefer 2)`
+    ;; 定胜负：有 `()` 开头就走上面那支。
+    (-> (stmts) (program (main (params) (block $*1)))))
+
+  (rule pre
+    (-> () ())
+    (-> (pre predecl) ($*1 $2)))
+
+  ;; 文件级那两格的**分号可省**（`tigrou/metaballs.pss` 的 `enum{…}` 后面就没有分号）。
+  (rule predecl
+    (-> ("static" staticlist ";") (static $*2))
+    (-> ("static" staticlist) (static $*2))
+    (-> ("enum" "{" enumlist "}" ";") (enum $*3))
+    (-> ("enum" "{" enumlist "}") (enum $*3)))
+
+  (rule fns
+    (-> () ())
+    (-> (fns fndecl) ($*1 $2)))
+
+  ;; 主函数没有名字，且必须在最前面（说明书 §"Function style"）。
+  (rule main
+    (-> (params block) (main $1 $2)))
+
+  (rule fndecl
+    (-> (NAME params block) (fn $1 $2 $3)))
+
+  (rule params
+    (-> ("(" ")") (params))
+    (-> ("(" paramlist ")") (params $*2)))
+
+  (rule paramlist
+    (-> (param) ($1))
+    (-> (paramlist "," param) ($*1 $3)))
+
+  ;; 形参四态：`a` 按值、`&a` 指针、`$a` 串、`a[4]` 数组（`eval.txt` 的那张表）。
+  (rule param
+    (-> (NAME) (pval $1))
+    (-> ("&" NAME) (pref $2))
+    (-> ("$" NAME) (pstr $2))
+    (-> (NAME "[" "]") (parr $1))
+    (-> (NAME "[" NUMBER "]") (parr $1 $3)))
+
+  ;; ── 语句 ──────────────────────────────────────────────────────────────
+  ;; **函数体最后那个表达式就是返回值，不用分号**（说明书 §"Function style" 的第二条）：
+  ;; `twice(x){ 2*x }`。只在 `}` 前面收这一支 —— 那是有界的，不像"分号到处可省"那样
+  ;; 会把解析空间炸开（见文件头"还欠什么"）。
+  (rule block
+    (-> ("{" stmts "}") (block $*2))
+    (-> ("{" stmts expr "}") (block $*2 (retexpr $3))))
+
+  (rule stmts
+    (-> () ())
+    (-> (stmts stmt) ($*1 $2)))
+
+  (rule stmt
+    (-> (block) $1)
+    (-> (expr ";") (expr $1))
+    (-> (";") (empty))
+    ;; **没有"空语句"这一支**（`;` 自己成一句）。少了它是有意的：既然分号可省（见下一支），
+    ;; 留着空语句就等于每条 `a;` 都有两种读法（`a;` 一句，或者 `a` 一句加 `;` 一句）——
+    ;; 一行四句赋值就是十六种，`balls2k.pss:30` 上当场撞到"并发解析超过 400 条"。
+    (-> ("if" "(" expr ")" stmt) (if $3 $5))
+    (-> ("if" "(" expr ")" stmt "else" stmt) (if $3 $5 $7))
+    (-> ("while" "(" expr ")" stmt) (while $3 $5))
+    (-> ("do" stmt "while" "(" expr ")" ";") (dowhile $2 $5))
+    (-> ("for" "(" optlist ";" optexpr ";" optlist ")" stmt) (for $3 $5 $7 $9))
+    (-> ("return" ";") (return))
+    (-> ("return" expr ";") (return $2))
+    (-> ("break" ";") (break))
+    (-> ("continue" ";") (continue))
+    (-> ("goto" NAME ";") (goto $2))
+    (-> (NAME ":") (label $1))
+    (-> ("static" staticlist ";") (static $*2))
+    (-> ("enum" "{" enumlist "}" ";") (enum $*3)))
+
+  (rule optexpr
+    (-> () ())
+    (-> (expr) $1))
+
+  ;; for 头里的**逗号表达式**：`for(v=0,i=1/256;i<1;i*=1.3)`（`ken/curvybuild.pss:48`）。
+  ;; 只在 for 的第一格与第三格收 —— 那儿有 `;` 与 `)` 兜着，不会与实参表的逗号打架。
+  (rule optlist
+    (-> () ())
+    (-> (forlist) (comma $*1)))
+
+  (rule forlist
+    (-> (expr) ($1))
+    (-> (forlist "," expr) ($*1 $3)))
+
+  (rule staticlist
+    (-> (staticone) ($1))
+    (-> (staticlist "," staticone) ($*1 $3)))
+
+  ;; 多维照收：`static planes[6][4];`（`tigrou/balls2k.pss:11`）。旧实现把它摊成一块
+  ;; 连续的内存（下标是行优先算出来的），所以这儿只把每一维记下来，摊平归 adapter。
+  ;;
+  ;; **带初值也收**：`static ncur = 0, clut[NMAX] = {0};`（同一份 187 行）。
+  ;; `eval.txt` 那句"数组初始化列表还不支持"是 2003 年那一版的话 —— 语料里就有 `={0}`，
+  ;; 而判据是 `eval.c` 那份源码，不是那份说明书里的旧话。
+  (rule staticone
+    (-> (NAME) (svar $1))
+    (-> (NAME "=" expr) (svar $1 $3))
+    (-> (NAME dims) (sarr $1 (dims $*2)))
+    (-> (NAME dims "=" init) (sarr $1 (dims $*2) $4)))
+
+  ;; 初值列表**末尾可以多一个逗号**（`ken/curvybuild.pss:22` 那张表每行都以逗号收尾）。
+  (rule init
+    (-> ("{" "}") (init))
+    (-> ("{" exprlist "}") (init $*2))
+    (-> ("{" exprlist "," "}") (init $*2)))
+
+  (rule exprlist
+    (-> (expr) ($1))
+    (-> (exprlist "," expr) ($*1 $3)))
+
+  (rule dims
+    (-> ("[" expr "]") ($2))
+    (-> (dims "[" expr "]") ($*1 $3)))
+
+  (rule enumlist
+    (-> (enumone) ($1))
+    (-> (enumlist "," enumone) ($*1 $3)))
+
+  (rule enumone
+    (-> (NAME) (ename $1))
+    (-> (NAME "=" expr) (ename $1 $3)))
+
+  ;; ── 表达式：一级一个非终结符（优先级全在级联里，不用 (prec …)） ────────
+  (rule expr
+    (-> (assign) $1))
+
+  (rule assign
+    (-> (orexp) $1)
+    (-> (unary "=" assign) (assign "=" $1 $3))
+    (-> (unary "+=" assign) (assign "+=" $1 $3))
+    (-> (unary "-=" assign) (assign "-=" $1 $3))
+    (-> (unary "*=" assign) (assign "*=" $1 $3))
+    (-> (unary "/=" assign) (assign "/=" $1 $3))
+    (-> (unary "%=" assign) (assign "%=" $1 $3)))
+
+  (rule orexp
+    (-> (andexp) $1)
+    (-> (orexp "||" andexp) (bin "||" $1 $3)))
+
+  (rule andexp
+    (-> (cmp) $1)
+    (-> (andexp "&&" cmp) (bin "&&" $1 $3)))
+
+  (rule cmp
+    (-> (add) $1)
+    (-> (cmp "==" add) (bin "==" $1 $3))
+    (-> (cmp "!=" add) (bin "!=" $1 $3))
+    (-> (cmp "<" add) (bin "<" $1 $3))
+    (-> (cmp "<=" add) (bin "<=" $1 $3))
+    (-> (cmp ">" add) (bin ">" $1 $3))
+    (-> (cmp ">=" add) (bin ">=" $1 $3)))
+
+  (rule add
+    (-> (mul) $1)
+    (-> (add "+" mul) (bin "+" $1 $3))
+    (-> (add "-" mul) (bin "-" $1 $3)))
+
+  (rule mul
+    (-> (powexp) $1)
+    (-> (mul "*" powexp) (bin "*" $1 $3))
+    (-> (mul "/" powexp) (bin "/" $1 $3))
+    (-> (mul "%" powexp) (bin "%" $1 $3)))
+
+  ;; `^` 是幂、**右结合**。优先级照 `eval.c:7352` 那张 LUT：
+  ;; `POW=0 < TIMES/SLASH/PERC=1 < PLUS/MINUS=2 < 比较=3 < ==/!=4 < &&=5 < ||=6`（数越小越紧）。
+  ;;
+  ;; **一元 `-` 比 `^` 还紧**（与 C 家族、Python 相反）：`eval.c:2019` 那个 `negit` 是在
+  ;; **读操作数的时候**把前缀的 `+`/`-` 吃掉的，所以 `-2^2` 是 `(-2)^2 = 4`，不是 `-(2^2)`。
+  ;; 这一格写错不会报错，只会**静默给出另一个答案** —— 所以左边是 `unary` 不是 `postfix`。
+  (rule powexp
+    (-> (unary) $1)
+    (-> (unary "^" powexp) (bin "^" $1 $3)))
+
+  (rule unary
+    (-> (postfix) $1)
+    (-> ("-" unary) (neg $2))
+    (-> ("+" unary) $2)
+    (-> ("!" unary) (not $2))
+    (-> ("++" unary) (preinc $2))
+    (-> ("--" unary) (predec $2)))
+
+  (rule postfix
+    (-> (primary) $1)
+    (-> (postfix "[" expr "]") (index $1 $3))
+    (-> (postfix "(" ")") (call $1))
+    (-> (postfix "(" arglist ")") (call $1 $*3))
+    (-> (postfix "++") (postinc $1))
+    (-> (postfix "--") (postdec $1)))
+
+  ;; 实参里可以写 `&x`：那是**取地址**，配的是 `&a` 那种形参（`rotate(&x,&y,t/2)`，
+  ;; `tigrou/balls2k.pss:46`）。只在实参位置收 —— EVAL 里它别处没有意思。
+  (rule arglist
+    (-> (arg) ($1))
+    (-> (arglist "," arg) ($*1 $3)))
+
+  (rule arg
+    (-> (expr) $1)
+    (-> ("&" postfix) (addr $2)))
+
+  (rule primary
+    (-> (NUMBER) (num $1))
+    (-> (STRING) (str $1))
+    (-> (NAME) (name $1))
+    (-> ("(" expr ")") $2)))

@@ -27,6 +27,8 @@ import { GO_RT } from '../../../ext/go/go-rt.js';
 /* **迁过来的那几门**（ADR-0044）：`toIR` 是 adapter（CST → 标准 IR），语义降级走
    `src/core/lower/`。有 `toIR` 的语言**没有** `toGraph` —— 图那一层不再有它。 */
 import { awkToIR, AWK_HOOKS } from '../../../ext/awk/adapter.js';
+import { polydrawToIR } from '../../../ext/polydraw/adapter.js';
+import { evaldrawToIR } from '../../../ext/evaldraw/adapter.js';
 import { chezToIR } from '../../../ext/chez/adapter/index.js';
 import { sbclToIR } from '../../../ext/sbcl/adapter/index.js';
 import { fbToIR } from '../../../ext/freebasic/adapter/index.js';
@@ -122,6 +124,14 @@ export const LANGS = new Map([
     grammar: 'ext/nim/nim.grammar', toIR: nimToIR, imports: nimImports, exts: ['nim'],
   }],
   ['cpp', { grammar: 'ext/cpp/cpp.grammar', toIR: cppToIR, exts: ['cpp', 'cc', 'cxx', 'hpp'] }],
+  /* PolyDraw 的脚本（Ken Silverman 的 EVAL）。正确性口径是那棵参考树里的
+     `polydraw_src/`（`eval.c` + `eval.txt`）—— 新写的 `c_impl` / `js_impl` 有已知偏差。
+     这一版只接"只算不画"那一半：画图那一族的名字会当场报"要渲染那一侧"。 */
+  ['polydraw', { grammar: 'ext/polydraw/polydraw.grammar', toIR: polydrawToIR, exts: ['pss'] }],
+  /* EvalDraw（Ken 的另一个程序，**同一门语言**）—— 指的就是上面那份语法：
+     它不改一条规则读下了 141/142 份 `.kc`。差别只有那张宿主表（`ext/evaldraw/adapter.js`）。
+     那棵树里**没有源码**（只有 .exe），所以口径是 `evaldraw.txt` / `evaldraw_ref.md`。 */
+  ['evaldraw', { grammar: 'ext/polydraw/polydraw.grammar', toIR: evaldrawToIR, exts: ['kc'] }],
 ]);
 
 /** 后缀 -> 语言名。**一个后缀只许有一门** —— 撞了当场报，不许悄悄挑一个。 */

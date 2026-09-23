@@ -1,0 +1,45 @@
+// ext/polydraw/examples/06-arrays.pss —— **`static` 数组、越界那两档规矩、RND/NRND**
+//
+// 口径全在 `polydraw_src/eval.txt`：
+//   * 数组长度必须是**常量或 enum 名**；多维照收（旧实现把它摊成一块）；
+//   * **越界检查**分两档：长度是 2 的幂 -> 下标按位与（绕回去）；
+//                        别的长度 -> 越界的下标改成 0 再读/写；
+//   * `RND` 是 [0,1) 均匀、`NRND` 是正态（均值 0、标准差 1）、`srand(种)` 定种子。
+//
+// 这一份只印数（没有图），所以三条腿的 stdout 逐字节相同 —— 判据在 tests/lower/run.js。
+
+enum{n=8,m=5};
+
+static a[n], b[m], grid[3][4];
+
+()
+{
+      //一维：填 i*i，读回来
+   for(i=0;i<n;i++) a[i] = i*i;
+   printf("a: %g %g %g\n", a[0], a[3], a[7]);
+
+      //**2 的幂那一档**：下标绕回去（a[8] 就是 a[0]、a[-1] 就是 a[7]）
+   printf("wrap: %g %g\n", a[n], a[-1]);
+
+      //**不是 2 的幂那一档**：越界的下标改成 0
+   for(i=0;i<m;i++) b[i] = i+1;
+   printf("clip: %g %g %g\n", b[0], b[m], b[-3]);
+
+      //写也走同一条规矩：b[m] 其实写进了 b[0]
+   b[m] = 99;
+   printf("clipw: %g %g\n", b[0], b[4]);
+
+      //多维摊成一块：grid[r][c] = r*10+c
+   for(r=0;r<3;r++) for(c=0;c<4;c++) grid[r][c] = r*10+c;
+   printf("grid: %g %g %g\n", grid[0][0], grid[1][2], grid[2][3]);
+
+      //随机数：定了种子之后是**可复现**的（三条腿同一串）
+   srand(12345);
+   printf("rnd: %.6f %.6f\n", rnd, rnd);
+   printf("range: %g\n", (rnd>=0)*(rnd<1));
+
+      //正态：几个样本的均值该在 0 附近（这儿只判它不是 NaN、量级合理）
+   s = 0;
+   for(i=0;i<64;i++) s = s + nrnd;
+   printf("nrnd-mean-small: %g\n", abs(s/64) < 1);
+}

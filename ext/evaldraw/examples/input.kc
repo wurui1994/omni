@@ -1,0 +1,42 @@
+// ext/evaldraw/examples/input.kc —— **输入那一族**（鼠标 + 键盘）的判据例子
+//
+// 宿主给的量：`mousx`/`mousy`（渲染窗口左上角起的像素位置）、`bstatus`（按键位：
+// bit0 左、bit1 右、bit2 中）、`keystatus[扫描码]`。后两格**脚本写得动** ——
+// 说明书里"消掉一次点击/一次按键"就是往它们上写（polydraw.txt:381、:388）。
+//
+// 跑一趟（CPU 备选那一档没有窗口，输入从环境变量来）：
+//   OMNI_GFX=host OMNI_MOUSE=200,80,1 OMNI_KEYS=0xc8 omni run ext/evaldraw/examples/input.kc
+//   -> 光标那个十字画在 (200,80)、左键按着所以圆是实心的、方向键上按着所以顶上多一条线
+//
+// 浏览器那一档（WebGL2 设备）里来源是真事件：canvas 的鼠标 + window 的键盘。
+
+()
+{
+   cls(16, 24, 32);
+
+      //光标位置画个十字
+   setcol(80, 200, 255);
+   moveto(mousx - 10, mousy);
+   lineto(mousx + 10, mousy);
+   moveto(mousx, mousy - 10);
+   lineto(mousx, mousy + 10);
+
+      //左键按着 -> 实心圆；没按 -> 描边圆（半径为负是描边）
+   setcol(255, 190, 60);
+   if (bstatus % 2) drawsph(mousx, mousy, 24);
+   else drawsph(mousx, mousy, -24);
+
+      //`keystatus[0xc8]` 是方向键上。**读完就消掉**（写回 0）—— 这一格证明"写得动"
+   if (keystatus[0xc8])
+   {
+      keystatus[0xc8] = 0;
+      setcol(255, 255, 255);
+      moveto(20, 20);
+      lineto(300, 20);
+   }
+
+      //按键位也写得动：把左键那一位消掉之后，`bstatus%2` 就不成立了
+   if (bstatus % 2) bstatus--;
+   setcol(120, 255, 120);
+   if (bstatus % 2) drawsph(40, 200, 8);
+}

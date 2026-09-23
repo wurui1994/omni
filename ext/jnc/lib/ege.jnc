@@ -1,0 +1,168 @@
+// ext/jnc/lib/ege.jnc —— **EasyX / BGI / EGE 那个形状的 2D 图形设备**（C 这一侧）
+//
+// 与 `ext/js/lib/ege.js` 是**同一套名字、同一套语义、同一个表面格式**：
+// `initgraph(320,240)` 开设备、`setcolor` 换笔、`line`/`circle`/`bar`/`putpixel` 画、
+// `closegraph()` 把一帧交出去。学过 C 的人第一次画图用的就是这套名字。
+//
+// ## 这是图形设备，不是一串字
+//
+// 像素落在**内存**里：`g_fb` 是一块 `int` 槽（一槽一个 `0xRRGGBB`，行优先），所有图元都是
+// 往那块里写（Bresenham 画线、中点画圆）。`putpixel` 调一百万次就是往数组里写一百万次 ——
+// 一个字节都不过 stdout。
+//
+// 一趟只有**一帧表面**跨出去：`closegraph()` 走方言那一格 `gfxframe(路径, 宽, 高, 帧缓冲)`
+// （见 `src/core/sexpr/lower.js` 的 gfxframe 那一段），写成
+//
+//     #rgba <宽> <高>\n<w*h*4 个字节>
+//
+// stdout 上只留一行指针 `#gfx rgba <路径> <宽> <高>` —— Studio 见着它就去读那份表面贴 canvas。
+//
+// 坐标与 EasyX 一致：左上角原点、y 往下、单位是像素。颜色是 `0xRRGGBB`。
+//
+// **尺寸上限是 640×480**（`g_fb` 是一格定长的全局数组 —— 这一层刻意不做动态分配：
+// 设备只有一块，大小在开的时候定，超了当场说清楚）。
+
+int g_fb[307200];              // 640*480 个 int 槽：一槽一个 0xRRGGBB
+int g_w = 0;
+int g_h = 0;
+int g_pen = 0x000000;          // 描边色（setcolor）
+int g_brush = 0xffffff;        // 填充色（setfillcolor）
+int g_bk = 0x000000;           // 背景色（setbkcolor / cleardevice）
+
+int RGB(int r, int g, int b) {
+    int rr = r; int gg = g; int bb = b;
+    if (rr < 0) rr = 0;  if (rr > 255) rr = 255;
+    if (gg < 0) gg = 0;  if (gg > 255) gg = 255;
+    if (bb < 0) bb = 0;  if (bb > 255) bb = 255;
+    return rr * 65536 + gg * 256 + bb;
+}
+
+// BGI 那几格颜色常量（名字照 `graphics.h`）
+int BLACK = 0x000000;
+int WHITE = 0xffffff;
+int RED = 0xff0000;
+int GREEN = 0x00a000;
+int BLUE = 0x0050ff;
+int YELLOW = 0xffd000;
+int CYAN = 0x00c0c0;
+int MAGENTA = 0xff00ff;
+int DARKGRAY = 0x404040;
+int LIGHTGRAY = 0xc0c0c0;
+
+// ---------------------------------------------------------------- 设备
+
+// 开设备。整幅先刷成背景色（与 EasyX 一样：`initgraph` 之后画布是干净的）。
+void initgraph(int w, int h) {
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    if (w > 640) w = 640;
+    if (h > 480) h = 480;
+    g_w = w;
+    g_h = h;
+    cleardevice();
+}
+
+int getwidth() { return g_w; }
+int getheight() { return g_h; }
+
+void setcolor(int c) { g_pen = c; }
+void setfillcolor(int c) { g_brush = c; }
+void setbkcolor(int c) { g_bk = c; }
+
+void cleardevice() {
+    int n = g_w * g_h;
+    for (int i = 0; i < n; i++) g_fb[i] = g_bk;
+}
+
+// 一格像素。**裁剪只在这一处做**，上头的图元都不用再判。
+void putpixel(int x, int y, int c) {
+    if (x < 0) return;
+    if (y < 0) return;
+    if (x >= g_w) return;
+    if (y >= g_h) return;
+    g_fb[y * g_w + x] = c;
+}
+
+int getpixel(int x, int y) {
+    if (x < 0) return 0;
+    if (y < 0) return 0;
+    if (x >= g_w) return 0;
+    if (y >= g_h) return 0;
+    return g_fb[y * g_w + x];
+}
+
+// ---------------------------------------------------------------- 图元
+
+// Bresenham。两头都画（与 BGI 的 `line` 一样是闭区间）。
+void line(int x1, int y1, int x2, int y2) {
+    int x = x1; int y = y1;
+    int dx = x2 - x1; if (dx < 0) dx = -dx;
+    int dy = y2 - y1; if (dy < 0) dy = -dy;
+    int sx = 1; if (x1 > x2) sx = -1;
+    int sy = 1; if (y1 > y2) sy = -1;
+    int err = dx - dy;
+    while (1) {
+        putpixel(x, y, g_pen);
+        if (x == x2 && y == y2) break;
+        int e2 = err * 2;
+        if (e2 > -dy) { err = err - dy; x = x + sx; }
+        if (e2 < dx) { err = err + dx; y = y + sy; }
+    }
+}
+
+// 描边矩形（x,y 是左上角，w/h 是宽高 —— 与 EGE 的 `rectangle` 同）
+void rectangle(int x, int y, int w, int h) {
+    line(x, y, x + w - 1, y);
+    line(x + w - 1, y, x + w - 1, y + h - 1);
+    line(x + w - 1, y + h - 1, x, y + h - 1);
+    line(x, y + h - 1, x, y);
+}
+
+// 填充矩形（`bar`：用填充色）
+void bar(int x, int y, int w, int h) {
+    for (int j = 0; j < h; j++) {
+        for (int i = 0; i < w; i++) putpixel(x + i, y + j, g_brush);
+    }
+}
+
+// 中点画圆 + 八分对称（描边，用笔色）
+void circle(int cx, int cy, int r) {
+    int x = r; int y = 0; int err = 1 - r;
+    while (x >= y) {
+        putpixel(cx + x, cy + y, g_pen);
+        putpixel(cx + y, cy + x, g_pen);
+        putpixel(cx - y, cy + x, g_pen);
+        putpixel(cx - x, cy + y, g_pen);
+        putpixel(cx - x, cy - y, g_pen);
+        putpixel(cx - y, cy - x, g_pen);
+        putpixel(cx + y, cy - x, g_pen);
+        putpixel(cx + x, cy - y, g_pen);
+        y = y + 1;
+        if (err < 0) err = err + 2 * y + 1;
+        else { x = x - 1; err = err + 2 * (y - x) + 1; }
+    }
+}
+
+// 填充圆：逐行算半弦长，一行一段（用填充色）
+void fillcircle(int cx, int cy, int r) {
+    for (int dy = -r; dy <= r; dy++) {
+        int w = 0;
+        while ((w + 1) * (w + 1) + dy * dy <= r * r) w = w + 1;
+        for (int dx = -w; dx <= w; dx++) putpixel(cx + dx, cy + dy, g_brush);
+    }
+}
+
+// ---------------------------------------------------------------- 交出这一帧
+
+/**
+ * 把这一帧交出去：方言那一格 `gfxframe(路径, 宽, 高, 帧缓冲)` 写表面文件，
+ * stdout 上只印一行**指针**。
+ *
+ * 名字照 BGI（`closegraph`）—— 设备关了，图在那份表面里。
+ * 路径与 `ext/js/lib/ege.js` 的默认一致（`.omni-cache/gfx/frame.rgba`），所以 Studio
+ * 与原生那侧的窗口两边都不用改。
+ */
+void closegraph() {
+    gfxframe(".omni-cache/gfx/frame.rgba", g_w, g_h, g_fb);
+    printf("#gfx rgba .omni-cache/gfx/frame.rgba %d %d\n", g_w, g_h);
+}

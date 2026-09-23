@@ -1,0 +1,29 @@
+// ext/evaldraw/examples/frames.kc —— **帧循环**那一格的判据例子
+//
+// EVAL 的执行模型是"宿主每帧调脚本一次"：所以这一份里
+//   * `static n` **跨帧活**（每帧加一），
+//   * `numframes` 是宿主给的量（第一帧是 0），
+//   * 画出来的圆随帧数变大 —— 于是"跑了几帧"在表面上看得见。
+//
+// 跑一趟（离屏那一档：`OMNI_FRAMES` 说画几帧，默认 1）：
+//   OMNI_GFX=host OMNI_FRAMES=3 omni run ext/evaldraw/examples/frames.kc
+//   -> 三行 `#gfx rgba …`（一帧一行指针），最后那一帧里圆的半径是 60
+//
+// 口径见 docs/design/eval-realtime-gpu.md 第 3 节。
+
+()
+{
+   static n = 0;
+   n++;
+
+   cls(16, 24, 32);
+
+      //圆随帧数长大：半径 = 帧数 * 20
+   setcol(255, 190, 60);
+   drawsph(160, 120, n * 20);
+
+      //`numframes` 是宿主给的（第一帧 0）—— 画一条随帧数变长的线，两样都在表面上留痕
+   setcol(80, 200, 255);
+   moveto(10, 230);
+   lineto(10 + numframes * 40, 230);
+}

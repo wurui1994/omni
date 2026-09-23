@@ -1,0 +1,50 @@
+// ext/polydraw/examples/05-shader-geom.pss —— **着色器 + 立即模式的几何**
+//
+// 这一份是 PolyDraw 里最常见的那个组合：脚本自己挑一对着色器，几何还是 `glBegin`/`glVertex`
+// 那一族发出去 —— 于是顶点走**自己的顶点着色器**（`ftransform()` 乘的是我们喂的 `u_mvp`，
+// 也就是 MODELVIEW 与 PROJECTION 的积），像素走自己的片元着色器。
+//
+// 用到的：glsetshader / glbegin+glend / glvertex / glcolor / gltexcoord /
+//          glrotate+glscale（矩阵栈，变换在着色器里生效）/ glgetuniformloc + gluniform1f
+//
+// 判据（`tests/studio/run.js` 第 4 节）判的是：四边形**转起来了**（矩阵真的进了 u_mvp）、
+// 顶点色与纹理坐标都插值到了片元里（四角颜色不同）。
+
+()
+{
+   glsetshader("vert","frag");
+   gluniform1f(glgetuniformloc("t"), numframes/60);
+
+   glclear(GL_COLOR_BUFFER_BIT);
+
+      //**套在 push/pop 里**：MODELVIEW 每帧被摆回单位（`framebegin`），但脚本自己
+      //这一段变换还是该收干净 —— 而且要先挪到镜头前头（默认投影是透视的）
+   glpushmatrix();
+   gltranslate(0, 0, -2);
+   glrotate(numframes*2, 0, 0, 1);
+   glscale(.6, .6, 1);
+
+   glbegin(GL_QUADS);
+   glcolor(1,0,0); gltexcoord(0,0); glvertex(-1,-1);
+   glcolor(0,1,0); gltexcoord(1,0); glvertex( 1,-1);
+   glcolor(0,0,1); gltexcoord(1,1); glvertex( 1, 1);
+   glcolor(1,1,0); gltexcoord(0,1); glvertex(-1, 1);
+   glend();
+   glpopmatrix();
+}
+@v:vert
+varying vec4 uv;
+void main()
+{
+   uv = gl_MultiTexCoord0;
+   gl_Position = ftransform();
+}
+@f:frag
+uniform float t;
+varying vec4 uv;
+void main()
+{
+      //顶点色（gl_Color 是插值过的那一格）与纹理坐标一起进颜色里 —— 两样都在判据上
+   float w = 0.5 + 0.5*sin(t*4.0);
+   gl_FragColor = vec4(gl_Color.rgb*(1.0 - 0.3*w) + 0.3*w*vec3(uv.x, uv.y, 1.0), 1.0);
+}

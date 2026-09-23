@@ -1,0 +1,47 @@
+// ext/jnc/examples/01-shapes.jnc —— 用 ege 那套名字画几样东西（C 这一侧）
+//
+// 与 `ext/js/examples/01-shapes.js` 是**同一幅图、同一套 API** —— 差别只有语言。
+//
+// 跑一趟：
+//   omni run ext/jnc/examples/01-shapes.jnc
+//   -> #gfx rgba .omni-cache/gfx/frame.rgba 320 240
+//
+// stdout 上只有那一行**指针**；像素在那份表面文件里（320*240*4 字节的裸 RGBA），
+// Studio 贴 canvas、本机 glfw 贴窗口都吃这个格式。
+
+import "../lib/ege.jnc"
+
+int main() {
+    initgraph(320, 240);
+    setbkcolor(RGB(16, 24, 32));
+    cleardevice();
+
+        // 一排格线
+    setcolor(RGB(60, 72, 88));
+    for (int y = 30; y < 240; y += 30) line(0, y, 319, y);
+
+        // 三个矩形：描边、填充、再描边
+    setcolor(YELLOW);
+    rectangle(20, 20, 120, 80);
+    setfillcolor(RGB(200, 60, 60));
+    bar(40, 40, 80, 40);
+    setcolor(WHITE);
+    rectangle(40, 40, 80, 40);
+
+        // 两个圆：描边 + 填充
+    setcolor(CYAN);
+    circle(230, 70, 40);
+    setfillcolor(RGB(80, 200, 255));
+    fillcircle(230, 70, 18);
+
+        // 一把线（扇形）
+    setcolor(RGB(40, 220, 140));
+    for (int i = 0; i <= 12; i++) line(30, 220, 30 + i * 22, 130);
+
+        // 一排点（putpixel 就是往内存里写 —— 一个字节都不过 stdout）
+    setcolor(WHITE);
+    for (int i = 0; i < 260; i++) putpixel(30 + i, 232, RGB(255, 255, 255));
+
+    closegraph();
+    return 0;
+}
