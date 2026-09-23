@@ -15,7 +15,7 @@ import {
 import { INT, arrOf, named, typeOf } from '../../../src/core/lower/ty-of.js';
 import {
   exprOf, condOf, typeOfSpecs, printArgs, nameOf, tyArg, vcallName, readParams, coerce,
-  wrapNarrow,
+  wrapNarrow, argsWithRefs,
 } from './expr.js';
 
 /**
@@ -85,9 +85,28 @@ function borrowedLocals(fnTok, C) {
         }
       }
       if (fn !== undefined && tag(fn) === 'n' && as !== undefined) {
-        const idx = C.refSig.get(C.ref(nameOf(fn)));
+        /* 自由函数，或者**函数式的构造**（`Counter(y)` —— 那一格按类名查）。 */
+        const idx = C.refSig.get(C.ref(nameOf(fn))) ?? C.ctorRef.get(C.ref(nameOf(fn)));
         if (idx !== undefined) {
           kids(as).forEach((a, i) => {
+            const inner = tag(a) === 'addrof' ? kids(a)[0] : a;
+            if (idx.has(i) && tag(inner) === 'n') out.add(C.ref(nameOf(inner)));
+          });
+        }
+      }
+    }
+    /* **声明形的构造**（`Counter c(y);`）：类名在 specs 上、实参在声明符的 `(ctor …)` 里。 */
+    if (tag(t) === 'decl') {
+      const sp = part(t, 'specs');
+      const cn = sp === undefined ? undefined : kids(sp).find((y) => tag(y) === 'n');
+      const idx = cn === undefined ? undefined : C.ctorRef.get(C.ref(nameOf(cn)));
+      const it = part(t, 'init');
+      if (idx !== undefined && it !== undefined) {
+        for (const d of kids(it)) {
+          const ct = kids(d).find((y) => tag(y) === 'ctor');
+          const cas = ct === undefined ? undefined : part(ct, 'args');
+          if (cas === undefined) continue;
+          kids(cas).forEach((a, i) => {
             const inner = tag(a) === 'addrof' ? kids(a)[0] : a;
             if (idx.has(i) && tag(inner) === 'n') out.add(C.ref(nameOf(inner)));
           });
@@ -330,6 +349,12 @@ export function cppToIR(tree) {
      * 所以按**名字**近似。多装了盒子不会错（读写一律走 `.v`），只是白装一格。
      */
     refByName: new Map(),
+    /**
+     * **类名（规整过的） → 它那一份构造的哪几格实参是借出去的**。构造在两个位置上被调
+     * （`Counter c(y);` 与 `Counter(y)`），两处都要在**求值之前**知道 —— 所以按类名记。
+     * 只有"这个类只有一份构造"那一档进这张表（重载的当场报）。
+     */
+    ctorRef: new Map(),
     /**
      * **按值传一格记录要拷一份**（C++ 的值语义）。方言的记录是引用语义，所以"传进去、
      * 在里头改字段"从前**改到了调用者那一格**（`grow(a)` 之后 `a.x` 变了 —— 答案静默地错）。
@@ -1015,7 +1040,19 @@ export function cppToIR(tree) {
         throw new Error(`cpp->IR: ${rec.name} 有两份形参一模一样的构造函数`);
       }
       const s = sigOf(tok, undefined, name);
-      noRefParams(s, `${rec.name} 的构造函数`);
+      /**
+       * **构造上的出参**（`Sum(int& out)`）：与方法那一格同一台机器，只认"这个类只有
+       * 一份构造"那一档 —— 名字定得死，调用点才能在**求值之前**知道哪几格要交盒子。
+       * 有两份及以上就当场报（挑那一份靠实参类型，而借出去那一格给的是盒子）。
+       */
+      const cRef = new Set(s.params.flatMap((p, i) => (p.ref === true ? [i] : [])));
+      if (cRef.size > 0) {
+        if ((rec.ctors ?? []).length > 1) {
+          throw new Error(`cpp->IR: ${rec.name} 的构造既重载又有 \`T&\` 形参 —— 还没接`);
+        }
+        C.refSig.set(s.name, cRef);
+        C.ctorRef.set(C.ref(rec.name), cRef);
+      }
       C.fns.set(s.name, { params: s.params, ret: selfType });
       if (byType) {
         const k = C.ref(rec.name);
@@ -1626,6 +1663,10 @@ function ctorDecl(sig, rec, ctorTok, C) {
   const outerScoped = C.scoped;
   const outerSelf = C.self;
   const outerRet = C.retType;
+  const outerRefs = C.refNames;
+  /* 这格构造里哪几个名字装在盒子里（出参 + 体里被借出去的那几格局部量）—— 与 `fnDecl` 同。 */
+  C.refNames = new Set(sig.params.filter((p) => p.ref === true).map((p) => p.name));
+  for (const n of borrowedLocals(ctorTok, C)) C.refNames.add(n);
   C.self = recName;
   /* 构造交出去的是那格记录 —— 体里的 `return;` 上没有窄整数要回卷。 */
   C.retType = null;
@@ -1664,6 +1705,7 @@ function ctorDecl(sig, rec, ctorTok, C) {
   C.scoped = outerScoped;
   C.self = outerSelf;
   C.retType = outerRet;
+  C.refNames = outerRefs;
   C.pop();
   return {
     kind: 'fn',
@@ -2174,7 +2216,10 @@ function declOf(d, specs, C) {
      那个类有两份个数一样的构造时，再按**实参类型**挑（见 `ctorPlan` / `pickCtor`）。 */
   if (type.kind === 'named') {
     const as = ctorTok === undefined ? undefined : part(ctorTok, 'args');
-    const args = as === undefined ? [] : kids(as).map((a) => exprOf(a, C));
+    /* 借出去的那几格实参不许求值（`Counter c(y);`）—— 交的是盒子本身。 */
+    const crs = C.ctorRef.get(type.cls ?? type.name);
+    const args = as === undefined ? []
+      : argsWithRefs(kids(as), crs, C, `${type.cls ?? type.name} 的构造`);
     const hitT = (ctorTok !== undefined || initTok === undefined)
       ? C.pickCtor(type.cls ?? type.name, args.map((a) => typeOf(a, C.tyCtx()))) : null;
     if (hitT !== null) {
@@ -2235,10 +2280,13 @@ function declOf(d, specs, C) {
 //      （按位截断那一格见第 4 条 —— 回卷在**存进去**那一头，不在印出来这一头）。
 //   3. 引用（`T&`）与**按指针收的出参**（`T*` + `*p` + 调用点 `&y`）落成同一样东西：
 //      记录 / 列表 / 字典照原样收（本来就是引用语义）；**标量装进一格盒子**
-//      （`__ref_int`，`refparam.cpp`）。接**自由函数**与**方法**（后者只认"没重载、非虚"
-//      那一档 —— 名字按实参个数就定得死）；借出去的那个实参只能是"一格装着盒子的量"。
-//      构造 / lambda 的形参、重载或虚方法 + `T&`、把字段或数组元素借出去，全当场报。
-//      指针也**只有这一种用法** —— 指针算术、指向数组的指针都当场报。
+//      （`__ref_int`，`refparam.cpp`）。接**自由函数**、**方法**与**构造**（后两者只认
+//      "没重载、非虚"那一档 —— 名字定得死，调用点才能在求值之前知道哪几格要交盒子）；
+//      借出去的那个实参只能是"一格装着盒子的量"。构造那一格两种写法都接：声明形
+//      （`Grab gr(g);` —— 实参在声明符的 `(ctor …)` 里，按类名查 `C.ctorRef`）与函数式
+//      （`Grab(g)` —— 一格普通调用）。
+//      lambda 的形参、重载或虚方法 + `T&`、重载的构造 + `T&`、把字段或数组元素借出去，
+//      全当场报。指针也**只有这一种用法** —— 指针算术、指向数组的指针都当场报。
 //      `&x`（取地址当值用）只在记录/列表/字典上成立。
 //   4. **窄整数存进去会回卷**（`narrow.cpp`）：方言里整数只有一格宽度，所以类型上带一格
 //      `bits` / `uns` 记号（`expr.js` 的 `BTYPES`），**存进去**的六处补一次 `wrapNarrow` ——

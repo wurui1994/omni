@@ -48,6 +48,17 @@ struct Acc {
   }
 };
 
+/* **构造上的出参**（`Grab(int& out)`）：与方法那一格同一台机器，只认"这个类只有一份
+   构造"那一档 —— 名字定得死，调用点才能在**求值之前**知道哪几格要交盒子。两种写法都接：
+   声明形（`Grab gr(g);`，实参在声明符的 `(ctor …)` 里）与函数式（`Grab(g)`，一格普通调用）。 */
+struct Grab {
+  int v;
+  Grab(int& out) {
+    out = out + 100;
+    v = out;
+  }
+};
+
 int main() {
   int y = 5;
   bump(y, 3);
@@ -70,5 +81,10 @@ int main() {
   int got = 0;
   acc.take(got);
   printf("%d %d\n", got, acc.n);
+  int g = 1;
+  Grab gr(g);
+  printf("%d %d\n", g, gr.v);
+  Grab gr2 = Grab(g);
+  printf("%d %d\n", g, gr2.v);
   return 0;
 }

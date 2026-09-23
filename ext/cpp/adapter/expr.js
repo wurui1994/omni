@@ -429,7 +429,7 @@ export function exprOf(x, C) {
  * 形参）—— 别的（字段、数组元素、临时值）当场报，别静默地传一份副本进去。
  * 写法两种都认：`f(y)`（`T&`）与 `f(&y)`（`T*`）。
  */
-function argsWithRefs(rawArgs, rsig, C, who) {
+export function argsWithRefs(rawArgs, rsig, C, who) {
   return rawArgs.map((a, i) => {
     if (rsig === undefined || !rsig.has(i)) return exprOf(a, C);
     const inner = tag(a) === 'addrof' ? kids(a)[0] : a;
@@ -569,7 +569,8 @@ function callOf(x, C) {
    * 不是盒子里的值。能借的只有"一格装着盒子的量"（局部量或上一层的引用形参）——
    * 别的（字段、数组元素、临时值）当场报，别静默地传一份副本进去。
    */
-  const args = argsWithRefs(rawArgs, C.refSig.get(C.ref(name)), C, name);
+  const rsig = C.refSig.get(C.ref(name)) ?? C.ctorRef.get(C.ref(name));
+  const args = argsWithRefs(rawArgs, rsig, C, name);
   if (name === 'printf' || name === 'puts') {
     throw new Error(`cpp->IR: \`${name}\` 在表达式位置上（它不交值）`);
   }
