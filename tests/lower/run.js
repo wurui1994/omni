@@ -26,7 +26,7 @@ import {
   BASICS, INTMATH, LOOPEXIT, DICT, UNARY, RECORD, INDEX, SLICE, CONV, VALUES, MUT,
   DEFER, BLOCKRET, METHOD, ASSERTOK, STRCAT, NUMSTR, NAMEDARG, CASEFOR, CASERANGE,
   CTIF, MEMBER, BLOCKSCOPE, BITS, CHARLIT, CTCONST, DECLS, ENUMVAL, FNVAL, FORIN,
-  HOIST, LITNONE, MATCH, METHOD2, OPTRES, POINTER, POSINIT, PUSH, INHERIT, OPOVER, TMPL, CTOR, VIRT, CTMPL, LAMBDA, FMT, FORMAT, POSTEST, CTOR2, METHOV,
+  HOIST, LITNONE, MATCH, METHOD2, OPTRES, POINTER, POSINIT, PUSH, INHERIT, OPOVER, TMPL, CTOR, VIRT, CTMPL, LAMBDA, FMT, FORMAT, POSTEST, CTOR2, METHOV, PUREVIRT,
 } from '../lib/cases.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -53,7 +53,7 @@ const FAMILIES = {
   method2: METHOD2, optres: OPTRES, pointer: POINTER, posinit: POSINIT, push: PUSH,
   inherit: INHERIT, opover: OPOVER, tmpl: TMPL, ctor: CTOR, virt: VIRT,
   ctmpl: CTMPL, lambda: LAMBDA, fmt: FMT, format: FORMAT, postest: POSTEST,
-  ctor2: CTOR2, methov: METHOV,
+  ctor2: CTOR2, methov: METHOV, purevirt: PUREVIRT,
 };
 const MIGRATED = {
   awk: ['basics', 'intmath', 'loopexit', 'dict', 'unary'],
@@ -77,7 +77,7 @@ const MIGRATED = {
      本机 `c++ -std=c++17` 给的，不是我们自己编的。 */
   cpp: ['basics', 'conv', 'ctmpl', 'ctor', 'ctor2', 'defer', 'dict', 'fmt', 'index',
     'inherit', 'intmath', 'methov',
-    'lambda', 'loopexit', 'opover', 'record', 'tmpl', 'values', 'virt'],
+    'lambda', 'loopexit', 'opover', 'purevirt', 'record', 'tmpl', 'values', 'virt'],
   /* nim：十九个家族（借来那几门里最多的一格）。这门语言自己带进来的有五样：
      `casefor`（`case` 里能有 `elif` + `for … in` 区间/序列）、`caserange`（`of 0 .. 59:`）、
      `ctif`（`when` 是**编译期**分支：中的那支摊开、别的整格丢掉）、`namedarg`

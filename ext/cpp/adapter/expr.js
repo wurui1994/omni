@@ -360,9 +360,11 @@ function callOf(x, C) {
    * `int total() { return sum() + c; }` 里的 `sum()` 是成员。
    * 类里有同名成员时裸写的一定是成员（自由函数要写 `::f()` 才轮到它）。
    */
-  const selfPick = C.self === null ? null : C.pickMethod(C.self, name, args.length);
-  if (selfPick !== null) {
-    /* 裸写的**虚**方法同样走分派函数（`twice()` 里的 `area()`）。 */
+  /**
+   * 裸写的**虚**方法走分派函数（`describe()` 里的 `area()`）。这一格要排在
+   * "有没有这个名字的方法"**之前** —— 纯虚那一格根上根本没有体，按名字找是找不着的。
+   */
+  if (C.self !== null) {
     const root = C.storageRef.get(C.self) ?? C.self;
     const tab = C.vtab.get(root);
     if (tab !== undefined && tab.has(name)) {
@@ -372,6 +374,9 @@ function callOf(x, C) {
         args: [{ kind: 'name', name: 'this' }, ...args],
       };
     }
+  }
+  const selfPick = C.self === null ? null : C.pickMethod(C.self, name, args.length);
+  if (selfPick !== null) {
     return {
       kind: 'call',
       fn: { kind: 'name', name: selfPick },

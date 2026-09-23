@@ -444,8 +444,13 @@ export function cppToIR(tree) {
   /* **虚方法的分派函数**（签名照根那一份抄，第一格实参是接收者）。 */
   for (const { root } of (C.vtRoots ?? [])) {
     const rootRef = C.ref(root);
-    for (const [m] of C.vtab.get(rootRef)) {
-      const base = C.fns.get(`${rootRef}_${C.ref(m)}`);
+    for (const [m, entries] of C.vtab.get(rootRef)) {
+      /* 签名照根那一份抄；**纯虚那一格根上没有体**，那就照分派表里第一份实现抄。 */
+      const base = C.fns.get(`${rootRef}_${C.ref(m)}`)
+        ?? (entries.length > 0 ? C.fns.get(entries[0].fn) : undefined);
+      if (base === undefined) {
+        throw new Error(`cpp->IR: ${root}::${m} 是纯虚的，可一个派生类都没有实现它`);
+      }
       C.fns.set(vcallName(rootRef, C.ref(m)), { params: base.params, ret: base.ret });
     }
   }
@@ -498,9 +503,10 @@ function vcallDecls(C) {
       const hand = (fn) => (isVoid
         ? [{ kind: 'expr-stmt', expr: callTo(fn) }, { kind: 'return', values: [] }]
         : [{ kind: 'return', values: [callTo(fn)] }]);
+      const isPure = C.records.get(root).pure?.has(m) === true;
       const body = [];
       for (const e of entries) {
-        if (e.vt === 0) continue;               // 根那一份是兜底，摆在最后
+        if (!isPure && e.vt === 0) continue;    // 根那一份是兜底，摆在最后
         body.push({
           kind: 'if',
           cond: {
@@ -513,7 +519,21 @@ function vcallDecls(C) {
           else_: null,
         });
       }
-      body.push(...hand(`${rootRef}_${mref}`));
+      if (isPure) {
+        /**
+         * **纯虚的兜底**：抽象类造不出对象，所以这一支跑不到；真跑到了就是我们自己
+         * 算错了（`__vt` 没设对），那时候停下来比静默地答错强。
+         */
+        body.push({
+          kind: 'builtin-stmt',
+          name: 'fail',
+          args: [{ kind: 'string', value: `${root}::${m} 是纯虚的（__vt 没设对）` }],
+        });
+        if (sig.ret.kind !== 'void') body.push({ kind: 'return', values: [zeroFor(sig.ret)] });
+        else body.push({ kind: 'return', values: [] });
+      } else {
+        body.push(...hand(`${rootRef}_${mref}`));
+      }
       out.push({
         kind: 'fn', name: vcallName(rootRef, mref), params: sig.params, ret: sig.ret, body,
       });
@@ -559,7 +579,7 @@ function freeNames(tok) {
 }
 
 /**
- * 一格 `(class …)` → `{ name, bases, fields, methods, dtor, ctors, virtuals }`。
+ * 一格 `(class …)` → `{ name, bases, fields, methods, dtor, ctors, virtuals, pure }`。
  * `asName` 给了就用它当记录名（**类模板的实例**走这一格：同一棵树按不同的 `T` 读两遍，
  * 名字是 `Box__int` / `Box__real`）。字段与形参的类型走 `typeOfSpecs`，所以类型形参
  * 只要在 `C.aliases` 里绑着，这一份一个字都不用改。
@@ -578,6 +598,7 @@ function collectClass(cls, C, asName = null) {
   const fields = [];
   const methods = [];
   const virtuals = new Set();
+  const pure = new Set();
   let dtor = null;
   const ctors = [];
   for (const m of (members === undefined ? [] : kids(members))) {
@@ -585,6 +606,22 @@ function collectClass(cls, C, asName = null) {
       const ms = part(m, 'specs');
       const mi = part(m, 'init');
       const mn = mi === undefined ? undefined : kids(kids(mi)[0])[0];
+      /**
+       * **纯虚那一格在树上是 `decl` 不是 `func`**：
+       * `virtual int area() = 0;` → `(decl (specs "virtual" …) (init (d (fn (n area) …) (init (num 0)))))`。
+       * 不认它的后果是"多出一格叫 null 的字段"（`nameOf` 读 `(fn …)` 答 null）—— 静默地错。
+       */
+      if (mn !== undefined && tag(mn) === 'fn') {
+        const zero = kids(kids(mi)[0]).find((y) => tag(y) === 'init');
+        if (zero === undefined) {
+          throw new Error(`cpp->IR: 类里只声明不给体的方法（${nameOf(kids(mn)[0])}）还没接`
+            + '（体写在类外那一档）');
+        }
+        const pn = nameOf(kids(mn)[0]);
+        virtuals.add(pn);
+        pure.add(pn);
+        continue;
+      }
       if (mn !== undefined) {
         fields.push({ name: nameOf(mn), type: typeOfSpecs(ms, C, kids(kids(mi)[0])[0]) ?? INT });
       }
@@ -609,7 +646,7 @@ function collectClass(cls, C, asName = null) {
     }
   }
   return {
-    name: asName ?? nameOf(nm), bases, fields, methods, dtor, ctors, virtuals,
+    name: asName ?? nameOf(nm), bases, fields, methods, dtor, ctors, virtuals, pure,
   };
 }
 
@@ -690,9 +727,11 @@ function layoutVirtual(C, recFields, decls) {
           throw new Error(`cpp->IR: ${n} 上的 ${name} 既是虚方法又重载了 —— 还没接`);
         }
       }
-      tab.set(name, members.map((n) => ({
-        vt: C.vtId.get(n), fn: `${C.ref(n)}_${C.ref(name)}`,
-      })));
+      /* **纯虚那一格根上没有体**，所以兜底不能是根自己那一份（见 `vcallDecls`）。 */
+      const isPure = C.records.get(root).pure?.has(name) === true;
+      tab.set(name, members
+        .filter((n) => !(isPure && n === root))
+        .map((n) => ({ vt: C.vtId.get(n), fn: `${C.ref(n)}_${C.ref(name)}` })));
     }
     C.vtab.set(rootRef, tab);
   }
@@ -1127,7 +1166,9 @@ function declOf(d, specs, C) {
 //   5. 构造函数与方法都按**实参个数**重载；个数一样的两份当场报（按类型挑还没接）。
 //      拷贝构造与赋值算子没有 —— 记录是引用语义，那两格在这条腿上本来就不是"拷贝"。
 //      **虚方法 + 重载**当场报（分派表按老名字找那一份）。
-//   6. 虚函数只接**单继承**（虚函数 + 多继承当场报）；纯虚（`= 0`）与虚析构没接。
+//   6. 虚函数只接**单继承**（虚函数 + 多继承当场报）；纯虚（`= 0`）接了 ——
+//      根上没有体，分派函数的兜底是一格 `(fail …)`。**虚析构还没接**。
+//      类里"只声明不给体、体写在类外"那一档也当场报。
 //   7. 类模板只接"没有继承、没有虚函数、没有构造/析构"那一档（别的当场报）；
 //      模板的默认实参与特化没接。
 //   8. lambda 的捕获**一律按值**：`[&]` / `[&x]` 当场报（按引用要"把借走的局部量提上去"
