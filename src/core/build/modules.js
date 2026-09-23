@@ -139,3 +139,127 @@ export function launcherText(entry, names, initOf, prelude, tail) {
   lines.push('');
   return lines.join('\n');
 }
+
+/** 一行是不是顶层声明的**开头**；是就回它的名字，不是回 null。 */
+function declName(line) {
+  const kws = ['function ', 'const ', 'let ', 'var '];
+  for (const kw of kws) {
+    if (!line.startsWith(kw)) continue;
+    const rest = line.slice(kw.length);
+    let end = rest.length;
+    for (const ch of ['(', ' ', '=', ';']) {
+      const at = rest.indexOf(ch);
+      if (at >= 0 && at < end) end = at;
+    }
+    return end === 0 ? null : rest.slice(0, end);
+  }
+  return null;
+}
+
+/**
+ * **把一目录模块产物链接成两段脚本**：一段是**库**（常驻），一段是**这个程序**（每趟）。
+ *
+ * 为什么要这一步：`node` 自己能跑那张 ESM 图，可**那得再起一个进程** —— 量出来
+ * 光 `node -e 0` 在这台机器上就要 110ms，而整趟 asy（01-arith）是 227ms。别的语言
+ * 都在当前进程里 `eval` 一趟就完（30ms 一档）。驱动这一条是**同步**的，拿不到
+ * 异步的 `import()`（见 host/native.js 那段），所以"在本进程里跑"只剩这一条路：
+ * 自己把那张图摊平成脚本，交给 `evalJs`。
+ *
+ * 为什么要**分成两段**：一段短程序每趟重新塞进 2.4MB 的库是纯浪费 —— 量到的账是
+ * V8 编那份库 35ms、第一趟 `init()` 里的惰性编译 78ms，而**第二趟 `init()` 只要
+ * 0.3ms**（库的"真活儿"就这么点，剩下全是编译）。所以库那一段只在**进程里装一次**，
+ * 往后每趟只 eval 这个程序自己那一小段（十几 KB）。常驻靠的是一条语言事实：
+ * 间接 `eval` 里 `var` 与函数声明进的是**全局对象**（下一趟 eval 看得见），
+ * 而 `const` / `let` 只活在那一趟自己的词法环境里 —— 所以库那一段的顶层
+ * `const` / `let` 在这儿改写成 `var`（只有顶层那一层，函数体里的一个字不动）。
+ *
+ * 跨趟的干净由**各家自己的 `init()`** 保证：那本来就是"把这一份的全局清零 + 重设"
+ * （`launcherText` 每趟按次序全跑一遍），所以常驻的是**编译结果**，不是上一趟的状态。
+ *
+ * 这**不是**"把模块合回单体"：每一份产物照旧各自降级、各自缓存、各自按内容做键 ——
+ * 变的只有"谁来装载"。两段都是派生品（`lib-…js` / `prog-…js`），与 `main-<入口>.js`
+ * 同生共死：那一份重写了，这两份就跟着重写。
+ *
+ * 同名声明**去重且校验文字**：按模块发射时，同一个蹦床／函数指针盒会在好几份里各发一遍
+ * （量到 143 个多行函数 + 286 行单行声明重名，全部逐字节相同）。同名而文字不同就**当场报**
+ * —— 那说明两份产物对同一个名字的理解不一样，静默地挑一份是"答案静默地错"。
+ * 这一格顺带保住了正确性：程序那一段里重名的声明被**丢掉**（而不是自己新造一格盒子），
+ * 不然库读的是一格、程序写的是另一格 —— 那才是真的答案静默地错。
+ */
+export function linkBundle(dir, mainName, perRun) {
+  /* 入口那一份（`main-<入口>.js` -> `<入口>.js`）、启动器自己、外加点名要**每趟重来**的
+     那几份（运行时就是一份：它有二十来格顶层可变状态 —— arena、`$fnOnes` 那张按名字
+     记的表、输出缓冲…… 常驻的话上一个程序的东西会漏给下一个。撞过一次：`$fnOne` 按
+     **裸名字**记（入口单元的名字没有前缀，两个程序都有 `f`），于是第二个程序拿到的是
+     第一个程序的闭包 —— 答案静默地错。运行时那一份末尾本来就有
+     `Object.assign(globalThis, …)`，所以它每趟重来、库那一段照旧看得见。 */
+  const entryFile = `${mainName.slice('main-'.length)}`;
+  const fresh = new Set(perRun === undefined || perRun === null ? [] : perRun);
+  const seen = new Set();
+  const libParts = [];
+  const progParts = [];
+  const libNames = [];
+  const decls = new Map();
+  const take = (name) => {
+    if (seen.has(name)) return;
+    seen.add(name);
+    const isLib = name !== mainName && name !== entryFile && !fresh.has(name);
+    const lines = readText(join(dir, name)).split('\n');
+    const out = [];
+    let i = 0;
+    while (i < lines.length) {
+      const raw = lines[i];
+      /* `import './x.js';` / `import { … } from './x.js';` —— 先把被引的那一份摊进来。 */
+      if (raw.startsWith('import ')) {
+        const a = raw.indexOf("'./");
+        const b = a < 0 ? -1 : raw.indexOf("'", a + 3);
+        if (a >= 0 && b > a) take(raw.slice(a + 3, b));
+        i++;
+        continue;
+      }
+      const line = raw.startsWith('export ') ? raw.slice(7) : raw;
+      const nm = declName(line);
+      if (nm === null) { out.push(line); i++; continue; }
+      /* 一句到底在哪儿收尾：单行的自己就收（`;` 或 `}` 结尾），多行的收到**顶格的 `}`**
+         —— 那是发射层的排版（函数体永远以顶格 `}` 收尾）。 */
+      const body = [line];
+      if (!(line.endsWith(';') || line.endsWith('}'))) {
+        i++;
+        while (i < lines.length) {
+          body.push(lines[i]);
+          if (lines[i] === '}') break;
+          i++;
+        }
+      }
+      i++;
+      const raw2 = body.join('\n');
+      /* 重名要校验的是**产物里那句原文**（下面那一格会把库里的 `const` 改成 `var`，
+         拿改写后的去比会把"同一样东西"误判成"两样东西"）。 */
+      const had = decls.get(nm);
+      if (had !== undefined) {
+        if (had !== raw2) {
+          throw new Error(`链接：\`${nm}\` 在两份产物里不是同一样东西`
+            + ` —— 不许静默挑一份\n旧：${had.slice(0, 120)}\n新：${raw2.slice(0, 120)}`);
+        }
+        continue;
+      }
+      decls.set(nm, raw2);
+      let txt = raw2;
+      /* 库那一段要**常驻**：顶层 `const` / `let` 改成 `var`（间接 eval 里 `var` 与函数
+         声明进全局对象，下一趟 eval 才看得见）。只动这一行的开头，函数体不碰。 */
+      if (isLib) {
+        if (txt.startsWith('const ')) txt = `var ${txt.slice('const '.length)}`;
+        else if (txt.startsWith('let ')) txt = `var ${txt.slice('let '.length)}`;
+      }
+      out.push(txt);
+    }
+    if (isLib) { libParts.push(out.join('\n')); libNames.push(name); } else progParts.push(out.join('\n'));
+  };
+  take(mainName);
+  return {
+    /* 库那一段的身份 = 它由哪几份产物拼起来的（产物名本身就是内容地址）。 */
+    libKey: libNames.join(','),
+    lib: `${libParts.join('\n')}\n`,
+    prog: `${progParts.join('\n')}\n`,
+  };
+}

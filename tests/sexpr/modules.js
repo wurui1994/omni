@@ -262,5 +262,49 @@ if (process.platform === 'darwin') {
     `${exe} 是 ${size(exe)} 字节`);
 }
 
+/* **库常驻**（JS 那条腿的链接：`lib-<键>.js` 装一次、`prog-<入口>.js` 每趟一份）。
+ *
+ * 判的是**跨趟不串味**：一个进程里接着跑三个不同的程序，三个答案都要对。这一格撞过一次，
+ * 而且是最难发现的那种 —— 运行时里 `$fnOne` 按**裸名字**记函数值（入口单元的名字没有
+ * 前缀，两个程序都有 `f`），运行时常驻的话第二个程序拿到的是第一个程序的闭包，答案静默
+ * 地错（表现成 `Cannot convert undefined to a BigInt`，栈里全是别人家的函数）。所以运行时
+ * 那一份是**每趟重来**的，只有库常驻。
+ *
+ * 为什么不在 `tests/asy` 里判：那条套件一个例子起一个进程，常驻这件事在那儿看不见。 */
+{
+  const w = mkdtempSync(join(tmpdir(), 'omni-resident-'));
+  const progs = [
+    ['a.asy', 'int f(int x) { return x * 2; }\nwrite(f(21));\n', '42'],
+    ['b.asy', 'int f(int x) { return x + 1000; }\nwrite(f(23));\n', '1023'],
+    ['c.asy', 'real f(real x) { return x / 4; }\nwrite(f(9.0));\n', '2.25'],
+  ];
+  for (const [nm, src] of progs) writeFileSync(join(w, nm), src);
+  /* 一个进程里连着跑三趟（`OMNI_AS_LIB=1` 之后 `runCli` 可以被 import 而不自己跑）。 */
+  const driver = join(w, 'drive.mjs');
+  writeFileSync(driver, `process.env.OMNI_AS_LIB = '1';
+process.env.OMNI_TIMEOUT = '0';
+const { runCli } = await import(${JSON.stringify(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'core', 'cli.js'))});
+let OUT = [];
+const real = process.stdout.write.bind(process.stdout);
+process.stdout.write = (s) => { OUT.push(typeof s === 'string' ? s : Buffer.from(s).toString('utf8')); return true; };
+const got = [];
+for (const nm of ${JSON.stringify(progs.map((p) => p[0]))}) {
+  OUT = [];
+  const code = runCli(['run', ${JSON.stringify(w)} + '/' + nm]);
+  got.push({ nm, code, out: OUT.join('') });
+}
+process.stdout.write = real;
+real(JSON.stringify(got));
+`);
+  const r = spawnSync('node', [driver], { encoding: 'utf8', timeout: 180000 });
+  let got = null;
+  try { got = JSON.parse((r.stdout ?? '').trim()); } catch { got = null; }
+  ok('一个进程里连着跑三个 asy 程序，三个答案都对',
+    got !== null && got.length === 3
+      && got.every((g, i) => g.code === 0 && g.out.trim() === progs[i][2]),
+    got === null ? `驱动没给出 JSON：${(r.stderr ?? '').trim().split('\n').slice(-3).join(' | ')}`
+      : got.map((g) => `${g.nm}=${JSON.stringify(g.out.trim())}`).join('，'));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exitCode = 1;

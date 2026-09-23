@@ -64,7 +64,7 @@ import { ninjaCmd } from './build/cli.js';
 /* 模块产物缓存那套通用机器（一份索引 + 内容身份 + 一格键）：有 import 关系的语言共用它，
  * 不再每门语言手写一份脏判定 —— 见 `docs/design/build-system.md` §10。 */
 import {
-  UnitIndex, moduleDir, declRead, declWrite, launcherText,
+  UnitIndex, moduleDir, declRead, declWrite, launcherText, linkBundle,
 } from './build/modules.js';
 import { cacheSlot, slotDone, slotRelay } from './build/modcache.js';
 import { check } from './hir/check.js';
@@ -2321,6 +2321,51 @@ function asyModsBuild(path, dir) {
   vStep(`asy units      -> ${dir}`);
   return mainPath;
 }
+
+/**
+ * 那几份产物链接出来的**两段脚本**（`lib-<入口>.js` 常驻那一段 + `prog-<入口>.js` 每趟那一段），
+ * 没有就现链一份。
+ *
+ * 两条失效判据都要有：①与 `main-<入口>.js` 同生共死（那一份每趟构建都重写，见
+ * `asyModsBuild` 末尾，所以"比它新"就等于"这一趟的模块一份都没换过"）；②**链接器自己
+ * 换了形状**也要重链 —— 那不在模块的印记里（模块一个字节都没动），所以键文件第一行记一格
+ * 格式号。少了第二条的样子是：改完链接器，盘上那份旧链接产物照旧被跑。
+ */
+const LINK_FMT = 'link2';
+
+function asyBundle(dir, mainPath) {
+  const at = mainPath.lastIndexOf('/');
+  const mainName = at < 0 ? mainPath : mainPath.slice(at + 1);
+  const stem = mainName.slice('main-'.length, mainName.length - '.js'.length);
+  const progPath = join(dir, `prog-${stem}.js`);
+  const keyPath = join(dir, `prog-${stem}.key`);
+  /* 库那一段的文件名按**内容键**起（`lib-<键的哈希>.js`）：同一套库的程序共用一份 ——
+     按入口各存一份的话，198 个例子在盘上就是 198 × 2.4MB 的同一段文字。 */
+  const libFile = (k) => join(dir, `lib-${hash16(k)}.js`);
+  if (exists(progPath) && exists(keyPath) && mtimeMs(progPath) >= mtimeMs(mainPath)) {
+    const lines = readText(keyPath).split('\n');
+    if (lines[0] === LINK_FMT && exists(libFile(lines[1]))) {
+      return { libKey: `${dir}|${lines[1]}`, libPath: libFile(lines[1]), prog: readText(progPath) };
+    }
+  }
+  const got = linkBundle(dir, mainName, ['omni_rt.js']);
+  const libPath = libFile(got.libKey);
+  if (!exists(libPath)) writeText(libPath, got.lib);
+  writeText(progPath, got.prog);
+  writeText(keyPath, `${LINK_FMT}\n${got.libKey}\n`);
+  return { libKey: `${dir}|${got.libKey}`, libPath, prog: got.prog };
+}
+
+/**
+ * **这个进程里已经装着哪一段库**（`linkBundle` 那个 libKey）。
+ *
+ * 这是**故意**留在模块级的一格状态：常驻的正是它的意义 —— `omni serve` 的热工人一个
+ * 进程接着跑好多趟，库那 2.4MB 只该编一次。跨趟的干净不靠"重新装一遍"，靠各家自己的
+ * `init()`（每趟按次序全跑一遍，那本来就是"把这一份的全局清零 + 重设"，量到 0.3ms）。
+ * 键换了（换了库、换了编译器印记、换了产物目录）就重装 —— 键里带的是产物名，而产物名
+ * 本身是内容地址。
+ */
+let ASY_LIB_LOADED = null;
 
 /**
  * 影响"同一个名字解析到哪个文件"的那几样 —— 它是**产物目录的配置键**
@@ -5553,6 +5598,28 @@ function main(argv) {
         // 先问一句"上一趟的清单还成立吗"。成立就一步前端都不走 —— 判断本身只是几十个 stat。
         const hit = asyModsFast(path, dir);
         const mainPath = hit === null ? asyModsBuild(path, dir) : hit;
+        /* **在本进程里跑、库只装一次**（这一刀）：把那几份产物链接成"库 + 这个程序"两段，
+         * 库那一段在进程里常驻，每趟只 eval 程序那一小段。不再 spawn。
+         *
+         * 量出来的账（01-arith，产物全命中）：`node` 子进程 227ms 里有 110ms 是**光起一个
+         * node**（这台机器上 `node -e 0` 就要 110ms）、35ms 是 V8 编那份 1.97MB 的库、
+         * 78ms 是第一趟 `init()` 里的惰性编译 —— 而**第二趟 `init()` 只要 0.3ms**：库的
+         * 真活儿就这么点，剩下全是编译。一段短程序每趟重新塞一遍那 2.4MB 是纯浪费。
+         *
+         * 产物一格没变：每份模块照旧各自降级、各自缓存。变的只有"谁来装载、装几次"。
+         * `OMNI_ASY_LINK=0` 回到 spawn 那条（**对照腿**：答案不一致时第一个要比的就是它）。 */
+        if (env('OMNI_ASY_LINK') !== '0') {
+          const b = asyBundle(dir, mainPath);
+          if (ASY_LIB_LOADED !== b.libKey) {
+            const lib = readText(b.libPath);
+            evalJs(lib);
+            ASY_LIB_LOADED = b.libKey;
+            vStep(`asy lib 装进来  ${lib.length} bytes`);
+          } else vStep('asy lib 已在内存里');
+          evalJs(b.prog);
+          vStep(`exec in-process  程序那一段 ${b.prog.length} bytes`);
+          return 0;
+        }
         const st = spawn('node', [mainPath], 'i')[0];
         vStep('exec node（每个源文件一份 ESM）');
         return st;
