@@ -275,6 +275,15 @@ export function gfxCall(name, args) {
   const a = (i) => Number(args[i] ?? 0);
   switch (`${name}/${args.length}`) {
     case 'cls/3': need(320, 240); cls(a(0), a(1), a(2)); return 0;
+    /* `cls(打包好的颜色)`：EvalDraw 里最常见的写法（`cls(0)`）—— 与 `setcol/1` 同一档。 */
+    case 'cls/1': {
+      need(320, 240);
+      const c = Math.trunc(a(0)) & 0xffffff;
+      const n = D.w * D.h;
+      for (let i = 0; i < n; i++) D.fb[i] = c;
+      D.dirty = true;
+      return 0;
+    }
     case 'setcol/3': need(320, 240); D.col = rgb(a(0), a(1), a(2)); return 0;
     case 'setcol/1': need(320, 240); D.col = Math.trunc(a(0)) & 0xffffff; return 0;
     case 'setpix/2': need(320, 240); px(a(0), a(1), D.col); return 0;

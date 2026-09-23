@@ -38,6 +38,9 @@ export function gfxGlobalDecls() {
  */
 export const EVALDRAW_2D = new Map([
   ['cls/3', 'gfx_cls'],
+  /* `cls(打包好的颜色)` —— EvalDraw 里最常见的那个写法（`cls(0)` 清成黑，
+     语料里 14 份 `.kc` 头一句就是它）。与 `setcol/1` 同一档：一格 0xRRGGBB 的数。 */
+  ['cls/1', 'gfx_cls1'],
   ['setcol/3', 'gfx_setcol'],
   ['setcol/1', 'gfx_setcol1'],
   ['setpix/2', 'gfx_setpix'],
@@ -145,6 +148,16 @@ export function gfxFnDecls(defW, defH) {
     fn('gfx_setcol1', ['c'], [
       ex(call('gfx_need', [])),
       set('gfx_col', nm('c')),
+      ret(num(0)),
+    ]),
+    /* `cls(c)`：一格打包好的颜色清整块（与 `gfx_cls` 同一段循环，只是颜色不用拼）。 */
+    fn('gfx_cls1', ['c'], [
+      ex(call('gfx_need', [])),
+      letR('i', num(0)),
+      whil(bin('<', nm('i'), bin('*', nm('gfx_w'), nm('gfx_h'))), [
+        aset('gfx_fb', nm('i'), nm('c')),
+        set('i', bin('+', nm('i'), num(1))),
+      ]),
       ret(num(0)),
     ]),
     fn('gfx_setpix', ['x', 'y'], [

@@ -766,6 +766,14 @@ function call(name, args) {
       gl.clearColor(clamp01(a(0)), clamp01(a(1)), clamp01(a(2)), 1);
       gl.clear(gl.COLOR_BUFFER_BIT);
       return 0;
+    /* `cls(打包好的颜色)`：EvalDraw 里最常见的那个写法（`cls(0)`）。 */
+    case 'cls/1': {
+      flush();
+      const v = Math.trunc(a(0)) & 0xffffff;
+      gl.clearColor(((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      return 0;
+    }
     case 'setcol/3': D.col = [clamp01(a(0)), clamp01(a(1)), clamp01(a(2))]; return 0;
     case 'setcol/1': {
       const v = Math.trunc(a(0)) & 0xffffff;

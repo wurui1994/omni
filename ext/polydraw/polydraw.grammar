@@ -150,7 +150,12 @@
     (-> ("goto" NAME ";") (goto $2))
     (-> (NAME ":") (label $1))
     (-> ("static" staticlist ";") (static $*2))
-    (-> ("enum" "{" enumlist "}" ";") (enum $*3)))
+    ;; 块里的 `enum` **不带分号**（`games/breakout.kc:6` 是 `enum {BULNUM=16}` 接一行
+    ;; `static bulx[BULNUM]…` —— 少这一支的话报的是"unexpected static"，看着像 static 的错）。
+    ;; **只留这一支**：分号那一格由上面 `(";") (empty)` 那一支收 ——
+    ;; 两支都留就成了歧义（`enum{…};` 有"带分号的 enum"与"enum 加一句空语句"两种读法，
+    ;; GLR 当场报 ambiguous，语料里十份脚本都撞上了）。
+    (-> ("enum" "{" enumlist "}") (enum $*3)))
 
   (rule optexpr
     (-> () ())

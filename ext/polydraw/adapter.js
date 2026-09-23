@@ -632,8 +632,39 @@ function writtenNames(x, out = new Set()) {
   return out;
 }
 
-/** 一段里出现过的所有名字（读也算）—— 判"这个名字是不是全局/enum"用。 */
-function usedNames(x, out = new Set()) {
+/**
+ * **整棵树里的 `enum` 都登记成编译期常量**（文件级的与函数体里的都算）。
+ *
+ * 为什么要整棵树走一遍而不是只看文件级：语料里 `enum` 多半就写在函数体里，
+ * 紧挨着用它的那句 —— `ken/drawsph.pss:42` 是 `enum {NMAX=16}; static clut[NMAX] …`、
+ * `games/breakout.kc:6` 也是这个形状。只收文件级那一档的话，`static a[NMAX]` 的长度
+ * 算不出来（27 份脚本卡在这一格），而那不是"语言不支持"，是我们少走了一遍。
+ *
+ * 作用域：这门语言里 enum 就是**编译期的数**（`eval.c` 那侧也没有块作用域的概念），
+ * 所以一律落进同一张表。**同名不同值当场报** —— 悄悄用后面那个值是"图安静地变了"的来源。
+ */
+function collectEnums(x, C) {
+  if (!isList(x)) return;
+  if (tag(x) === 'enum') {
+    let next = 0;
+    for (const one of kids(x)) {
+      const k = kids(one);
+      const n = idOf(k[0]);
+      if (k.length > 1) next = Number(leaf(kids(k[1])[0] ?? k[1]));
+      const prev = C.enums.get(n);
+      if (prev !== undefined && prev !== next) {
+        throw new Error(`eval->IR: 两处 \`enum ${n}\` 的值不一样（${prev} 与 ${next}）——`
+          + ' enum 在这门语言里是编译期的数、落在同一张表里，所以当场报');
+      }
+      C.enums.set(n, next);
+      next += 1;
+    }
+    return;
+  }
+  for (const k of kids(x)) collectEnums(k, C);
+}
+
+/** 一段里出现过的所有名字（读也算）—— 判"这个名字是不是全局/enum"用。 */function usedNames(x, out = new Set()) {
   if (!isList(x)) return out;
   if (tag(x) === 'name') out.add(idOf(x));
   for (const k of kids(x)) usedNames(k, out);
@@ -931,20 +962,14 @@ export function evalToIR(cst, host, src = '') {
      所以这儿从**原文**里切 —— 切出来的原样交给设备（`(gfxdef …)` 登记在入口里）。 */
   if (C.gfxHost) C.shaders = splitSections(src);
 
-  /* 第一遍：登记文件级的 `enum` 与 `static`，以及每个用户函数的签名。 */
+  /* **enum 先收一遍**（整棵树：文件级的与函数体里的都算）—— `static a[NMAX]` 的长度
+     要用它，而语料里 enum 多半就写在用它那句的上一行。 */
+  collectEnums(cst, C);
+
+  /* 第一遍：登记文件级的 `static`，以及每个用户函数的签名。 */
   const preDecls = [];
   for (const x of top) {
-    if (tag(x) === 'enum') {
-      let next = 0;
-      for (const one of kids(x)) {
-        const k = kids(one);
-        const n = idOf(k[0]);
-        if (k.length > 1) next = Number(leaf(kids(k[1])[0] ?? k[1]));
-        C.enums.set(n, next);
-        next += 1;
-      }
-      continue;
-    }
+    if (tag(x) === 'enum') continue;              /* 上面那一趟已经收过 */
     if (tag(x) === 'static') {
       for (const one of kids(x)) {
         const k = kids(one);
