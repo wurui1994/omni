@@ -474,21 +474,14 @@ function callOf(x, C) {
     if (t.kind === 'named') {
       /**
        * **方法上的出参**（`void set(int& out)`）：这一格要排在"把实参求值"**之前** ——
-       * 借出去的那一格不许求值。只认"没重载"那一档（名字按实参个数就定得死）。
-       * **虚方法走分派函数**（名字换成 `Sink__v_fill`）—— 不换就静默地绑死静态那一份。
+       * 借出去的那一格不许求值。没重载的按名字查 `refSig`；重载的按"同个数的几份共识"
+       * （`C.refIdxAgreed` —— 借哪几格与挑哪一份无关，于是可以先建实参再挑）。
        */
-      const byArity = C.pickMethod(t.cls ?? t.name, m, rawArgs.length);
-      const mrs = byArity === null ? undefined : C.refSig.get(byArity);
-      if (mrs !== undefined) {
-        const vt0 = C.vtab.get(t.name);
-        const fname = vt0 !== undefined && vt0.has(m) ? vcallName(t.name, C.ref(m)) : byArity;
-        return {
-          kind: 'call',
-          fn: { kind: 'name', name: fname },
-          args: [obj, ...argsWithRefs(rawArgs, mrs, C, `${t.cls ?? t.name}::${m}`)],
-        };
-      }
-      const as = rawArgs.map((a) => exprOf(a, C));
+      const cls = t.cls ?? t.name;
+      const byArity = C.pickMethod(cls, m, rawArgs.length);
+      const mrs = (byArity === null ? undefined : C.refSig.get(byArity))
+        ?? C.refIdxAgreed(C.methOvl.get(`${cls}_${C.ref(m)}`), rawArgs.length, `${cls}::${m}`);
+      const as = argsWithRefs(rawArgs, mrs, C, `${cls}::${m}`);
       /**
        * **虚方法走分派函数**（`Shape__v_area(obj)`）—— 按对象自己的 `__vt` 走 if 链。
        * 为什么连 `q.area()`（静态类型就是派生类）也走：那格对象的真身可能是**更派生的**
@@ -586,8 +579,12 @@ function callOf(x, C) {
       t.kind === 'named' && C.refBoxDone.has(t.name) ? [i] : [])));
   /* 方法体里**裸写**的那一格（`set(z)` = `this->set(z)`）：名字先按 `this` 的类挑出来。 */
   const selfFn = C.self === null ? null : C.pickMethod(C.self, name, rawArgs.length);
-  const rsig = C.refSig.get(C.ref(name)) ?? C.ctorRef.get(C.ref(name))
+  const rsig = C.refSig.get(C.ref(name))
+    ?? C.refIdxAgreed(C.ovlFns.get(C.ref(name)), rawArgs.length, name)
+    ?? C.refIdxAgreed(C.ctorCands.get(C.ref(name)), rawArgs.length, name)
     ?? (selfFn === null ? undefined : C.refSig.get(selfFn))
+    ?? (C.self === null ? undefined
+      : C.refIdxAgreed(C.methOvl.get(`${C.self}_${C.ref(name)}`), rawArgs.length, name))
     ?? (boxIdx !== undefined && boxIdx.size > 0 ? boxIdx : undefined);
   const args = argsWithRefs(rawArgs, rsig, C, name);
   if (name === 'printf' || name === 'puts') {

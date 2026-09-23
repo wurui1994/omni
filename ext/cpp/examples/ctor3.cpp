@@ -17,6 +17,11 @@ struct Num {
   }
   Num(int a, int b) : i(a + b), d(0.0) {
   }
+  /* **重载的构造 + 出参**：从前这一格当场报（"这个类只有一份构造"才接）。现在按
+     `C.ctorCands` + 那条共识挑：收 3 个实参的只有这一份，借的是第一格。 */
+  Num(int& seed, int a, int b) : i(a + b), d(0.0) {
+    seed = seed + i;
+  }
   int show() {
     return i;
   }
@@ -34,5 +39,8 @@ int main() {
   printf("%d\n", c.show());
   printf("%d\n", Num(9).show());
   printf("%.2f\n", Num(0.25).dd());
+  int seed = 1;
+  Num e(seed, 4, 5);
+  printf("%d %d\n", seed, e.show());
   return 0;
 }

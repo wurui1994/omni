@@ -33,6 +33,18 @@ int mix(P p) {
   return p.x + 100;
 }
 
+/* **重载 + 出参**：从前当场报（挑那一份靠实参类型，而借出去那一格不许求值 —— 次序像是
+   死的）。解开它的是一条共识：**同一个实参个数的几份重载如果借出去的位置一样**，那"哪几格
+   交盒子"与挑哪一份无关，于是可以先建实参再挑；盒子那一格与候选的形参类型逐格一模一样，
+   `pickAmong` 第一步就命中。位置不一样的仍当场报（那种写法在 C++ 里也有歧义）。 */
+void grow(int& v) {
+  v = v + 1;
+}
+
+void grow(double& v) {
+  v = v * 2;
+}
+
 int main() {
   printf("%d\n", mix(4));
   printf("%.2f\n", mix(1.5));
@@ -43,5 +55,10 @@ int main() {
   double d = 2.0;
   printf("%.2f\n", mix(d));
   printf("%d\n", mix(true));
+  int gi = 5;
+  grow(gi);
+  double gd = 1.5;
+  grow(gd);
+  printf("%d %.2f\n", gi, gd);
   return 0;
 }

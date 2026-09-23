@@ -26,6 +26,21 @@ struct Acc {
   int both() {
     return add(1) + (int)add(2.0);
   }
+  /* **重载 + 出参**：两份 `take` 个数一样、借的都是第一格 —— 有了这条共识就可以先建实参
+     （那一格交盒子）再按类型挑那一份。外头调与体里裸写着调各钉一行。 */
+  void take(int& out) {
+    out = n;
+  }
+  void take(double& out) {
+    out = r;
+  }
+  int sum() {
+    int i = 0;
+    double d = 0.0;
+    take(i);
+    take(d);
+    return i + (int)d;
+  }
 };
 
 int main() {
@@ -36,5 +51,11 @@ int main() {
   printf("%.2f\n", a.add(1.5));
   printf("%d\n", a.add(2, 10));
   printf("%d\n", a.both());
+  int gi = 0;
+  a.take(gi);
+  double gd = 0.0;
+  a.take(gd);
+  printf("%d %.2f\n", gi, gd);
+  printf("%d\n", a.sum());
   return 0;
 }

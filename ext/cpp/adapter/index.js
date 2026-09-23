@@ -103,10 +103,12 @@ function borrowedLocals(fnTok, C) {
       }
       if (fn !== undefined && tag(fn) === 'n' && as !== undefined) {
         /* 自由函数、**函数式的构造**（按类名查）、绑了 lambda 的名字，或者方法体里
-           **裸写**的那一格（`set(z)` = `this->set(z)` —— 按方法名近似，同 dot 那一支）。 */
+           **裸写**的那一格（`set(z)` = `this->set(z)` —— 按方法名近似，同 dot 那一支）。
+           这一趟只要"要不要装盒子"，所以重载的那几份用**并集**（多装一格不会错）。 */
         const fname = C.ref(nameOf(fn));
-        const idx = C.refSig.get(fname) ?? C.ctorRef.get(fname) ?? lamRef.get(fname)
-          ?? C.refByName.get(nameOf(fn));
+        const idx = C.refSig.get(fname) ?? C.refHint.get(fname)
+          ?? C.refIdxAgreed(C.ctorCands.get(fname), kids(as).length, fname)
+          ?? lamRef.get(fname) ?? C.refByName.get(nameOf(fn));
         if (idx !== undefined) {
           kids(as).forEach((a, i) => {
             const inner = tag(a) === 'addrof' ? kids(a)[0] : a;
@@ -119,13 +121,15 @@ function borrowedLocals(fnTok, C) {
     if (tag(t) === 'decl') {
       const sp = part(t, 'specs');
       const cn = sp === undefined ? undefined : kids(sp).find((y) => tag(y) === 'n');
-      const idx = cn === undefined ? undefined : C.ctorRef.get(C.ref(nameOf(cn)));
+      const cands = cn === undefined ? undefined : C.ctorCands.get(C.ref(nameOf(cn)));
       const it = part(t, 'init');
-      if (idx !== undefined && it !== undefined) {
+      if (cands !== undefined && it !== undefined) {
         for (const d of kids(it)) {
           const ct = kids(d).find((y) => tag(y) === 'ctor');
           const cas = ct === undefined ? undefined : part(ct, 'args');
           if (cas === undefined) continue;
+          const idx = C.refIdxAgreed(cands, kids(cas).length, nameOf(cn));
+          if (idx === undefined) continue;
           kids(cas).forEach((a, i) => {
             const inner = tag(a) === 'addrof' ? kids(a)[0] : a;
             if (idx.has(i) && tag(inner) === 'n') out.add(C.ref(nameOf(inner)));
@@ -362,6 +366,26 @@ export function cppToIR(tree) {
     refBoxDone: new Set(),
     /** 函数名（已 ref 过） → 哪几格形参是借出去的（下标集合）。 */
     refSig: new Map(),
+    /**
+     * **几份重载在"哪几格按引用借出去"上的共识**（收 `n` 个实参的那几份）。
+     *
+     * 调用点挑重载靠实参**类型**，可借出去那一格**不许求值** —— 于是次序像是死的。
+     * 解开它的是这一条：**同一个实参个数的几份重载，如果借出去的位置一样**，那"哪几格
+     * 交盒子"与挑哪一份无关，可以先建实参再挑（挑的时候盒子那一格就是盒子那种记录，
+     * 与候选的形参类型逐格一模一样，`pickAmong` 第一步就命中）。
+     * 位置不一样的当场报 —— 那种写法在 C++ 里本来也是有歧义的。
+     */
+    refIdxAgreed: (cands, n, who) => {
+      const fit = (cands ?? []).filter((c) => c.params.length === n);
+      if (fit.length === 0) return undefined;
+      const sets = fit.map((c) => c.params
+        .flatMap((p, i) => (p.ref === true ? [i] : [])).join(','));
+      if (new Set(sets).size > 1) {
+        throw new Error(`cpp->IR: \`${who}\` 收 ${n} 个实参的几份重载在"哪几格按引用`
+          + '借出去"上不一致 —— 还没接（那种写法在 C++ 里也是有歧义的）');
+      }
+      return sets[0] === '' ? undefined : new Set(sets[0].split(',').map(Number));
+    },
     /** `类名_成员名`（类名已 ref 过） → 那格 `static` 成员落成的模块级名字。 */
     statics: new Map(),
     /** `类名_成员函数名`（类名已 ref 过） → 那格 `static` 成员函数落成的函数名。 */
@@ -381,11 +405,17 @@ export function cppToIR(tree) {
      */
     refByName: new Map(),
     /**
-     * **类名（规整过的） → 它那一份构造的哪几格实参是借出去的**。构造在两个位置上被调
-     * （`Counter c(y);` 与 `Counter(y)`），两处都要在**求值之前**知道 —— 所以按类名记。
-     * 只有"这个类只有一份构造"那一档进这张表（重载的当场报）。
+     * **类名（规整过的） → 它那几份构造 `[{ name, params }]`**（全都在，不只重载的那些）。
+     * 构造在两个位置上被调（`Counter c(y);` 与 `Counter(y)`），两处都要在**求值之前**
+     * 知道哪几格交盒子 —— 所以按类名记，再用 `refIdxAgreed` 按实参个数取共识。
      */
-    ctorRef: new Map(),
+    ctorCands: new Map(),
+    /**
+     * **名字 → 哪几格实参可能是借出去的（并集）**。只给降体之前那趟扫树用
+     * （`borrowedLocals` —— 它只要答"这格局部量要不要装盒子"，多装一格不会错）：
+     * 重载的名字不止一份，`refSig` 按名字答不了，可扫树那一趟又必须有个答案。
+     */
+    refHint: new Map(),
     /**
      * **按值传一格记录要拷一份**（C++ 的值语义）。方言的记录是引用语义，所以"传进去、
      * 在里头改字段"从前**改到了调用者那一格**（`grow(a)` 之后 `a.x` 变了 —— 答案静默地错）。
@@ -1005,16 +1035,20 @@ export function cppToIR(tree) {
   for (const f of topFns) {
     const s0 = sigOf(f);
     const refIdx = new Set(s0.params.flatMap((p, i) => (p.ref === true ? [i] : [])));
+    if (refIdx.size > 0) C.refSig.set(s0.name, refIdx);
+    if (refIdx.size > 0) {
+      if (!C.refHint.has(s0.name)) C.refHint.set(s0.name, new Set());
+      for (const i of refIdx) C.refHint.get(s0.name).add(i);
+    }
     if ((fnSeen.get(s0.name) ?? 0) < 2) {
-      if (refIdx.size > 0) C.refSig.set(s0.name, refIdx);
       topSig.set(f, s0);
       C.fns.set(s0.name, { params: s0.params, ret: s0.ret });
       continue;
     }
-    if (refIdx.size > 0) {
-      throw new Error(`cpp->IR: \`${s0.name}\` 既重载又有 \`T&\` 形参 —— 还没接`
-        + '（调用点挑重载靠实参类型，而借出去那一格给的是盒子）');
-    }
+    /* 重载 + `T&` 也接了：调用点按"同个数的几份共识"先建实参再挑（见 `refIdxAgreed`）。
+       `refSig` 那张表按**名字**答，重载的名字不止一份 —— 所以这儿撤掉，只留 `refHint`
+       给降体前那趟扫树用（那一趟只要"这格局部量要不要装盒子"，多装不会错）。 */
+    C.refSig.delete(s0.name);
     const s = { ...s0, name: `${s0.name}__${s0.params.map((p) => tyTag(p.type)).join('_')}` };
     if (C.fns.has(s.name)) {
       throw new Error(`cpp->IR: \`${s0.name}\` 有两份形参类型一模一样的重载`);
@@ -1033,17 +1067,14 @@ export function cppToIR(tree) {
       const s = sigOf(m.tok, selfType, methodName(rec, m, C));
       /**
        * **方法上的出参**（`void set(int& out)`）：形参表第一格是 `this`，所以实参的下标
-       * 要减一。**虚方法也接**（分派函数只是把实参照原样转发，盒子那一格穿过去就行 ——
-       * 调用点那儿要先认出"这是虚方法"再交盒子，见 `expr.js` 的方法调用那一段）。
-       * 重载上仍当场报：挑那一份靠实参类型，而借出去那一格给的是盒子。
+       * 要减一。**虚方法**（分派函数照原样转发）与**重载**（同个数的几份要在"借哪几格"
+       * 上一致 —— 见 `C.refIdxAgreed`）都接了。
        */
       const mRef = new Set(s.params.flatMap((p, i) => (p.ref === true ? [i - 1] : [])));
       if (mRef.size > 0) {
-        if (rec.ovl?.has(m.name) === true) {
-          throw new Error(`cpp->IR: ${rec.name}::${m.name} 既是重载又有 \`T&\` 形参 —— 还没接`);
-        }
         C.refSig.set(s.name, mRef);
-        C.refByName.set(m.name, mRef);
+        if (!C.refByName.has(m.name)) C.refByName.set(m.name, new Set());
+        for (const i of mRef) C.refByName.get(m.name).add(i);
       }
       if (C.fns.has(s.name)) {
         throw new Error(`cpp->IR: ${rec.name} 上有两份一模一样的 ${m.name}`);
@@ -1079,13 +1110,10 @@ export function cppToIR(tree) {
        * 有两份及以上就当场报（挑那一份靠实参类型，而借出去那一格给的是盒子）。
        */
       const cRef = new Set(s.params.flatMap((p, i) => (p.ref === true ? [i] : [])));
-      if (cRef.size > 0) {
-        if ((rec.ctors ?? []).length > 1) {
-          throw new Error(`cpp->IR: ${rec.name} 的构造既重载又有 \`T&\` 形参 —— 还没接`);
-        }
-        C.refSig.set(s.name, cRef);
-        C.ctorRef.set(C.ref(rec.name), cRef);
-      }
+      if (cRef.size > 0) C.refSig.set(s.name, cRef);
+      const k = C.ref(rec.name);
+      if (!C.ctorCands.has(k)) C.ctorCands.set(k, []);
+      C.ctorCands.get(k).push({ name: s.name, params: s.params });
       C.fns.set(s.name, { params: s.params, ret: selfType });
       if (byType) {
         const k = C.ref(rec.name);
@@ -2250,7 +2278,8 @@ function declOf(d, specs, C) {
   if (type.kind === 'named') {
     const as = ctorTok === undefined ? undefined : part(ctorTok, 'args');
     /* 借出去的那几格实参不许求值（`Counter c(y);`）—— 交的是盒子本身。 */
-    const crs = C.ctorRef.get(type.cls ?? type.name);
+    const crs = C.refIdxAgreed(C.ctorCands.get(type.cls ?? type.name),
+      as === undefined ? 0 : kids(as).length, type.cls ?? type.name);
     const args = as === undefined ? []
       : argsWithRefs(kids(as), crs, C, `${type.cls ?? type.name} 的构造`);
     const hitT = (ctorTok !== undefined || initTok === undefined)
@@ -2315,16 +2344,20 @@ function declOf(d, specs, C) {
 //      记录 / 列表 / 字典照原样收（本来就是引用语义）；**标量装进一格盒子**
 //      （`__ref_int`，`refparam.cpp`）。接**自由函数**、**方法**（含**虚方法** ——
 //      `virt.cpp`，调用点认出是虚的就把名字换成分派函数，分派函数只是照原样转发）、
-//      **构造**与**lambda**；构造与非虚方法只认"没重载"那一档 —— 名字定得死，调用点才能
-//      在求值之前知道哪几格要交盒子。借出去的那个实参只能是"一格装着盒子的量"。
+//      **构造**与**lambda**，**重载的那几份也接了**（`fnovl` / `methov2` / `ctor3`）：
+//      挑重载靠实参类型、而借出去那一格不许求值 —— 解开这个死结的是一条共识
+//      （`C.refIdxAgreed`）：**同一个实参个数的几份重载如果借出去的位置一样**，那
+//      "哪几格交盒子"与挑哪一份无关，于是可以先建实参再挑（盒子那一格与候选的形参类型
+//      逐格一模一样，`pickAmong` 第一步就命中）。位置不一样的当场报 —— 那种写法在 C++ 里
+//      本来也是有歧义的。借出去的那个实参只能是"一格装着盒子的量"。
 //      构造那一格两种写法都接：声明形（`Grab gr(g);` —— 实参在声明符的 `(ctor …)` 里，
 //      按类名查 `C.ctorRef`）与函数式（`Grab(g)` —— 一格普通调用）。
 //      lambda 那一格**名字不进 `refSig`**（闭包没有名字），靠**类型**认：形参那格是
 //      盒子那种记录（`C.refBoxDone`）就是借出去的；降体前那趟扫树按"哪个名字上绑了
 //      带 `&` 形参的 lambda"记（`lamRef`）。
-//      重载的方法 + `T&`、重载的构造 + `T&`、把字段或数组元素借出去，全当场报。
+//      把字段或数组元素借出去、同个数的几份重载在"借哪几格"上不一致，这两格当场报。
 //      方法体里**裸写**的那一格（`take(z)` 而不是 `this->take(z)`）也接了 —— 名字先按
-//      `this` 的类挑出来（`C.pickMethod`）才看得见出参那张表。
+//      `this` 的类挑出来（`C.pickMethod` / `C.methOvl`）才看得见出参那张表。
 //      指针也**只有这一种用法** —— 指针算术、指向数组的指针都当场报。
 //      `&x`（取地址当值用）只在记录/列表/字典上成立。
 //   4. **窄整数存进去会回卷**（`narrow.cpp`）：方言里整数只有一格宽度，所以类型上带一格
