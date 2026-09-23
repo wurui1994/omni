@@ -223,6 +223,12 @@ export function cppToIR(tree) {
     const rec = collectClass(cls, C);
     C.records.set(rec.name, rec);
   }
+  /**
+   * **体写在类外的那几格搬回类里**（`int Counter::bump() { … }`）—— 要排在摊平与
+   * 虚方法那两趟**之前**：它们读的就是 `rec.methods` / `rec.ctors` / `rec.dtor`。
+   * 搬走的那几格不能再当自由函数发一遍，所以顶层函数那份名单从这儿取。
+   */
+  const topFns = attachOutline(kids(tree).filter((f) => tag(f) === 'func'), C);
   planVirtuals(C, recFields, decls);
   /* **把基类摊进派生类**（字段在前、方法按名字继承）—— 见 `flatten`。 */
   for (const [, rec] of C.records) flatten(rec, C, new Set());
@@ -239,7 +245,6 @@ export function cppToIR(tree) {
   layoutVirtual(C, recFields, decls);
 
   /* ---- 第二遍：函数签名（含方法与析构）------------------------------------- */
-  const topFns = kids(tree).filter((f) => tag(f) === 'func');
   const sigOf = (fnTok, selfType, forcedName) => {
     const f = kids(fnTok).find((y) => tag(y) === 'fn');
     const nmTok = kids(f)[0];
@@ -603,6 +608,10 @@ function collectClass(cls, C, asName = null) {
   const methods = [];
   const virtuals = new Set();
   const pure = new Set();
+  /** 类里**只声明不给体**的那几格（体写在类外，见 `attachOutline`）。 */
+  const declared = new Set();
+  const declaredCtors = new Set();
+  let dtorDeclared = false;
   let dtor = null;
   const ctors = [];
   for (const m of (members === undefined ? [] : kids(members))) {
@@ -617,11 +626,31 @@ function collectClass(cls, C, asName = null) {
        */
       if (mn !== undefined && tag(mn) === 'fn') {
         const zero = kids(kids(mi)[0]).find((y) => tag(y) === 'init');
+        const head = kids(mn)[0];
         if (zero === undefined) {
-          throw new Error(`cpp->IR: 类里只声明不给体的方法（${nameOf(kids(mn)[0])}）还没接`
-            + '（体写在类外那一档）');
+          /**
+           * **类里只声明、体写在类外**（`int bump();` + `int Counter::bump() { … }`）。
+           * 这一格只把名字记下来（`declared` / `declaredCtors`），体由 `attachOutline`
+           * 从顶层那几格 `(fn (qual (n 类) (n 方法)) …)` 搬进来。收不到体就当场报 ——
+           * 静默地少一格方法，调用点会变成"这一格方法还没接"，账就不在这儿了。
+           */
+          const isVirt = ms !== undefined
+            && kids(ms).some((y) => tag(y) === null && String(leaf(y)) === 'virtual');
+          if (tag(head) === 'dtor') { dtorDeclared = true; continue; }
+          if (tag(head) === 'n' && nameOf(head) === nameOf(nm) && ms === undefined) {
+            const ps = part(mn, 'params');
+            declaredCtors.add(ps === undefined ? 0 : kids(ps).filter((y) => tag(y) === 'p').length);
+            continue;
+          }
+          if (tag(head) !== 'n' && tag(head) !== 'opname') {
+            throw new Error('cpp->IR: 这一格"只声明不给体"的成员还没接');
+          }
+          const pn0 = tag(head) === 'opname' ? opMethodName(head) : nameOf(head);
+          declared.add(pn0);
+          if (isVirt) virtuals.add(pn0);
+          continue;
         }
-        const pn = nameOf(kids(mn)[0]);
+        const pn = nameOf(head);
         virtuals.add(pn);
         pure.add(pn);
         continue;
@@ -651,7 +680,60 @@ function collectClass(cls, C, asName = null) {
   }
   return {
     name: asName ?? nameOf(nm), bases, fields, methods, dtor, ctors, virtuals, pure,
+    declared, declaredCtors, dtorDeclared,
   };
+}
+
+/**
+ * **体写在类外的那几格搬回类里**：`int Counter::bump() { … }` 在树上是一格**顶层** `func`，
+ * 声明符的名字是 `(qual (n Counter) (n bump))`。
+ *
+ * 为什么不在类里就地留个"待补"的壳：类那一遍读完才知道有哪几个类，而 `Counter::bump`
+ * 的归属只看声明符 —— 一趟扫顶层就分得清。搬完之后后面几遍（摊平、重载编名、签名、
+ * 发体）一个字都不用改：它们只看 `rec.methods` / `rec.ctors` / `rec.dtor`。
+ *
+ * 交的是**剩下的顶层函数**（搬走的那几格不能再当自由函数发一遍）。
+ */
+function attachOutline(topFns, C) {
+  const rest = [];
+  for (const fnTok of topFns) {
+    const f = kids(fnTok).find((y) => tag(y) === 'fn');
+    const head = f === undefined ? undefined : kids(f)[0];
+    if (head === undefined || tag(head) !== 'qual') { rest.push(fnTok); continue; }
+    const owner = nameOf(kids(head)[0]);
+    const member = kids(head)[1];
+    const rec = C.records.get(owner);
+    if (rec === undefined) throw new Error(`cpp->IR: \`${owner}::…\` 的 ${owner} 不是登记过的类`);
+    if (tag(member) === 'dtor') {
+      if (rec.dtor !== null) throw new Error(`cpp->IR: ${owner} 有两份析构函数`);
+      rec.dtor = fnTok;
+      continue;
+    }
+    const mn = tag(member) === 'opname' ? opMethodName(member) : nameOf(member);
+    /* 构造函数：名字与类同名、而且没有返回类型那一格（与类里那一档同一条判据）。 */
+    if (mn === owner && part(fnTok, 'specs') === undefined) { rec.ctors.push(fnTok); continue; }
+    rec.methods.push({ tok: fnTok, name: mn });
+    rec.declared.delete(mn);
+  }
+  /**
+   * **只声明、体没找着**：那一格调用点会变成"这一格方法还没接"，账就不在这儿了 ——
+   * 所以在这儿当场报。构造函数那一档按**实参个数**核对。
+   */
+  for (const [, rec] of C.records) {
+    for (const n of rec.declared) {
+      throw new Error(`cpp->IR: ${rec.name}::${n} 只声明了，这份源码里没有它的体`);
+    }
+    if (rec.dtorDeclared === true && rec.dtor === null) {
+      throw new Error(`cpp->IR: ${rec.name} 的析构只声明了，这份源码里没有它的体`);
+    }
+    for (const argc of rec.declaredCtors) {
+      if (!rec.ctors.some((ct) => ctorArity(ct) === argc)) {
+        throw new Error(`cpp->IR: ${rec.name} 收 ${argc} 个实参的构造函数只声明了，`
+          + '这份源码里没有它的体');
+      }
+    }
+  }
+  return rest;
 }
 
 /**
@@ -1235,7 +1317,7 @@ function declOf(d, specs, C) {
 //      派生类遮住基类同名字段那一档也当场报。析构**按链跑**（自己先、再往基类走）；
 //      `virtual ~X()` 上的 `virtual` 这条腿上没有意义（没有 `delete`，对象都是作用域里的，
 //      静态类型定得死），所以照普通析构收。
-//      类里"只声明不给体、体写在类外"那一档也当场报。
+//      类里"只声明不给体、体写在类外"那一档**接了**（`attachOutline`；类模板上还没有）。
 //   7. 类模板只接"没有继承、没有虚函数、没有构造/析构"那一档（别的当场报）；
 //      模板的默认实参与特化没接。
 //   8. lambda 的捕获**一律按值**：`[&]` / `[&x]` 当场报（按引用要"把借走的局部量提上去"

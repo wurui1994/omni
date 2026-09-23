@@ -26,7 +26,7 @@ import {
   BASICS, INTMATH, LOOPEXIT, DICT, UNARY, RECORD, INDEX, SLICE, CONV, VALUES, MUT,
   DEFER, BLOCKRET, METHOD, ASSERTOK, STRCAT, NUMSTR, NAMEDARG, CASEFOR, CASERANGE,
   CTIF, MEMBER, BLOCKSCOPE, BITS, CHARLIT, CTCONST, DECLS, ENUMVAL, FNVAL, FORIN,
-  HOIST, LITNONE, MATCH, METHOD2, OPTRES, POINTER, POSINIT, PUSH, INHERIT, OPOVER, TMPL, CTOR, VIRT, CTMPL, LAMBDA, FMT, FORMAT, POSTEST, CTOR2, METHOV, PUREVIRT, DTORCHAIN, MIXVIRT,
+  HOIST, LITNONE, MATCH, METHOD2, OPTRES, POINTER, POSINIT, PUSH, INHERIT, OPOVER, TMPL, CTOR, VIRT, CTMPL, LAMBDA, FMT, FORMAT, POSTEST, CTOR2, METHOV, PUREVIRT, DTORCHAIN, MIXVIRT, OUTLINE,
 } from '../lib/cases.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -54,6 +54,7 @@ const FAMILIES = {
   inherit: INHERIT, opover: OPOVER, tmpl: TMPL, ctor: CTOR, virt: VIRT,
   ctmpl: CTMPL, lambda: LAMBDA, fmt: FMT, format: FORMAT, postest: POSTEST,
   ctor2: CTOR2, methov: METHOV, purevirt: PUREVIRT, dtorchain: DTORCHAIN, mixvirt: MIXVIRT,
+  outline: OUTLINE,
 };
 const MIGRATED = {
   awk: ['basics', 'intmath', 'loopexit', 'dict', 'unary'],
@@ -71,12 +72,12 @@ const MIGRATED = {
      按口径拼成 `if !cond then print + fail`）三样是这门语言带进来的。 */
   mojo: ['assertok', 'basics', 'conv', 'defer', 'dict', 'index', 'intmath', 'loopexit',
     'method', 'record', 'slice', 'values'],
-  /* cpp：二十二个家族。`defer` 在这门语言里是 `~Say()`（RAII，与 freebasic 同一手，
+  /* cpp：二十三个家族。`defer` 在这门语言里是 `~Say()`（RAII，与 freebasic 同一手，
      出口那一半交给公共层的 `{ kind: 'scope' }`）；`printf` 只接"一格转换 + 换行"
      （见 adapter/expr.js 的 printArgs）。`inherit` 与 `opover` 两族的期望输出是
      本机 `c++ -std=c++17` 给的，不是我们自己编的。 */
   cpp: ['basics', 'conv', 'ctmpl', 'ctor', 'ctor2', 'defer', 'dict', 'dtorchain', 'fmt', 'index',
-    'inherit', 'intmath', 'methov', 'mixvirt',
+    'inherit', 'intmath', 'methov', 'mixvirt', 'outline',
     'lambda', 'loopexit', 'opover', 'purevirt', 'record', 'tmpl', 'values', 'virt'],
   /* nim：十九个家族（借来那几门里最多的一格）。这门语言自己带进来的有五样：
      `casefor`（`case` 里能有 `elif` + `for … in` 区间/序列）、`caserange`（`of 0 .. 59:`）、

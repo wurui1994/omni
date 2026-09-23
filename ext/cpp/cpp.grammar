@@ -241,11 +241,23 @@
     (-> ("double") $1) (-> ("signed") $1) (-> ("unsigned") $1))
 
   ;; 限定名：`std::vector<int>::iterator`、`::foo`、`~Foo`、`operator+`
+  ;; 前头那格 `::` 单提出来（`qname` = 可选的 `::` + 一条链），**不是复制一条链**：
+  ;; 复制的代价量过 —— 语料那 6.2MB 的解析从 12.7s 涨到 28.4s（声明符与类型名两条链
+  ;; 一路并行分叉）。这样写只在"第一个记号是不是 `::`"那一处分一次。
+  ;; 树的形状因此变了一点：`::a::b` 从前是 `(qual (root (n a)) (n b))`，现在是
+  ;; `(root (qual (n a) (n b)))` —— 后者才是那句话的意思（整条名字都在全局作用域里找）。
   (rule qname
+    (-> (qname-d) $1)
+    (-> ("::" qname-d) (root $2)))
+
+  ;; **声明符里的名字不许前头带 `::`**（`void ::f() {}` 在 C++ 里不合法）。
+  ;; 不挡的话 `Counter::~Counter() { … }` 有两棵树 —— ①没有返回类型那一格、声明符是
+  ;; `Counter::~Counter()`；②`Counter` 当返回类型、声明符是 `::~Counter()`。
+  ;; 后面那棵不合法，所以这不是"要回问"，还是**语法写松了**（第六类）。
+  (rule qname-d
     (-> (name-part) $1)
-    (-> ("::" name-part) (root $2))
-    (-> (qname "::" name-part) (qual $1 $3))
-    (-> (qname "::" "template" name-part) (qual $1 $4)))
+    (-> (qname-d "::" name-part) (qual $1 $3))
+    (-> (qname-d "::" "template" name-part) (qual $1 $4)))
 
   (rule name-part
     (-> (ID) (n $1))
@@ -355,8 +367,19 @@
   (rule member
     (-> (access ":") (label $1))
     (-> (decl) $1)
+    ;; **构造函数与析构函数的声明**（体写在类外）：这两格没有 decl-specifier-seq，
+    ;; 所以 `specs declarators ";"` 那条收不住 `Counter(int);` / `~Counter();`。
+    ;; 单开一条**受限**的（只认 `qname "(" params ")"`，不是任意声明符）——
+    ;; 让 `Foo;` 那种"光一个名字"仍然只有一份解析，不添歧义。
+    (-> (ctor-decl ";") (decl (init (d $1))))
     ;; 位域：`int flags : 3;`
     (-> (specs bitfields ";") (bitfield (specs $*1) $*2)))
+
+  ;; 只认**一格名字**（`name-part`：`Counter` / `~Counter` / `operator+`），不认带
+  ;; `::` 的长名字 —— 类体里的构造/析构**声明**不会写成 `A::B(…)`。这么限死是有代价账的：
+  ;; 这一条的分叉从类体里每个成员的**第一个记号**就开始，名字越长分得越久。
+  (rule ctor-decl
+    (-> (name-part "(" params ")") (fn $1 (params $*3))))
 
   (rule bitfields
     (-> (bitfield-one) ($1))
@@ -405,7 +428,12 @@
     (-> (declarator) (d $1))
     (-> (declarator "=" initializer) (d $1 (init $3)))
     (-> (declarator braced) (d $1 (init $2)))
-    (-> (declarator "(" args ")") (d $1 (ctor (args $*3))))
+    ;; **实参那一串不许空**（`arg-list` 不是 `args`）：`int f();` 在 C++ 里是
+    ;; **函数声明**，不是"默认造一格 f"（`T x();` 那一句没法默认构造 —— 要写
+    ;; `T x;` 或 `T x{};`）。让 `args` 可空的话这一句有两份解析（`(d (fn …))` 与
+    ;; `(d (n f) (ctor (args)))`），驱动器会报"输入有歧义" —— 那是从前"类里只声明
+    ;; 不给体的方法"根本parse不过去的原因。这一条是标准自己定死的一格，不是在猜。
+    (-> (declarator "(" arg-list ")") (d $1 (ctor (args $*3))))
     ;; `= 0` / `= delete` / `= default`（虚函数与特殊成员）
     (-> (declarator "=" "delete") (d $1 deleted))
     (-> (declarator "=" "default") (d $1 defaulted))
@@ -429,7 +457,7 @@
     (-> (cvs cv) ($*1 $2)))
 
   (rule noptr
-    (-> (qname) $1)
+    (-> (qname-d) $1)
     (-> ("...") (pack))
     (-> ("(" declarator ")") (paren $2))
     (-> (noptr "[" "]") (array $1))
