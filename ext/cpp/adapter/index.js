@@ -17,8 +17,12 @@ import {
   exprOf, condOf, typeOfSpecs, printArgs, nameOf, tyArg, vcallName, readParams,
 } from './expr.js';
 
-/** 析构函数的名字。 */
-const dtorName = (ty) => `__destruct_${String(ty).replace(/[^A-Za-z0-9_]/g, '_')}`;
+/**
+ * 析构函数的名字。**两截**：`rec` 是给哪一格记录用的、`owner` 是谁的体 ——
+ * 继承之后 `Mid` 要跑 `~Mid` 与 `~Base` 两段，而基类那段的接收者是 `Mid`
+ * （摊平之后 `Base` 与 `Mid` 是两格互不相关的记录，不能拿 `Base` 那份去收 `Mid`）。
+ */
+const dtorName = (rec, owner) => `__destruct_${rec}_${owner}`;
 
 /**
  * 构造函数的名字（交的是一格记录，所以它是个**普通函数**，不带 `this`）。
@@ -422,8 +426,8 @@ export function cppToIR(tree) {
       const s = sigOf(m.tok, selfType, methodName(rec, m, C));
       C.fns.set(s.name, { params: s.params, ret: s.ret });
     }
-    if (rec.dtor !== null) {
-      C.fns.set(dtorName(rec.name), {
+    for (const owner of (rec.dchain ?? [])) {
+      C.fns.set(dtorName(C.ref(rec.name), C.ref(owner)), {
         params: [{ name: 'this', type: selfType }],
         ret: { kind: 'void' },
       });
@@ -463,13 +467,14 @@ export function cppToIR(tree) {
       const s = sigOf(m.tok, selfType, methodName(rec, m, C));
       decls.push(fnDecl(s, m.tok, C, C.ref(rec.name)));
     }
-    if (rec.dtor !== null) {
+    for (const owner of (rec.dchain ?? [])) {
       const s = {
-        name: dtorName(rec.name),
+        name: dtorName(C.ref(rec.name), C.ref(owner)),
         params: [{ name: 'this', type: selfType }],
         ret: { kind: 'void' },
       };
-      decls.push(fnDecl(s, rec.dtor, C, C.ref(rec.name)));
+      /* 体是 `owner` 的，接收者是 `rec` —— 字段已经摊平，所以同一份体在派生类上逐字成立。 */
+      decls.push(fnDecl(s, C.records.get(owner).dtor, C, C.ref(rec.name)));
     }
     for (const ct of (rec.ctors ?? [])) {
       const s = sigOf(ct, undefined, ctorName(C.ref(rec.name), ctorArity(ct)));
@@ -775,6 +780,15 @@ function flatten(rec, C, seen) {
   const own = new Set(rec.methods.map((m) => m.name));
   rec.methods = [...methods.filter((m) => !own.has(m.name)), ...rec.methods];
   rec.fields = fields;
+  /**
+   * **析构链**：自己那一份先跑，再一层层往基类走（C++ 的次序）。中间层没有析构就跳过它。
+   * 从前只记一份 `dtor` 且不串链 —— `Mid m;` 出作用域只跑 `~Mid()`，`~Base()`
+   * 那一段**安静地没跑**。
+   */
+  rec.dchain = [
+    ...(rec.dtor !== null ? [rec.name] : []),
+    ...(rec.bases ?? []).flatMap((bn) => C.records.get(bn).dchain ?? []),
+  ];
   rec.flat = true;
 }
 
@@ -899,15 +913,19 @@ function vtZeroRecord(type, C) {
   }
 }
 
-/** 当前函数里那几格带析构的量 → **逆序**各调一次（C++ 的规矩）。 */function dtorCalls(C) {
-  return [...C.scoped].reverse().map((v) => ({
+/**
+ * 当前函数里那几格带析构的量 → **量之间逆序**（C++ 的规矩），
+ * 每格量**按析构链的次序**（自己那一份先、再往基类走）各调一次。
+ */
+function dtorCalls(C) {
+  return [...C.scoped].reverse().flatMap((v) => v.chain.map((owner) => ({
     kind: 'expr-stmt',
     expr: {
       kind: 'call',
-      fn: { kind: 'name', name: dtorName(v.type) },
+      fn: { kind: 'name', name: dtorName(C.ref(v.rec), C.ref(owner)) },
       args: [{ kind: 'name', name: v.name }],
     },
-  }));
+  })));
 }
 
 /* ─── 语句 ────────────────────────────────────────────────────────────────── */
@@ -1113,7 +1131,9 @@ function declOf(d, specs, C) {
   /* `Say s1;`（带析构的类型）—— 记一格，出作用域要逆序调。 */
   if (type.kind === 'named') {
     const rec = [...C.records.values()].find((r) => C.ref(r.name) === type.name);
-    if (rec !== undefined && rec.dtor !== null) C.scoped.push({ name, type: rec.name });
+    if (rec !== undefined && (rec.dchain ?? []).length > 0) {
+      C.scoped.push({ name, rec: rec.name, chain: rec.dchain });
+    }
   }
   /**
    * **构造**：`Point p(1, 2)` 走 `(ctor (args …))` 那一格，`Counter c;`（这个类有构造函数）
@@ -1167,7 +1187,9 @@ function declOf(d, specs, C) {
 //      拷贝构造与赋值算子没有 —— 记录是引用语义，那两格在这条腿上本来就不是"拷贝"。
 //      **虚方法 + 重载**当场报（分派表按老名字找那一份）。
 //   6. 虚函数只接**单继承**（虚函数 + 多继承当场报）；纯虚（`= 0`）接了 ——
-//      根上没有体，分派函数的兜底是一格 `(fail …)`。**虚析构还没接**。
+//      根上没有体，分派函数的兜底是一格 `(fail …)`。析构**按链跑**（自己先、再往基类走）；
+//      `virtual ~X()` 上的 `virtual` 这条腿上没有意义（没有 `delete`，对象都是作用域里的，
+//      静态类型定得死），所以照普通析构收。
 //      类里"只声明不给体、体写在类外"那一档也当场报。
 //   7. 类模板只接"没有继承、没有虚函数、没有构造/析构"那一档（别的当场报）；
 //      模板的默认实参与特化没接。
