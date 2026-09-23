@@ -31,5 +31,21 @@ int main() {
     return bump(scale(x));
   };
   printf("%d\n", compose(2));
+  /* **按引用捕获**（`[&n]` / `[&]`）：改得动外头那一格。落法与出参同一台机器 ——
+     那格量装进一格盒子，闭包按值捕**盒子**（记录本来就是引用）。 */
+  int n = 1;
+  auto grow = [&n](int d) {
+    n = n + d;
+    return n;
+  };
+  printf("%d\n", grow(2));
+  printf("%d\n", n);
+  int sum = 0;
+  auto acc = [&](int v) {
+    sum = sum + v;
+  };
+  acc(5);
+  acc(7);
+  printf("%d\n", sum);
   return 0;
 }

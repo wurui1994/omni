@@ -182,18 +182,9 @@ export function exprOf(x, C) {
        */
       const flat = C.ref(n);
       /**
-       * **借出去的那几格量装在一格盒子里**（`T&` —— 见 index.js 的 `refBox` / `borrowedLocals`）：
-       * 方言里标量是值，"改得动调用者那一格"只能把它装进一格记录（记录本来就是引用）。
-       * 于是读写这个名字都要走那一格字段 —— 这一条要排在最前：装盒子的量既在环境里，
-       * 也可能与字段同名，漏了就是**答案静默地错**（改的是副本）。
-       */
-      if (C.refNames.has(flat)) {
-        return { kind: 'field', obj: { kind: 'name', name: flat }, name: 'v' };
-      }
-      /**
        * **区间 for 按引用走的那一格量就是列表里那一格**（`for (T& v : xs)` —— `v` 是
-       * `xs[i]` 的别名）：读写都摊成那一格下标，于是"改得动元素"落成一次普通的
-       * `aset`，一格新东西也没加。这一条要与上面那格盒子分开：那是"装起来"，这是"摊开"。
+       * `xs[i]` 的别名）：读写都摊成那一格下标，于是"改得动元素"落成一次普通的 `aset`。
+       * 这一条与下面那格盒子分开：那是"装起来"，这是"摊开"。
        */
       const lv = C.lvAlias.get(flat);
       if (lv !== undefined) return lv;
@@ -201,13 +192,22 @@ export function exprOf(x, C) {
        * **lambda 体里借走的那几格量**落成 `(cap …)`：那一层的作用域栈是换空过的
        * （见 index.js 的 `C.lambda`），所以"环境里没有、捕获表里有"就是一格捕获。
        */
-      if (C.tyCtx().env.get(flat) === undefined && C.capNames.has(flat)) {
-        return { kind: 'capture', name: flat, type: C.capNames.get(flat) };
-      }
-      if (C.self !== null && C.tyCtx().env.get(flat) === undefined
+      const asCap = C.tyCtx().env.get(flat) === undefined && C.capNames.has(flat);
+      if (!asCap && C.self !== null && C.tyCtx().env.get(flat) === undefined
         && (C.tyCtx().fields.get(C.self) ?? []).some((f) => f.name === n)) {
         return { kind: 'field', obj: { kind: 'name', name: 'this' }, name: n };
       }
+      const base = asCap
+        ? { kind: 'capture', name: flat, type: C.capNames.get(flat) }
+        : { kind: 'name', name: flat };
+      /**
+       * **装在盒子里的那几格量**（出参 `T&` / `T*`，以及 lambda 的**按引用捕获**）：
+       * 方言里标量是值，"改得动外头那一格"只能把它装进一格记录（记录本来就是引用）。
+       * 读写这个名字都要走那一格字段 —— 漏了就是**答案静默地错**（改的是副本）。
+       * 要摆在"是名字还是捕获"**之后**：在 lambda 里它是 `(field (cap x) v)`。
+       */
+      if (C.refNames.has(flat)) return { kind: 'field', obj: base, name: 'v' };
+      if (asCap) return base;
       /**
        * 裸写的 `static` 数据成员：它不是字段，是一格模块级的量（一个类一份）。
        * 两处都要认：普通方法里（`C.self`）与 **`static` 成员函数里**（`C.statCls` ——
@@ -218,7 +218,7 @@ export function exprOf(x, C) {
         const g = C.statics.get(`${inCls}_${n}`);
         if (g !== undefined) return { kind: 'name', name: g };
       }
-      return { kind: 'name', name: flat };
+      return base;
     }
     case 'paren': case 'expr': return exprOf(kids(x)[0], C);
     case 'this': return { kind: 'name', name: 'this' };

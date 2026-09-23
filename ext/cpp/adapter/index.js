@@ -53,8 +53,23 @@ function methodName(rec, m, C) {
  */
 function borrowedLocals(fnTok, C) {
   const out = new Set();
+  /**
+   * **`[&]` / `[&x]` 捕的那几格也要装盒子**：捕获一律按值传进闭包，而"按引用捕获"的意思是
+   * 改得动外头那一格 —— 装成盒子之后"按值捕一格记录的引用"就是它（与出参同一台机器）。
+   * 这一趟手上还没有类型，所以先收着，最后与"这个体里真声明过的局部量"求交（见下面）。
+   */
+  const capWanted = new Set();
   const walk = (t) => {
     if (t === null || t === undefined || !isList(t)) return;
+    if (tag(t) === 'lambda') {
+      const capsTok = kids(t).find((y) => tag(y) === 'captures');
+      let allRef = false;
+      for (const c of (capsTok === undefined ? [] : kids(capsTok))) {
+        if (tag(c) === 'c-ref') capWanted.add(C.ref(String(leaf(kids(c)[0]))));
+        if (tag(c) === 'by-ref-all') allRef = true;
+      }
+      if (allRef) for (const n of freeNames(part(t, 'body'))) capWanted.add(C.ref(n));
+    }
     if (tag(t) === 'call') {
       const fn = kids(t)[0];
       const as = part(t, 'args');
@@ -81,6 +96,31 @@ function borrowedLocals(fnTok, C) {
     for (const k of kids(t)) walk(k);
   };
   walk(part(fnTok, 'body'));
+  /* 与"这个体里真声明过的局部量"求交 —— 全局名字与函数名不许装盒子（装了会当场报）。 */
+  if (capWanted.size > 0) {
+    const locals = declaredLocals(part(fnTok, 'body'), C);
+    for (const n of capWanted) if (locals.has(n)) out.add(n);
+  }
+  return out;
+}
+
+/** 一格体里**声明过的局部量**（名字都 ref 过）。 */
+function declaredLocals(bodyTok, C) {
+  const out = new Set();
+  const walk = (t) => {
+    if (t === null || t === undefined || !isList(t)) return;
+    if (tag(t) === 'decl') {
+      const it = part(t, 'init');
+      for (const d of (it === undefined ? [] : kids(it))) {
+        const nm = kids(d)[0];
+        if (nm === undefined) continue;
+        const bare = tag(nm) === 'n' ? nm : kids(nm).find((y) => tag(y) === 'n');
+        if (bare !== undefined) out.add(C.ref(nameOf(bare)));
+      }
+    }
+    for (const k of kids(t)) walk(k);
+  };
+  walk(bodyTok);
   return out;
 }
 
@@ -718,11 +758,20 @@ export function cppToIR(tree) {
     const capsTok = kids(tok).find((y) => tag(y) === 'captures');
     const wanted = [];
     let all = false;
+    /** 按引用捕的那几格（名字已 ref 过）—— 它们在外头是**盒子**，体里读写走 `.v`。 */
+    const refCaps = new Set();
+    let allRef = false;
     for (const c of (capsTok === undefined ? [] : kids(capsTok))) {
       if (tag(c) === 'c') { wanted.push(String(leaf(kids(c)[0]))); continue; }
+      if (tag(c) === 'c-ref') {
+        const n0 = String(leaf(kids(c)[0]));
+        wanted.push(n0);
+        refCaps.add(C.ref(n0));
+        continue;
+      }
       if (tag(c) === 'by-value-all') { all = true; continue; }
-      throw new Error(`cpp->IR: lambda 的这一格捕获还没接：${tag(c)}`
-        + '（按引用捕获要"把借走的局部量提上去"那台机器）');
+      if (tag(c) === 'by-ref-all') { all = true; allRef = true; continue; }
+      throw new Error(`cpp->IR: lambda 的这一格捕获还没接：${tag(c)}`);
     }
     const pnames = new Set(params.map((p) => p.name));
     if (all) {
@@ -732,10 +781,19 @@ export function cppToIR(tree) {
         if (!wanted.includes(n)) wanted.push(n);
       }
     }
+    if (allRef) for (const n of wanted) refCaps.add(C.ref(n));
     const caps = wanted.map((n) => {
       const flat = C.ref(n);
       const t = C.tyCtx().env.get(flat) ?? C.capNames.get(flat);
       if (t === undefined) throw new Error(`cpp->IR: lambda 捕获了 ${n}，可是这儿没有这格量`);
+      /**
+       * 按引用捕的那格量**必须已经装了盒子**（降体之前那趟扫树干的事）。不是盒子就说明
+       * 那两处没对上 —— 当场报，别让它静默地退化成按值捕获。
+       */
+      if (refCaps.has(flat) && !(t.kind === 'named' && C.refBoxDone.has(t.name))) {
+        throw new Error(`cpp->IR: \`[&${n}]\` 按引用捕的那格量没装盒子 ——`
+          + ' 只接"这个函数体里声明的标量局部量"那一档');
+      }
       return { name: flat, type: t };
     });
     /* 造点上那几格实参 —— **在换作用域之前**算（外面一层自己也可能在一格 lambda 里）。 */
@@ -749,10 +807,12 @@ export function cppToIR(tree) {
     C.capNames = new Map(caps.map((c) => [c.name, c.type]));
     C.self = null;
     C.scoped = [];
-    /* **盒子那张表在 lambda 里清空**：捕获一律按值，而盒子是按引用的 —— 两种语义不能
-       混着来。真在 lambda 体里用了一格装盒子的量，那一格会在方言那侧当场报类型不对
-       （`__ref_int` vs `int`），比"静默地变成按引用捕获"强。 */
-    C.refNames = new Set();
+    /**
+     * **盒子那张表在 lambda 里只留按引用捕的那几格**：按值捕的那几格在体里就是一格
+     * 普通的值（`(cap x)`），走 `.v` 会错；按引用捕的那几格捕进来的是**盒子**，
+     * 读写必须走 `.v`（落成 `(field (cap x) v)`）。
+     */
+    C.refNames = refCaps;
     let stmts;
     let ret;
     try {
@@ -2024,7 +2084,11 @@ function declOf(d, specs, C) {
 }
 
 // ---- 这一批明说的不足（不猜）----------------------------------------------------
-//   1. **异常**还没接（当场报）。
+//   1. **异常**（`try` / `catch` / `throw`）—— 整格没接，而且**不该在这一层接**：
+//      方言里没有异常那一族（JS 那条腿也缺它，见 docs/js-bootstrap-subset.md），在 adapter
+//      里靠"一格隐藏的全局 + 每次调用后查一下"伪造出来就是第二份实现 —— 慢、漏、而且
+//      别的门用不上。这一格要先有一次**语言决定**（方言加什么、三条腿各怎么落），
+//      那是一份 ADR 的事，不是这一份文件的事。
 //   2. `printf` 的格式串走公共层那一份（`src/core/lower/fmt.js` 的 `fmtToStmts`）：
 //      宽度、`-` / `0` / `+` / 空格 / `#` 五个标志、各档精度、`*` / `.*`、`%c`、
 //      末尾不带换行（落 `write`）、一句里几个换行 —— **都接了**。
@@ -2054,8 +2118,11 @@ function declOf(d, specs, C) {
 //      类里"只声明不给体、体写在类外"那一档**接了**（`attachOutline`；类模板上还没有）。
 //   7. 类模板接**构造与析构**（`ctmpl2.cpp`）；**继承与虚函数**当场报；
 //      模板的默认实参与特化没接；类模板里"体写在类外"也当场报。
-//   8. lambda 的捕获**一律按值**：`[&]` / `[&x]` 当场报（按引用要"把借走的局部量提上去"
-//      那台机器，go 那侧的 `promote`）；`mutable`、`[this]`、泛型 lambda 也没接。
+//   8. lambda 的捕获：按值（`[x]` / `[=]`）与**按引用**（`[&x]` / `[&]`）都接了 ——
+//      后者与出参走同一台机器：那格量装进一格盒子，闭包**按值捕盒子**（记录本来就是
+//      引用），体里读写落成 `(field (cap x) v)`。只接"这个函数体里声明过的局部量"
+//      （哪几格要装是降体之前扫树算的，与"真声明过"求交 —— 全局名字装了盒子会当场报）。
+//      `mutable`、`[this]`、`[*this]`、`[x = 表达式]`、泛型 lambda 还没接。
 //   9. **`static` 数据成员**落成一格模块级的量（`类名__成员名`，`staticmem.cpp`）：
 //      一个类一份，初值（类里那句或类外那句 `int C::x = …;`）摆在 `main` 体的最前面 ——
 //      方言的 `(global 名字 类型)` 按设计零初始化，不带初值那一格。
