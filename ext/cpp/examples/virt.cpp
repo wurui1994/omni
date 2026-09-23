@@ -39,6 +39,21 @@ int describe(Shape *s) {
   return s->area();
 }
 
+/* **虚方法上的出参**（`fill(int& out)`）：分派函数只是把实参照原样**转发**，所以盒子
+   那一格穿过去就行；要紧的是调用点 —— 先认出"这是虚方法"再交盒子，名字换成分派函数那个
+   （`Sink__v_fill`）。不换就静默地绑死静态那一份，答案会成基类的。 */
+struct Sink {
+  virtual void fill(int& out) {
+    out = 1;
+  }
+};
+
+struct Twice : Sink {
+  void fill(int& out) {
+    out = out * 2;
+  }
+};
+
 int main() {
   Square q;
   q.w = 3;
@@ -57,5 +72,14 @@ int main() {
   printf("%d\n", r.twice());
   Shape *p = &r;
   printf("%d\n", p->area());
+  Twice tw;
+  Sink *sp = &tw;
+  int z = 10;
+  sp->fill(z);
+  printf("%d\n", z);
+  Sink base2;
+  sp = &base2;
+  sp->fill(z);
+  printf("%d\n", z);
   return 0;
 }

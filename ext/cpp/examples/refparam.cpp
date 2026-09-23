@@ -46,6 +46,13 @@ struct Acc {
     out = n;
     n = 0;
   }
+  /* **方法体里裸写**的那一格（`take(z)` = `this->take(z)`）：名字要先按 `this` 的类挑
+     出来才看得见出参那张表，不然只有调用点没换、体里换了，方言当场报"形参是 __ref_int"。 */
+  int pull() {
+    int z = 0;
+    take(z);
+    return z;
+  }
 };
 
 /* **构造上的出参**（`Grab(int& out)`）：与方法那一格同一台机器，只认"这个类只有一份
@@ -86,5 +93,7 @@ int main() {
   printf("%d %d\n", g, gr.v);
   Grab gr2 = Grab(g);
   printf("%d %d\n", g, gr2.v);
+  acc.n = 4;
+  printf("%d %d\n", acc.pull(), acc.n);
   return 0;
 }

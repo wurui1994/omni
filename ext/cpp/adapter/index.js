@@ -102,9 +102,11 @@ function borrowedLocals(fnTok, C) {
         }
       }
       if (fn !== undefined && tag(fn) === 'n' && as !== undefined) {
-        /* 自由函数、**函数式的构造**（按类名查），或者一格绑了 lambda 的名字。 */
+        /* 自由函数、**函数式的构造**（按类名查）、绑了 lambda 的名字，或者方法体里
+           **裸写**的那一格（`set(z)` = `this->set(z)` —— 按方法名近似，同 dot 那一支）。 */
         const fname = C.ref(nameOf(fn));
-        const idx = C.refSig.get(fname) ?? C.ctorRef.get(fname) ?? lamRef.get(fname);
+        const idx = C.refSig.get(fname) ?? C.ctorRef.get(fname) ?? lamRef.get(fname)
+          ?? C.refByName.get(nameOf(fn));
         if (idx !== undefined) {
           kids(as).forEach((a, i) => {
             const inner = tag(a) === 'addrof' ? kids(a)[0] : a;
@@ -1031,13 +1033,14 @@ export function cppToIR(tree) {
       const s = sigOf(m.tok, selfType, methodName(rec, m, C));
       /**
        * **方法上的出参**（`void set(int& out)`）：形参表第一格是 `this`，所以实参的下标
-       * 要减一。重载与虚方法上仍当场报 —— 前者挑那一份靠实参类型（而借出去那一格给的是
-       * 盒子），后者要连分派函数一起转发。
+       * 要减一。**虚方法也接**（分派函数只是把实参照原样转发，盒子那一格穿过去就行 ——
+       * 调用点那儿要先认出"这是虚方法"再交盒子，见 `expr.js` 的方法调用那一段）。
+       * 重载上仍当场报：挑那一份靠实参类型，而借出去那一格给的是盒子。
        */
       const mRef = new Set(s.params.flatMap((p, i) => (p.ref === true ? [i - 1] : [])));
       if (mRef.size > 0) {
-        if (rec.ovl?.has(m.name) === true || rec.virtuals.has(m.name)) {
-          throw new Error(`cpp->IR: ${rec.name}::${m.name} 既是重载/虚方法又有 \`T&\` 形参 —— 还没接`);
+        if (rec.ovl?.has(m.name) === true) {
+          throw new Error(`cpp->IR: ${rec.name}::${m.name} 既是重载又有 \`T&\` 形参 —— 还没接`);
         }
         C.refSig.set(s.name, mRef);
         C.refByName.set(m.name, mRef);
@@ -2310,15 +2313,18 @@ function declOf(d, specs, C) {
 //      （按位截断那一格见第 4 条 —— 回卷在**存进去**那一头，不在印出来这一头）。
 //   3. 引用（`T&`）与**按指针收的出参**（`T*` + `*p` + 调用点 `&y`）落成同一样东西：
 //      记录 / 列表 / 字典照原样收（本来就是引用语义）；**标量装进一格盒子**
-//      （`__ref_int`，`refparam.cpp`）。接**自由函数**、**方法**、**构造**与**lambda**
-//      （中间两样只认"没重载、非虚"那一档 —— 名字定得死，调用点才能在求值之前知道
-//      哪几格要交盒子）；借出去的那个实参只能是"一格装着盒子的量"。
+//      （`__ref_int`，`refparam.cpp`）。接**自由函数**、**方法**（含**虚方法** ——
+//      `virt.cpp`，调用点认出是虚的就把名字换成分派函数，分派函数只是照原样转发）、
+//      **构造**与**lambda**；构造与非虚方法只认"没重载"那一档 —— 名字定得死，调用点才能
+//      在求值之前知道哪几格要交盒子。借出去的那个实参只能是"一格装着盒子的量"。
 //      构造那一格两种写法都接：声明形（`Grab gr(g);` —— 实参在声明符的 `(ctor …)` 里，
 //      按类名查 `C.ctorRef`）与函数式（`Grab(g)` —— 一格普通调用）。
 //      lambda 那一格**名字不进 `refSig`**（闭包没有名字），靠**类型**认：形参那格是
 //      盒子那种记录（`C.refBoxDone`）就是借出去的；降体前那趟扫树按"哪个名字上绑了
 //      带 `&` 形参的 lambda"记（`lamRef`）。
-//      重载或虚方法 + `T&`、重载的构造 + `T&`、把字段或数组元素借出去，全当场报。
+//      重载的方法 + `T&`、重载的构造 + `T&`、把字段或数组元素借出去，全当场报。
+//      方法体里**裸写**的那一格（`take(z)` 而不是 `this->take(z)`）也接了 —— 名字先按
+//      `this` 的类挑出来（`C.pickMethod`）才看得见出参那张表。
 //      指针也**只有这一种用法** —— 指针算术、指向数组的指针都当场报。
 //      `&x`（取地址当值用）只在记录/列表/字典上成立。
 //   4. **窄整数存进去会回卷**（`narrow.cpp`）：方言里整数只有一格宽度，所以类型上带一格
