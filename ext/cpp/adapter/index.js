@@ -154,6 +154,24 @@ function byValueCopies(sig, C) {
     }));
 }
 
+/**
+ * **按值收的窄整数，进门也回卷一次**（`void show(unsigned char c)`，`show(300)` 是 44）。
+ *
+ * 落在被调方的理由与上一格一模一样：调用点有八九处（自由函数、方法、虚分派、构造、
+ * 模板实例、lambda…），而"进门第一句"只有一处。借出去的那几格（`ref`）不动 ——
+ * 它们在体里是 `.v`，不是这个名字自己。
+ */
+function narrowParams(sig, C) {
+  return sig.params
+    .filter((p) => p.name !== 'this' && p.ref !== true
+      && p.type.kind === 'int' && p.type.bits !== undefined)
+    .map((p) => ({
+      kind: 'assign',
+      target: { kind: 'name', name: p.name },
+      value: wrapNarrow({ kind: 'name', name: p.name }, p.type),
+    }));
+}
+
 /** 一格记录**当值赋出去**（`P b = a;` / `b = a;`）也要拷 —— 右边是"一格地方"才拷。 */
 function copyIfLv(v, type, C) {
   if (type === null || type === undefined || type.kind !== 'named') return v;
@@ -471,6 +489,8 @@ export function cppToIR(tree) {
     scoped: [],
     /** 正在降的这格方法的**接收者类型名**（裸写字段名 = `this->` 那一格靠它）。 */
     self: null,
+    /** 正在降的这格函数**写着的返回类型** —— 窄整数交出去那一下要回卷（见 `case 'return'`）。 */
+    retType: null,
     /** 正在降的这格 lambda 借走了哪几格量（名字 → 类型）—— 体里它们落成 `(cap …)`。 */
     capNames: new Map(),
     fresh: (p) => { tmpN += 1; return `${p}${tmpN}`; },
@@ -834,7 +854,7 @@ export function cppToIR(tree) {
         ? { kind: 'capture', name: c.name, type: c.type }
         : { kind: 'name', name: c.name }));
     const outer = {
-      caps: C.capNames, self: C.self, scoped: C.scoped, refs: C.refNames,
+      caps: C.capNames, self: C.self, scoped: C.scoped, refs: C.refNames, ret: C.retType,
     };
     C.capNames = new Map(caps.map((c) => [c.name, c.type]));
     /* 捕了 `this` 才留着 `C.self`（体里裸写的字段名当 `this->`）；别的一律清空。 */
@@ -846,6 +866,15 @@ export function cppToIR(tree) {
      * 读写必须走 `.v`（落成 `(field (cap x) v)`）。
      */
     C.refNames = refCaps;
+    /**
+     * 写着的返回类型（`-> T`）在降体**之前**就要知道 —— 窄整数交出去那一下要回卷。
+     * 没写的那一档从体里推（`firstReturn`），推出来的不是"写着的"，不回卷。
+     */
+    const retTok = kids(tok).find((y) => tag(y) === 'ret');
+    const declRet = retTok === undefined
+      ? null
+      : typeOfSpecs(part(kids(retTok)[0], 'specs') ?? kids(kids(retTok)[0])[0], C);
+    C.retType = declRet;
     let stmts;
     let ret;
     try {
@@ -854,6 +883,7 @@ export function cppToIR(tree) {
         for (const p of params) C.bind(p.name, p.type);
         stmts = [
           ...byValueCopies({ params }, C),
+          ...narrowParams({ params }, C),
           ...kids(body).flatMap((s) => stmtsOf(s, C)),
         ];
         const rv = firstReturn(stmts);
@@ -865,11 +895,9 @@ export function cppToIR(tree) {
       C.self = outer.self;
       C.scoped = outer.scoped;
       C.refNames = outer.refs;
+      C.retType = outer.ret;
     }
-    const retTok = kids(tok).find((y) => tag(y) === 'ret');
-    if (retTok !== undefined) {
-      ret = typeOfSpecs(part(kids(retTok)[0], 'specs') ?? kids(kids(retTok)[0])[0], C) ?? ret;
-    }
+    if (declRet !== null && declRet !== undefined) ret = declRet;
     decls.push({
       kind: 'closure', name, caps, params, ret, body: stmts,
     });
@@ -1549,6 +1577,7 @@ function fnDecl(sig, fnTok, C, selfName = null) {
   const outerScoped = C.scoped;
   const outerSelf = C.self;
   const outerRefs = C.refNames;
+  const outerRet = C.retType;
   /**
    * **这一格函数里哪几个名字装在盒子里**：引用形参，加上"体里被借出去"的那几格局部量
    * （`borrowedLocals` 先扫一趟树 —— 声明那一句要发成盒子，所以得在降体**之前**知道）。
@@ -1556,16 +1585,19 @@ function fnDecl(sig, fnTok, C, selfName = null) {
   C.refNames = new Set(sig.params.filter((p) => p.ref === true).map((p) => p.name));
   for (const n of borrowedLocals(fnTok, C)) C.refNames.add(n);
   C.self = selfName;
+  C.retType = sig.ret;
   C.scoped = [];
   const body = part(fnTok, 'body');
   const stmts = [
     ...byValueCopies(sig, C),
+    ...narrowParams(sig, C),
     ...(body === undefined ? [] : kids(body).flatMap((s) => stmtsOf(s, C))),
   ];
   const exits = dtorCalls(C);
   C.scoped = outerScoped;
   C.self = outerSelf;
   C.refNames = outerRefs;
+  C.retType = outerRet;
   C.pop();
   return {
     kind: 'fn',
@@ -1593,9 +1625,12 @@ function ctorDecl(sig, rec, ctorTok, C) {
   C.bind('this', selfType);
   const outerScoped = C.scoped;
   const outerSelf = C.self;
+  const outerRet = C.retType;
   C.self = recName;
+  /* 构造交出去的是那格记录 —— 体里的 `return;` 上没有窄整数要回卷。 */
+  C.retType = null;
   C.scoped = [];
-  const stmts = [...byValueCopies(sig, C), {
+  const stmts = [...byValueCopies(sig, C), ...narrowParams(sig, C), {
     kind: 'let',
     name: 'this',
     type: selfType,
@@ -1628,6 +1663,7 @@ function ctorDecl(sig, rec, ctorTok, C) {
   const exits = dtorCalls(C);
   C.scoped = outerScoped;
   C.self = outerSelf;
+  C.retType = outerRet;
   C.pop();
   return {
     kind: 'fn',
@@ -1892,7 +1928,11 @@ export function stmtsOf(x, C) {
     case 'return': {
       /* 析构不在这儿补 —— 公共层那一格 `scope` 在**每个**出口上补（见 `fnDecl`）。 */
       const vs = kids(x);
-      return [{ kind: 'return', values: vs.length === 0 ? [] : [exprOf(vs[0], C)] }];
+      /* 交出去那一下也要回卷（`unsigned char f(int x) { return x; }`，`f(300)` 是 44）。 */
+      return [{
+        kind: 'return',
+        values: vs.length === 0 ? [] : [wrapNarrow(exprOf(vs[0], C), C.retType)],
+      }];
     }
     case 'break': return [{ kind: 'break', label: null }];
     case 'continue': return [{ kind: 'continue', label: null }];
@@ -2201,13 +2241,17 @@ function declOf(d, specs, C) {
 //      指针也**只有这一种用法** —— 指针算术、指向数组的指针都当场报。
 //      `&x`（取地址当值用）只在记录/列表/字典上成立。
 //   4. **窄整数存进去会回卷**（`narrow.cpp`）：方言里整数只有一格宽度，所以类型上带一格
-//      `bits` / `uns` 记号（`expr.js` 的 `BTYPES`），**存进去**的四处补一次 `wrapNarrow` ——
-//      声明的初值、赋值、`++` / `--`、显式转换。无符号一次与掩码；有符号 `((v+half)&mask)-half`。
+//      `bits` / `uns` 记号（`expr.js` 的 `BTYPES`），**存进去**的六处补一次 `wrapNarrow` ——
+//      声明的初值、赋值、`++` / `--`、显式转换、**按值收的形参**（补在被调方**进门第一句**，
+//      `narrowParams` —— 与记录的值语义同一手：调用点有八九处、进门只有一处）、以及
+//      **`return`**（按 `C.retType`，那是**写着的**返回类型；lambda 上只有写了 `-> T`
+//      那一档算"写着的"，从体里推出来的不回卷）。
+//      无符号一次与掩码；有符号 `((v+half)&mask)-half`。
 //      `int` / `long` 那几格**有意不带**：C++ 里有符号溢出是 UB，没有义务把 UB 学像。
 //      读树那一格要当心：`unsigned char` 是**一格 `btype` 里两个词**（只读第一个词会按 32 位
 //      回卷，还是错的）—— 所以 `typeOfSpecs` 把 `btype` 的 kids 全 flatMap 出来按"合起来的词"查表。
-//      还没补的两格：窄形参（传进去那一下）与窄返回值。定宽类型（`int8_t` …）的位宽表在
-//      `src/core/lower/cfam.js` 的 `C_INT_BITS`（与 jancy 共用一张）。
+//      还没补的：借出去的窄形参（`unsigned char&` —— 那格在体里是 `.v`）。定宽类型
+//      （`int8_t` …）的位宽表在 `src/core/lower/cfam.js` 的 `C_INT_BITS`（与 jancy 共用一张）。
 //   5. **自由函数、方法与构造函数**都按实参**类型**重载（`fnovl.cpp` / `methov2.cpp` /
 //      `ctor3.cpp`：名字分三档 —— 没重载不动 / 个数各不相同的缀个数 / 有两份个数一样的
 //      缀类型；挑那一份三处共用 `pickAmong`）。形参一模一样的两份当场报。

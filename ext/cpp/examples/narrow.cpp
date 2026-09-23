@@ -9,12 +9,23 @@
 //    树上要小心：`unsigned char` 是**一格 `btype` 里两个词**（语法那条 `builtin-seq`），
 //    只读第一个词的话按 32 位回卷，还是错的。
 //
-// 2. `i++` / `++i` **当值用**那一档（语句位置早就有了）：落公共层现成的 `block-expr`
+// 2. **形参与返回值**那两头也要回卷（`show(300)` 里那格 `unsigned char c` 是 44）。
+//    落在**被调方进门第一句**（与记录的值语义同一手）—— 调用点有八九处，进门只有一处。
+//    交出去那一下按**写着的**返回类型回卷（`C.retType`）；lambda 上只有写了 `-> T`
+//    那一档算"写着的"，从体里推出来的那一档不回卷。
+//
+// 3. `i++` / `++i` **当值用**那一档（语句位置早就有了）：落公共层现成的 `block-expr`
 //    （先跑几句、再交一格值）——`++i` 交的是那格量自己，`i++` 先把旧值存进一格临时量。
 //
-// 钉住七件事：无符号 8 位回卷、有符号 8 位回卷成负数、16 位、32 位、转换时回卷、
-// `i++` 与 `++i` 当值用。
+// 钉住十件事：无符号 8 位回卷、有符号 8 位回卷成负数、16 位、32 位、转换时回卷、
+// **窄形参**、**窄返回值**、**lambda 写着的窄返回类型**、`i++` 与 `++i` 当值用。
 #include <stdio.h>
+
+void show(unsigned char c) { printf("%d\n", (int)c); }
+
+unsigned char clamp8(int x) { return x; }
+
+short shrink(int x) { return x; }
 
 int main() {
   unsigned char a = 200;
@@ -34,5 +45,10 @@ int main() {
   int x = i++;
   int y = ++i;
   printf("%d %d %d\n", x, y, i);
+  show(300);
+  printf("%d\n", (int)clamp8(300));
+  printf("%d\n", (int)shrink(70000));
+  auto lo = [](int v) -> unsigned char { return v; };
+  printf("%d\n", (int)lo(300));
   return 0;
 }
