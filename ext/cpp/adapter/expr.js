@@ -295,6 +295,7 @@ function callOf(x, C) {
      * 所以这儿只查一次，不用往基类走。
      */
     if (t.kind === 'named') {
+      const as = rawArgs.map((a) => exprOf(a, C));
       /**
        * **虚方法走分派函数**（`Shape__v_area(obj)`）—— 按对象自己的 `__vt` 走 if 链。
        * 为什么连 `q.area()`（静态类型就是派生类）也走：那格对象的真身可能是**更派生的**
@@ -305,19 +306,28 @@ function callOf(x, C) {
         return {
           kind: 'call',
           fn: { kind: 'name', name: vcallName(t.name, C.ref(m)) },
-          args: [obj, ...rawArgs.map((a) => exprOf(a, C))],
+          args: [obj, ...as],
         };
       }
       /**
        * 非虚方法按**静态类型**（`t.cls`）单态分派 —— C++ 的隐藏规则。
-       * 重载的那几份名字后头缀了实参个数，所以这儿要**数一数实参**再挑（见 `pickMethod`）。
+       * 三档，与 `methodName` 那三档反过来：先试"按实参**类型**挑"（有两份个数一样的
+       * 那几个名字才在表里），再试"带实参个数"那个名字，最后是老名字（见 `pickMethod`）。
        */
+      const hitT = C.pickMethodT(t.cls ?? t.name, m, as.map((a) => typeOf(a, C.tyCtx())));
+      if (hitT !== null) {
+        return {
+          kind: 'call',
+          fn: { kind: 'name', name: hitT.name },
+          args: [obj, ...as.map((a, i) => coerce(a, hitT.params[i].type, C))],
+        };
+      }
       const target = C.pickMethod(t.cls ?? t.name, m, rawArgs.length);
       if (target !== null) {
         return {
           kind: 'call',
           fn: { kind: 'name', name: target },
-          args: [obj, ...rawArgs.map((a) => exprOf(a, C))],
+          args: [obj, ...as],
         };
       }
     }
@@ -377,6 +387,16 @@ function callOf(x, C) {
         args: [{ kind: 'name', name: 'this' }, ...args],
       };
     }
+  }
+  /* 裸写的成员也走那三档（先按类型，再按个数 / 老名字）。 */
+  const selfT = C.self === null ? null
+    : C.pickMethodT(C.self, name, args.map((a) => typeOf(a, C.tyCtx())));
+  if (selfT !== null) {
+    return {
+      kind: 'call',
+      fn: { kind: 'name', name: selfT.name },
+      args: [{ kind: 'name', name: 'this' }, ...args.map((a, i) => coerce(a, selfT.params[i].type, C))],
+    };
   }
   const selfPick = C.self === null ? null : C.pickMethod(C.self, name, args.length);
   if (selfPick !== null) {

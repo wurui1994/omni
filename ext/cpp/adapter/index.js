@@ -32,12 +32,54 @@ const dtorName = (rec, owner) => `__destruct_${rec}_${owner}`;
 const ctorName = (rec, argc) => `${rec}__ctor${argc}`;
 
 /**
- * **一格方法叫什么**。没重载的还叫老名字（`Acc_get`）—— 已有那几族一个字节都不动；
- * 重载的那几份缀上实参个数（`Acc_add__0` / `Acc_add__1`）。调用点数一数实参就挑得出来。
+ * **一格方法叫什么**。三档，从"不动"往"分得最细"排：
+ *   1. 没重载 → 还叫老名字（`Acc_get`）——**已有那几族一个字节都不动**；
+ *   2. 重载了、但几份的**实参个数各不相同** → 缀个数（`Acc_add__1`）；
+ *   3. 有两份个数一样 → 缀**实参类型**（`Acc_add__int` / `Acc_add__real`）。
+ * 调用点照这三档反过来找（见 `pickMethodT` / `pickMethod`）。
  */
 function methodName(rec, m, C) {
   const base = `${C.ref(rec.name)}_${C.ref(m.name)}`;
+  if (rec.ovlT?.has(m.name) === true) return `${base}__${paramTags(m.tok, C)}`;
   return (rec.ovl?.has(m.name) === true) ? `${base}__${ctorArity(m.tok)}` : base;
+}
+
+/** 一份函数的形参类型标记（`int_real`）—— 与造模板实例名时用的是同一份 `tyTag`。 */
+function paramTags(fnTok, C) {
+  const f = kids(fnTok).find((y) => tag(y) === 'fn');
+  return readParams(part(f, 'params'), C).map((p) => tyTag(p.type)).join('_');
+}
+
+/**
+ * 这个方法要不要进"按类型挑"那张表（只有 `ovlT` 里的名字要）。
+ * `params` 里**去掉 this** —— 调用点手上只有写出来的那几格实参。
+ */
+function regMethOvl(rec, m, s, C) {
+  if (rec.ovlT?.has(m.name) !== true) return;
+  const k = `${C.ref(rec.name)}_${C.ref(m.name)}`;
+  if (!C.methOvl.has(k)) C.methOvl.set(k, []);
+  C.methOvl.get(k).push({ name: s.name, params: s.params.slice(1) });
+}
+
+/**
+ * **从几份重载里挑一份**（自由函数与方法共用这一份）。照 C++ 的次序两步：
+ *   1. 逐格类型**一模一样**的那份赢；
+ *   2. 没有的话看"每格实参都能转过去"的（这条腿上只认 `int -> double` 与
+ *      `bool -> int` 两格提升）—— 剩下**正好一份**才算。
+ * 挑不出唯一那份就当场报并把候选全列出来（别猜 —— 猜错就是答案静默地错）。
+ */
+function pickAmong(label, cands, argTypes) {
+  const tags = argTypes.map(tyTag);
+  const arity = (c) => c.params.length === tags.length;
+  const same = cands.filter((c) => arity(c) && c.params.every((p, i) => tyTag(p.type) === tags[i]));
+  if (same.length === 1) return same[0];
+  const ok = (want, got) => tyTag(want) === tyTag(got)
+    || (want.kind === 'real' && got.kind === 'int')
+    || (want.kind === 'int' && got.kind === 'bool');
+  const fits = cands.filter((c) => arity(c) && c.params.every((p, i) => ok(p.type, argTypes[i])));
+  if (fits.length === 1) return fits[0];
+  throw new Error(`cpp->IR: \`${label}(${tags.join(', ')})\` 挑不出唯一那一份重载`
+    + `（有 ${cands.length} 份：${cands.map((c) => c.name).join(' / ')}）`);
 }
 
 /** 一份构造函数（或方法）收几个实参。 */
@@ -135,21 +177,18 @@ export function cppToIR(tree) {
      * 交的是 `{ name, params }`，调用点照 `params` 给实参补转换（方言是严的：
      * 拿 int 去喂 real 形参会当场报，不会悄悄转）。
      */
-    pickFn: (base, argTypes) => {
-      const cands = C.ovlFns.get(base) ?? [];
-      const tags = argTypes.map(tyTag);
-      const same = cands.filter((c) => c.params.length === tags.length
-        && c.params.every((p, i) => tyTag(p.type) === tags[i]));
-      if (same.length === 1) return same[0];
-      const ok = (want, got) => tyTag(want) === tyTag(got)
-        || (want.kind === 'real' && got.kind === 'int')
-        || (want.kind === 'int' && got.kind === 'bool');
-      const fits = cands.filter((c) => c.params.length === tags.length
-        && c.params.every((p, i) => ok(p.type, argTypes[i])));
-      if (fits.length === 1) return fits[0];
-      throw new Error(`cpp->IR: \`${base}(${tags.join(', ')})\` 挑不出唯一那一份重载`
-        + `（有 ${cands.length} 份：${cands.map((c) => c.name).join(' / ')}）`);
+    pickFn: (base, argTypes) => pickAmong(base, C.ovlFns.get(base) ?? [], argTypes),
+    /**
+     * **挑哪一份方法**（按实参类型）—— 只有"两份实参个数一样"的名字在这张表里
+     * （见 `overloadedByType`）；不在表里答 null，调用点退回按个数挑的老路。
+     */
+    pickMethodT: (clsRef, mname, argTypes) => {
+      const k = `${clsRef}_${C.ref(mname)}`;
+      const cands = C.methOvl.get(k);
+      return cands === undefined ? null : pickAmong(k, cands, argTypes);
     },
+    /** `类名_方法名`（都已 ref 过） → `[{ name, params }]`（params 里**不含** this）。 */
+    methOvl: new Map(),
     /**
      * 一格类名 → 类型。**`name` 是落地的记录（可能是根）、`cls` 是写着的那个静态类型** ——
      * 非虚方法按 `cls` 单态分派（C++ 的隐藏规则），虚方法按 `name` 找分派表。
@@ -262,7 +301,7 @@ export function cppToIR(tree) {
   /* **把基类摊进派生类**（字段在前、方法按名字继承）—— 见 `flatten`。 */
   for (const [, rec] of C.records) flatten(rec, C, new Set());
   /* 哪几个方法名在这个类上出现过一次以上 —— 名字怎么编靠它（见 `methodName`）。 */
-  for (const [, rec] of C.records) rec.ovl = overloadedNames(rec);
+  for (const [, rec] of C.records) { rec.ovl = overloadedNames(rec); rec.ovlT = overloadedByType(rec); }
   for (const [, rec] of C.records) {
     if (rec.done === true) continue;
     recFields.set(C.ref(rec.name), rec.fields);
@@ -342,8 +381,12 @@ export function cppToIR(tree) {
       decls.push({ kind: 'class', name: C.ref(inst), fields: rec.fields });
       const selfType = C.recType(inst);
       rec.ovl = overloadedNames(rec);
+      rec.ovlT = overloadedByType(rec);
       const sigs = rec.methods.map((m) => sigOf(m.tok, selfType, methodName(rec, m, C)));
-      sigs.forEach((s) => C.fns.set(s.name, { params: s.params, ret: s.ret }));
+      sigs.forEach((s, i) => {
+        C.fns.set(s.name, { params: s.params, ret: s.ret });
+        regMethOvl(rec, rec.methods[i], s, C);
+      });
       /**
        * **构造与析构**：签名要在体之前全登记好（构造函数体里可能调自己这个类的方法，
        * 而方法体里也可能造一格自己）。落法与非模板那条路**同一条** —— 构造是一格交记录的
@@ -522,7 +565,11 @@ export function cppToIR(tree) {
     const selfType = C.recType(rec.name);
     for (const m of rec.methods) {
       const s = sigOf(m.tok, selfType, methodName(rec, m, C));
+      if (C.fns.has(s.name)) {
+        throw new Error(`cpp->IR: ${rec.name} 上有两份一模一样的 ${m.name}`);
+      }
       C.fns.set(s.name, { params: s.params, ret: s.ret });
+      regMethOvl(rec, m, s, C);
     }
     for (const owner of (rec.dchain ?? [])) {
       C.fns.set(dtorName(C.ref(rec.name), C.ref(owner)), {
@@ -945,6 +992,21 @@ function layoutVirtual(C, recFields, decls) {
   const cnt = new Map();
   for (const m of rec.methods) cnt.set(m.name, (cnt.get(m.name) ?? 0) + 1);
   return new Set([...cnt].filter(([, n]) => n > 1).map(([k]) => k));
+}
+
+/**
+ * 这个类上**有两份实参个数一样**的方法名 —— 那几个要按**类型**分（`methodName` 第三档）。
+ * 从前这一格是当场报（方言会看见两份同名的函数）。
+ */
+function overloadedByType(rec) {
+  const seen = new Set();
+  const out = new Set();
+  for (const m of rec.methods) {
+    const k = `${m.name}/${ctorArity(m.tok)}`;
+    if (seen.has(k)) out.add(m.name);
+    seen.add(k);
+  }
+  return out;
 }
 
 /**
@@ -1402,10 +1464,11 @@ function declOf(d, specs, C) {
 //      `&x` 只在记录/列表/字典上成立（标量上当场报，那要真指针）。
 //   4. 整数那一族只有一格宽度：定宽类型（`int8_t` …）的位宽表在
 //      `src/core/lower/cfam.js` 的 `C_INT_BITS`（与 jancy 共用一张），**回卷还没接**。
-//   5. **自由函数**按实参**类型**重载（`fnovl.cpp`：`pickFn` —— 先找一模一样的，
-//      再看能提升的，剩下正好一份才算）；**方法与构造函数**只按实参**个数**，
-//      个数一样的两份当场报。拷贝构造与赋值算子没有 —— 记录是引用语义，那两格在这条腿上
-//      本来就不是"拷贝"。**虚方法 + 重载**当场报（分派表按老名字找那一份）。
+//   5. **自由函数与方法**都按实参**类型**重载（`fnovl.cpp` / `methov2.cpp`：名字分三档 ——
+//      没重载不动 / 个数各不相同的缀个数 / 有两份个数一样的缀类型；挑那一份走 `pickAmong`）。
+//      **构造函数只按实参个数**，个数一样的两份当场报。拷贝构造与赋值算子没有 ——
+//      记录是引用语义，那两格在这条腿上本来就不是"拷贝"。
+//      **虚方法 + 重载**当场报（分派表按老名字找那一份）。
 //   6. 虚函数接**单继承与多继承**（分组按连通块 —— 见 `planVirtuals`）；纯虚（`= 0`）接了 ——
 //      声明处没有体，分派函数的兜底是一格 `(fail …)`。**菱形继承当场报**（两个基类都有
 //      同一个字段名时 C++ 是两份独立的字段，而摊平只有一张表 —— 见 `flatten`）；
