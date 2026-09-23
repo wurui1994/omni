@@ -358,7 +358,18 @@ function callOf(x, C) {
       return gfxCallIR(n, as);
     }
   }
-  const args = kids(x).slice(1).map((a) => exprOf(a, C));
+  /* **宿主调用的串实参一律换成名字表下标**（`glsettex(0,"earth.jpg")` 那一族）：
+     宿主面只收 double，所以串在入口里内部到名字表、这儿发它的下标（与 `SHADER_FNS`
+     那一段同一手 —— 那一段是"哪几格实参是串"的白名单，这一格是兜底的一般规矩）。
+     只在宿主调用那条路上这么做：普通函数的串实参照旧原样递下去。 */
+  const rawArgs = kids(x).slice(1);
+  const hostish = C.gfxHost
+    && (C.host.draw?.has(`${n}/${rawArgs.length}`) === true
+      || HOST_FNS0.includes(n)
+      || C.host.gfx.some((p) => n === p || n.startsWith(p)));
+  const args = rawArgs.map((a) => (hostish && isList(a) && tag(a) === 'str'
+    ? num(internStr(C, cUnescape(unquote(leaf(kids(a)[0])))))
+    : exprOf(a, C)));
 
   if (RMATH1.has(n) && args.length === 1) return rmath(RMATH1.get(n), args);
   if (RMATH2.has(n) && args.length === 2) return rmath(RMATH2.get(n), args);
@@ -429,6 +440,12 @@ function callOf(x, C) {
      差别只在这张表 —— PolyDraw 是 GL 立即模式（`polydraw.c:2070` 的 myext[]）、
      EvalDraw 是 `cls/setcol/setpix/moveto/lineto/drawsph/drawcone/…`（`evaldraw_ref.md`）。 */
   if (C.host.gfx.some((p) => n === p || n.startsWith(p))) {
+    /* **录制那一档不拦名字**（`--gfx null`）：设备认所有名字（记一笔、回 0），
+       所以这儿把它原样落成 `(gfxcall …)` —— 于是一份脚本能一路跑到底，
+       账上那串名字就是"它到底要哪几格 API"。撞上第一个没接的名字就报那种查法，
+       一份脚本要查十几遍才知道还缺什么（语料上量过：那是最费时间的一段）。
+       **只在这一档**：默认那两档仍然当场报，不许静默回 0 把图画错。 */
+    if (C.recGfx) return gfxCallIR(n, args);
     throw new Error(`${C.host.who}->IR: \`${n}\` 这一格宿主函数这条腿上没有落点`
       + '（固定管线那一档已经接了：glClear/glBegin/glEnd/glVertex/glColor/矩阵栈/gluPerspective；'
       + `**着色器与纹理那两族没有** —— 这条腿上没有可编程管线。口径是 ${C.host.spec}）`);
@@ -929,8 +946,11 @@ function bodyOf(blk, params, C) {
 export function evalToIR(cst, host, src = '') {
   const C = {
     host,
-    /* 画图走宿主调用（`(gfxcall …)`）还是生成出来的 CPU 光栅器 —— 见 `gfxMode()` 的头注。 */
-    gfxHost: gfxMode() === 'host' || gfxMode() === 'gl' || gfxMode() === 'auto',
+    /* 画图走宿主调用（`(gfxcall …)`）还是生成出来的 CPU 光栅器 —— 见 `gfxMode()` 的头注。
+       `null` 是**录制那一档**（设备只记账不画，量语言这一半与量覆盖用它）—— 它也是宿主调用。 */
+    gfxHost: ['host', 'gl', 'auto', 'null'].includes(gfxMode()),
+    /* 录制那一档（`--gfx null`）：设备认所有名字 ⇒ adapter 这一层也不拦（见 callOf 那一段）。 */
+    recGfx: gfxMode() === 'null',
     fns: new Map(),
     globals: new Map(),                 /* 名字 -> 类型（`static`） */
     staticInits: [],                    /* `static x = 3;` 的初值：入口里做**一次** */

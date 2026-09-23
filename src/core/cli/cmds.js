@@ -398,7 +398,10 @@ uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开
         { name: '--w', arity: 1, value: 'W', brief: '（EVAL）画布宽，默认 320' },
         { name: '--h', arity: 1, value: 'H', brief: '（EVAL）画布高，默认 240' },
         { name: '--perf', arity: 0,
-          brief: '（EVAL）每帧耗时与 fps 印到 stderr（#perf gfx …）' }],
+          brief: '（EVAL）每帧耗时与 fps 印到 stderr（#perf gfx …）' },
+        { name: '--gfx', arity: 1, value: 'D',
+          brief: '（EVAL）哪一档设备：host（宿主里的 CPU 备选）| ir（生成出来的光栅器，默认）'
+            + ' | null（只记账不画 —— 量语言那一半与量"要哪几格 API"用它）' }],
     },
     {
       name: 'build', key: 'build', usage: 'FILE -o NAME',

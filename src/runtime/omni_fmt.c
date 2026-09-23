@@ -410,6 +410,29 @@ static double gfx_now_ms(void) {
   return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
 }
 
+/* **录制那一档**（OMNI_GFX=null，与 host/gfx-cpu.js 的 REC 一一对应）：
+   画图那一族记一笔就回 0、**一个像素都不画**，查询与帧循环那几格照旧给真答案。
+   量的是"一帧里语言这一半花了多少"（与 c_impl 的 bench 同一个口径）。
+   这一侧只记**总次数**（按名字分桶那张表在 JS 那边 —— 它是分析用的，不在热路径上）。 */
+static int g_grec = -1;
+static int64_t g_greccnt = 0;
+
+static int gfx_rec(void) {
+  if (g_grec < 0) {
+    const char *m = getenv("OMNI_GFX");
+    g_grec = (m != NULL && strcmp(m, "null") == 0) ? 1 : 0;
+  }
+  return g_grec;
+}
+
+/* 录制那一档里仍然要给真答案的那几格（与 JS 那侧的 QUERY 一字不差）。 */
+static int gfx_is_query(const char *nm) {
+  static const char *q[] = { "nextframe", "numframes", "klock", "xres", "yres",
+    "mousx", "mousy", "bstatus", "setbstatus", "keystatus", "setkeystatus", "rgb", NULL };
+  for (int i = 0; q[i] != NULL; i++) if (!strcmp(nm, q[i])) return 1;
+  return 0;
+}
+
 static int64_t gfx_clamp255(double v) {
   int64_t i = gfx_rnd(v);
   return i < 0 ? 0 : (i > 255 ? 255 : i);
@@ -528,12 +551,18 @@ static void gfx_perf_report(void) {
   fprintf(stderr, "#perf gfx %s frames=%lld total=%.1fms avg=%.1fms min=%.1fms max=%.1fms fps=%.1f\n",
           gfx_mode() == 2 ? "view" : "render", (long long)g_gtn,
           g_gtsum, avg, g_gtmin, g_gtmax, avg > 0.0 ? 1000.0 / avg : 0.0);
+  if (gfx_rec()) fprintf(stderr, "#perf calls total=%lld\n", (long long)g_greccnt);
 }
 
 double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a2,
                      double a3, double a4, double a5, double a6, double a7, double a8) {
   char *nm = omni_cstr(name);
   (void)a6; (void)a7; (void)a8;
+  /* 录制那一档：记一笔，画图那一族到此为止（查询与帧循环照旧往下走）。 */
+  if (gfx_rec()) {
+    g_greccnt += 1;
+    if (!gfx_is_query(nm)) return 0.0;
+  }
   if (!strcmp(nm, "cls") && argc == 3) {
     gfx_need();
     int64_t c = gfx_rgb(a0, a1, a2);

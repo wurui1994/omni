@@ -56,6 +56,31 @@ function modeOf() {
 }
 
 /**
+ * **录制那一档**（`OMNI_GFX=null`）：名字 -> 这一趟发了几次，**一个像素都不画**。
+ *
+ * 两个用处，都不是"少画点省时间"：
+ *
+ * 1. **量语言这一半**（与 c_impl 的 `bench` 同一个口径）：一帧的时间里去掉光栅化那一截，
+ *    剩下的就是脚本本身 + 宿主调用的开销 —— 我们三条腿（js / interp / c）拿它互比，
+ *    也拿它与参考实现的 interp/llvm 两档比。
+ * 2. **量覆盖**：这一档**认所有名字**（记一笔、回 0），于是一份脚本能一路跑到底，
+ *    账上那串名字就是"它到底要哪几格 API"。撞上第一个没有的名字就报那种查法，
+ *    一份脚本要查十几遍才知道还缺什么。
+ *
+ * 查询那一族（`xres`/`numframes`/`klock`/输入那几格）在这一档里**照旧给真答案** ——
+ * 脚本靠它们分支，回 0 会让整份脚本走上另一条路（那时量的就不是同一件事了）。
+ */
+let REC = null;
+function recOn() {
+  if (REC === null && env('OMNI_GFX') === 'null') REC = new Map();
+  return REC !== null;
+}
+
+/** 录制那一档里**仍然要给真答案**的那几格（脚本靠它们分支 / 帧循环靠它转）。 */
+const QUERY = new Set(['nextframe', 'numframes', 'klock', 'xres', 'yres',
+  'mousx', 'mousy', 'bstatus', 'setbstatus', 'keystatus', 'setkeystatus', 'rgb']);
+
+/**
  * **输入那一族的来源**：CPU 这一档没有窗口，所以从环境变量读一次 ——
  * `OMNI_MOUSE=x,y,按键位`、`OMNI_KEYS=0xc8,0x1d`（按住的扫描码，逗号分隔）。
  *
@@ -255,6 +280,10 @@ function ms1(v) {
  *
  * 为什么不落 stdout：那一股上只许有指针行（判据按行比）。格式与 Studio 那一侧
  * 显示的是同一组数（帧数 / 总时间 / 每帧平均 / 最快最慢 / fps）。
+ *
+ * 录制那一档（`OMNI_GFX=null`）多印一行 **调用账**：总次数 + 最多的那几个名字。
+ * 那一行同时是两件事的答案：「这份脚本每帧发多少次宿主调用」（性能）与
+ * 「它到底要哪几格 API」（覆盖）—— 后者比"撞上第一个没有的名字就报"准得多。
  */
 function perfReport() {
   if (D.perf !== 1 || D.tn === 0) return;
@@ -263,6 +292,13 @@ function perfReport() {
   stderr(`#perf gfx ${modeOf()} frames=${D.tn} total=${ms1(D.tSum)}ms`
     + ` avg=${ms1(avg)}ms min=${ms1(D.tMin)}ms max=${ms1(D.tMax)}ms`
     + ` fps=${ms1(avg > 0 ? 1000 / avg : 0)}\n`);
+  if (REC !== null) {
+    let n = 0;
+    for (const v of REC.values()) n += v;
+    const top = [...REC.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12)
+      .map(([k, v]) => `${k}:${v}`).join(' ');
+    stderr(`#perf calls total=${n} names=${REC.size} ${top}\n`);
+  }
 }
 
 /**
@@ -273,7 +309,14 @@ function perfReport() {
  */
 export function gfxCall(name, args) {
   const a = (i) => Number(args[i] ?? 0);
-  switch (`${name}/${args.length}`) {
+  const key = `${name}/${args.length}`;
+  /* **录制那一档**（`OMNI_GFX=null`）：记一笔，画图那一族就到此为止。
+     查询与帧循环那几格照旧往下走 —— 脚本靠它们分支（见 `recOn` 的头注）。 */
+  if (recOn()) {
+    REC.set(key, (REC.get(key) ?? 0) + 1);
+    if (!QUERY.has(name)) return 0;
+  }
+  switch (key) {
     case 'cls/3': need(320, 240); cls(a(0), a(1), a(2)); return 0;
     /* `cls(打包好的颜色)`：EvalDraw 里最常见的写法（`cls(0)`）—— 与 `setcol/1` 同一档。 */
     case 'cls/1': {
