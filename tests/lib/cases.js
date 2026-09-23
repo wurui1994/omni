@@ -397,10 +397,12 @@ export const LAMBDA = ['5', '15', '17', '15', '12', '16'];
 /**
  * **cpp 的格式串**（`ext/cpp/examples/fmt.cpp`）。格式那一层走公共层 `fmt.js` 的 `fmtToIR`
  * （与 jancy 的 `printf` 同一张转换表）。七行分别钉：两格转换、浮点三种写法、`%s` 与 `%%`、
- * 十六进制/八进制、纯文本、转换挨着排、转换后面还有文字。期望输出由 `c++` 给。
+ * 十六进制/八进制、纯文本、转换挨着排、转换后面还有文字；后四行是**宽度与标志**
+ * （右对齐 / 左对齐 / 补零 —— `%05d` 印 -42 要是 `-0042`）与 `%.2s` 剪短。期望输出由 `c++` 给。
  */
 export const FMT = ['a=1 b=22', '3.14 | 3.142e+00 | 3.14159', 'pct=100%',
-  'hex ff oct 10', 'no args', '123', '5 then text'];
+  'hex ff oct 10', 'no args', '123', '5 then text',
+  '[   42][42   ][00042]', '[-0042][  -42]', '[    3.14][3.14    ]', '[    ab][ab    ][ab]'];
 
 const C = (name, grammar, file, expect) => ({ name, grammar, file, expect });
 

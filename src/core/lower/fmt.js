@@ -15,7 +15,7 @@
 //     格式化字面量 `$"…"` 走这条 —— 它产出的是一格值（literals.rst:62），不是一次输出。
 
 import { intConvCode } from './int.js';
-import { typeOf } from './ty-of.js';
+import { STR, typeOf } from './ty-of.js';
 
 /** 段里那几块（字符串常量与 `(tostr …)`）拼起来：**左结合**的 `(bin "+" …)`。 */
 export function joinPieces(pieces) {
@@ -424,19 +424,89 @@ export function specPieceIR(spec, v, tyCtx, who) {
   }
 }
 
+/** 两格串接起来。 */
+const catIR = (a, b) => ({ kind: 'binop', op: '+', left: a, right: b });
+/** 一格串内建。 */
+const biIR = (name, ...args) => ({ kind: 'builtin', name, args });
+const intIR = (n) => ({ kind: 'int', value: n });
+const strIR = (s) => ({ kind: 'string', value: s });
+
+/**
+ * **补到至少 `width` 个字符宽**（按节点那一份，与上头 `padTo` 是同一条规矩）。
+ *
+ * `piece` 会被读好几次，所以先落成一格临时量（`block-expr` + `let`）—— **不能直接抄几遍**：
+ * `printf("%5d\n", f())` 那样会把 `f()` 多跑几趟，那是"答案静默地错"。
+ *
+ * `0` 补的零排在符号**后面**：`%05d` 印 -42 是 `-0042`（不是 `000-42`）。
+ */
+function padToIR(piece, width, left, zero, fresh) {
+  const name = fresh('__fw');
+  const t = { kind: 'name', name };
+  const gap = (fill) => biIR('srep', strIR(fill), {
+    kind: 'binop', op: '-', left: intIR(width), right: biIR('slen', t),
+  });
+  let value;
+  if (left) {
+    value = catIR(t, gap(' '));
+  } else if (!zero) {
+    value = catIR(gap(' '), t);
+  } else {
+    const head = biIR('ssub', t, intIR(0), intIR(1));
+    const rest = biIR('ssub', t, intIR(1), {
+      kind: 'binop', op: '-', left: biIR('slen', t), right: intIR(1),
+    });
+    value = {
+      kind: 'if-expr',
+      type: STR,
+      cond: { kind: 'binop', op: '==', left: head, right: strIR('-') },
+      then: catIR(strIR('-'), catIR(gap('0'), rest)),
+      else_: catIR(gap('0'), t),
+    };
+  }
+  return {
+    kind: 'block-expr',
+    stmts: [{ kind: 'let', name, type: STR, init: piece }],
+    value,
+  };
+}
+
+/** `%.3s` 是"**最多**三个字符"（与上头 `precStr` 同一条）。同样要落临时量。 */
+function cutToIR(piece, n, fresh) {
+  const name = fresh('__fp');
+  const t = { kind: 'name', name };
+  return {
+    kind: 'block-expr',
+    stmts: [{ kind: 'let', name, type: STR, init: piece }],
+    value: {
+      kind: 'if-expr',
+      type: STR,
+      cond: { kind: 'binop', op: '>', left: biIR('slen', t), right: intIR(n) },
+      then: biIR('ssub', t, intIR(0), intIR(n)),
+      else_: t,
+    },
+  };
+}
+
 /**
  * `fmt` 那句话 + 那几格实参 → **一格标准 IR 的串表达式**（`(bin "+" …)` 串起来）。
  * `fmt` 要**已经解过转义**（调用方先过 `cUnescape`）。`who` 是报错时的前缀。
+ * `fresh(前缀)` 给一个没用过的名字 —— 宽度与 `%.Ns` 要落临时量，没给就当场报。
  *
  * 实参给多给少都**当场报**：C 那边多给的会悄悄丢掉、少给的读到垃圾，两样都是
  * "答案静默地错"，所以这儿不跟着糊弄。
  */
-export function fmtToIR(fmt, args, tyCtx, who) {
+export function fmtToIR(fmt, args, tyCtx, who, fresh = null) {
   const parts = [];
   let lit = '';
   let ai = 0;
   const flushLit = () => {
-    if (lit !== '') { parts.push({ kind: 'string', value: lit }); lit = ''; }
+    if (lit !== '') { parts.push(strIR(lit)); lit = ''; }
+  };
+  const need = (what) => {
+    if (fresh === null) {
+      throw new Error(`${who}: ${what} 要一格临时量，可这个调用点没给取名字的口子`);
+    }
+    return fresh;
   };
   for (let i = 0; i < fmt.length; i += 1) {
     const c = fmt[i];
@@ -445,17 +515,32 @@ export function fmtToIR(fmt, args, tyCtx, who) {
     const spec = readSpec(fmt, i);
     if (spec === null) { lit += c; continue; }
     const f = spec.flags ?? {};
-    if (spec.width !== null || f.left || f.zero || f.plus || f.space || f.alt) {
-      throw new Error(`${who}: \`${fmt.slice(i, spec.end + 1)}\` 里的宽度/标志还没接`
-        + '（"补到几位"那一层在 fmt.js 的 padTo，按节点那一份还没写）');
+    const at = fmt.slice(i, spec.end + 1);
+    if (f.plus || f.space || f.alt) {
+      throw new Error(`${who}: \`${at}\` 里的 \`+\` / 空格 / \`#\` 标志还没接`
+        + '（sx 那一半有 `specDress`，按节点那一份还没写）');
     }
-    if (spec.prec === '*') throw new Error(`${who}: \`.*\`（精度从实参来）还没接`);
+    if (spec.width === '*' || spec.prec === '*') {
+      throw new Error(`${who}: \`${at}\` 的宽度/精度从实参来（\`*\`）还没接`);
+    }
     const v = args[ai];
     if (v === undefined) {
       throw new Error(`${who}: 格式串要第 ${ai + 1} 格实参，可是没给（${JSON.stringify(fmt)}）`);
     }
     flushLit();
-    parts.push(specPieceIR(spec, v, tyCtx, who));
+    let piece = specPieceIR(spec, v, tyCtx, who);
+    const isStr = spec.conv === 's' || spec.conv === 'v';
+    /* `%.3s` 剪短；数字上的精度（`%.3d` 那种"至少几位"）还没接 —— 当场报。 */
+    if (spec.prec !== null && isStr) {
+      piece = cutToIR(piece, spec.prec, need(`\`${at}\``));
+    } else if (spec.prec !== null && !'fFeEgG'.includes(spec.conv)) {
+      throw new Error(`${who}: \`${at}\` 上的精度还没接（只有浮点与 \`%s\` 这两档）`);
+    }
+    if (spec.width !== null) {
+      const zero = f.zero === true && f.left !== true && !isStr;
+      piece = padToIR(piece, spec.width, f.left === true, zero, need(`\`${at}\` 的宽度`));
+    }
+    parts.push(piece);
     ai += 1;
     i = spec.end;
   }
@@ -464,6 +549,6 @@ export function fmtToIR(fmt, args, tyCtx, who) {
     throw new Error(`${who}: 格式串只用了 ${ai} 格实参，给了 ${args.length} 格`
       + `（${JSON.stringify(fmt)}）`);
   }
-  if (parts.length === 0) return { kind: 'string', value: '' };
-  return parts.reduce((a, b) => ({ kind: 'binop', op: '+', left: a, right: b }));
+  if (parts.length === 0) return strIR('');
+  return parts.reduce(catIR);
 }

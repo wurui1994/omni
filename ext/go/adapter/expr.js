@@ -579,7 +579,7 @@ export function sprintfOf(rawArgs, C) {
   }
   const fmt = cUnescape(unquote(leaf(kids(fmtTok)[0])));
   const args = rawArgs.slice(1).map((a) => exprOf(a, C));
-  return fmtToIR(fmt, args, C.tyCtx(), 'go->IR');
+  return fmtToIR(fmt, args, C.tyCtx(), 'go->IR', C.fresh);
 }
 
 /**
@@ -597,7 +597,7 @@ export function printfOf(rawArgs, C) {
       + '（方言的 print 自带换行，"不换行地写一段"这一层还没有）');
   }
   const args = rawArgs.slice(1).map((a) => exprOf(a, C));
-  return fmtToIR(raw.slice(0, -1), args, C.tyCtx(), 'go->IR');
+  return fmtToIR(raw.slice(0, -1), args, C.tyCtx(), 'go->IR', C.fresh);
 }
 
 function callOf(x, C) {  const fnTok = kids(x)[0];

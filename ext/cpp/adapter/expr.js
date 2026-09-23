@@ -424,7 +424,7 @@ export function printArgs(name, rawArgs, C) {
       kind: 'if-expr', type: INT, cond: v, then: { kind: 'int', value: 1 }, else_: { kind: 'int', value: 0 },
     };
   });
-  return [{ kind: 'print', values: [fmtToIR(fmt, args, C.tyCtx(), 'cpp->IR')] }];
+  return [{ kind: 'print', values: [fmtToIR(fmt, args, C.tyCtx(), 'cpp->IR', C.fresh)] }];
 }
 
 /** 条件位置上的那一格（C++ 里"非零为真"）。 */
