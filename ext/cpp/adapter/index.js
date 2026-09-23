@@ -445,15 +445,15 @@ export function cppToIR(tree) {
     }
   }
 
-  /* **虚方法的分派函数**（签名照根那一份抄，第一格实参是接收者）。 */
+  /* **虚方法的分派函数**（签名照声明处那一份抄，第一格实参是接收者）。 */
   for (const { root } of (C.vtRoots ?? [])) {
     const rootRef = C.ref(root);
-    for (const [m, entries] of C.vtab.get(rootRef)) {
-      /* 签名照根那一份抄；**纯虚那一格根上没有体**，那就照分派表里第一份实现抄。 */
-      const base = C.fns.get(`${rootRef}_${C.ref(m)}`)
-        ?? (entries.length > 0 ? C.fns.get(entries[0].fn) : undefined);
+    for (const [m, t] of C.vtab.get(rootRef)) {
+      /* 签名照声明处那一份抄；**纯虚那一格声明处没有体**，那就照分派表里第一份实现抄。 */
+      const base = C.fns.get(`${C.ref(t.owner)}_${C.ref(m)}`)
+        ?? (t.entries.length > 0 ? C.fns.get(t.entries[0].fn) : undefined);
       if (base === undefined) {
-        throw new Error(`cpp->IR: ${root}::${m} 是纯虚的，可一个派生类都没有实现它`);
+        throw new Error(`cpp->IR: ${t.owner}::${m} 是纯虚的，可一个派生类都没有实现它`);
       }
       C.fns.set(vcallName(rootRef, C.ref(m)), { params: base.params, ret: base.ret });
     }
@@ -489,8 +489,8 @@ export function cppToIR(tree) {
 }
 
 /**
- * **虚方法的分派函数**：按 `this.__vt` 走一条 if 链，兜底是根自己那一份
- * （`__vt` 为 0 —— 那是基类自己的对象）。
+ * **虚方法的分派函数**：按 `this.__vt` 走一条 if 链，兜底是**声明处**那一份
+ * （多继承时那不一定是块名那一格 —— `ink` 声明在 `Printable` 上）。
  *
  * 为什么是 if 链而不是一格"虚表"：方言里函数不是值（没有函数指针那一族），
  * 而这条链落的全是现成的 `if` + `call` —— 一格新节点也没加。派生类少的时候它也够快。
@@ -499,7 +499,7 @@ function vcallDecls(C) {
   const out = [];
   for (const { root } of (C.vtRoots ?? [])) {
     const rootRef = C.ref(root);
-    for (const [m, entries] of C.vtab.get(rootRef)) {
+    for (const [m, t] of C.vtab.get(rootRef)) {
       const mref = C.ref(m);
       const sig = C.fns.get(vcallName(rootRef, mref));
       const fwd = sig.params.map((p) => ({ kind: 'name', name: p.name }));
@@ -508,10 +508,9 @@ function vcallDecls(C) {
       const hand = (fn) => (isVoid
         ? [{ kind: 'expr-stmt', expr: callTo(fn) }, { kind: 'return', values: [] }]
         : [{ kind: 'return', values: [callTo(fn)] }]);
-      const isPure = C.records.get(root).pure?.has(m) === true;
       const body = [];
-      for (const e of entries) {
-        if (!isPure && e.vt === 0) continue;    // 根那一份是兜底，摆在最后
+      for (const e of t.entries) {
+        if (!t.abstract && e.vt === t.home) continue;    // 声明处那一份是兜底，摆在最后
         body.push({
           kind: 'if',
           cond: {
@@ -524,7 +523,7 @@ function vcallDecls(C) {
           else_: null,
         });
       }
-      if (isPure) {
+      if (t.abstract) {
         /**
          * **纯虚的兜底**：抽象类造不出对象，所以这一支跑不到；真跑到了就是我们自己
          * 算错了（`__vt` 没设对），那时候停下来比静默地答错强。
@@ -532,12 +531,12 @@ function vcallDecls(C) {
         body.push({
           kind: 'builtin-stmt',
           name: 'fail',
-          args: [{ kind: 'string', value: `${root}::${m} 是纯虚的（__vt 没设对）` }],
+          args: [{ kind: 'string', value: `${t.owner}::${m} 是纯虚的（__vt 没设对）` }],
         });
         if (sig.ret.kind !== 'void') body.push({ kind: 'return', values: [zeroFor(sig.ret)] });
         else body.push({ kind: 'return', values: [] });
       } else {
-        body.push(...hand(`${rootRef}_${mref}`));
+        body.push(...hand(`${C.ref(t.owner)}_${mref}`));
       }
       out.push({
         kind: 'fn', name: vcallName(rootRef, mref), params: sig.params, ret: sig.ret, body,
@@ -666,27 +665,41 @@ function collectClass(cls, C, asName = null) {
  * 而"按真身分派"落成按 `__vt` 走的 if 链 —— 图上一格新节点也没加。
  */
 function planVirtuals(C, recFields, decls) {
-  const rootOf = (name, seen = new Set()) => {
-    const rec = C.records.get(name);
-    if (rec === undefined || rec.bases.length === 0) return name;
-    if (seen.has(name)) throw new Error(`cpp->IR: 继承成环了（${name}）`);
-    return rootOf(rec.bases[0], new Set([...seen, name]));
+  /**
+   * 分组按**连通块**，不按"往上走找根"：`Box : Shape, Printable` 有两个基类，
+   * "根"不止一格。把继承那几条边当**无向**的一并连起来，整块合成一格记录之后
+   * "通过第二基类的指针调"就只是同一格记录上的另一种静态类型。
+   *
+   * 块的名字取**块里第一格登记的类**（C++ 里基类一定先声明，所以那一格没有基类）。
+   */
+  const find = new Map();
+  const root0 = (n) => {
+    let r = n;
+    while (find.get(r) !== r) r = find.get(r);
+    return r;
   };
-  /* 每棵树的成员表（根 → 树里的类，按登记次序）。 */
+  for (const [n] of C.records) find.set(n, n);
+  for (const [n, rec] of C.records) {
+    for (const bn of rec.bases) {
+      if (!find.has(bn)) throw new Error(`cpp->IR: 基类 ${bn} 没有登记过`);
+      const a = root0(n);
+      const b = root0(bn);
+      if (a !== b) find.set(a, b);          // 合成一块（谁指谁不要紧，名字另取）
+    }
+  }
+  /* 每块的成员表（块名 → 块里的类，按登记次序）。 */
   const trees = new Map();
   for (const [n] of C.records) {
-    const r = rootOf(n);
+    const r = root0(n);
     if (!trees.has(r)) trees.set(r, []);
     trees.get(r).push(n);
   }
-  for (const [root, members] of trees) {
+  for (const [, members] of trees) {
+    const root = members[0];
     const anyVirtual = members.some((n) => C.records.get(n).virtuals.size > 0);
     if (!anyVirtual) {
       for (const n of members) { C.storage.set(n, n); C.storageRef.set(C.ref(n), C.ref(n)); }
       continue;
-    }
-    if (members.some((n) => C.records.get(n).bases.length > 1)) {
-      throw new Error(`cpp->IR: 虚函数 + 多继承还没接（${root} 那棵树）`);
     }
     members.forEach((n, i) => {
       C.storage.set(n, root);
@@ -724,19 +737,30 @@ function layoutVirtual(C, recFields, decls) {
     cls.fields = union;
     C.vtUnion = C.vtUnion ?? new Map();
     C.vtUnion.set(rootRef, union);
-    /* 分派表：一格虚方法名 → 每个派生类那一份。 */
+    /**
+     * 分派表：一格虚方法名 → `{ home, abstract, entries }`。
+     *   * `home` 是**最先声明它的那一格**的 `__vt`（多继承时那不一定是块名那一格 ——
+     *     `ink` 声明在 `Printable` 上，而块名可能是 `Shape`）；
+     *   * `abstract` 是"声明处没有体"（纯虚）；
+     *   * `entries` 只收**真有一份体**的类（没覆盖纯虚的中间层不该进链）。
+     */
     const tab = new Map();
-    for (const name of C.records.get(root).virtuals) {
+    const names = new Set(members.flatMap((n) => [...C.records.get(n).virtuals]));
+    for (const name of names) {
       for (const n of members) {
         if (C.records.get(n).ovl?.has(name) === true) {
           throw new Error(`cpp->IR: ${n} 上的 ${name} 既是虚方法又重载了 —— 还没接`);
         }
       }
-      /* **纯虚那一格根上没有体**，所以兜底不能是根自己那一份（见 `vcallDecls`）。 */
-      const isPure = C.records.get(root).pure?.has(name) === true;
-      tab.set(name, members
-        .filter((n) => !(isPure && n === root))
-        .map((n) => ({ vt: C.vtId.get(n), fn: `${C.ref(n)}_${C.ref(name)}` })));
+      const homeName = members.find((n) => C.records.get(n).virtuals.has(name));
+      const has = (n) => C.records.get(n).methods.some((m) => m.name === name);
+      const entries = members
+        .filter(has)
+        .map((n) => ({ vt: C.vtId.get(n), fn: `${C.ref(n)}_${C.ref(name)}` }));
+      if (entries.length === 0) {
+        throw new Error(`cpp->IR: ${homeName}::${name} 是纯虚的，可一个派生类都没有实现它`);
+      }
+      tab.set(name, { home: C.vtId.get(homeName), abstract: !has(homeName), owner: homeName, entries });
     }
     C.vtab.set(rootRef, tab);
   }
@@ -772,10 +796,29 @@ function flatten(rec, C, seen) {
     const base = C.records.get(bn);
     if (base === undefined) throw new Error(`cpp->IR: 基类 ${bn} 没有登记过`);
     flatten(base, C, next);
-    for (const f of base.fields) if (!fields.some((y) => y.name === f.name)) fields.push(f);
+    for (const f of base.fields) {
+      /**
+       * **两个基类都有这个字段名**（菱形里的公共祖先，或者两个基类各自叫了同一个名字）：
+       * C++ 那边是**两份独立的字段**（要写 `B::x` / `C::x` 才分得开），而摊平只有一张表 ——
+       * 并成一份就是静默地答错。所以当场报。
+       */
+      const dup = fields.find((y) => y.name === f.name);
+      if (dup !== undefined) {
+        throw new Error(`cpp->IR: ${rec.name} 的两个基类都有字段 ${f.name}`
+          + '（摊平只有一张表，并成一份会静默地答错）—— 菱形继承还没接');
+      }
+      fields.push(f);
+    }
     for (const m of base.methods) methods.push(m);
   }
-  for (const f of rec.fields) if (!fields.some((y) => y.name === f.name)) fields.push(f);
+  /* 派生类自己写了同名字段 = **遮住**基类那一份（C++ 允许）；摊平只有一张表，所以当场报。 */
+  for (const f of rec.fields) {
+    if (fields.some((y) => y.name === f.name)) {
+      throw new Error(`cpp->IR: ${rec.name} 自己的字段 ${f.name} 遮住了基类同名的那一份`
+        + '（摊平只有一张表）—— 还没接');
+    }
+    fields.push(f);
+  }
   /* 派生类自己那一份**盖掉**同名的基类方法。 */
   const own = new Set(rec.methods.map((m) => m.name));
   rec.methods = [...methods.filter((m) => !own.has(m.name)), ...rec.methods];
@@ -1186,8 +1229,10 @@ function declOf(d, specs, C) {
 //   5. 构造函数与方法都按**实参个数**重载；个数一样的两份当场报（按类型挑还没接）。
 //      拷贝构造与赋值算子没有 —— 记录是引用语义，那两格在这条腿上本来就不是"拷贝"。
 //      **虚方法 + 重载**当场报（分派表按老名字找那一份）。
-//   6. 虚函数只接**单继承**（虚函数 + 多继承当场报）；纯虚（`= 0`）接了 ——
-//      根上没有体，分派函数的兜底是一格 `(fail …)`。析构**按链跑**（自己先、再往基类走）；
+//   6. 虚函数接**单继承与多继承**（分组按连通块 —— 见 `planVirtuals`）；纯虚（`= 0`）接了 ——
+//      声明处没有体，分派函数的兜底是一格 `(fail …)`。**菱形继承当场报**（两个基类都有
+//      同一个字段名时 C++ 是两份独立的字段，而摊平只有一张表 —— 见 `flatten`）；
+//      派生类遮住基类同名字段那一档也当场报。析构**按链跑**（自己先、再往基类走）；
 //      `virtual ~X()` 上的 `virtual` 这条腿上没有意义（没有 `delete`，对象都是作用域里的，
 //      静态类型定得死），所以照普通析构收。
 //      类里"只声明不给体、体写在类外"那一档也当场报。
