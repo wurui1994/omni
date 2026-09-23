@@ -328,6 +328,24 @@ export function exprOf(x, C) {
   }
 }
 
+/**
+ * 一串实参 → IR。**借出去的那几格不许求值**（`T&` / `T*`）：那个位置上要交的是
+ * **盒子本身**，不是盒子里的值。能借的只有"一格装着盒子的量"（局部量或上一层的引用
+ * 形参）—— 别的（字段、数组元素、临时值）当场报，别静默地传一份副本进去。
+ * 写法两种都认：`f(y)`（`T&`）与 `f(&y)`（`T*`）。
+ */
+function argsWithRefs(rawArgs, rsig, C, who) {
+  return rawArgs.map((a, i) => {
+    if (rsig === undefined || !rsig.has(i)) return exprOf(a, C);
+    const inner = tag(a) === 'addrof' ? kids(a)[0] : a;
+    if (tag(inner) !== 'n' || !C.refNames.has(C.ref(nameOf(inner)))) {
+      throw new Error(`cpp->IR: \`${who}\` 的第 ${i + 1} 格实参要按引用借出去，`
+        + '可这儿给的不是一格局部量（字段 / 数组元素 / 临时值上还没接）');
+    }
+    return { kind: 'name', name: C.ref(nameOf(inner)) };
+  });
+}
+
 /** 一格调用。 */
 function callOf(x, C) {
   const fn = kids(x)[0];
@@ -354,6 +372,20 @@ function callOf(x, C) {
      * 所以这儿只查一次，不用往基类走。
      */
     if (t.kind === 'named') {
+      /**
+       * **方法上的出参**（`void set(int& out)`）：这一格要排在"把实参求值"**之前** ——
+       * 借出去的那一格不许求值。只认"没重载、非虚"那一档（名字按实参个数就定得死），
+       * 别的在签名那一趟就当场报了。
+       */
+      const byArity = C.pickMethod(t.cls ?? t.name, m, rawArgs.length);
+      const mrs = byArity === null ? undefined : C.refSig.get(byArity);
+      if (mrs !== undefined) {
+        return {
+          kind: 'call',
+          fn: { kind: 'name', name: byArity },
+          args: [obj, ...argsWithRefs(rawArgs, mrs, C, `${t.cls ?? t.name}::${m}`)],
+        };
+      }
       const as = rawArgs.map((a) => exprOf(a, C));
       /**
        * **虚方法走分派函数**（`Shape__v_area(obj)`）—— 按对象自己的 `__vt` 走 if 链。
@@ -442,17 +474,7 @@ function callOf(x, C) {
    * 不是盒子里的值。能借的只有"一格装着盒子的量"（局部量或上一层的引用形参）——
    * 别的（字段、数组元素、临时值）当场报，别静默地传一份副本进去。
    */
-  const rsig = C.refSig.get(C.ref(name));
-  const args = rawArgs.map((a, i) => {
-    if (rsig === undefined || !rsig.has(i)) return exprOf(a, C);
-    /* 借出去的那一格写法有两种：`f(y)`（`T&`）与 `f(&y)`（`T*`）—— 交的都是盒子。 */
-    const inner = tag(a) === 'addrof' ? kids(a)[0] : a;
-    if (tag(inner) !== 'n' || !C.refNames.has(C.ref(nameOf(inner)))) {
-      throw new Error(`cpp->IR: \`${name}\` 的第 ${i + 1} 格实参要按引用借出去，`
-        + '可这儿给的不是一格局部量（字段 / 数组元素 / 临时值上还没接）');
-    }
-    return { kind: 'name', name: C.ref(nameOf(inner)) };
-  });
+  const args = argsWithRefs(rawArgs, C.refSig.get(C.ref(name)), C, name);
   if (name === 'printf' || name === 'puts') {
     throw new Error(`cpp->IR: \`${name}\` 在表达式位置上（它不交值）`);
   }

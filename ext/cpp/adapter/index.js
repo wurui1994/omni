@@ -58,6 +58,16 @@ function borrowedLocals(fnTok, C) {
     if (tag(t) === 'call') {
       const fn = kids(t)[0];
       const as = part(t, 'args');
+      if (fn !== undefined && (tag(fn) === 'dot' || tag(fn) === 'arrow') && as !== undefined) {
+        /* 方法调用：这一趟还没有类型，按方法名近似（多装一格盒子不会错）。 */
+        const idx = C.refByName.get(nameOf(kids(fn)[1]));
+        if (idx !== undefined) {
+          kids(as).forEach((a, i) => {
+            const inner = tag(a) === 'addrof' ? kids(a)[0] : a;
+            if (idx.has(i) && tag(inner) === 'n') out.add(C.ref(nameOf(inner)));
+          });
+        }
+      }
       if (fn !== undefined && tag(fn) === 'n' && as !== undefined) {
         const idx = C.refSig.get(C.ref(nameOf(fn)));
         if (idx !== undefined) {
@@ -255,6 +265,12 @@ export function cppToIR(tree) {
     statCls: null,
     /** 名字 → 它其实是哪一格地方（区间 for 按引用走那一格：`v` 就是 `xs[i]`）。 */
     lvAlias: new Map(),
+    /**
+     * **方法名（没缀类名的那个） → 哪几格实参是借出去的**。降体之前那一趟扫树
+     * （`borrowedLocals`）手上还没有类型，认不出 `a.set(y)` 里 `a` 是哪个类 ——
+     * 所以按**名字**近似。多装了盒子不会错（读写一律走 `.v`），只是白装一格。
+     */
+    refByName: new Map(),
     /**
      * **按值传一格记录要拷一份**（C++ 的值语义）。方言的记录是引用语义，所以"传进去、
      * 在里头改字段"从前**改到了调用者那一格**（`grow(a)` 之后 `a.x` 变了 —— 答案静默地错）。
@@ -837,7 +853,19 @@ export function cppToIR(tree) {
     const selfType = C.recType(rec.name);
     for (const m of rec.methods) {
       const s = sigOf(m.tok, selfType, methodName(rec, m, C));
-      noRefParams(s, `${rec.name}::${m.name}`);
+      /**
+       * **方法上的出参**（`void set(int& out)`）：形参表第一格是 `this`，所以实参的下标
+       * 要减一。重载与虚方法上仍当场报 —— 前者挑那一份靠实参类型（而借出去那一格给的是
+       * 盒子），后者要连分派函数一起转发。
+       */
+      const mRef = new Set(s.params.flatMap((p, i) => (p.ref === true ? [i - 1] : [])));
+      if (mRef.size > 0) {
+        if (rec.ovl?.has(m.name) === true || rec.virtuals.has(m.name)) {
+          throw new Error(`cpp->IR: ${rec.name}::${m.name} 既是重载/虚方法又有 \`T&\` 形参 —— 还没接`);
+        }
+        C.refSig.set(s.name, mRef);
+        C.refByName.set(m.name, mRef);
+      }
       if (C.fns.has(s.name)) {
         throw new Error(`cpp->IR: ${rec.name} 上有两份一模一样的 ${m.name}`);
       }
@@ -2005,9 +2033,10 @@ function declOf(d, specs, C) {
 //      真要按位截断得等定宽整数回卷那一格（见第 4 条）。
 //   3. 引用（`T&`）与**按指针收的出参**（`T*` + `*p` + 调用点 `&y`）落成同一样东西：
 //      记录 / 列表 / 字典照原样收（本来就是引用语义）；**标量装进一格盒子**
-//      （`__ref_int`，`refparam.cpp`）。只接**自由函数**的形参，借出去的那个实参只能是
-//      "一格装着盒子的量"；方法 / 构造 / lambda 的形参、重载 + `T&`、把字段或数组元素
-//      借出去，全当场报。指针也**只有这一种用法** —— 指针算术、指向数组的指针都当场报。
+//      （`__ref_int`，`refparam.cpp`）。接**自由函数**与**方法**（后者只认"没重载、非虚"
+//      那一档 —— 名字按实参个数就定得死）；借出去的那个实参只能是"一格装着盒子的量"。
+//      构造 / lambda 的形参、重载或虚方法 + `T&`、把字段或数组元素借出去，全当场报。
+//      指针也**只有这一种用法** —— 指针算术、指向数组的指针都当场报。
 //      `&x`（取地址当值用）只在记录/列表/字典上成立。
 //   4. 整数那一族只有一格宽度：定宽类型（`int8_t` …）的位宽表在
 //      `src/core/lower/cfam.js` 的 `C_INT_BITS`（与 jancy 共用一张），**回卷还没接**。

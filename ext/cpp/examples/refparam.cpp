@@ -9,8 +9,9 @@
 // 声明要发成盒子；③调用点在那个位置上交**盒子本身**，不是盒子里的值。
 // 图上一格新东西也没加：落的全是现成的记录、字段读写与调用。
 //
-// 钉住五件事：改得动调用者那一格、**引用形参再借给别人**（`twice` 里的 `bump(x, x)`）、
-// 两格引用一起（`swap2`）、`double&`、以及同一格量既按引用借出去又照常当值用。
+// 钉住七件事：改得动调用者那一格、**引用形参再借给别人**（`twice` 里的 `bump(x, x)`）、
+// 两格引用一起（`swap2`）、`double&`、同一格量既按引用借出去又照常当值用、
+// 按指针收的出参（`int*` + `*p` + `&y`），以及**方法上的出参**（`acc.take(got)`）。
 #include <stdio.h>
 
 void bump(int& x, int d) {
@@ -37,6 +38,16 @@ void addTo(int* p, int d) {
   *p = *p + d;
 }
 
+/* **方法上的出参**（没重载、非虚那一档）：与自由函数同一台机器，只是形参表第一格是
+   接收者，所以实参的下标要减一。 */
+struct Acc {
+  int n;
+  void take(int& out) {
+    out = n;
+    n = 0;
+  }
+};
+
 int main() {
   int y = 5;
   bump(y, 3);
@@ -54,5 +65,10 @@ int main() {
   int c = 10;
   addTo(&c, 7);
   printf("%d\n", c);
+  Acc acc;
+  acc.n = 9;
+  int got = 0;
+  acc.take(got);
+  printf("%d %d\n", got, acc.n);
   return 0;
 }
