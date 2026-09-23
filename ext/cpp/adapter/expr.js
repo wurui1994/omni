@@ -305,9 +305,12 @@ function callOf(x, C) {
           args: [obj, ...rawArgs.map((a) => exprOf(a, C))],
         };
       }
-      /* 非虚方法按**静态类型**（`t.cls`）单态分派 —— C++ 的隐藏规则。 */
-      const target = `${t.cls ?? t.name}_${C.ref(m)}`;
-      if (C.fns.has(target)) {
+      /**
+       * 非虚方法按**静态类型**（`t.cls`）单态分派 —— C++ 的隐藏规则。
+       * 重载的那几份名字后头缀了实参个数，所以这儿要**数一数实参**再挑（见 `pickMethod`）。
+       */
+      const target = C.pickMethod(t.cls ?? t.name, m, rawArgs.length);
+      if (target !== null) {
         return {
           kind: 'call',
           fn: { kind: 'name', name: target },
@@ -357,7 +360,8 @@ function callOf(x, C) {
    * `int total() { return sum() + c; }` 里的 `sum()` 是成员。
    * 类里有同名成员时裸写的一定是成员（自由函数要写 `::f()` 才轮到它）。
    */
-  if (C.self !== null && C.fns.has(`${C.self}_${C.ref(name)}`)) {
+  const selfPick = C.self === null ? null : C.pickMethod(C.self, name, args.length);
+  if (selfPick !== null) {
     /* 裸写的**虚**方法同样走分派函数（`twice()` 里的 `area()`）。 */
     const root = C.storageRef.get(C.self) ?? C.self;
     const tab = C.vtab.get(root);
@@ -370,7 +374,7 @@ function callOf(x, C) {
     }
     return {
       kind: 'call',
-      fn: { kind: 'name', name: `${C.self}_${C.ref(name)}` },
+      fn: { kind: 'name', name: selfPick },
       args: [{ kind: 'name', name: 'this' }, ...args],
     };
   }

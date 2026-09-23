@@ -27,7 +27,16 @@ const dtorName = (ty) => `__destruct_${String(ty).replace(/[^A-Za-z0-9_]/g, '_')
  */
 const ctorName = (rec, argc) => `${rec}__ctor${argc}`;
 
-/** 一份构造函数收几个实参。 */
+/**
+ * **一格方法叫什么**。没重载的还叫老名字（`Acc_get`）—— 已有那几族一个字节都不动；
+ * 重载的那几份缀上实参个数（`Acc_add__0` / `Acc_add__1`）。调用点数一数实参就挑得出来。
+ */
+function methodName(rec, m, C) {
+  const base = `${C.ref(rec.name)}_${C.ref(m.name)}`;
+  return (rec.ovl?.has(m.name) === true) ? `${base}__${ctorArity(m.tok)}` : base;
+}
+
+/** 一份构造函数（或方法）收几个实参。 */
 function ctorArity(ctorTok) {
   const f = kids(ctorTok).find((y) => tag(y) === 'fn');
   const ps = f === undefined ? undefined : part(f, 'params');
@@ -96,6 +105,16 @@ export function cppToIR(tree) {
     vtId: new Map(),
     /** 同一张表，键**已经 ref 过**。 */
     vtIdRef: new Map(),
+    /**
+     * **挑哪一份方法**：先试"带实参个数"那个名字（重载的那几份），再试老名字。
+     * 两个都没有答 null —— 调用点再报，别在这儿猜。
+     */
+    pickMethod: (clsRef, mname, argc) => {
+      const a = `${clsRef}_${C.ref(mname)}__${argc}`;
+      if (C.fns.has(a)) return a;
+      const b = `${clsRef}_${C.ref(mname)}`;
+      return C.fns.has(b) ? b : null;
+    },
     /** 根名（已 ref 过） → 方法名 → [{ vt, fn }]（虚方法的分派表）。 */
     vtab: new Map(),
     /**
@@ -203,6 +222,8 @@ export function cppToIR(tree) {
   planVirtuals(C, recFields, decls);
   /* **把基类摊进派生类**（字段在前、方法按名字继承）—— 见 `flatten`。 */
   for (const [, rec] of C.records) flatten(rec, C, new Set());
+  /* 哪几个方法名在这个类上出现过一次以上 —— 名字怎么编靠它（见 `methodName`）。 */
+  for (const [, rec] of C.records) rec.ovl = overloadedNames(rec);
   for (const [, rec] of C.records) {
     if (rec.done === true) continue;
     recFields.set(C.ref(rec.name), rec.fields);
@@ -278,7 +299,8 @@ export function cppToIR(tree) {
       recFields.set(C.ref(inst), rec.fields);
       decls.push({ kind: 'class', name: C.ref(inst), fields: rec.fields });
       const selfType = C.recType(inst);
-      const sigs = rec.methods.map((m) => sigOf(m.tok, selfType, `${C.ref(inst)}_${C.ref(m.name)}`));
+      rec.ovl = overloadedNames(rec);
+      const sigs = rec.methods.map((m) => sigOf(m.tok, selfType, methodName(rec, m, C)));
       sigs.forEach((s) => C.fns.set(s.name, { params: s.params, ret: s.ret }));
       rec.methods.forEach((m, i) => {
         decls.push(C.isolate(() => fnDecl(sigs[i], m.tok, C, C.ref(inst))));
@@ -397,7 +419,7 @@ export function cppToIR(tree) {
     if (rec.done === true) continue;
     const selfType = C.recType(rec.name);
     for (const m of rec.methods) {
-      const s = sigOf(m.tok, selfType, `${C.ref(rec.name)}_${C.ref(m.name)}`);
+      const s = sigOf(m.tok, selfType, methodName(rec, m, C));
       C.fns.set(s.name, { params: s.params, ret: s.ret });
     }
     if (rec.dtor !== null) {
@@ -433,7 +455,7 @@ export function cppToIR(tree) {
     if (rec.done === true) continue;
     const selfType = C.recType(rec.name);
     for (const m of rec.methods) {
-      const s = sigOf(m.tok, selfType, `${C.ref(rec.name)}_${C.ref(m.name)}`);
+      const s = sigOf(m.tok, selfType, methodName(rec, m, C));
       decls.push(fnDecl(s, m.tok, C, C.ref(rec.name)));
     }
     if (rec.dtor !== null) {
@@ -663,12 +685,24 @@ function layoutVirtual(C, recFields, decls) {
     /* 分派表：一格虚方法名 → 每个派生类那一份。 */
     const tab = new Map();
     for (const name of C.records.get(root).virtuals) {
+      for (const n of members) {
+        if (C.records.get(n).ovl?.has(name) === true) {
+          throw new Error(`cpp->IR: ${n} 上的 ${name} 既是虚方法又重载了 —— 还没接`);
+        }
+      }
       tab.set(name, members.map((n) => ({
         vt: C.vtId.get(n), fn: `${C.ref(n)}_${C.ref(name)}`,
       })));
     }
     C.vtab.set(rootRef, tab);
   }
+}
+
+/** 这个类上**出现过一次以上**的方法名（重载）。 */
+function overloadedNames(rec) {
+  const cnt = new Map();
+  for (const m of rec.methods) cnt.set(m.name, (cnt.get(m.name) ?? 0) + 1);
+  return new Set([...cnt].filter(([, n]) => n > 1).map(([k]) => k));
 }
 
 /**
@@ -1090,9 +1124,9 @@ function declOf(d, specs, C) {
 //      `&x` 只在记录/列表/字典上成立（标量上当场报，那要真指针）。
 //   4. 整数那一族只有一格宽度：定宽类型（`int8_t` …）的位宽表在
 //      `src/core/lower/cfam.js` 的 `C_INT_BITS`（与 jancy 共用一张），**回卷还没接**。
-//   5. 构造函数按**实参个数**重载；个数一样的两份当场报（按类型挑还没接）。
+//   5. 构造函数与方法都按**实参个数**重载；个数一样的两份当场报（按类型挑还没接）。
 //      拷贝构造与赋值算子没有 —— 记录是引用语义，那两格在这条腿上本来就不是"拷贝"。
-//      **方法的重载也还没接**（同名方法后面的会盖掉前面的）。
+//      **虚方法 + 重载**当场报（分派表按老名字找那一份）。
 //   6. 虚函数只接**单继承**（虚函数 + 多继承当场报）；纯虚（`= 0`）与虚析构没接。
 //   7. 类模板只接"没有继承、没有虚函数、没有构造/析构"那一档（别的当场报）；
 //      模板的默认实参与特化没接。
