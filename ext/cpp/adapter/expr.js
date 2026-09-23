@@ -38,6 +38,16 @@ const BTYPES = new Map([
 ]);
 
 export const nameOf = (x) => (tag(x) === 'n' ? String(leaf(kids(x)[0])) : String(leaf(x)));
+
+/**
+ * **`this` 是哪一格**：方法体里就是那个形参；**lambda 里**（`[this]` 捕进来的）是一格
+ * 捕获 —— 那一层的作用域栈换空过，写成裸 `this` 会报"未声明的变量"。
+ */
+function thisNode(C) {
+  return C.capNames.has('this')
+    ? { kind: 'capture', name: 'this', type: C.capNames.get('this') }
+    : { kind: 'name', name: 'this' };
+}
 export const tyArg = (type) => ({ kind: 'type', type });
 /** 虚方法的**分派函数**叫什么（`Shape__v_area`）。 */
 export const vcallName = (root, m) => `${root}__v_${m}`;
@@ -195,7 +205,7 @@ export function exprOf(x, C) {
       const asCap = C.tyCtx().env.get(flat) === undefined && C.capNames.has(flat);
       if (!asCap && C.self !== null && C.tyCtx().env.get(flat) === undefined
         && (C.tyCtx().fields.get(C.self) ?? []).some((f) => f.name === n)) {
-        return { kind: 'field', obj: { kind: 'name', name: 'this' }, name: n };
+        return { kind: 'field', obj: thisNode(C), name: n };
       }
       const base = asCap
         ? { kind: 'capture', name: flat, type: C.capNames.get(flat) }
@@ -221,7 +231,8 @@ export function exprOf(x, C) {
       return base;
     }
     case 'paren': case 'expr': return exprOf(kids(x)[0], C);
-    case 'this': return { kind: 'name', name: 'this' };
+    /* `this` —— 在 lambda 里它是**捕获进来的那一格**（`[this]`），不是本地的名字。 */
+    case 'this': return thisNode(C);
     /**
      * `&x` —— **记录本来就是引用**（方言的 `(class …)`），所以取地址就是那格值自己。
      * 标量上的 `&` 当场报：那要真指针，这条腿上没有。

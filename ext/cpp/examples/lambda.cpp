@@ -9,6 +9,20 @@
 // （那是最容易静默地错的一处），以及**捕获闭包**（`compose` 借走另外两格 lambda）。
 #include <stdio.h>
 
+/* **`[this]`**：把接收者借进去 —— 记录本来就是引用语义，所以"按值捕一格记录"与 C++ 的
+   `[this]` 是同一件事（改字段改得动那个对象）。体里裸写的字段名照旧当 `this->`，
+   所以这一格上 `C.self` 不清空；而 `this` 自己在 lambda 里是**一格捕获**。 */
+struct Box {
+  int n;
+  int grow(int d) {
+    auto add = [this](int v) {
+      n = n + v;
+      return n;
+    };
+    return add(d) + add(d);
+  }
+};
+
 int main() {
   auto add = [](int a, int b) {
     return a + b;
@@ -47,5 +61,9 @@ int main() {
   acc(5);
   acc(7);
   printf("%d\n", sum);
+  Box bx;
+  bx.n = 1;
+  printf("%d\n", bx.grow(2));
+  printf("%d\n", bx.n);
   return 0;
 }

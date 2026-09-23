@@ -771,6 +771,16 @@ export function cppToIR(tree) {
       }
       if (tag(c) === 'by-value-all') { all = true; continue; }
       if (tag(c) === 'by-ref-all') { all = true; allRef = true; continue; }
+      /**
+       * **`[this]`**：把接收者借进去（记录本来就是引用语义，所以"按值捕一格记录"
+       * 与 C++ 的 `[this]` 是同一件事 —— 改字段改得动那个对象）。
+       * 体里裸写的字段名还要当 `this->`，所以 `C.self` 在这一格上**不清空**。
+       */
+      if (tag(c) === 'c-this') {
+        if (C.self === null) throw new Error('cpp->IR: `[this]` 只能在方法体里用');
+        wanted.push('this');
+        continue;
+      }
       throw new Error(`cpp->IR: lambda 的这一格捕获还没接：${tag(c)}`);
     }
     const pnames = new Set(params.map((p) => p.name));
@@ -805,7 +815,8 @@ export function cppToIR(tree) {
       caps: C.capNames, self: C.self, scoped: C.scoped, refs: C.refNames,
     };
     C.capNames = new Map(caps.map((c) => [c.name, c.type]));
-    C.self = null;
+    /* 捕了 `this` 才留着 `C.self`（体里裸写的字段名当 `this->`）；别的一律清空。 */
+    C.self = wanted.includes('this') ? C.self : null;
     C.scoped = [];
     /**
      * **盒子那张表在 lambda 里只留按引用捕的那几格**：按值捕的那几格在体里就是一格
@@ -2122,7 +2133,9 @@ function declOf(d, specs, C) {
 //      后者与出参走同一台机器：那格量装进一格盒子，闭包**按值捕盒子**（记录本来就是
 //      引用），体里读写落成 `(field (cap x) v)`。只接"这个函数体里声明过的局部量"
 //      （哪几格要装是降体之前扫树算的，与"真声明过"求交 —— 全局名字装了盒子会当场报）。
-//      `mutable`、`[this]`、`[*this]`、`[x = 表达式]`、泛型 lambda 还没接。
+//      **`[this]`** 也接了（记录是引用语义，"按值捕一格记录"就是它；体里裸写的字段名
+//      照旧当 `this->`，`this` 自己落成一格捕获）。`mutable`、`[*this]`、`[x = 表达式]`、
+//      泛型 lambda 还没接。
 //   9. **`static` 数据成员**落成一格模块级的量（`类名__成员名`，`staticmem.cpp`）：
 //      一个类一份，初值（类里那句或类外那句 `int C::x = …;`）摆在 `main` 体的最前面 ——
 //      方言的 `(global 名字 类型)` 按设计零初始化，不带初值那一格。
