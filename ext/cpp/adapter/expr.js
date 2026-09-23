@@ -374,9 +374,13 @@ function callOf(x, C) {
       args: [{ kind: 'name', name: 'this' }, ...args],
     };
   }
-  /* `Point(1, 2)` —— **函数式的构造**（与 `Point p(1,2)` 落同一格调用）。 */
-  if (C.records.has(name) && C.fns.has(`${C.ref(name)}__ctor`)) {
-    return { kind: 'call', fn: { kind: 'name', name: `${C.ref(name)}__ctor` }, args };
+  /* `Point(1, 2)` —— **函数式的构造**（与 `Point p(1,2)` 落同一格调用，按实参个数挑）。 */
+  if (C.records.has(name)) {
+    const pick = `${C.ref(name)}__ctor${args.length}`;
+    if (C.fns.has(pick)) return { kind: 'call', fn: { kind: 'name', name: pick }, args };
+    if ([...C.fns.keys()].some((k) => k.startsWith(`${C.ref(name)}__ctor`))) {
+      throw new Error(`cpp->IR: ${name} 没有收 ${args.length} 个实参的构造函数`);
+    }
   }
   /* **模板的调用**（推出类型形参 → 单态化 → 落成一格普通调用）。 */
   if (C.templates.has(name)) {

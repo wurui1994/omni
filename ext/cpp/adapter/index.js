@@ -20,8 +20,19 @@ import {
 /** 析构函数的名字。 */
 const dtorName = (ty) => `__destruct_${String(ty).replace(/[^A-Za-z0-9_]/g, '_')}`;
 
-/** 构造函数的名字（交的是一格记录，所以它是个**普通函数**，不带 `this`）。 */
-const ctorName = (rec) => `${rec}__ctor`;
+/**
+ * 构造函数的名字（交的是一格记录，所以它是个**普通函数**，不带 `this`）。
+ * **按实参个数编**（`Vec__ctor0` / `Vec__ctor2`）：重载就是"调用点数一数实参"，
+ * 于是它还是一格普通调用，一格新东西都不用加。
+ */
+const ctorName = (rec, argc) => `${rec}__ctor${argc}`;
+
+/** 一份构造函数收几个实参。 */
+function ctorArity(ctorTok) {
+  const f = kids(ctorTok).find((y) => tag(y) === 'fn');
+  const ps = f === undefined ? undefined : part(f, 'params');
+  return ps === undefined ? 0 : kids(ps).filter((y) => tag(y) === 'p').length;
+}
 
 /**
  * **`operator@` 的方法名**（与 `expr.js` 的 `OP_MAP` 是同一张表的两头）。
@@ -258,7 +269,7 @@ export function cppToIR(tree) {
       const rec = collectClass(t.clsTok, C, inst);
       if (rec.virtuals.size > 0) throw new Error('cpp->IR: 类模板 + 虚函数还没接');
       if (rec.bases.length > 0) throw new Error('cpp->IR: 类模板 + 继承还没接');
-      if (rec.ctor !== null) throw new Error('cpp->IR: 类模板 + 构造函数还没接');
+      if (rec.ctors.length > 0) throw new Error('cpp->IR: 类模板 + 构造函数还没接');
       rec.done = true;
       rec.flat = true;
       C.records.set(inst, rec);
@@ -396,8 +407,14 @@ export function cppToIR(tree) {
       });
     }
     /* **构造函数**交的是一格记录（`Point__ctor(a, b) -> Point`）。 */
-    if (rec.ctor !== null && rec.ctor !== undefined) {
-      const s = sigOf(rec.ctor, undefined, ctorName(C.ref(rec.name)));
+    for (const ct of (rec.ctors ?? [])) {
+      const argc = ctorArity(ct);
+      const nm2 = ctorName(C.ref(rec.name), argc);
+      if (C.fns.has(nm2)) {
+        throw new Error(`cpp->IR: ${rec.name} 有两份收 ${argc} 个实参的构造函数`
+          + '（按实参**类型**挑那一档还没接）');
+      }
+      const s = sigOf(ct, undefined, nm2);
       C.fns.set(s.name, { params: s.params, ret: selfType });
     }
   }
@@ -427,9 +444,9 @@ export function cppToIR(tree) {
       };
       decls.push(fnDecl(s, rec.dtor, C, C.ref(rec.name)));
     }
-    if (rec.ctor !== null && rec.ctor !== undefined) {
-      const s = sigOf(rec.ctor, undefined, ctorName(C.ref(rec.name)));
-      decls.push(ctorDecl({ ...s, ret: selfType }, rec, C));
+    for (const ct of (rec.ctors ?? [])) {
+      const s = sigOf(ct, undefined, ctorName(C.ref(rec.name), ctorArity(ct)));
+      decls.push(ctorDecl({ ...s, ret: selfType }, rec, ct, C));
     }
   }
   for (const f of topFns) decls.push(fnDecl(sigOf(f), f, C));
@@ -520,7 +537,7 @@ function freeNames(tok) {
 }
 
 /**
- * 一格 `(class …)` → `{ name, bases, fields, methods, dtor, ctor, virtuals }`。
+ * 一格 `(class …)` → `{ name, bases, fields, methods, dtor, ctors, virtuals }`。
  * `asName` 给了就用它当记录名（**类模板的实例**走这一格：同一棵树按不同的 `T` 读两遍，
  * 名字是 `Box__int` / `Box__real`）。字段与形参的类型走 `typeOfSpecs`，所以类型形参
  * 只要在 `C.aliases` 里绑着，这一份一个字都不用改。
@@ -540,7 +557,7 @@ function collectClass(cls, C, asName = null) {
   const methods = [];
   const virtuals = new Set();
   let dtor = null;
-  let ctor = null;
+  const ctors = [];
   for (const m of (members === undefined ? [] : kids(members))) {
     if (tag(m) === 'decl') {
       const ms = part(m, 'specs');
@@ -557,7 +574,7 @@ function collectClass(cls, C, asName = null) {
       if (head !== undefined && tag(head) === 'dtor') { dtor = m; continue; }
       /* **构造函数**：名字与类同名、而且**没有返回类型那一格**。 */
       if (head !== undefined && tag(head) === 'n' && nameOf(head) === nameOf(nm)
-        && part(m, 'specs') === undefined) { ctor = m; continue; }
+        && part(m, 'specs') === undefined) { ctors.push(m); continue; }
       const mn2 = (head !== undefined && tag(head) === 'opname')
         ? opMethodName(head) : nameOf(kids(f)[0]);
       /* `virtual` 是 specs 里的一格光秃秃的词。 */
@@ -570,7 +587,7 @@ function collectClass(cls, C, asName = null) {
     }
   }
   return {
-    name: asName ?? nameOf(nm), bases, fields, methods, dtor, ctor, virtuals,
+    name: asName ?? nameOf(nm), bases, fields, methods, dtor, ctors, virtuals,
   };
 }
 
@@ -725,7 +742,7 @@ function fnDecl(sig, fnTok, C, selfName = null) {
  *   1. 成员初始化表**按字段声明的次序**跑（不按表里写的次序 —— 那一格写反了答案会静默地错）；
  *   2. 体里裸写的名字先查形参、再查字段（`C.self` 那条既有规矩，见 expr.js 的 `case 'n'`）。
  */
-function ctorDecl(sig, rec, C) {
+function ctorDecl(sig, rec, ctorTok, C) {
   const recName = C.ref(rec.name);
   const selfType = C.recType(rec.name);
   C.push();
@@ -743,7 +760,7 @@ function ctorDecl(sig, rec, C) {
     init: vtZeroRecord(selfType, C),
   }];
   /* 成员初始化表 —— 按**字段声明的次序**，不按表里写的次序。 */
-  const initTok = kids(rec.ctor).find((y) => tag(y) === 'ctor-init');
+  const initTok = kids(ctorTok).find((y) => tag(y) === 'ctor-init');
   const inits = new Map();
   for (const mi of (initTok === undefined ? [] : kids(initTok))) {
     if (tag(mi) !== 'mi') continue;
@@ -762,7 +779,7 @@ function ctorDecl(sig, rec, C) {
       value: exprOf(e, C),
     });
   }
-  const body = part(rec.ctor, 'body');
+  const body = part(ctorTok, 'body');
   if (body !== undefined) for (const s of kids(body)) stmts.push(...stmtsOf(s, C));
   stmts.push({ kind: 'return', values: [{ kind: 'name', name: 'this' }] });
   const exits = dtorCalls(C);
@@ -1042,19 +1059,20 @@ function declOf(d, specs, C) {
       kind: 'let', name, type, init: vtZeroRecord(type, C),
     };
   }
-  if (type.kind === 'named' && C.fns.has(`${type.name}__ctor`)
-    && (ctorTok !== undefined || initTok === undefined)) {
+  /* **哪一份构造**：数一数实参（`Vec a;` 是 0 个、`Vec c(3, 4)` 是 2 个）。 */
+  if (type.kind === 'named') {
     const as = ctorTok === undefined ? undefined : part(ctorTok, 'args');
-    return {
-      kind: 'let',
-      name,
-      type,
-      init: {
-        kind: 'call',
-        fn: { kind: 'name', name: `${type.name}__ctor` },
-        args: as === undefined ? [] : kids(as).map((a) => exprOf(a, C)),
-      },
-    };
+    const args = as === undefined ? [] : kids(as).map((a) => exprOf(a, C));
+    const pick = `${type.name}__ctor${args.length}`;
+    if (C.fns.has(pick) && (ctorTok !== undefined || initTok === undefined)) {
+      return {
+        kind: 'let', name, type, init: { kind: 'call', fn: { kind: 'name', name: pick }, args },
+      };
+    }
+    /* 有构造函数、可个数对不上 —— 当场报（别静默地走成"零值 + 什么都不跑"）。 */
+    if (ctorTok !== undefined) {
+      throw new Error(`cpp->IR: ${type.cls} 没有收 ${args.length} 个实参的构造函数`);
+    }
   }
   return {
     kind: 'let', name, type,
@@ -1072,8 +1090,9 @@ function declOf(d, specs, C) {
 //      `&x` 只在记录/列表/字典上成立（标量上当场报，那要真指针）。
 //   4. 整数那一族只有一格宽度：定宽类型（`int8_t` …）的位宽表在
 //      `src/core/lower/cfam.js` 的 `C_INT_BITS`（与 jancy 共用一张），**回卷还没接**。
-//   5. 构造函数一个类只认**一份**（重载还没接）；拷贝构造与赋值算子也没有 ——
-//      记录是引用语义，所以那两格在这条腿上本来就不是"拷贝"。
+//   5. 构造函数按**实参个数**重载；个数一样的两份当场报（按类型挑还没接）。
+//      拷贝构造与赋值算子没有 —— 记录是引用语义，那两格在这条腿上本来就不是"拷贝"。
+//      **方法的重载也还没接**（同名方法后面的会盖掉前面的）。
 //   6. 虚函数只接**单继承**（虚函数 + 多继承当场报）；纯虚（`= 0`）与虚析构没接。
 //   7. 类模板只接"没有继承、没有虚函数、没有构造/析构"那一档（别的当场报）；
 //      模板的默认实参与特化没接。
