@@ -376,8 +376,10 @@ export function fmtRun(fmt, mode, emitValue, pad = '') {
  * 是同一个算法，抄第二份就会分叉 —— 那正是这份文件头上写的教训。所以两侧共用
  * `readSpec`，只有"一格转换发什么"分两个函数，挨着摆、同一张表往下读。
  *
- * IR 那一侧接的范围：`%d` / `%s` / `%v` / `%g` / `%f` / `%e` / `%x` / `%o` / `%b`
- * × 宽度 / `-` / `0` / `+` / 空格 / `#` / 精度。**`*`（宽度或精度从实参来）与 `%c` 还没接**。
+ * IR 那一侧接的范围：`%d` / `%s` / `%v` / `%c` / `%g` / `%f` / `%e` / `%x` / `%o` / `%b`
+ * × 宽度 / `-` / `0` / `+` / 空格 / `#` / 精度 / `*`（宽度或精度从实参来）——
+ * **这一侧现在与 sx 那一半一样齐**（长度修饰 `hh` / `l` 那一族由上头的 `modBits` 读、
+ * 这一侧还没用上，它改的是"按几位读"，等定宽整数那一格再接）。
  */
 
 /** C 的转义（格式串在树上是**原文**，`\n` 是两个字符）。 */
@@ -399,12 +401,16 @@ export function cUnescape(s) {
  * **`%E` 有意不在这儿转大写**：`#` 那一支要在 `e` 前面插小数点，先转了大写就找不着那个
  * `e` 了 —— 与 sx 那一半同一条（见 `specDress` 里那段话）。
  */
-export function specPieceIR(spec, v, tyCtx, who) {
+export function specPieceIR(spec, v, tyCtx, who, precE = null) {
   const t = typeOf(v, tyCtx);
   const int = (n) => ({ kind: 'int', value: n });
   const bi = (name, ...rest) => ({ kind: 'builtin', name, args: rest });
   const real = () => (t.kind === 'real' ? v : bi('toreal', v));
-  const digits = spec.prec === null ? 6 : spec.prec;
+  /* 精度是**一段表达式**（`.*` 那一格从实参来）。`.*` 收到负数时"等于没写"，
+     那一格判断落到运行期 —— C99 7.19.6.1，与 sx 那一半的 `nf` 同一条。 */
+  const digits = precE === null
+    ? int(spec.prec === null ? 6 : spec.prec)
+    : selIR(cmpIR('<', precE, int(0)), int(6), precE, { kind: 'int' });
   const alt = spec.flags?.alt === true;
   const at = `%${spec.conv}`;
   switch (spec.conv) {
@@ -414,11 +420,16 @@ export function specPieceIR(spec, v, tyCtx, who) {
     /* `%v` 是 go 的"按默认样子印"；`%s` 碰上串就是串本身（别套 `tostr`）。 */
     case 's': case 'v':
       return t.kind === 'string' ? v : bi('tostr', v);
+    /* `%c` 是**一个码位 → 一个字符**（`(chr E)`）；本来就是串就照原样。 */
+    case 'c':
+      if (t.kind === 'string') return v;
+      if (t.kind !== 'int') throw new Error(`${who}: \`%c\` 收到的是 ${t.kind}`);
+      return bi('chr', v);
     /* `#` 在 `%g` 上是"尾随零留着"（另一个算子 `sgenk`）。 */
-    case 'g': return bi(alt ? 'sgenk' : 'sgen', real(), int(digits));
-    case 'G': return bi('supper', bi(alt ? 'sgenk' : 'sgen', real(), int(digits)));
-    case 'f': case 'F': return bi('sfix', real(), int(digits));
-    case 'e': case 'E': return bi('ssci', real(), int(digits));
+    case 'g': return bi(alt ? 'sgenk' : 'sgen', real(), digits);
+    case 'G': return bi('supper', bi(alt ? 'sgenk' : 'sgen', real(), digits));
+    case 'f': case 'F': return bi('sfix', real(), digits);
+    case 'e': case 'E': return bi('ssci', real(), digits);
     case 'x': return bi('sbase', v, int(16));
     case 'X': return bi('supper', bi('sbase', v, int(16)));
     case 'o': return bi('sbase', v, int(8));
@@ -440,14 +451,15 @@ const selIR = (cond, then, els, type = STR) => ({
 });
 
 /**
- * **补到至少 `width` 个字符宽**（与上头 `padTo` 是同一条规矩）。`t` / `p` 必须**已经
+ * **补到至少 `wE` 个字符宽**（与上头 `padTo` 是同一条规矩）。`t` / `p` 必须**已经
  * 落成临时量** —— 它们被读好几次，直接抄几遍会把实参那格表达式多跑几趟。
+ * `wE` 是**一段表达式**（`%*d` 那一格的宽度从实参来）。
  *
  * **前缀单独一段**：`0` 补的零排在前缀**后面** —— `%05d` 印 -42 是 `-0042`。
  */
-function padToIR(p, t, width, left, zero) {
+function padToIR(p, t, wE, left, zero) {
   const len = p === null ? biIR('slen', t) : cmpIR('+', biIR('slen', p), biIR('slen', t));
-  const gap = (fill) => biIR('srep', strIR(fill), cmpIR('-', intIR(width), len));
+  const gap = (fill) => biIR('srep', strIR(fill), cmpIR('-', wE, len));
   const whole = p === null ? t : catIR(p, t);
   if (left) return catIR(whole, gap(' '));
   const sp = catIR(gap(' '), whole);
@@ -457,15 +469,15 @@ function padToIR(p, t, width, left, zero) {
 }
 
 /** `%.3d` 是"**至少**三位数字"，零补在符号**后面**（与上头 `precInt` 同一条）。 */
-function precIntIR(t, n) {
+function precIntIR(t, nE) {
   const d = selIR(cmpIR('==', t, strIR('0')),
-    selIR(cmpIR('==', intIR(n), intIR(0)), strIR(''), strIR('0')), t);
-  return catIR(biIR('srep', strIR('0'), cmpIR('-', intIR(n), biIR('slen', d))), d);
+    selIR(cmpIR('==', nE, intIR(0)), strIR(''), strIR('0')), t);
+  return catIR(biIR('srep', strIR('0'), cmpIR('-', nE, biIR('slen', d))), d);
 }
 
-/** `%.3s` 是"**最多**三个字符"（与上头 `precStr` 同一条）。 */
-const precStrIR = (t, n) => selIR(cmpIR('>', biIR('slen', t), intIR(n)),
-  biIR('ssub', t, intIR(0), intIR(n)), t);
+/** `%.3s` 是"**最多**三个字符"；精度是负数时等于没写（与上头 `precStr` 同一条）。 */
+const precStrIR = (t, nE) => selIR(cmpIR('<', nE, intIR(0)), t,
+  selIR(cmpIR('>', biIR('slen', t), nE), biIR('ssub', t, intIR(0), nE), t));
 
 /**
  * **一格转换说明的排版那一层**（与上头 `specDress` 是同一张表的两头、同一个次序）：
@@ -474,7 +486,7 @@ const precStrIR = (t, n) => selIR(cmpIR('>', biIR('slen', t), intIR(n)),
  * 要读好几次的东西一律先落成临时量（`block-expr` + `let`）。三处 C 的**未定义行为**
  * 当场报（`%c` 上的精度、非有符号转换上的 `+`/空格、别处的 `#`）—— 没有可对的答案。
  */
-function dressIR(spec, body, fresh, who) {
+function dressIR(spec, body, fresh, who, wE = null, pE = null) {
   const f = spec.flags ?? {};
   const conv = spec.conv;
   const at = `%${conv}`;
@@ -498,11 +510,17 @@ function dressIR(spec, body, fresh, who) {
   if (f.alt && !hexConv && !'ofeEgG'.includes(conv)) {
     throw new Error(`${who}: \`${at}\` 上的 \`#\` 标志（C 里它是未定义行为）`);
   }
-  /* 整数上一写精度，`0` 标志就作废。 */
-  const zeroF = f.zero === true && f.left !== true && conv !== 's' && conv !== 'v' && conv !== 'c'
-    && !(intSpec && spec.prec !== null);
+  /**
+   * 整数上一写精度，`0` 标志就作废；`.*` 那一格的实参是**负数时它又活着**
+   * （负精度等于没写）—— 所以那一格是一段运行期的 bool，不是 true / false。
+   */
+  let zeroF = f.zero === true && f.left !== true && conv !== 's' && conv !== 'v' && conv !== 'c';
+  if (intSpec && spec.prec !== null) {
+    zeroF = zeroF && spec.prec === '*' ? cmpIR('<', pE, intIR(0)) : false;
+  }
   /* **前缀**：符号与 `#` 的 `0x`，排在补零**外面**。 */
-  if (signed && (f.plus === true || f.space === true || zeroF || (intSpec && spec.prec !== null))) {
+  if (signed && (f.plus === true || f.space === true || zeroF !== false
+    || (intSpec && spec.prec !== null))) {
     const t = spill(piece);
     const neg = cmpIR('==', biIR('ssub', t, intIR(0), intIR(1)), strIR('-'));
     const other = f.plus === true ? '+' : (f.space === true ? ' ' : '');
@@ -528,7 +546,8 @@ function dressIR(spec, body, fresh, who) {
   if (conv === 'E') piece = biIR('supper', piece);
   if (spec.prec !== null && (intSpec || conv === 's' || conv === 'v')) {
     const t = spill(piece);
-    piece = intSpec ? precIntIR(t, spec.prec) : precStrIR(t, spec.prec);
+    const nE = spec.prec === '*' ? pE : intIR(spec.prec);
+    piece = intSpec ? precIntIR(t, nE) : precStrIR(t, nE);
   } else if (spec.prec !== null && !'fFeEgG'.includes(conv)) {
     throw new Error(`${who}: \`${at}\` 上的精度还没接`);
   }
@@ -546,7 +565,16 @@ function dressIR(spec, body, fresh, who) {
   if (spec.width !== null) {
     const t = spill(piece);
     const p = pfx === null ? null : spill(pfx);
-    piece = padToIR(p, t, spec.width, f.left === true, zeroF);
+    if (spec.width !== '*') {
+      piece = padToIR(p, t, intIR(spec.width), f.left === true, zeroF);
+    } else {
+      /* `%*d` 的宽度是负数时"等于写了 `-`、宽度取绝对值"（C99 7.19.6.1）。 */
+      const aw = selIR(cmpIR('<', wE, intIR(0)), { kind: 'unop', op: '-', operand: wE }, wE,
+        { kind: 'int' });
+      piece = selIR(cmpIR('<', wE, intIR(0)),
+        padToIR(p, t, aw, true, false),
+        padToIR(p, t, aw, f.left === true, zeroF));
+    }
   } else if (pfx !== null) {
     piece = catIR(pfx, piece);
   }
@@ -582,8 +610,19 @@ function fmtWalk(fmt, args, tyCtx, who, fresh, split) {
     if (spec === null) { lit += c; continue; }
     const f = spec.flags ?? {};
     const at = fmt.slice(i, spec.end + 1);
-    if (spec.width === '*' || spec.prec === '*') {
-      throw new Error(`${who}: \`${at}\` 的宽度/精度从实参来（\`*\`）还没接`);
+    /**
+     * **`*` 各自也吃掉一个实参**，而 C 的次序是"宽度、精度、值"（C99 7.19.6.1）——
+     * 数错这一格会把后头所有实参错位，而且不报错。
+     */
+    const wE = spec.width === '*' ? args[ai] : null;
+    if (spec.width === '*') ai += 1;
+    const pE = spec.prec === '*' ? args[ai] : null;
+    if (spec.prec === '*') ai += 1;
+    if (spec.width === '*' && wE === undefined) {
+      throw new Error(`${who}: \`${at}\` 的宽度要一格实参，可是没给`);
+    }
+    if (spec.prec === '*' && pE === undefined) {
+      throw new Error(`${who}: \`${at}\` 的精度要一格实参，可是没给`);
     }
     const v = args[ai];
     if (v === undefined) {
@@ -593,8 +632,10 @@ function fmtWalk(fmt, args, tyCtx, who, fresh, split) {
     /* 排版那一层要落临时量（宽度 / 精度 / `#` 都会把那一段读好几次）。 */
     const dressed = spec.width !== null || spec.prec !== null
       || f.left || f.zero || f.plus || f.space || f.alt;
-    let piece = specPieceIR(spec, v, tyCtx, who);
-    if (dressed || spec.conv === 'E') piece = dressIR(spec, piece, need(`\`${at}\``), who);
+    let piece = specPieceIR(spec, v, tyCtx, who, spec.prec === '*' ? pE : null);
+    if (dressed || spec.conv === 'E') {
+      piece = dressIR(spec, piece, need(`\`${at}\``), who, wE, pE);
+    }
     parts.push(piece);
     ai += 1;
     i = spec.end;

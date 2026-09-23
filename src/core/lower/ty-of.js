@@ -114,6 +114,8 @@ function builtinType(e, ctx) {
        装进去的是串，方言当场报"未声明的变量"那一串连锁错）。 */
     case 'tostr': case 'ssub': case 'srep': case 'supper':
     case 'sfix': case 'ssci': case 'sgen': case 'sgenk': case 'sbase': return STR;
+    /* `(chr 码位)` 交的是**一个字符的串**（`printf("%c")` 走它）。 */
+    case 'chr': return STR;
     case 'anew': return e.args[0].type ?? arrOf(INT);
     case 'dnew': return e.args[0].type ?? dictOf(INT);
     case 'cnew': case 'new': return e.args[0].type ?? INT;
