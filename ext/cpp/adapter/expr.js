@@ -9,6 +9,7 @@
 //     `first` / `second`，那是 C++ 自己的名字）。
 
 import { tag, kids, leaf, part, unquote } from '../../../src/core/lower/cst.js';
+import { cUnescape, fmtToIR } from '../../../src/core/lower/fmt.js';
 import {
   INT, REAL, STR, BOOL, arrOf, dictOf, named, typeOf,
 } from '../../../src/core/lower/ty-of.js';
@@ -391,11 +392,14 @@ function callOf(x, C) {
 }
 
 /**
- * `printf(格式, 实参…)` / `puts(串)` → 一串 `print`。
+ * `printf(格式, 实参…)` / `puts(串)` → 一格 `print`。
  *
- * **只接"一格转换 + 末尾换行"那一档**（`"%d\n"` / `"%g\n"` / `"%s\n"`）与纯文本 ——
- * 与从前那条路同一个范围。别的格式（宽度、几格转换挤一行）当场报，不糊弄：
- * 那要把 `fmt.js` 那套格式化接进来，是另一件事。
+ * 格式那一层**走公共层那一份**（`src/core/lower/fmt.js` 的 `fmtToIR` —— 与 jancy 的
+ * `printf` 共用同一张转换表、同一个 `readSpec`）。这一份只管三样：解转义、
+ * **bool 按 `%d` 印成 1 / 0**（C++ 的规矩，不是 true / false）、以及"末尾那个换行归 `print`"。
+ *
+ * 方言的 `print` 自带换行，所以格式串必须**正好以一个换行收尾**；不是那样的当场报
+ * （要不带换行地写一段是 `write`，公共 IR 这一层还没有那一格）。
  */
 export function printArgs(name, rawArgs, C) {
   if (name === 'puts') {
@@ -405,28 +409,22 @@ export function printArgs(name, rawArgs, C) {
   if (fmtTok === undefined || tag(fmtTok) !== 'str') {
     throw new Error('cpp->IR: printf 的格式串不是字面量 —— 那要运行期的格式化（还没接）');
   }
-  const fmt = String(unquote(leaf(kids(fmtTok)[0])));
-  const specs = fmt.match(/%[-+ #0]*[0-9]*(?:\.[0-9]+)?[a-zA-Z]/g) ?? [];
-  if (specs.length === 0) {
-    const text = fmt.replace(/\\n$/, '');
-    return [{ kind: 'print', values: [{ kind: 'string', value: text }] }];
+  const raw = cUnescape(unquote(leaf(kids(fmtTok)[0])));
+  if (!raw.endsWith('\n')) {
+    throw new Error(`cpp->IR: 这个格式串不以换行收尾：${JSON.stringify(raw)}`
+      + '（方言的 print 自带换行，"不换行地写一段"这一层还没有）');
   }
-  if (specs.length !== 1 || !/\\n$/.test(fmt) || fmt.replace(/%[a-zA-Z]|\\n/g, '') !== '') {
-    throw new Error(`cpp->IR: 这个格式串还没接：${fmt}（这一批只接"一格转换 + 换行"）`);
-  }
-  const v = exprOf(rawArgs[1], C);
-  /* `printf("%d\n", x == y)` —— C++ 里 bool 按 `%d` 印的是 1 / 0，不是 true / false。
-     方言的 `toint` 只吃 real，所以这一格用三目摊开。 */
-  if (/^%[-+ #0]*[0-9]*(?:\.[0-9]+)?[diu]$/.test(specs[0])
-    && typeOf(v, C.tyCtx()).kind === 'bool') {
-    return [{
-      kind: 'print',
-      values: [{
-        kind: 'if-expr', type: INT, cond: v, then: { kind: 'int', value: 1 }, else_: { kind: 'int', value: 0 },
-      }],
-    }];
-  }
-  return [{ kind: 'print', values: [v] }];
+  const fmt = raw.slice(0, -1);
+  /* `printf("%d\n", x == y)`：C++ 里 bool 按 `%d` 印的是 1 / 0。方言的 `toint` 只吃 real，
+     所以这一格在交给公共层**之前**用三目摊成 int。 */
+  const args = rawArgs.slice(1).map((a) => {
+    const v = exprOf(a, C);
+    if (typeOf(v, C.tyCtx()).kind !== 'bool') return v;
+    return {
+      kind: 'if-expr', type: INT, cond: v, then: { kind: 'int', value: 1 }, else_: { kind: 'int', value: 0 },
+    };
+  });
+  return [{ kind: 'print', values: [fmtToIR(fmt, args, C.tyCtx(), 'cpp->IR')] }];
 }
 
 /** 条件位置上的那一格（C++ 里"非零为真"）。 */

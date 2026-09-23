@@ -15,6 +15,7 @@ import {
   INT, REAL, STR, BOOL, arrOf, dictOf, named, typeOf,
 } from '../../../src/core/lower/ty-of.js';
 import { foldIntConst, intLit } from '../../../src/core/lower/cfam.js';
+import { cUnescape, fmtToIR } from '../../../src/core/lower/fmt.js';
 import { mathConst, mathCall, hostCall } from './stdlib.js';
 
 const OPS = new Map([
@@ -564,8 +565,42 @@ function sliceOf(x, C) {
  *   `Point.total(p)`                               -> **方法表达式**（接收者写在实参里）
  *   `f(v)`（f 装着函数）/ `func(){…}()`             -> `(callfn …)`
  */
-function callOf(x, C) {
-  const fnTok = kids(x)[0];
+/**
+ * `fmt.Sprintf(格式, 实参…)` → 一格串。格式那一层走**公共层**那一份
+ * （`src/core/lower/fmt.js` 的 `fmtToIR`）—— 与 jancy 的 `printf` 和 cpp 的 `printf`
+ * 共用同一个 `readSpec` 与同一张转换表。
+ *
+ * 格式串必须是**字面量**：格式那一层是编译期的事，串是运行期算出来的就没法在这一层摊开。
+ */
+export function sprintfOf(rawArgs, C) {
+  const fmtTok = rawArgs[0];
+  if (fmtTok === undefined || tag(fmtTok) !== 'str') {
+    throw new Error('go->IR: `Sprintf` 的格式串不是字面量 —— 那要运行期的格式化（还没接）');
+  }
+  const fmt = cUnescape(unquote(leaf(kids(fmtTok)[0])));
+  const args = rawArgs.slice(1).map((a) => exprOf(a, C));
+  return fmtToIR(fmt, args, C.tyCtx(), 'go->IR');
+}
+
+/**
+ * `fmt.Printf` = `Sprintf` 再印一趟。方言的 `print` **自带换行**，所以格式串必须
+ * 正好以一个换行收尾 —— 不是那样的当场报（"不换行地写一段"公共 IR 这一层还没有）。
+ */
+export function printfOf(rawArgs, C) {
+  const fmtTok = rawArgs[0];
+  if (fmtTok === undefined || tag(fmtTok) !== 'str') {
+    throw new Error('go->IR: `Printf` 的格式串不是字面量 —— 那要运行期的格式化（还没接）');
+  }
+  const raw = cUnescape(unquote(leaf(kids(fmtTok)[0])));
+  if (!raw.endsWith('\n')) {
+    throw new Error(`go->IR: 这个格式串不以换行收尾：${JSON.stringify(raw)}`
+      + '（方言的 print 自带换行，"不换行地写一段"这一层还没有）');
+  }
+  const args = rawArgs.slice(1).map((a) => exprOf(a, C));
+  return fmtToIR(raw.slice(0, -1), args, C.tyCtx(), 'go->IR');
+}
+
+function callOf(x, C) {  const fnTok = kids(x)[0];
   const argsTok = part(x, 'args');
   const rawArgs = argsTok === undefined ? [] : kids(argsTok);
 
@@ -584,6 +619,14 @@ function callOf(x, C) {
       if (nameOf(objTok) === 'math') {
         const one = mathCall(m, rawArgs, C);
         if (one !== null) return one;
+      }
+      /**
+       * **`fmt.Sprintf` 走公共层那份格式串**（`src/core/lower/fmt.js` 的 `fmtToIR` ——
+       * 与 jancy 的 `printf`、cpp 的 `printf` 同一张转换表）。它不要桩：格式那一层是
+       * **编译期**的事，落到的全是现成的串内建。
+       */
+      if (nameOf(objTok) === 'fmt' && m === 'Sprintf') {
+        return sprintfOf(rawArgs, C);
       }
       /**
        * **`--pkgs` 把桩真的编进来之后，包限定的调用就是一格普通调用**：名字是**平的**

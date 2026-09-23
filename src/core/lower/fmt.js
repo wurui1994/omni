@@ -15,6 +15,7 @@
 //     格式化字面量 `$"…"` 走这条 —— 它产出的是一格值（literals.rst:62），不是一次输出。
 
 import { intConvCode } from './int.js';
+import { typeOf } from './ty-of.js';
 
 /** 段里那几块（字符串常量与 `(tostr …)`）拼起来：**左结合**的 `(bin "+" …)`。 */
 export function joinPieces(pieces) {
@@ -364,4 +365,105 @@ export function fmtRun(fmt, mode, emitValue, pad = '') {
   }
   flush(false);
   return { lines };
+}
+
+/* ─── 标准 IR 那一侧（ADR-0044 的 adapter 走这条）──────────────────────────────
+ *
+ * 上头那一整套发的是 **`.sx` 的文字**（jancy 那条路直接写 sx）。ADR-0044 的 adapter
+ * 交的是**标准 IR 的节点**，所以这儿要一份按节点搭的。
+ *
+ * **为什么不另开一份文件**：`readSpec` 那张表（标志 / 宽度 / 精度 / 长度修饰怎么读）
+ * 是同一个算法，抄第二份就会分叉 —— 那正是这份文件头上写的教训。所以两侧共用
+ * `readSpec`，只有"一格转换发什么"分两个函数，挨着摆、同一张表往下读。
+ *
+ * IR 那一侧现在只接**没有标志、没有宽度**的那一档（`%d` / `%s` / `%g` / `%.2f` / `%x` …）。
+ * 要用到 `%-5d` 那一族时，把 `padTo` 那几条按节点再写一遍**加在这儿**，别搬走。
+ */
+
+/** C 的转义（格式串在树上是**原文**，`\n` 是两个字符）。 */
+export function cUnescape(s) {
+  return String(s).replace(/\\(.)/g, (_, c) => {
+    if (c === 'n') return '\n';
+    if (c === 't') return '\t';
+    if (c === 'r') return '\r';
+    if (c === '0') return '\0';
+    return c;                                  // `\\` / `\"` / `\'` 都是它自己
+  });
+}
+
+/**
+ * **一格转换 → 一格标准 IR 的串表达式**（与上头 `specPiece` 是同一张表的两头）。
+ * 每一格都拿本机 `printf` 对过：`%d`→`tostr`、`%g`→`tostr`（方言印 real 的默认样子）、
+ * `%.2f`→`sfix`、`%.3e`→`ssci`、`%x`→`sbase 16`。认不出的当场报。
+ */
+export function specPieceIR(spec, v, tyCtx, who) {
+  const t = typeOf(v, tyCtx);
+  const int = (n) => ({ kind: 'int', value: n });
+  const bi = (name, ...rest) => ({ kind: 'builtin', name, args: rest });
+  const real = () => (t.kind === 'real' ? v : bi('toreal', v));
+  const digits = spec.prec === null ? 6 : spec.prec;
+  const at = `%${spec.conv}`;
+  switch (spec.conv) {
+    case 'd': case 'i': case 'u':
+      if (t.kind === 'string') throw new Error(`${who}: \`${at}\` 收到的是一格串`);
+      return bi('tostr', t.kind === 'real' ? bi('toint', v) : v);
+    /* `%v` 是 go 的"按默认样子印"；`%s` 碰上串就是串本身（别套 `tostr`）。 */
+    case 's': case 'v':
+      return t.kind === 'string' ? v : bi('tostr', v);
+    case 'g': return bi('tostr', v);
+    case 'G': return bi('supper', bi('tostr', v));
+    case 'f': case 'F': return bi('sfix', real(), int(digits));
+    case 'e': return bi('ssci', real(), int(digits));
+    case 'E': return bi('supper', bi('ssci', real(), int(digits)));
+    case 'x': return bi('sbase', v, int(16));
+    case 'X': return bi('supper', bi('sbase', v, int(16)));
+    case 'o': return bi('sbase', v, int(8));
+    case 'b': return bi('sbase', v, int(2));
+    default:
+      throw new Error(`${who}: \`${at}\` 这一格转换还没接`);
+  }
+}
+
+/**
+ * `fmt` 那句话 + 那几格实参 → **一格标准 IR 的串表达式**（`(bin "+" …)` 串起来）。
+ * `fmt` 要**已经解过转义**（调用方先过 `cUnescape`）。`who` 是报错时的前缀。
+ *
+ * 实参给多给少都**当场报**：C 那边多给的会悄悄丢掉、少给的读到垃圾，两样都是
+ * "答案静默地错"，所以这儿不跟着糊弄。
+ */
+export function fmtToIR(fmt, args, tyCtx, who) {
+  const parts = [];
+  let lit = '';
+  let ai = 0;
+  const flushLit = () => {
+    if (lit !== '') { parts.push({ kind: 'string', value: lit }); lit = ''; }
+  };
+  for (let i = 0; i < fmt.length; i += 1) {
+    const c = fmt[i];
+    if (c !== '%') { lit += c; continue; }
+    if (fmt[i + 1] === '%') { lit += '%'; i += 1; continue; }
+    const spec = readSpec(fmt, i);
+    if (spec === null) { lit += c; continue; }
+    const f = spec.flags ?? {};
+    if (spec.width !== null || f.left || f.zero || f.plus || f.space || f.alt) {
+      throw new Error(`${who}: \`${fmt.slice(i, spec.end + 1)}\` 里的宽度/标志还没接`
+        + '（"补到几位"那一层在 fmt.js 的 padTo，按节点那一份还没写）');
+    }
+    if (spec.prec === '*') throw new Error(`${who}: \`.*\`（精度从实参来）还没接`);
+    const v = args[ai];
+    if (v === undefined) {
+      throw new Error(`${who}: 格式串要第 ${ai + 1} 格实参，可是没给（${JSON.stringify(fmt)}）`);
+    }
+    flushLit();
+    parts.push(specPieceIR(spec, v, tyCtx, who));
+    ai += 1;
+    i = spec.end;
+  }
+  flushLit();
+  if (ai < args.length) {
+    throw new Error(`${who}: 格式串只用了 ${ai} 格实参，给了 ${args.length} 格`
+      + `（${JSON.stringify(fmt)}）`);
+  }
+  if (parts.length === 0) return { kind: 'string', value: '' };
+  return parts.reduce((a, b) => ({ kind: 'binop', op: '+', left: a, right: b }));
 }

@@ -394,6 +394,14 @@ export const CTMPL = ['7', '14', '1.5', '3', '4', '7', '18'];
  */
 export const LAMBDA = ['5', '15', '17', '15', '12', '16'];
 
+/**
+ * **cpp 的格式串**（`ext/cpp/examples/fmt.cpp`）。格式那一层走公共层 `fmt.js` 的 `fmtToIR`
+ * （与 jancy 的 `printf` 同一张转换表）。七行分别钉：两格转换、浮点三种写法、`%s` 与 `%%`、
+ * 十六进制/八进制、纯文本、转换挨着排、转换后面还有文字。期望输出由 `c++` 给。
+ */
+export const FMT = ['a=1 b=22', '3.14 | 3.142e+00 | 3.14159', 'pct=100%',
+  'hex ff oct 10', 'no args', '123', '5 then text'];
+
 const C = (name, grammar, file, expect) => ({ name, grammar, file, expect });
 
 /**
@@ -608,6 +616,9 @@ export const CASES = [
   // 闭包那一格（`{ kind: 'closure' }` / `make-closure` / `capture`），go 的匿名函数走的就是它。
   // 这一门只做三样：读捕获表、**返回类型从体里第一句 return 推**、局部量里装着函数就按值调。
   ...fam('lambda', LAMBDA, ['cpp']),
+  // 第六十一个家族：**格式串**（cpp 独一份）。它不是一格新节点 —— 是把公共层那份
+  // C printf 引擎（`src/core/lower/fmt.js`，本来只有 jancy 那条路在用）接到 adapter 这条路上。
+  ...fam('fmt', FMT, ['cpp']),
 ];
 
 

@@ -26,7 +26,7 @@ import {
   BASICS, INTMATH, LOOPEXIT, DICT, UNARY, RECORD, INDEX, SLICE, CONV, VALUES, MUT,
   DEFER, BLOCKRET, METHOD, ASSERTOK, STRCAT, NUMSTR, NAMEDARG, CASEFOR, CASERANGE,
   CTIF, MEMBER, BLOCKSCOPE, BITS, CHARLIT, CTCONST, DECLS, ENUMVAL, FNVAL, FORIN,
-  HOIST, LITNONE, MATCH, METHOD2, OPTRES, POINTER, POSINIT, PUSH, INHERIT, OPOVER, TMPL, CTOR, VIRT, CTMPL, LAMBDA,
+  HOIST, LITNONE, MATCH, METHOD2, OPTRES, POINTER, POSINIT, PUSH, INHERIT, OPOVER, TMPL, CTOR, VIRT, CTMPL, LAMBDA, FMT, FORMAT, POSTEST,
 } from '../lib/cases.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -52,7 +52,7 @@ const FAMILIES = {
   fnval: FNVAL, forin: FORIN, hoist: HOIST, litnone: LITNONE, match: MATCH,
   method2: METHOD2, optres: OPTRES, pointer: POINTER, posinit: POSINIT, push: PUSH,
   inherit: INHERIT, opover: OPOVER, tmpl: TMPL, ctor: CTOR, virt: VIRT,
-  ctmpl: CTMPL, lambda: LAMBDA,
+  ctmpl: CTMPL, lambda: LAMBDA, fmt: FMT, format: FORMAT, postest: POSTEST,
 };
 const MIGRATED = {
   awk: ['basics', 'intmath', 'loopexit', 'dict', 'unary'],
@@ -74,7 +74,7 @@ const MIGRATED = {
      出口那一半交给公共层的 `{ kind: 'scope' }`）；`printf` 只接"一格转换 + 换行"
      （见 adapter/expr.js 的 printArgs）。`inherit` 与 `opover` 两族的期望输出是
      本机 `c++ -std=c++17` 给的，不是我们自己编的。 */
-  cpp: ['basics', 'conv', 'ctmpl', 'ctor', 'defer', 'dict', 'index', 'inherit', 'intmath',
+  cpp: ['basics', 'conv', 'ctmpl', 'ctor', 'defer', 'dict', 'fmt', 'index', 'inherit', 'intmath',
     'lambda', 'loopexit', 'opover', 'record', 'tmpl', 'values', 'virt'],
   /* nim：十九个家族（借来那几门里最多的一格）。这门语言自己带进来的有五样：
      `casefor`（`case` 里能有 `elif` + `for … in` 区间/序列）、`caserange`（`of 0 .. 59:`）、
@@ -96,6 +96,11 @@ const MIGRATED = {
     'defer', 'dict', 'enumval', 'fnval', 'forin', 'hoist', 'index', 'intmath', 'litnone',
     'loopexit', 'match', 'member', 'method', 'method2', 'optres', 'pointer', 'posinit',
     'push', 'record', 'slice', 'strcat', 'values'],
+  /* go：**判据的主力在 `tests/go/run.js`**（46 份与 `go run` 逐字节，原生腿），所以这张表里
+     只留 `format` 一格 —— 它是"家族表里有期望常量、却没人跑"那个洞的补丁：`fmt.Sprintf` /
+     `Printf` 在迁过来之后曾经整格当场报，而 146 份例子那把尺子只看"退出码变没变"，
+     一直记着它是红的，没人发现它本该是绿的。 */
+  go: ['format', 'postest'],   // 两格都是 `Sprintf` 一修就转绿的
 };
 
 /** 敲一条命令，回 `{ code, out, err }`（out 按行切好，末尾空行去掉）。 */
