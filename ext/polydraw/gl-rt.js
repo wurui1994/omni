@@ -155,6 +155,13 @@ export const POLYDRAW_GL = new Map([
   ['gluniform3iv/3', 'gl_univ3i'],
   ['gluniform4iv/3', 'gl_univ4i'],
   ['glgettex/5', 'gl_gettex5'],
+  /* **抓屏那一族**（§22）：`glcapture([边长])` / `glcaptureend([槽])`。
+     没给槽那一档照原版是"那个实参根本没传"（`GLCAPTUREEND()` 在 `myext[]` 里是零参），
+     我们按 0 号槽 —— `disco blur shader +blur.pss` 就是这么用的（它只有一张抓屏纹理）。 */
+  ['glcapture/0', 'gl_capbegin0'],
+  ['glcapture/1', 'gl_capbegin'],
+  ['glcaptureend/0', 'gl_capend0'],
+  ['glcaptureend/1', 'gl_capend'],
   ['glgetattribloc/1', 'gl_attrloc'],
   ['glvertexattrib1f/2', 'gl_attr1'],
   ['glvertexattrib2f/3', 'gl_attr2'],
@@ -804,6 +811,25 @@ function glMatrixDecls() {
         nm('aspect'), nm('zn'), nm('zf')])),
       ret(num(0)),
     ]),
+    /**
+     * **抓屏那一族**（`glcapture([边长])` / `glcaptureend([槽])`，§22）。
+     *
+     * 这一侧只有两件事：**断批**（抓屏前后是两拨不同的东西，攒在一起就错了）与
+     * 把那一句转给设备。矩阵一格都不动 —— 口径与那一格为什么这么定，见
+     * `omni_ev_gl_capbegin` 的头注（两份参考在这一格不是一回事，跟的是 c_impl）。
+     */
+    fn('gl_capbegin', ['siz'], [
+      ex(call('gl_need', [])),
+      ex(call('gl_flush', [])),
+      ret(dev('glcapture', [nm('siz')])),
+    ]),
+    fn('gl_capbegin0', [], [ex(call('gl_capbegin', [num(0)])), ret(num(0))]),
+    fn('gl_capend', ['t'], [
+      ex(call('gl_need', [])),
+      ex(call('gl_flush', [])),
+      ret(dev('glcaptureend', [nm('t')])),
+    ]),
+    fn('gl_capend0', [], [ex(call('gl_capend', [num(0)])), ret(num(0))]),
   ];
 }
 

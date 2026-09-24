@@ -1314,4 +1314,41 @@ disco ball 39.7s -> **1.17s**，两份从"跑不起来"变成有 RMSE 的数。
 `napi_set_element`（320×320 = 102400 次）。一帧只交一次，所以现在不是瓶颈；
 真要 60fps 得让那一格走整块的路（子集里加 TypedArray —— 按"撞上就扩"那条纪律做，不绕）。
 
+## 22. 第十二刀：**抓屏那一族**（`glcapture()` / `glcaptureend(槽)`，6 份脚本）
+
+`tigrou/` 那几份后处理（blur/bloom）都是同一套：先把场景画一遍抓成纹理，再拿一个满屏
+四边形配一段片元着色器把它糊开。语料里 6 份用它（tree / gears / clock / funky /
+disco blur / ken 的 texture），从前 `glcapture` 是"收下不管"，于是那格 `tex0` 里
+什么都没有 —— 图能出，但后处理采的是空的。
+
+### 22.1 两份参考在这一格不是一回事 —— 跟的是 c_impl
+
+* `polydraw.c:1195` 的 `qglCapture`：视口换成 `captexsiz²`（512 往下取到 2 的幂 ⇒
+  320×240 上是 128）、PROJECTION 换成定死的 `gluPerspective(45,1,0.1,1000)`、
+  MODELVIEW 换成 `glScalef(高/宽,1,1)`；`qglEndCapture` 拷 128×128 进纹理后**清屏**。
+* `c_impl/src/render/gl_renderer.c:1652` 起：**整帧**。视口不动、矩阵不动，
+  `glcapture()` 只把画布清成黑，`glcaptureend(槽)` 那一刻把整帧读回纹理。
+
+按"以 polydraw_src 为准"本该照前者，但**这一格它定不下来**：`glcapture()` 在
+`myext[]` 里是**零参**的（`"GLCAPTURE()"`），而 `qglCapture(double dcaptexsiz)` 读的是
+一格根本没传的实参 —— `captexsiz` 拿到的是栈上的垃圾，视口边长在原版里就是不确定的。
+语料自己的注释说的也是整帧那一种（`examples/opengl/25_offscreen_capture.pss`：
+"glcapture() grabs the current framebuffer into a texture id"）。
+两种都做过、量过：按 polydraw_src 那一种做，这一族与参考的差**一律变大**
+（tree 38.6→64.4、gears 40→82、clock 16.7→40.6、texture 54→全黑）。所以跟 c_impl。
+
+### 22.2 落点：设备两格 + 语言两句
+
+设备（`omni_ev_gl_capbegin` / `_capend`）：清屏、`glCopyTexImage2D(0,0,宽,高)`、
+按 `KGL_BGRA32`（LINEAR + REPEAT，后处理常按 >1 的坐标采样）设参数。
+语言（`gl_capbegin` / `gl_capend`）：**断批**再把那一句转过去 —— 抓屏前后是两拨东西，
+攒在一条批里就错了。矩阵一格都不动。
+
+### 22.3 一个判据陷阱：`.ours.rgba` 前头有 14 字节文本头
+
+判据留的那份原始像素是 `#rgba 宽 高\n` + RGBA，**看图/取像素前要跳过那一行**
+（判据自己是 `b.indexOf(10)+1`）。忘了跳的话每个像素错位两字节，黑底变成纯绿、
+黄色变成青色 —— 会把人引到"通道顺序错了""着色器被 miscompile 了"那条岔路上去（踩过，
+为此还去试了改标识符名、改行尾）。要看图就 `tail -c $((宽*高*4))`。
+
 

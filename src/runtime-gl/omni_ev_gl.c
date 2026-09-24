@@ -57,6 +57,10 @@ static GLuint g_fbo, g_color, g_depth, g_vao;
 static GLuint g_vbo;
 static GLuint g_prog;            /* 内建那对着色器（位置已是裁剪空间） */
 static int g_w, g_h;
+/** 现在这格视口（抓屏那一族会用到，见 `omni_ev_gl_capbegin`）。 */
+static int g_vpw, g_vph;
+/** 抓屏那一趟的尺寸（照 c_impl 就是整帧）。 */
+static int g_capw, g_caph;
 static int g_on;
 static int g_depth_test;
 
@@ -204,6 +208,8 @@ int omni_ev_gl_open(int w, int h) {
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
   g_w = w;
   g_h = h;
+  g_vpw = w;
+  g_vph = h;
   g_on = 1;
   g_depth_test = 0;
   return 0;
@@ -816,6 +822,61 @@ int omni_ev_gl_gettex(int slot, int w, int h, long cap, double *out) {
 
 }
 
+/**
+ * **抓屏那一族**（`glcapture()` / `glcaptureend(槽)`，§22）。
+ *
+ * 两份参考在这一格**不是一回事**，这儿跟的是 `c_impl`（也就是逐像素那把尺子）：
+ *
+ * * `polydraw.c:1195` 的 `qglCapture` 把视口换成 `captexsiz²`（512 往下取到 2 的幂）、
+ *   把 PROJECTION 换成定死的 `gluPerspective(45,1,0.1,1000)`、MODELVIEW 换成
+ *   `glScalef(高/宽,1,1)`；
+ * * `c_impl/src/render/gl_renderer.c:1652` 起是**整帧**：视口不动、矩阵不动，
+ *   只把画布清成黑，`glcaptureend` 那一刻把整帧拷进纹理。
+ *
+ * **为什么跟 c_impl**：原版那个 `glcapture()` 是**零参**的（`myext[]` 里写着
+ * `"GLCAPTURE()"`），而 `qglCapture(double dcaptexsiz)` 读的是一格根本没传的实参 ——
+ * 于是 `captexsiz` 拿到的是栈上的垃圾，视口边长在原版里就是不确定的。这一格
+ * "以 polydraw_src 为准"定不下来；而语料自己的注释（`examples/opengl/25_offscreen_capture.pss`：
+ * "glcapture() grabs the current framebuffer into a texture id"）说的正是整帧那一种。
+ * 量过：按 polydraw_src 那一种做，这一族六份与参考的差**一律变大**
+ * （tree 38.6→64.4、gears 40→82、clock 16.7→40.6、texture 54→全黑）。
+ */
+int omni_ev_gl_capbegin(int siz) {
+  if (!g_on) return 0;
+  (void)siz;
+  CGLSetCurrentContext(g_ctx);
+  g_capw = g_w;
+  g_caph = g_h;
+  glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
+  glViewport(0, 0, g_vpw, g_vph);
+  /* 从干净的黑底起（照 c_impl）：后处理那一趟按 >1 的坐标采样时，采到的只该是
+     这一趟画下来的东西，不该是上一帧留下的。 */
+  glClearColor(0, 0, 0, 1);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  return 0;
+}
+
+int omni_ev_gl_capend(int slot) {
+  if (!g_on) return 0;
+  CGLSetCurrentContext(g_ctx);
+  int i = ev_tex_slot(slot);
+  if (i < 0) return 1;
+  glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
+  g_tex[i].tar = GL_TEXTURE_2D;
+  glActiveTexture(GL_TEXTURE0 + g_texunit);
+  glBindTexture(GL_TEXTURE_2D, g_tex[i].id);
+  /* 纹理的第 0 行是帧缓冲的**最下面**一行 —— 与 `glquad()` 那六个顶点的纹理坐标
+     （t=0 在下）对得上，所以不用翻。 */
+  glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 0, 0, g_capw, g_caph, 0);
+  /* `KGL_BGRA32`（格 0）= LINEAR + REPEAT：后处理那几份着色器按 >1 的坐标采样
+     （`clock.pss` 是 3.0*uv），REPEAT 才不会糊成边上那一圈。 */
+  ev_tex_params_t(GL_TEXTURE_2D, 0);
+  g_tex[i].w = g_capw;
+  g_tex[i].h = g_caph;
+  g_tex[i].fmt = 0;
+  return 0;
+}
+
 /** `glbindtexture(槽)` / `glactivetexture(单元)`：把那一槽挂到现在这格单元上。 */
 void omni_ev_gl_bindtex(int slot) {
   if (!g_on) return;
@@ -853,7 +914,7 @@ void omni_ev_gl_batch(int kind, long n, const double *verts) {
 
   glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
   glBindVertexArray(g_vao);
-  glViewport(0, 0, g_w, g_h);
+  glViewport(0, 0, g_vpw, g_vph);
   if (g_depth_test) glEnable(GL_DEPTH_TEST);
   else glDisable(GL_DEPTH_TEST);
   /* 这一段用哪格 program 由 `batchprog` 说：0 是内建那对（位置**已是裁剪空间** ⇒

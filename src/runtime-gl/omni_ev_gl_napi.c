@@ -48,6 +48,8 @@ int omni_ev_gl_tex(int slot, int w, int h, int d, int fmt, const double *px);
 int omni_ev_gl_texfile(int slot, const char *path, int colmode);
 int omni_ev_gl_univ(double h, int comps, int isint, long n, const double *v);
 int omni_ev_gl_gettex(int slot, int w, int h, long cap, double *out);
+int omni_ev_gl_capbegin(int siz);
+int omni_ev_gl_capend(int slot);
 void omni_ev_gl_bindtex(int slot);
 void omni_ev_gl_activetex(int unit);
 
@@ -313,6 +315,17 @@ static napi_value jsTex(napi_env env, napi_callback_info info) {
   return mknum(env, r);
 }
 
+/** `capbegin(边长)` / `capend(槽)` —— 抓屏那一族（§22）。 */
+static napi_value jsCapbegin(napi_env env, napi_callback_info info) {
+  ARGS(1);
+  return mknum(env, omni_ev_gl_capbegin((int)num(env, a[0])));
+}
+
+static napi_value jsCapend(napi_env env, napi_callback_info info) {
+  ARGS(1);
+  return mknum(env, omni_ev_gl_capend((int)num(env, a[0])));
+}
+
 static napi_value jsBindtex(napi_env env, napi_callback_info info) {
   ARGS(1);
   omni_ev_gl_bindtex((int)num(env, a[0]));
@@ -366,6 +379,8 @@ napi_value napi_register_module_v1(napi_env env, napi_value exports) {
   PUT("texfile", jsTexfile);
   PUT("univ", jsUniv);
   PUT("gettex", jsGettex);
+  PUT("capbegin", jsCapbegin);
+  PUT("capend", jsCapend);
   PUT("bindtex", jsBindtex);
   PUT("activetex", jsActivetex);
   PUT("error", jsError);

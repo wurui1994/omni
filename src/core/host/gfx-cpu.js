@@ -667,12 +667,25 @@ export function gfxCall(name, args) {
        为什么不报：这些脚本的主体是几何（3D 的球/锥/线），贴图与文字只是点缀 ——
        报了整份图都出不来，收下则"图能出、少了贴图与文字"。这一条偏差明写在
        `docs/design/eval-realtime-gpu.md` 第 12 节，真要贴图与文字得走 GPU 那两档设备。 */
+    /* **抓屏那一族**（`glcapture` / `glcaptureend`，§22）：GL 那一档真做（换视口 +
+       一次 `glCopyTexImage2D`），CPU 备选收下不管（这一层没有纹理采样）。
+       语言那一侧发的是一参那两格（边长 / 槽）—— 矩阵那一半在它那儿。 */
+    case 'glcapture/1': {
+      need(320, 240);
+      if (!G.on) return 0;
+      return G.m.capbegin(Math.trunc(a(0)));
+    }
+    case 'glcaptureend/1': {
+      need(320, 240);
+      if (!G.on) return 0;
+      return G.m.capend(Math.trunc(a(0)));
+    }
     case 'pic/1': case 'pic/2': case 'pic/3': case 'pic/4': case 'pic/5': case 'pic/6':
     case 'glsettex/1': case 'glsettex/2': case 'glsettex/3': case 'glsettex/4':
     case 'glsettex/5': case 'glsettex/6':
     case 'glgettex/4': case 'glgettex/5':
     case 'glbindtexture/1': case 'glactivetexture/1':
-    case 'glcapture/0': case 'glcapture/4': case 'glcaptureend/0': case 'glcaptureend/1':
+    case 'glcapture/0': case 'glcapture/4': case 'glcaptureend/0':
     case 'mountzip/1': case 'mountzip/2': case 'glulookat/9':
     case 'drawspr/4': case 'drawspr/5': case 'drawspr/6':
     case 'drawkv6/4': case 'drawkv6/5': case 'drawkv6/7': case 'drawkv6/8':
