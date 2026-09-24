@@ -28,7 +28,16 @@
 
 import { evalToIR } from '../polydraw/adapter.js';
 import { EVALDRAW_2D } from '../polydraw/gfx-rt.js';
-import { GL_CONSTS } from '../polydraw/gl-rt.js';
+import { GL_CONSTS, POLYDRAW_GL } from '../polydraw/gl-rt.js';
+
+/**
+ * **GL 那个子集两门共用同一份**（`gl-rt.js`）—— 只有一个模型：命令变顶点、合批、拆 mode
+ * 全在语言这一侧（`docs/design/eval-realtime-gpu.md` 第 9 节）。
+ *
+ * 只取名字以 `gl` 打头的那几格：`setfov` / `framebegin` / `rgb` 在 EvalDraw 里是**别的
+ * 东西**（`setfov` 是它那套 3D 相机的，不是 GL 的 fov），那三格照旧走这门自己的路。
+ */
+const EVALDRAW_GL = new Map([...POLYDRAW_GL].filter(([k]) => k.startsWith('gl')));
 
 /**
  * **`drawcone` 的那几格旗子**（`evaldraw.txt:1586-1590` 那张名单）。
@@ -50,8 +59,12 @@ export const DRAWCONE_CONSTS = new Map([
 export const EVALDRAW_HOST = {
   who: 'evaldraw',
   spec: 'evaldraw_ref.md / evaldraw.txt（那棵树里没有源码）',
-  /** **已经接上设备的那几格**（`gfx-rt.js` 的 `EVALDRAW_2D`）：名字/元数 -> 生成出来的函数。 */
-  draw: EVALDRAW_2D,
+  /** **已经接上设备的那几格**（`gfx-rt.js` 的 `EVALDRAW_2D`）：名字/元数 -> 生成出来的函数。
+      GL 那个子集与 PolyDraw 共用 `gl-rt.js` 那一份（见 `EVALDRAW_GL`）—— 这门自己的名字
+      写在后头，撞上就以它为准。 */
+  draw: new Map([...EVALDRAW_GL, ...EVALDRAW_2D]),
+  /** GL 那一族走 `gl-rt.js`（命令 -> 顶点批），不是"把名字递给设备"。 */
+  glrt: true,
   /** GL 那几格常量（`GL_QUADS` / `GL_TEXTURE0` …）—— EvalDraw 的脚本里也有 GL 子集，
       所以这张表两门语言共用（语料里 `demos/sprite2d.kc` 就写 `glbegin(GL_QUADS)`）；
       再加上 `drawcone` 那几格旗子（上头那张表）。 */

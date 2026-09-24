@@ -21,9 +21,11 @@
 //
 // ## 边界（明写）
 //
-// * GL 立即模式那一族（`glbegin`/`glvertex`/`glcolor` + 矩阵栈）**已接**，而且比 CPU
-//   备选那一档多一样东西：`glEnable(GL_DEPTH_TEST)` 真开 GPU 的 z 缓冲。
-//   着色器与纹理那两族**还没接** —— 认不出的名字当场报，报里说清"哪一格没有"。那是第 5、6 刀。
+// * GL 那一族（`glbegin`/`glvertex`/`glcolor`/矩阵栈/拆 mode/合批）**不在这一层** ——
+//   它在语言那一侧（`ext/polydraw/gl-rt.js`，两门语言共用一份），交到这儿的只有顶点批
+//   与几格状态（`batchprog`/`batchmvp`/`batchblend`/`gldepth`）。**只有一个模型**。
+//   这一档比 CPU 备选多两样：GPU 的 z 缓冲（`gldepth`）与**可编程管线**（脚本自己那对
+//   着色器：编 program、喂 uniform、常量属性）。纹理那一族还没接 —— 认不出的名字当场报。
 // * 帧循环**在页面这边**（`setFrame` + `requestAnimationFrame`）：`nextframe` 在这一档
 //   直接回 0，产物那条 while 一轮都不转 —— 见下面"帧循环（rAF）"那一段。
 // * 输入（`mousx`/`mousy`/`bstatus`/`keystatus[256]`）接的是**真事件**（canvas 的鼠标、
@@ -212,12 +214,6 @@ function batch(kind, prog = null, mvp = null) {
 const push = (b, x, y) => {
   b.v.push(x, y, 0, 1, D.col[0], D.col[1], D.col[2], 1, 0, 0, 0, 1);
 };
-/** 一格**带自己颜色/深度/纹理坐标**的顶点（GL 立即模式那一族）。 */
-const pushV = (b, v) => {
-  if (b.prog === null) b.v.push(v.x, v.y, v.z, 1);
-  else b.v.push(v.ox, v.oy, v.oz, v.ow);
-  b.v.push(v.r, v.g, v.b, v.a, v.u, v.tv, v.p, v.q);
-};
 
 /** 一段线（两个顶点）。 */
 function seg(x0, y0, x1, y1) {
@@ -325,215 +321,25 @@ function flush() {
   D.batches.length = 0;
 }
 
-/* ---------------------------------------------------------------- GL 立即模式
+/* ------------------------------------------------- GL 那一族在这一层剩下的东西
  *
- * PolyDraw 的宿主是**真 OpenGL 1.x 的薄包装**（`polydraw.c:619` 起那一排 `qgl*`），
- * 所以这一族的口径是固定管线的定义本身：顶点过 MODELVIEW 再过 PROJECTION、除以 w、
- * 映到视口。语义**逐条照 `ext/polydraw/gl-rt.js`**（那份是同一族的 CPU 备选实现）——
- * 两边要能对得上，不然"换设备"就变成了"换语义"。
+ * **只有一个模型**（`docs/design/eval-realtime-gpu.md` 第 9 节）：`glBegin`/`glVertex`/
+ * `glColor`/矩阵栈/拆 mode/合批**全在语言那一侧**（`ext/polydraw/gl-rt.js`，两门语言
+ * 共用一份），交到设备手里的只有顶点批（`(gfxbatch …)`）与几格状态。
  *
- * 与 CPU 备选那一档的差别（这一档更好，写在这儿免得当成 bug）：
- * * 光栅化与顶点色插值交给 GPU（CPU 那份是包围盒 + 重心坐标）；
- * * **有深度测试**（`glEnable(GL_DEPTH_TEST)` 真开 GPU 的 z 缓冲）—— CPU 那份没有，
- *   所以 3D 例子在这一档才是对的。
- *
- * 还没接（认不出的名字当场报）：着色器与纹理那两族、`glMultMatrix`、`glCapture`。
+ * 所以这一层只留三样 GL 的东西：**深度测试**（GPU 的 z 缓冲，只有设备做得到）、
+ * **常量属性**（`glVertexAttrib*` 是按 draw call 摆的）、**program 与 uniform**（下一节）。
+ * 从前那两百来行（`glVertex`/`glEnd`/`glXf`/`mvMul`/`mvpNow`/`frameBegin`/矩阵栈）
+ * 是第二份模型，2026-09-24 第四刀连着 EvalDraw 那张表一起切过去之后整段删掉了。
  */
 const G = {
-  on: false,
-  mode: -1,                       /* `glBegin` 那一格（GL 的号：0 点 … 9 多边形），-1 = 没在攒 */
-  verts: [],                      /* 攒着的顶点（屏幕坐标与物体坐标都留着，见 `glVertex`） */
-  mv: null, pj: null, st: [],     /* MODELVIEW / PROJECTION / 矩阵栈（列主序 m[c*4+r]） */
-  col: [1, 1, 1, 1],
-  tex: [0, 0, 0, 1],              /* 现在的纹理坐标（`glTexCoord`） */
-  fov: 90,
-  depth: false,                   /* 深度测试开着没有（`glEnable(GL_DEPTH_TEST)`） */
+  depth: false,                   /* 深度测试开着没有（语言那一侧的 `gldepth` 转过来的） */
   /* `glVertexAttrib*` 设的那几格**常量属性**：位置 -> 四个数。`attrVer` 是它的版本号 ——
      值一变就把顶点断成另一段（常量属性是**按 draw call** 摆的，段里不能变）。 */
   attrs: new Map(), attrVer: 0,
 };
 
-const GL_VMAX = 1024;
 const ident = () => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
-
-/**
- * `gluPerspective` 那张矩阵（列主序）。**收的是 `tan(fovy/2)` 而不是角度** ——
- * 理由是逐字节：默认那一档的 fovy 是 `ksetfov(90)` 算出来的
- * （`gfov = atan(高/宽)*360/π` 度），于是 `tan(fovy/2) = tan(atan(高/宽))` = **高/宽，
- * 一格除法就够**；真去调 `tan`/`atan` 的话 JS 的 Math 与 C 的 libm 差 1 ulp，
- * 三条腿的表面就不再逐字节相同（量过：02-gl.pss 差 96 字节、一条边上的 24 格像素）。
- */
-function perspectiveT(ft, aspect, zn, zf) {
-  const pj = ident();
-  const f = 1 / ft;
-  pj[0] = f / aspect;
-  pj[5] = f;
-  pj[10] = (zf + zn) / (zn - zf);
-  pj[11] = -1;
-  pj[14] = 2 * zf * zn / (zn - zf);
-  pj[15] = 0;
-  return pj;
-}
-
-/** `ksetfov`（`polydraw.c:1484`）：回的是 fovy（度）。默认 `setfov(90)` 在 4:3 上是 73.7 度。 */
-const fovOf = (fov) => Math.tan(fov * Math.PI / 360) * Math.atan(D.h / D.w) * 360 / Math.PI;
-
-function glNeed() {
-  if (G.on) return;
-  G.on = true;
-  G.mv = ident();
-  G.pj = ident();
-  G.st = [];
-  G.col = [1, 1, 1, 1];
-  G.tex = [0, 0, 0, 1];
-  G.mode = -1;
-  G.verts = [];
-  /* `setfov(90)` 是 PolyDraw 开机时那一句（`polydraw.c:2455`）。`fovT` 是它的
-     `tan(fovy/2)` —— 默认这一档**正好是高/宽**（见 `perspectiveT` 的头注）。 */
-  G.fov = fovOf(90);
-  G.fovT = D.h / D.w;
-}
-
-/**
- * **每帧的 GL 初态**（`(gfxcall "framebegin")`，PolyDraw 那张表的脚本每帧开头发一次）。
- *
- * 照 `polydraw.c:3572-3579` 一条条抄：清 color/depth/stencil、**开深度测试**、
- * PROJECTION = `gluPerspective(gfov, 宽/高, 0.1, 1000)`、MODELVIEW = 单位。
- *
- * 这一格是**按语言的**：EvalDraw 那张表（2D 那一族）不发它 —— 那边没有 GL，
- * 而且"这一帧要不要清"是脚本自己用 `cls()` 说的。
- */
-function frameBegin() {
-  glNeed();
-  const gl = D.gl;
-  G.mv = ident();
-  G.pj = perspectiveT(G.fovT, D.w / D.h, 0.1, 1000);
-  G.st = [];
-  G.depth = true;
-  D.batches.length = 0;
-  if (gl !== null) {
-    gl.viewport(0, 0, D.w, D.h);
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
-  }
-  return 0;
-}
-
-/** `G.mv = G.mv · t`（**右乘**，与 GL 同）。 */
-function mvMul(t) {
-  const m = G.mv;
-  const out = [];
-  for (let c = 0; c < 4; c++) {
-    for (let r = 0; r < 4; r++) {
-      let a = 0;
-      for (let k = 0; k < 4; k++) a += m[k * 4 + r] * t[c * 4 + k];
-      out[c * 4 + r] = a;
-    }
-  }
-  G.mv = out;
-}
-
-/** clip = PROJECTION · (MODELVIEW · v)。 */
-function glXf(x, y, z, w) {
-  const e = [];
-  for (let r = 0; r < 4; r++) {
-    e.push(G.mv[r] * x + G.mv[4 + r] * y + G.mv[8 + r] * z + G.mv[12 + r] * w);
-  }
-  const o = [];
-  for (let r = 0; r < 4; r++) {
-    o.push(G.pj[r] * e[0] + G.pj[4 + r] * e[1] + G.pj[8 + r] * e[2] + G.pj[12 + r] * e[3]);
-  }
-  return o;
-}
-
-/**
- * 一格顶点：变换 -> 透视除法 -> 视口（GL 的 y 朝上、我们的画布 y 朝下，所以翻过来）。
- *
- * **物体坐标也留着**：脚本要是 `glsetshader` 挑了自己的着色器，变换就该由它的顶点着色器
- * 做（`ftransform()`），我们只把物体坐标与 `u_mvp` 递过去 —— 两套坐标一格顶点里都有，
- * `glEnd` 那一刻按"有没有挑着色器"决定递哪一套。
- */
-function glVertex(x, y, z, w) {
-  glNeed();
-  if (G.verts.length >= GL_VMAX) return;
-  const c = glXf(x, y, z, w);
-  /* `w <= 0`（在眼睛后头）**整格丢掉** —— 近平面插值这一版没做，与 CPU 那份同一条边界。
-     着色器那一档不丢（裁剪交给 GPU 自己）。 */
-  if (c[3] <= 0 && SH.cur === null) return;
-  const iw = c[3] === 0 ? 1 : 1 / c[3];
-  G.verts.push({
-    x: (c[0] * iw * 0.5 + 0.5) * D.w,
-    y: (0.5 - c[1] * iw * 0.5) * D.h,
-    z: c[2] * iw,
-    ox: x, oy: y, oz: z, ow: w,
-    r: G.col[0], g: G.col[1], b: G.col[2], a: G.col[3],
-    u: G.tex[0], tv: G.tex[1], p: G.tex[2], q: G.tex[3],
-  });
-}
-
-/** MODELVIEW 与 PROJECTION 的积（着色器那一档的 `u_mvp`）。 */
-function mvpNow() {
-  const out = [];
-  for (let c = 0; c < 4; c++) {
-    for (let r = 0; r < 4; r++) {
-      let a = 0;
-      for (let k = 0; k < 4; k++) a += G.pj[k * 4 + r] * G.mv[c * 4 + k];
-      out[c * 4 + r] = a;
-    }
-  }
-  return out;
-}
-
-/** 这一段该用哪格 program（`null` = 内建那对）。 */
-const progNow = () => SH.cur;
-
-/** 一段线 / 一格三角形 / 一格点（都带逐顶点的色与深度）。 */
-function glSeg(i, j) {
-  const b = batch('line', progNow(), mvpNow());
-  pushV(b, G.verts[i]);
-  pushV(b, G.verts[j]);
-}
-
-function glTri(i, j, k) {
-  const b = batch('tri', progNow(), mvpNow());
-  pushV(b, G.verts[i]);
-  pushV(b, G.verts[j]);
-  pushV(b, G.verts[k]);
-}
-
-/** 一格点 = 1×1 的两个三角形（`gl_PointSize` 在 WebGL 里不可靠）。 */
-function glPt(i) {
-  const v = G.verts[i];
-  const b = batch('tri', progNow(), mvpNow());
-  for (const [dx, dy] of [[0, 0], [1, 0], [0, 1], [1, 0], [0, 1], [1, 1]]) {
-    pushV(b, { ...v, x: v.x + dx, y: v.y + dy });
-  }
-}
-
-/** `glEnd()`：按 `mode` 把攒下的顶点拆开（十格 mode 的号是 GL 的）。 */
-function glEnd() {
-  glNeed();
-  const m = G.mode;
-  const n = G.verts.length;
-  G.mode = -1;
-  if (m === 0) for (let i = 0; i < n; i++) glPt(i);
-  if (m === 1) for (let i = 0; i + 1 < n; i += 2) glSeg(i, i + 1);
-  if (m === 3) for (let i = 0; i + 1 < n; i++) glSeg(i, i + 1);
-  if (m === 2) {
-    for (let i = 0; i + 1 < n; i++) glSeg(i, i + 1);
-    if (n > 2) glSeg(n - 1, 0);
-  }
-  if (m === 4) for (let i = 0; i + 2 < n; i += 3) glTri(i, i + 1, i + 2);
-  if (m === 5) for (let i = 2; i < n; i++) glTri(i - 2, i - 1, i);
-  if (m === 6 || m === 9) for (let i = 2; i < n; i++) glTri(0, i - 1, i);
-  if (m === 7) {
-    for (let i = 0; i + 3 < n; i += 4) { glTri(i, i + 1, i + 2); glTri(i, i + 2, i + 3); }
-  }
-  if (m === 8) {
-    for (let i = 2; i + 1 < n; i += 2) { glTri(i - 2, i - 1, i); glTri(i - 1, i + 1, i); }
-  }
-  G.verts = [];
-}
 
 /* ---------------------------------------------------------------- 可编程管线
  *
@@ -554,8 +360,7 @@ const SH = {
   names: new Map(),
   /** `"顶点名|片元名"` -> 已经链好的 program（编一次，之后每帧复用）。 */
   progs: new Map(),
-  cur: null,                      /* 现在挑着的那格 program（`glsetshader` 设、`glquad` 用） */
-  quad: null,                     /* 满屏四边形那一格 buffer（造一次） */
+  cur: null,                      /* 现在挑着的那格 program（`glsetshader` 设、批带着用） */
 };
 
 /** 登记一格有名字的串（着色器原文 / 名字表）。 */
@@ -643,7 +448,6 @@ function useProgram(vName, fName) {
 
 /** `glsetshader(…)`：实参是**名字表的下标**（见 `gfxdef`）；旧式的数字那一档按序号取。 */
 function setShader(args) {
-  glNeed();
   /* **负下标 = "第一对"**（语言那一侧的 `gl_quad` 在脚本没挑过 program 时发的那句 ——
      `glquad` 在 PolyDraw 里本来就默认拿 `@v`/`@f` 那一对）。 */
   if (args.length === 1 && Math.trunc(Number(args[0])) < 0) {
@@ -674,55 +478,9 @@ function setShader(args) {
   return 0;
 }
 
-/** `glquad(mode)`：满屏四边形。`0` 走 alpha 混合、`1` 不透明（说明书 `glquad(mode)` 那一行）。 */
-function glQuad(mode) {
-  const gl = D.gl;
-  flush();                         /* 先把攒着的 2D/立即模式画掉 —— 次序与脚本一致 */
-  if (SH.cur === null) {
-    const v = firstOf('vert');
-    const f = firstOf('frag');
-    if (v === null || f === null) {
-      throw new Error('glquad：还没有着色器 —— `.pss` 里要有 @v 与 @f 区段'
-        + '（或者先 glsetshader(…) 挑一对）');
-    }
-    useProgram(v, f);
-  }
-  if (SH.quad === null) {
-    SH.quad = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, SH.quad);
-    /* 两个三角形，位置就是 NDC（旧式着色器里 `ftransform()` 乘的是单位矩阵 ——
-       满屏四边形本来就该直接盖满），纹理坐标 0..1。 */
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-      -1, -1, 0, 1, 0, 0, 0, 1, 1, -1, 0, 1, 1, 0, 0, 1, -1, 1, 0, 1, 0, 1, 0, 1,
-      1, -1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, -1, 1, 0, 1, 0, 1, 0, 1,
-    ]), gl.STATIC_DRAW);
-  }
-  gl.useProgram(SH.cur);
-  gl.bindBuffer(gl.ARRAY_BUFFER, SH.quad);
-  const aPos = gl.getAttribLocation(SH.cur, 'a_pos');
-  const aTex = gl.getAttribLocation(SH.cur, 'a_tex');
-  if (aPos >= 0) {
-    gl.enableVertexAttribArray(aPos);
-    gl.vertexAttribPointer(aPos, 4, gl.FLOAT, false, 32, 0);
-  }
-  if (aTex >= 0) {
-    gl.enableVertexAttribArray(aTex);
-    gl.vertexAttribPointer(aTex, 4, gl.FLOAT, false, 32, 16);
-  }
-  const mvp = gl.getUniformLocation(SH.cur, 'u_mvp');
-  if (mvp !== null) gl.uniformMatrix4fv(mvp, false, new Float32Array(ident()));
-  if (Math.trunc(mode) === 0) {
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-  } else {
-    gl.disable(gl.BLEND);
-  }
-  if (G.depth) gl.enable(gl.DEPTH_TEST);
-  else gl.disable(gl.DEPTH_TEST);
-  gl.drawArrays(gl.TRIANGLES, 0, 6);
-  gl.disable(gl.BLEND);
-  return 0;
-}
+/* `glquad(mode)` 那一格**不在这一层**：满屏四边形的六个顶点在语言那一侧造
+   （`ext/polydraw/gl-rt.js` 的 `gl_quad` —— 位置就是 NDC、`u_mvp` 是单位矩阵、
+   混合由 `batchblend` 说）。设备自己再造一份满屏几何就是第二个模型了。 */
 
 /** `glgetuniformloc(名字下标)` -> 一格句柄。句柄就是"第几个"（我们自己的编号）。 */
 const UNI = { list: [], byProg: new Map() };
@@ -860,104 +618,13 @@ function call(name, args) {
       if (k >= 0 && k < 256) D.keys[k] = a(1);
       return 0;
     }
-    /* ── GL 立即模式那一族（固定管线）。语义逐条照 `ext/polydraw/gl-rt.js`。 */
-    case 'glclear/1': {
-      flush();
-      const mask = Math.trunc(a(0));
-      /* GL 的清屏色从没被设过（`myext[]` 里没有 GLCLEARCOLOR）所以是黑；
-         mask 给 0 时 `qglClear` 清全部（`polydraw.c:622`）。 */
-      gl.clearColor(0, 0, 0, 1);
-      const bits = mask === 0
-        ? gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT
-        : ((mask & 0x4000) !== 0 ? gl.COLOR_BUFFER_BIT : 0)
-          | ((mask & 0x100) !== 0 ? gl.DEPTH_BUFFER_BIT : 0);
-      if (bits !== 0) gl.clear(bits);
-      return 0;
-    }
-    case 'glbegin/1': glNeed(); G.mode = Math.trunc(a(0)); G.verts = []; return 0;
-    case 'glend/0': glEnd(); return 0;
-    case 'glvertex/2': glVertex(a(0), a(1), 0, 1); return 0;
-    case 'glvertex/3': glVertex(a(0), a(1), a(2), 1); return 0;
-    case 'glvertex/4': glVertex(a(0), a(1), a(2), a(3)); return 0;
-    /* `glColor` 的分量是 0..1（GL 的 `glColor3d`），不是 `setcol` 那种 0..255。 */
-    case 'glcolor/3':
-      glNeed();
-      G.col = [a(0), a(1), a(2), 1];
-      return 0;
-    case 'glcolor/4':
-      glNeed();
-      G.col = [a(0), a(1), a(2), a(3)];
-      return 0;
-    /* `glTexCoord(u,v[,p,q])`：现在的纹理坐标（着色器那一档从 `a_tex` 读得到）。 */
-    case 'gltexcoord/2': glNeed(); G.tex = [a(0), a(1), 0, 1]; return 0;
-    case 'gltexcoord/3': glNeed(); G.tex = [a(0), a(1), a(2), 1]; return 0;
-    case 'gltexcoord/4': glNeed(); G.tex = [a(0), a(1), a(2), a(3)]; return 0;
-    case 'gltranslate/3': {
-      glNeed();
-      const t = ident();
-      t[12] = a(0); t[13] = a(1); t[14] = a(2);
-      mvMul(t);
-      return 0;
-    }
-    case 'glscale/3': {
-      glNeed();
-      const t = ident();
-      t[0] = a(0); t[5] = a(1); t[10] = a(2);
-      mvMul(t);
-      return 0;
-    }
-    /* `glRotate(角度, x, y, z)`：角度是**度**，轴先归一化（GL 的规矩）。 */
-    case 'glrotate/4': {
-      glNeed();
-      const t = ident();
-      const len = Math.hypot(a(1), a(2), a(3));
-      if (len > 0) {
-        const x = a(1) / len;
-        const y = a(2) / len;
-        const z = a(3) / len;
-        const rad = a(0) * Math.PI / 180;
-        const c = Math.cos(rad);
-        const s = Math.sin(rad);
-        const d = 1 - c;
-        t[0] = x * x * d + c; t[1] = y * x * d + z * s; t[2] = x * z * d - y * s;
-        t[4] = x * y * d - z * s; t[5] = y * y * d + c; t[6] = y * z * d + x * s;
-        t[8] = x * z * d + y * s; t[9] = y * z * d - x * s; t[10] = z * z * d + c;
-      }
-      mvMul(t);
-      return 0;
-    }
-    case 'glpushmatrix/0':
-      glNeed();
-      /* 栈满了就**不推**（GL 那边是 GL_STACK_OVERFLOW，画面照旧）。 */
-      if (G.st.length < 32) G.st.push(G.mv.slice());
-      return 0;
-    case 'glpopmatrix/0':
-      glNeed();
-      if (G.st.length > 0) G.mv = G.st.pop();
-      return 0;
-    /* `gluPerspective(fovy, aspect, zn, zf)`：**直接设** PROJECTION（`polydraw.c:1477`）。 */
-    case 'gluperspective/4':
-      glNeed();
-      G.pj = perspectiveT(Math.tan(a(0) * Math.PI / 360), a(1), a(2), a(3));
-      return 0;
-    /* **每帧的 GL 初态**（照 `polydraw.c:3572-3579`）：PolyDraw 那张表的脚本每帧发一次。 */
-    case 'framebegin/0': return frameBegin();
-    /* `SETFOV(fov)`：照 `ksetfov`（`polydraw.c:1484`）—— 只算一格数并回它，**不碰矩阵**
-       （下一帧的 `framebegin` 会拿它当 fovy）。 */
-    case 'setfov/1':
-      glNeed();
-      G.fov = fovOf(a(0));
-      G.fovT = Math.tan(G.fov * Math.PI / 360);
-      return G.fov;
-    /* `glEnable`/`glDisable`：只认深度测试那一格，别的收下不管（这一档没有光照）。 */
-    case 'glenable/1': glNeed(); if (Math.trunc(a(0)) === 0x0b71) G.depth = true; return 0;
-    case 'gldisable/1': glNeed(); if (Math.trunc(a(0)) === 0x0b71) G.depth = false; return 0;
-    /* **深度测试那一格设备状态**（语言那一侧的 `gl_enable` 转过来的 —— 只有一个模型：
+    /* ── GL 那一族在这一层剩下的几格。**立即模式与矩阵栈不在这儿**（那是语言那一侧的
+       `ext/polydraw/gl-rt.js`，两门语言共用一份）—— 见 `G` 的头注"只有一个模型"。 */
+    /* **深度测试那一格设备状态**（语言那一侧的 `gl_enable(GL_DEPTH_TEST)` 转过来的 ——
        GL 的状态机在语言那一侧，"开不开 z 缓冲"这件事只有设备做得到）。 */
-    case 'gldepth/1': glNeed(); G.depth = Math.trunc(a(0)) !== 0; return 0;
+    case 'gldepth/1': G.depth = Math.trunc(a(0)) !== 0; return 0;
     /* ── **批上带的那点状态**（第四刀，见 `B` 的头注）。 */
     case 'batchprog/1':
-      glNeed();
       B.prog = Math.trunc(a(0));
       return 0;
     case 'batchmvp/5': {
@@ -982,7 +649,6 @@ function call(name, args) {
     case 'glsetshader/2':
     case 'glsetshader/3':
       return setShader(args.map((v) => Number(v)));
-    case 'glquad/1': return glQuad(a(0));
     case 'glgetuniformloc/1': return uniLoc(a(0));
     case 'gluniform1f/2': return uniSet(a(0), [a(1)]);
     case 'gluniform2f/3': return uniSet(a(0), [a(1), a(2)]);
@@ -1003,9 +669,10 @@ function call(name, args) {
       throw new Error(`这格设备（WebGL2）上没有 '${name}'（${args.length} 个实参）——`
         + ' 2D 那一族是 cls/setcol/setpix/moveto/lineto/drawsph/drawcone/rgb/refresh，'
         + ' 宿主量是 nextframe/numframes/klock/xres/yres/mousx/mousy/bstatus/keystatus，'
-        + ' GL 立即模式是 glclear/glbegin/glend/glvertex/glcolor/gltranslate/glrotate/'
-        + 'glscale/glpushmatrix/glpopmatrix/gluperspective/setfov（+ glenable 那几格）；'
-        + ' **着色器与纹理那两族还没接**（docs/design/eval-realtime-gpu.md 第 5、6 刀）');
+        + ' 批与它的状态是 (gfxbatch …)/batchprog/batchmvp/batchblend/gldepth，'
+        + ' 可编程管线是 glsetshader/glgetuniformloc/gluniform*/glgetattribloc/glvertexattrib*；'
+        + ' **GL 立即模式与矩阵栈不在设备这一层**（在语言那一侧的 ext/polydraw/gl-rt.js，'
+        + '只有一个模型）；纹理那一族还没接（docs/design/eval-realtime-gpu.md 第 6 刀）');
   }
 }
 
@@ -1102,10 +769,6 @@ function reset() {
   D.pms = 0;
   D.pfps = 0;
   D.pt0 = 0;
-  G.on = false;
-  G.mode = -1;
-  G.verts = [];
-  G.st = [];
   G.depth = false;
   G.attrs.clear();
   G.attrVer = 0;

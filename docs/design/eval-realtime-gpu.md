@@ -426,9 +426,12 @@ GL calls into a flat command buffer"）：立即模式的调用先记进一条�
 + uniform + `glquad`、`05-shader-geom.pss` 的着色器 + 立即模式几何 + `u_mvp`）——
 真浏览器、判像素，全绿。`usesShaderGL` 已经删掉。
 
-**还留着的一摊**（下一刀）：WebGL2 那一档自己那份立即模式（`glbegin`/`glvertex`/矩阵栈）
-只给 EvalDraw 的 GL 子集（`.kc`）用着 —— 它那张宿主表还没有 `glrt`。把它也切到
-`gl-rt.js` 上之后，设备里那两百来行第二份模型就整段删掉。
+**第二份模型删掉了**（同一刀的后半）：EvalDraw 那张宿主表也加了 `glrt`（GL 那个子集
+两门共用 `gl-rt.js` 的同一份 —— 只取名字以 `gl` 打头的那几格，`setfov`/`framebegin`/`rgb`
+在 EvalDraw 里是别的东西），于是 WebGL2 设备里那两百来行自己的立即模式
+（`glVertex`/`glEnd`/`glXf`/`mvMul`/`mvpNow`/`frameBegin`/`perspectiveT`/矩阵栈 +
+十来格 `case`）整段删掉。设备那一层的 GL 现在只剩三样：深度测试、常量属性、
+program 与 uniform —— 全是"只有设备做得到"的东西。`glquad` 的那份满屏 buffer 也删了。
 
 **常量属性**（`glVertexAttrib*`）没有单开一格 `batchattr`：设备那一侧本来就按
 "位置 -> 四个数 + 版本号"记着（`G.attrs`/`attrVer`，值一变就断段），语言那一侧只要
