@@ -31,6 +31,67 @@
 //   4. 内建只认下面 `BUILTINS` 那一张表，表外的名字当用户函数调（调不到就是链接期的错）。
 
 import { isList, tag, kids, leaf } from '../../src/core/lower/cst.js';
+import { RMATH_LIB, rmathSig } from './rt/ffi.js';
+
+/* ─── R 的数值运行时：**R 自己的 C 代码** ────────────────────────────────────
+ *
+ * `round(0.5)` 在 R 里是 `0`（到偶），`round(2.675, 2)` 是 `2.67`（二进制里 2.675 比它看
+ * 起来小一点）。这些不是"我们算错了"能修的东西 —— 它们**就是** `r-source/src/nmath/fround.c`
+ * 那段代码的行为。所以这一族一律转发过去：`ext/r/build.js` 把 `src/nmath` 的 121 份 `.c`
+ * 编成 `libomniRmath`，签名由 `rt/ffi.js` 从**同一次构建生成的** `Rmath.h` 读出来（不手抄）。
+ *
+ * 这张表只说三件事。R 的可选实参在 C 那侧是必填的（`dnorm(x)` → `dnorm4(x, 0, 1, 0)`：
+ * 均值、标准差、要不要取对数），补的值照 R 的文档。
+ *
+ *   sym   —— `Rmath.h` 里的名字（**不一定与 R 的函数同名**：`dnorm` 在头里是 `dnorm4`）
+ *   fill  —— 实参表；`null` 是"这一格由 R 那边的位置实参填"，别的是缺省值。长度 = C 的元数 */
+const RMATH = new Map([
+  /* 取整与精度（`fround.c` / `fprec.c` / `ftrunc.c` / `fsign.c`）—— 整件事的起点 */
+  ['round', { sym: 'fround', fill: [null, 0] }],
+  ['signif', { sym: 'fprec', fill: [null, 6] }],
+  ['trunc', { sym: 'ftrunc', fill: [null] }],
+  ['sign', { sym: 'sign', fill: [null] }],
+  /* 两格取大小。R 的 `max`/`min` 收任意多格（那要向量），所以这儿只登记 `pmax`/`pmin`
+     的两格形式 —— 名字不一样就不会与"以后做了向量"的那一版撞。 */
+  ['pmax', { sym: 'fmax2', fill: [null, null] }],
+  ['pmin', { sym: 'fmin2', fill: [null, null] }],
+  /* Gamma 那一族（`gamma.c` / `lgamma.c` / `polygamma.c` / `beta.c` / `choose.c`） */
+  ['gamma', { sym: 'gammafn', fill: [null] }],
+  ['lgamma', { sym: 'lgammafn', fill: [null] }],
+  ['digamma', { sym: 'digamma', fill: [null] }],
+  ['trigamma', { sym: 'trigamma', fill: [null] }],
+  ['beta', { sym: 'beta', fill: [null, null] }],
+  ['lbeta', { sym: 'lbeta', fill: [null, null] }],
+  ['choose', { sym: 'choose', fill: [null, null] }],
+  ['lchoose', { sym: 'lchoose', fill: [null, null] }],
+  ['log1p', { sym: 'log1p', fill: [null] }],
+  ['expm1', { sym: 'expm1', fill: [null] }],
+  /* 分布那一族。`lower.tail = TRUE` → 1、`log = FALSE` → 0，照 R 的默认值补。
+     **随机数那一族（`r*`）刻意不在这张表里**：它们要 `set.seed` 那套状态，而 R 的发生器在
+     解释器里，standalone 这一份的流不一样 —— 接上去是"看着像对、每个数都不一样"。 */
+  ['dnorm', { sym: 'dnorm4', fill: [null, 0, 1, 0] }],
+  ['pnorm', { sym: 'pnorm5', fill: [null, 0, 1, 1, 0] }],
+  ['qnorm', { sym: 'qnorm5', fill: [null, 0, 1, 1, 0] }],
+  ['dbinom', { sym: 'dbinom', fill: [null, null, null, 0] }],
+  ['pbinom', { sym: 'pbinom', fill: [null, null, null, 1, 0] }],
+  ['dpois', { sym: 'dpois', fill: [null, null, 0] }],
+  ['ppois', { sym: 'ppois', fill: [null, null, 1, 0] }],
+  ['dgamma', { sym: 'dgamma', fill: [null, null, 1, 0] }],
+  ['pgamma', { sym: 'pgamma', fill: [null, null, 1, 1, 0] }],
+  ['dbeta', { sym: 'dbeta', fill: [null, null, null, 0] }],
+  ['pbeta', { sym: 'pbeta', fill: [null, null, null, 1, 0] }],
+  ['dt', { sym: 'dt', fill: [null, null, 0] }],
+  ['pt', { sym: 'pt', fill: [null, null, 1, 0] }],
+  ['dchisq', { sym: 'dchisq', fill: [null, null, 0] }],
+  ['pchisq', { sym: 'pchisq', fill: [null, null, 1, 0] }],
+  ['besselI', { sym: 'bessel_i', fill: [null, null, 1], take: 2 }],
+  ['besselJ', { sym: 'bessel_j', fill: [null, null] }],
+  ['besselK', { sym: 'bessel_k', fill: [null, null, 1], take: 2 }],
+  ['besselY', { sym: 'bessel_y', fill: [null, null] }],
+]);
+
+/** 这一趟真用到的 nmath 符号 —— 模块里只发**用到的**那几条 `(cabi …)`。 */
+const cabiUsed = new Set();
 
 /* ─── 类型（标准 IR 的类型描述，§1.2） ─────────────────────────────────── */
 
@@ -158,7 +219,8 @@ function typeOfExpr(x, types) {
       if (['<', '>', '<=', '>=', '==', '!=', '&', '&&', '|', '||'].includes(op)) return BOOL;
       if (ASSIGN_OPS.has(op)) return typeOfExpr(kids(x)[2], types);
       if (op === ':') return INT;
-      if (op === '/') return REAL;                  // R 的 `/` 一律是实数除
+      /* `/` 一律实数除；`^` 走 `R_pow`、`%%` / `%/%` 走那条 floor 的算法 —— 三者都回 double */
+      if (op === '/' || op === '^' || op === '**' || op === '%%' || op === '%/%') return REAL;
       return joinNum(typeOfExpr(kids(x)[1], types), typeOfExpr(kids(x)[2], types));
     }
     case 'bin-rev': return typeOfExpr(kids(x)[1], types);
@@ -171,6 +233,8 @@ function typeOfExpr(x, types) {
 function typeOfCall(x, types) {
   const fn = tag(kids(x)[0]) === 'sym' ? nameOf(kids(x)[0]) : null;
   const args = argsOf(x).map((a) => a.value).filter((v) => v !== null);
+  /* R 自己的 C 那一族回的都是 `double` —— 这是 nmath 的形状，不是我们的选择。 */
+  if (fn !== null && RMATH.has(fn)) return REAL;
   switch (fn) {
     case 'paste': case 'paste0': case 'as.character': return STR;
     case 'length': case 'nchar': case 'as.integer': return INT;
@@ -274,15 +338,85 @@ const tyArg = (type) => ({ kind: 'type', type });
 let tmpN = 0;
 const fresh = (p) => `r_${p}${tmpN++}`;
 
+/**
+ * 一格值变成 `double`（nmath 的每一格实参都是 f64）。
+ * 已经是实数的**不包 `toreal`** —— 包了照样对，但 `.sx` 里会多出一层
+ * `(toreal (real 0.5))` 这种明显的废话，而那种废话读的人会当成有意思的东西。
+ */
+const asReal = (e, ty) => {
+  if (e.kind === 'real') return e;
+  if (e.kind === 'int') return { kind: 'real', value: e.value };
+  if (ty !== undefined && ty.kind === 'real') return e;
+  return call1('toreal', e);
+};
+
+/**
+ * 转发到 R 自己的 C：`(ccall sym …)`。
+ *
+ * 摆位的规矩与 R 的形参一样：**位置实参从左往右填格子，没填到的格子取缺省值**。
+ * 于是 `dnorm(1)` → `dnorm4(1, 0, 1, 0)`、`dnorm(1, 2)` → `dnorm4(1, 2, 1, 0)`，
+ * 而 `pnorm(q, mean, sd, lower.tail)` 那第四格在 R 里**本来就是** `lower.tail` ——
+ * 按位置盖掉缺省值不是网开一面，是照 R 的形参表。
+ *
+ *   spec.fill —— 一格一个缺省值；`null` = 没有缺省值（R 那边必给）
+ *   spec.take —— R 那边最多许给几格位置实参（默认 = 格子数）。只有"R 的形参与 C 的形参
+ *                不是一一对应"的那几格要写它：`besselI(x, nu, expon.scaled)` 的第三格在
+ *                R 里是 TRUE/FALSE，在 C 里是 1/2 —— 按位置传过去就是静默答错，所以只收两格。
+ */
+function rmathCall(rname, spec, args, argTys) {
+  const need = spec.fill.filter((f) => f === null).length;
+  const take = spec.take ?? spec.fill.length;
+  if (args.length < need) {
+    throw new Error(`r->IR: ${rname}() 至少要 ${need} 格实参（给了 ${args.length}）`);
+  }
+  if (args.length > take) {
+    throw new Error(`r->IR: ${rname}() 这一批只接 ${take} 格位置实参（给了 ${args.length}）——`
+      + ` 再往后那几格在 ${spec.sym}() 那侧的口径与 R 的形参不是一一对应的，`
+      + '收下再忽略就是静默答错');
+  }
+  /* 签名从那份生成出来的头里查，查不到当场报（`rt/ffi.js` 会说清是名字错还是版本错）。
+     顺手核一遍元数：表里 `fill` 的长度必须等于 C 那边的形参个数 —— 这一格是**这张表与
+     那棵源码树之间的锁**（R 改了某个函数的元数，这儿就会报，而不是传错参数）。 */
+  const sig = rmathSig(spec.sym);
+  if (sig.params.length !== spec.fill.length) {
+    throw new Error(`r->IR: ${spec.sym}() 在 Rmath.h 里收 ${sig.params.length} 格，`
+      + `而这张表按 ${spec.fill.length} 格摆 —— RMATH 那一行与参考树走散了`);
+  }
+  cabiUsed.add(spec.sym);
+  const out = spec.fill.map((f, i) => {
+    const e = i < args.length ? args[i] : { kind: 'int', value: f };
+    /* `i32` 那几格是 R 的 `lower.tail` / `log` 旗子，按整数走；别的一律 double。 */
+    const ty = i < args.length ? argTys[i] : undefined;
+    return sig.params[i] === 'i32' ? e : asReal(e, ty);
+  });
+  return { kind: 'ccall', sym: spec.sym, args: out };
+}
+
+
 /** 下标从 1 起 → 从 0 起。字面量当场折掉（`x[1]` 出 `aget(x, 0)` 而不是 `1-1`）。 */
 function zeroBased(e) {
   if (e.kind === 'int') return { kind: 'int', value: e.value - 1 };
   return b('-', e, { kind: 'int', value: 1 });
 }
 
-/** 一格值变成串（串本来就是串，别的走 `tostr`）。 */
-const asStr = (x, types) => (typeOfExpr(x, types).kind === 'string'
-  ? exprOf(x, types) : call1('tostr', exprOf(x, types)));
+/**
+ * 一格值变成串。
+ *
+ * **实数走 `sgen(x, 7)`（`%.7g` 再去尾随零）** —— 这是 R 的 `cat` 对 double 的口径
+ * （`getOption("digits")` 默认 7）。原来这儿一律 `tostr`，于是 `cat(dnorm(1))` 印
+ * `0.24197072451914337` 而 R 印 `0.2419707` —— 差的不是精度，是"印几位"这条规矩。
+ *
+ * 明说还欠的一格：R 在**定点与科学记数之间按哪个短**挑（`scipen`），所以
+ * `cat(1e5)` 是 `1e+05` 而 `%.7g` 给 `100000`；`cat(123456789)` 是 `123456789` 而
+ * `%.7g` 给 `1.234568e+08`。那条挑法在 `src/main/format.c`（解释器那半边）里，
+ * 这一版没做 —— 量过：这两种形状要么整数、要么 ≥1e5，例子里都不在这一档。
+ */
+const asStr = (x, types) => {
+  const t = typeOfExpr(x, types);
+  if (t.kind === 'string') return exprOf(x, types);
+  if (t.kind === 'real') return call1('sgen', exprOf(x, types), { kind: 'int', value: 7 });
+  return call1('tostr', exprOf(x, types));
+};
 
 /** `x[…]` / `x[[…]]` 的读：按对象的类型分数组还是字典（见文件头第 5 条）。 */
 function indexRead(x, types) {
@@ -334,8 +468,27 @@ function exprOf(x, types, want) {
       /* `&&` / `||` 两边当条件看；`&` / `|` 在 R 里是**向量化**的那一对，标量上同解。 */
       if (op === '&&' || op === '&') return b('&&', condOf(l, types), condOf(r, types));
       if (op === '||' || op === '|') return b('||', condOf(l, types), condOf(r, types));
-      if (op === '%%') return b('%', exprOf(l, types), exprOf(r, types));
-      if (op === '%/%') return b('/', exprOf(l, types), exprOf(r, types));
+      /* `^` 交给 R 自己的 `R_pow`（`src/nmath/mlutils.c`）—— 它对整数指数走反复平方、
+         对 `1^x` 与 `x^0` 有明文特例，而 `pow()` 在这几格上与 R 不一样。 */
+      if (op === '^' || op === '**') {
+        cabiUsed.add('R_pow');
+        rmathSig('R_pow');
+        return {
+          kind: 'ccall',
+          sym: 'R_pow',
+          args: [asReal(exprOf(l, types), typeOfExpr(l, types)), asReal(exprOf(r, types), typeOfExpr(r, types))],
+        };
+      }
+      /* `%%` 与 `%/%`：**照 R 文档的定义算**（`x - floor(x/y)*y` / `floor(x/y)`），
+         于是结果随**除数**取号（`-7 %% 3` 是 2，C 的 `%` 给 -1）。
+         这两格 nmath 里没有（R 的 `myfmod` 在解释器那半边 `src/main/arith.c` 里），
+         所以是我们按它公开的口径写的 —— 不是抄过来的，也不是 C 的口径。 */
+      if (op === '%%' || op === '%/%') {
+        const x = asReal(exprOf(l, types), typeOfExpr(l, types));
+        const y = asReal(exprOf(r, types), typeOfExpr(r, types));
+        const q = call1('rmath', { kind: 'strlit', value: 'floor' }, b('/', x, y));
+        return op === '%/%' ? q : b('-', x, b('*', q, y));
+      }
       if (op === ':') throw new Error('r->IR: `a:b` 只在 `for (v in a:b)` 那一格接了（造向量还没接）');
       if (op === '$' || op === '@' || op === '::' || op === ':::' || op === '~' || op === '?') {
         throw new Error(`r->IR: \`${op}\` 还没接`);
@@ -372,6 +525,12 @@ function callOf(x, types, extra, want) {
   const all = extra === undefined ? args : [null, ...args];
   const ev = (i) => (all[i] === null ? extra : exprOf(all[i], types));
   const n = all.length;
+
+  /* **R 自己的 C 先问一遍**（摆在 BUILTINS 之前）：这一族的答案不由我们给。 */
+  if (fn !== null && RMATH.has(fn)) {
+    return rmathCall(fn, RMATH.get(fn), all.map((a, i) => ev(i)),
+      all.map((a) => (a === null ? REAL : typeOfExpr(a, types))));
+  }
 
   if (fn !== null && BUILTINS.has(fn)) {
     switch (fn) {
@@ -438,11 +597,11 @@ function callOf(x, types, extra, want) {
       case 'as.integer': return call1('toint', ev(0));
       case 'as.numeric': return call1('toreal', ev(0));
       case 'as.character': return call1('tostr', ev(0));
-      case 'sqrt': return call1('rmath', { kind: 'string', value: 'sqrt' }, ev(0));
+      case 'sqrt': return call1('rmath', { kind: 'strlit', value: 'sqrt' }, ev(0));
       case 'abs': case 'floor': {
         const t = all[0] === null ? INT : typeOfExpr(all[0], types);
         if (fn === 'floor' && t.kind !== 'real') return ev(0);
-        if (t.kind === 'real') return call1('rmath', { kind: 'string', value: fn }, ev(0));
+        if (t.kind === 'real') return call1('rmath', { kind: 'strlit', value: fn }, ev(0));
         /* 整数上的 `abs`：方言里没有这一格算子，落成一格三元 */
         return { kind: 'ternary', cond: b('<', ev(0), { kind: 'int', value: 0 }), then: { kind: 'unop', op: '-', operand: ev(0) }, else_: ev(0) };
       }
@@ -748,6 +907,7 @@ function returnType(body, types) {
 export function rToIR(tree) {
   if (tag(tree) !== 'program') throw new Error('r->IR: 这不是 (program …)');
   tmpN = 0;
+  cabiUsed.clear();
   const items = kids(tree);
   const fns = [];
   const rest = [];
@@ -769,7 +929,19 @@ export function rToIR(tree) {
   const lets = [];
   for (const [n, t] of types) lets.push({ kind: 'let', name: n, type: t, init: zeroInit(t) });
   decls.push({ kind: 'main', body: [...lets, ...stmts] });
-  return { kind: 'module', decls };
+
+  /* **自动 FFI 的那几行**（模块头上）。只发这一趟真用到的符号 —— 一份 271 条声明的头
+     全发出来的话，`.sx` 会被 271 行 `(cabi …)` 淹掉，而没用到的那些还要求链接期真有它们。
+     次序照名字排：出来的 `.sx` 要能进快照，不能随 Map 的插入序变。 */
+  const ffi = [];
+  if (cabiUsed.size > 0) {
+    ffi.push({ kind: 'lib', name: RMATH_LIB });
+    for (const sym of [...cabiUsed].sort()) {
+      const sig = rmathSig(sym);
+      ffi.push({ kind: 'cabi', sym, ret: sig.ret, params: sig.params });
+    }
+  }
+  return { kind: 'module', decls: [...ffi, ...decls] };
 }
 
 

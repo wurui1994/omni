@@ -44,6 +44,16 @@ export function lowerExpr(expr, ctx) {
     /* 类型当实参那一格（`(anew (arr int) N)` 的第一格、`(dnew …)`、`(new T)`）。 */
     case 'type': return typeToSx(expr.type, ctx.hooks);
     /**
+     * **编译期的串当实参那一格**（`{ kind: 'strlit', value: 'floor' }` → `"floor"`）。
+     *
+     * 与 `{ kind: 'string' }` 差在哪：那一格是**一个值**（运行期的串对象），这一格是
+     * 算子自己的一个**记号**。方言里有几格算子的第一个实参是编译期的名字而不是值 ——
+     * `(rmath "sqrt" A)` 就是（`sexpr/lower.js` 明说"第一项要是函数名字符串"）。
+     * 发成 `(str "sqrt")` 的话那一层当场报，而报出来的话离"我发错了一层"很远。
+     * 与 `case 'type'` 同一条道理：实参位上不是所有东西都是值。
+     */
+    case 'strlit': return JSON.stringify(String(expr.value));
+    /**
      * **函数值那两格**（方言里本来就有：`(fnref f)` 拿一格函数、`(callfn v …)` 通过值调它）。
      * 提供者不止一门：Scheme 的 lambda、V 的 `fn (x int) int { … }`、go 的函数值 ——
      * 都是"提升成顶层函数 + 拿它的名字"，所以这两格摆在公共这一份里，不在某一门的钩子里。
