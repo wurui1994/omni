@@ -132,7 +132,8 @@ const FN_DEPS = new Map([
   ['r_na', []],
   ['r_is_na', []],
   ['r_is_nan', []],
-  ['r_num_str', ['r_is_na', 'r_is_nan']],
+  ['r_num_str', ['r_is_na', 'r_is_nan', 'r_sci']],
+  ['r_sci', []],
   ['r_cat_vec', ['r_num_str']],
   ['r_cat_lgl', ['r_is_na']],
   ['r_sum', []],
@@ -155,6 +156,10 @@ const FN_DEPS = new Map([
   ['r_lgl_str', ['r_is_na']],
   ['r_any', ['r_is_na', 'r_na']],
   ['r_all', ['r_is_na', 'r_na']],
+  /* `print` 那一族：向量共用一套宽度，所以两个印法都要 `r_sci` 与逐格排版那一格。 */
+  ['r_num_fmt', ['r_is_na', 'r_is_nan']],
+  ['r_print_num', ['r_sci', 'r_is_na', 'r_is_nan', 'r_num_fmt']],
+  ['r_print_lgl', ['r_is_na', 'r_lgl_str']],
   ...[...CMP_FNS.values()].map((n) => [n, ['r_is_na', 'r_na']]),
 ]);
 
@@ -343,6 +348,7 @@ const BUILTINS = new Set([
   'cat', 'paste', 'paste0', 'c', 'list', 'length', 'nchar', 'return', 'is.null',
   'as.integer', 'as.numeric', 'as.character', 'abs', 'seq_len', 'is.na', 'is.nan',
   'sum', 'mean', 'max', 'min', 'rev', 'seq_along', 'which', 'any', 'all',
+  'print', 'invisible',
   /* libm 那一族：R 自己这几个也是直接调 libm（不在 nmath 里），所以落方言的 `rmath`。
      一格实参、回 double —— `log(x, base)` 那种两格的**当场报**（R 那一档是 `log(x)/log(b)`，
      而"替它算"与"照它算"是两件事）。 */
@@ -396,9 +402,13 @@ const joinNum = (a, b) => (a.kind === 'real' || b.kind === 'real' ? REAL : INT);
 function typeOfExpr(x, types) {
   switch (tag(x)) {
     case 'num': {
-      const v = numLit(leaf(kids(x)[0]));
+      const txt = String(leaf(kids(x)[0]));
+      const v = numLit(txt);
       if (v.kind === 'bool') return BOOL;
-      /* `NA` 走生成出来的 `r_na()`、`NaN` / `Inf` 走 ccall —— 三格回的都是 double */
+      /* **裸 `NA` 在 R 里是逻辑的**（`typeof(NA)` 是 "logical"）—— 所以
+         `c(TRUE, FALSE, NA)` 是逻辑向量、印 `TRUE FALSE NA`。`NA_real_` 才是 double。 */
+      if (txt === 'NA') return RLGL1;
+      /* `NA_real_` 走生成出来的 `r_na()`、`NaN` / `Inf` 走 ccall —— 三格回的都是 double */
       return v.kind === 'real' || v.kind === 'ccall' || v.kind === 'call' ? REAL : INT;
     }
     case 'str': return STR;
@@ -505,12 +515,14 @@ function typeOfCall(x, types) {
     case 'sinh': case 'cosh': case 'tanh':
       return args.length > 0 && isVecTy(typeOfExpr(args[0], types)) ? RVEC : REAL;
     case 'abs': return args.length === 0 ? INT : typeOfExpr(args[0], types);
+    /* `invisible(x)` 的类型就是 x 的（差别只在顶层要不要印）。 */
+    case 'invisible': return args.length === 0 ? INT : typeOfExpr(args[0], types);
     case 'return': return args.length === 0 ? INT : typeOfExpr(args[0], types);
     /* `c(TRUE, FALSE)` 在 R 里是**逻辑**向量（印 `TRUE` / `FALSE`），`c(1, 2)` 是数值向量。
        混着写（`c(TRUE, 1)`）R 会往数值那边收，所以"每一格都是逻辑"才算逻辑。 */
     case 'c': return args.length > 0 && args.every((a) => {
       const t = typeOfExpr(a, types);
-      return t.kind === 'bool' || isLglTy(t);
+      return t.kind === 'bool' || isLgl1(t) || isLglTy(t);
     }) ? RLGL : RVEC;
     case 'list': return dictOf(INT);
     default: return INT;
@@ -1311,6 +1323,14 @@ function callOf(x, types, extra, want) {
       }
       case 'cat':
         throw new Error('r->IR: `cat()` 只能摆在语句位上（这儿在表达式里）');
+      case 'print':
+        throw new Error('r->IR: `print()` 只能摆在语句位上（R 里它回的是"不可见的那格值"，'
+          + ' 而这一档没有"可见性"这一层）');
+      /* `invisible(x)` 就是 x 本身 —— 差别只在"顶层要不要印"，而那一问在 `topStmtOf` 里。 */
+      case 'invisible': {
+        if (n !== 1) throw new Error(`r->IR: invisible() 要正好一格实参（给了 ${n}）`);
+        return ev(0);
+      }
       case 'seq_len':
         throw new Error('r->IR: seq_len() 只在 `for (v in seq_len(n))` 那一格接了');
       default:
@@ -1319,6 +1339,70 @@ function callOf(x, types, extra, want) {
   }
   if (fn === null) throw new Error('r->IR: 只接"名字 + 实参"那种调用（函数值还没接）');
   return { kind: 'call', fn: { kind: 'name', name: mangle(fn) }, args: all.map((a, i) => ev(i)) };
+}
+
+/**
+ * `print(x)` / **顶层自动印** → 一串写。
+ *
+ * 与 `cat` 的差别是 R 自己的：`cat` 把值连成一串文本、不带换行也不带标号；
+ * `print` 印的是"这个对象长什么样"——`[1]` 那个标号、一整条向量共用的宽度、80 列换行、
+ * 串带引号。向量那一档在 `printFnDecl` 里（要一整趟取极值）；标量这一档宽度就是它自己
+ * 那串的长度，所以直接写。
+ */
+function printValStmt(node, types) {
+  const t = typeOfExpr(node, types);
+  const wr = (s) => ({ kind: 'builtin-stmt', name: 'write', args: [s] });
+  if (isVecTy(t)) {
+    return {
+      kind: 'expr-stmt',
+      expr: lglCall(isLglTy(t) ? 'r_print_lgl' : 'r_print_num', exprOf(node, types)),
+    };
+  }
+  if (t.kind === 'map') throw new Error('r->IR: print() 印一格 list 还没接（那要 `$名字` 那一层）');
+  /* 串在 `print` 里是**带引号**的（`cat` 不带）。转义没做 —— 明写在 SPEC。 */
+  const s = t.kind === 'string'
+    ? b('+', b('+', { kind: 'string', value: '"' }, exprOf(node, types)), { kind: 'string', value: '"' })
+    : asStr(node, types);
+  return { kind: 'block', stmts: [wr({ kind: 'string', value: '[1] ' }), wr(s), wr({ kind: 'string', value: '\n' })] };
+}
+
+/** `print(…)` 这一格调用 → 语句。 */
+function printOf(x, types) {
+  const args = posArgs(x);
+  if (args.length !== 1) {
+    throw new Error(`r->IR: print() 只接一格实参（给了 ${args.length}）—— `
+      + '`digits=` / `quote=` 那几个命名实参没接');
+  }
+  return printValStmt(args[0], types);
+}
+
+/**
+ * **顶层那一句要不要自动印。**
+ *
+ * R 在顶层（REPL 与 `Rscript`）对**可见的**值自动调 `print`：`x` 单独一行会印
+ * `[1] 3`。赋值、`for` / `while`、`cat()`、`invisible()` 都是不可见的。
+ *
+ * 这儿只对**认得出类型**的那几种自动印：字面量、名字、下标、一元/二元算式、以及
+ * `BUILTINS` 里那些回值类型明确的内建。**用户函数的调用刻意不印** —— 这一档不跟踪
+ * 用户函数的回值类型（`f <- function(x) cat(x)` 是 void），照 int 猜着印会把
+ * "本来好用的"那一格弄成编译期错误。明写在 SPEC。
+ */
+const NO_AUTOPRINT = new Set(['cat', 'print', 'invisible', 'return', 'seq_len']);
+function isAutoPrint(k) {
+  const t = tag(k);
+  if (t === 'bin') return !isAssign(k);
+  if (t === 'call') {
+    const f = tag(kids(k)[0]) === 'sym' ? nameOf(kids(k)[0]) : null;
+    return f !== null && BUILTINS.has(f) && !NO_AUTOPRINT.has(f);
+  }
+  return ['sym', 'num', 'str', 'un', 'sub1', 'sub2', 'pipe'].includes(t);
+}
+
+/** 顶层的一句。与函数体里那一句的差别只有"自动印"这一条。 */
+function topStmtOf(k, types) {
+  if (tag(k) === 'paren') return topStmtOf(kids(k)[0], types);
+  if (isAutoPrint(k)) return printValStmt(k, types);
+  return stmtOf(k, types);
 }
 
 /**
@@ -1479,6 +1563,7 @@ function stmtOf(x, types) {
       const fn = tag(fnNode) === 'sym' ? nameOf(fnNode) : null;
       /* `cat()` 与 `return()` 在 R 里都是**调用**，落到的却是语句（见文件头第 2 条）。 */
       if (fn === 'cat') return catOf(x, types);
+      if (fn === 'print') return printOf(x, types);
       if (fn === 'return') {
         const vs = posArgs(x);
         return { kind: 'return', values: vs.length === 0 ? [] : [exprOf(vs[0], types)] };
@@ -1619,38 +1704,23 @@ function numStrDecl() {
 }
 
 /**
- * R 的"定点还是科学记数"那条挑法 —— **照 `src/main/format.c` 抄**，不是 `%.7g`。
+ * `scientific()` 那一半（`src/main/format.c`）—— 一格 double 要印成什么形状，
+ * 三个数就够说：**符号**、**小数点左边几位**（`left`，已经把 `roundingwidens` 折进去了）、
+ * **有效数字几位**（`nsig`）。写进 `p` 的 0 / 1 / 2 三格。
  *
- * 从前这儿是 `(sgen x 7)`，也就是 C 的 `%.7g`。那一格是**按指数**挑的（`-4 <= X < P`
- * 才用定点），而 R 是**按哪个短**挑的（`formatReal` 里那句 `if (wF <= *w + scipen)`）。
- * 两条规矩在 `1e5` 上就分道：`%g` 印 `100000`（六位，指数 5 < 7 所以走定点），
- * R 印 `1e+05` —— 它算出定点要 6 格、科学记数要 5 格，于是挑短的那个。
+ * 为什么是"写进指针"而不是回一格值：`print` 要**一整条向量共用一套宽度**
+ * （R 的 `formatReal` 就是先把每格的这三个数取极值、再挑一次），所以这一半必须能
+ * 单独调、而且一趟给三个数。方言里函数只回一格值 —— 那就照 `r_na` 那条先例走指针。
  *
- * 所以这一段是两步，与那份 C 一一对应：
+ * 两处口径差别（量过 132 个值逐字节对 `Rscript`，含 `.Machine$double.xmax` 与 5e-324）：
  *
- *   1. `scientific()`：把 |x| 缩到 `[10^6, 10^7)`、就近取偶舍成整数 `alpha`，
- *      数掉几个尾随零就得到 `nsig`（有效数字位数），`kpower` 是十的幂次。
- *      `roundingwidens` 那一格是 R 自己的补丁：`9996` 按三位科学记数是 `1e+04`
- *      （宽 5）但定点是 `9996`（宽 4）—— 舍入让科学记数那一支**变宽**，
- *      所以左边的位数要先减回去，不然会挑错。
- *   2. `formatReal()`：算定点宽 `wF` 与科学记数宽 `w`，`wF <= w` 用定点
- *      （`scipen` 是 0，平手偏定点），位数分别是 `rgt` 与 `nsig-1`。
- *
- * 落地的两处口径差别，都量过（132 个值逐字节对 `Rscript`，含 `.Machine$double.xmax`
- * 与 5e-324）：
- *
- *   * 那份 C 在 macOS 上走 **long double** 那一支（80 位）缩放，这儿只有 double。
- *     缩放因子 `10^kp` 在 |kp| <= 22 上是精确值，所以那两支同结果；再往外 R 自己
- *     也退回 `pow()`。量的那 132 格没有一处分叉。
+ *   * 那份 C 在 macOS 上走 **long double**（80 位）缩放，这儿只有 double。缩放因子
+ *     `10^kp` 在 |kp| <= 22 上是精确值，所以两支同结果；再往外 R 自己也退回 `pow()`。
  *   * `nearbyintl` 是**就近取偶**，方言里没有这一格（`rmath "round"` 是 C 的离零舍入），
- *     所以这儿按 `floor` + 小数部分手写一遍 —— `1000000.5` 就压在这一格上：
- *     取偶给 `1000000`（于是 `nsig` 是 1、印 `1e+06`），离零舍入会给 `1000001`
- *     （于是 `nsig` 是 7、印 `1000001`）。
- *
- * 排版本身不自己写：`(sfix x n)` / `(ssci x n)` 就是 C 的 `%.nf` / `%.ne`
- * （两条腿上都是按位算的十进制，就近取偶、指数至少两位），正是 `EncodeReal0` 用的那两格。
+ *     所以按 `floor` + 小数部分手写一遍 —— `1000000.5` 就压在这儿：取偶给 `1000000`
+ *     （`nsig` 是 1、印 `1e+06`），离零舍入会给 `1000001`（`nsig` 是 7、印 `1000001`）。
  */
-function numFmtStmts() {
+function sciFnDecl() {
   const DIG = 7;                 /* R_print.digits（`options(digits=)` 的默认值） */
   const KP_MAX = 22;             /* 那张幂次表在 double 上的上界（`format.c` 的 tbl） */
   const nm = (name) => ({ kind: 'name', name });
@@ -1663,77 +1733,349 @@ function numFmtStmts() {
   const set = (name, value) => ({ kind: 'assign', target: nm(name), value });
   const iff = (cond, then, else_ = null) => ({ kind: 'if', cond, then, else_ });
   const x = nm('x');
-  const [r, kp, rp, fl, fr, al, nsig, kpw, rgtT, fuzz, left, sleft, rgt, wf, ee, dd, w]
-    = ['r', 'kp', 'rp', 'fl', 'fr', 'al', 'nsig', 'kpw', 'rgt_t', 'fuzz', 'left', 'sleft',
-      'rgt', 'wf', 'ee', 'dd', 'w'].map(nm);
+  const slot = (i) => ({ kind: 'deref', expr: call1('padd', nm('p'), I(i)) });
+  const put = (i, v) => ({ kind: 'assign', target: slot(i), value: call1('toreal', v) });
+  const [r, kp, rp, fl, fr, al, nsig, kpw, rgtT, fuzz, left]
+    = ['r', 'kp', 'rp', 'fl', 'fr', 'al', 'nsig', 'kpw', 'rgt_t', 'fuzz', 'left'].map(nm);
+  return {
+    kind: 'fn',
+    name: 'r_sci',
+    params: [{ name: 'x', type: REAL }, { name: 'p', type: PTR_REAL }],
+    ret: { kind: 'void' },
+    body: [
+      /* 零那一格：`kpower = 0, nsig = 1`（`format.c` 开头那一支） */
+      iff(b('==', x, R(0)), [put(0, I(0)), put(1, I(1)), put(2, I(1)), { kind: 'return', values: [] }]),
+      letI('neg', I(0)),
+      iff(b('<', x, R(0)), [set('neg', I(1))]),
+      letR('r', rm('fabs', x)),
+      letI('kp', b('-', call1('toint', rm('floor', rm('log10', r))), I(DIG - 1))),
+      /* |x| = alpha * 10^kpower，把 alpha 缩到 [10^(DIG-1), 10^DIG) */
+      letR('rp', r),
+      iff(b('&&', b('>=', kp, I(-KP_MAX)), b('<=', kp, I(KP_MAX))),
+        [iff(b('>=', kp, I(0)),
+          [set('rp', b('/', r, p10(kp)))],
+          [set('rp', b('*', r, p10(b('-', I(0), kp))))])],
+        /* 1e-308 往下只有渐进下溢能表示，所以先乘 1e+303 挪进正常数再缩（`format.c` 原话） */
+        [iff(b('<=', kp, I(-308)),
+          [set('rp', b('/', b('*', r, R(1e303)), p10(b('+', kp, I(303)))))],
+          [set('rp', b('/', r, p10(kp)))])]),
+      iff(b('<', rp, R(Math.pow(10, DIG - 1))), [set('rp', b('*', rp, R(10))), set('kp', b('-', kp, I(1)))]),
+      /* 就近取偶（`nearbyintl`）—— rp 在这儿一定是正的，所以只按 floor 那一侧写 */
+      letR('fl', rm('floor', rp)),
+      letR('fr', b('-', rp, fl)),
+      letR('al', fl),
+      iff(b('>', fr, R(0.5)),
+        [set('al', b('+', fl, R(1)))],
+        [iff(b('==', fr, R(0.5)),
+          [iff(b('!=', rm('fmod', fl, R(2)), R(0)), [set('al', b('+', fl, R(1)))])])]),
+      /* 尾随零数掉几个，就少几位有效数字 */
+      letI('nsig', I(DIG)),
+      {
+        kind: 'for',
+        init: letI('j', I(0)),
+        cond: b('<', nm('j'), I(DIG)),
+        post: set('j', b('+', nm('j'), I(1))),
+        body: [
+          set('al', b('/', al, R(10))),
+          iff(b('==', al, rm('floor', al)),
+            [set('nsig', b('-', nsig, I(1)))],
+            [{ kind: 'break', label: null }]),
+        ],
+      },
+      iff(b('==', nsig, I(0)), [set('nsig', I(1)), set('kp', b('+', kp, I(1)))]),
+      letI('kpw', b('+', kp, I(DIG - 1))),
+      /* roundingwidens：科学记数那一支会把 x 舍到 10^kpower 上去（9996 按三位是 `1e+04`，
+         反而比定点的 `9996` 宽），而定点不会 —— 那时左边的位数按舍入前算 */
+      letI('rgt_t', b('-', I(DIG), kpw)),
+      iff(b('<', rgtT, I(0)), [set('rgt_t', I(0))]),
+      iff(b('>', rgtT, I(KP_MAX)), [set('rgt_t', I(KP_MAX))]),
+      letR('fuzz', b('/', R(0.5), p10(rgtT))),
+      letI('left', b('+', kpw, I(1))),
+      iff(b('&&', b('&&', b('>', kpw, I(0)), b('<=', kpw, I(KP_MAX))),
+        b('<', r, b('-', p10(kpw), fuzz))), [set('left', b('-', left, I(1)))]),
+      put(0, nm('neg')),
+      put(1, left),
+      put(2, nsig),
+    ],
+  };
+}
+
+/**
+ * `formatReal()` 那一半：手里有了一条向量（或一格数）的 `neg` / `left` 的极值 /
+ * `nsig` 的极值，挑**定点还是科学记数**、各要几格宽几位小数。
+ *
+ * 回的是一串语句，声明 `wf` / `ee` / `dd` / `w` 四格 int 并且可能改 `rgt` 与 `mxsl` ——
+ * 挑中定点时 `ee` 是 0（照 `EncodeReal0` 的口径：`e` 非零才用 `%e`）、`dd` 是小数位数。
+ * 标量那一档 `mxl` 与 `mnl` 都是它自己的 `left`。
+ */
+function fmtPickStmts(v) {
+  const nm = (name) => ({ kind: 'name', name });
+  const I = (value) => ({ kind: 'int', value });
+  const set = (name, value) => ({ kind: 'assign', target: nm(name), value });
+  const iff = (cond, then, else_ = null) => ({ kind: 'if', cond, then, else_ });
+  const [neg, mxl, mnl, mxsl, rgt, mxns] = [v.neg, v.mxl, v.mnl, v.mxsl, v.rgt, v.mxns].map(nm);
   return [
-    /* 零那一格：`kpower=0, nsig=1` 一路走下来就是 `%1.0f`，直接给答案省一串算 */
-    iff(b('==', x, R(0)), [{ kind: 'return', values: [{ kind: 'string', value: '0' }] }]),
-    letI('neg', I(0)),
-    iff(b('<', x, R(0)), [set('neg', I(1))]),
-    letR('r', rm('fabs', x)),
-    letI('kp', b('-', call1('toint', rm('floor', rm('log10', r))), I(DIG - 1))),
-    /* |x| = alpha * 10^kpower，把 alpha 缩到 [10^(DIG-1), 10^DIG) */
-    letR('rp', r),
-    iff(b('&&', b('>=', kp, I(-KP_MAX)), b('<=', kp, I(KP_MAX))),
-      [iff(b('>=', kp, I(0)),
-        [set('rp', b('/', r, p10(kp)))],
-        [set('rp', b('*', r, p10(b('-', I(0), kp))))])],
-      /* 1e-308 往下只有渐进下溢能表示，所以先乘 1e+303 挪进正常数再缩（`format.c` 原话） */
-      [iff(b('<=', kp, I(-308)),
-        [set('rp', b('/', b('*', r, R(1e303)), p10(b('+', kp, I(303)))))],
-        [set('rp', b('/', r, p10(kp)))])]),
-    iff(b('<', rp, R(Math.pow(10, DIG - 1))), [set('rp', b('*', rp, R(10))), set('kp', b('-', kp, I(1)))]),
-    /* 就近取偶（`nearbyintl`）—— rp 在这儿一定是正的，所以只按 floor 那一侧写 */
-    letR('fl', rm('floor', rp)),
-    letR('fr', b('-', rp, fl)),
-    letR('al', fl),
-    iff(b('>', fr, R(0.5)),
-      [set('al', b('+', fl, R(1)))],
-      [iff(b('==', fr, R(0.5)),
-        [iff(b('!=', rm('fmod', fl, R(2)), R(0)), [set('al', b('+', fl, R(1)))])])]),
-    /* 尾随零数掉几个，就少几位有效数字 */
-    letI('nsig', I(DIG)),
+    /* 全在 0 与 1 之间时左边只有那一位 `0`（`%#w.dg` 的前导零） */
+    iff(b('<', mxl, I(0)), [set(v.mxsl, b('+', I(1), neg))]),
+    iff(b('<', rgt, I(0)), [set(v.rgt, I(0))]),
+    { kind: 'let', name: v.wf, type: INT, init: b('+', mxsl, rgt) },
+    iff(b('!=', rgt, I(0)), [set(v.wf, b('+', nm(v.wf), I(1)))]),
+    /* 科学记数那一支：符号 + 首位 + 点 + nsig-1 位 + `e+XX`（指数三位时多一格） */
+    { kind: 'let', name: v.ee, type: INT, init: I(1) },
+    iff(b('||', b('>', mxl, I(100)), b('<=', mnl, I(-99))), [set(v.ee, I(2))]),
+    { kind: 'let', name: v.dd, type: INT, init: b('-', mxns, I(1)) },
     {
-      kind: 'for',
-      init: letI('j', I(0)),
-      cond: b('<', nm('j'), I(DIG)),
-      post: set('j', b('+', nm('j'), I(1))),
+      kind: 'let',
+      name: v.w,
+      type: INT,
+      init: b('+', b('+', b('+', neg, nm(v.dd)), I(4)), nm(v.ee)),
+    },
+    iff(b('>', nm(v.dd), I(0)), [set(v.w, b('+', nm(v.w), I(1)))]),
+    /* `scipen` 是 0，平手偏定点 —— 这正是 `wF <= *w + R_print.scipen` 那一句 */
+    iff(b('<=', nm(v.wf), nm(v.w)),
+      [set(v.ee, I(0)), set(v.dd, rgt), set(v.w, nm(v.wf))]),
+  ];
+}
+
+/**
+ * R 的"定点还是科学记数"那条挑法 —— **照 `src/main/format.c` 抄**，不是 `%.7g`。
+ *
+ * 从前这儿是 `(sgen x 7)`，也就是 C 的 `%.7g`。那一格是**按指数**挑的（`-4 <= X < P`
+ * 才用定点），而 R 是**按哪个短**挑的（`formatReal` 里那句 `if (wF <= *w + scipen)`）。
+ * 两条规矩在 `1e5` 上就分道：`%g` 印 `100000`（六位，指数 5 < 7 所以走定点），
+ * R 印 `1e+05` —— 它算出定点要 6 格、科学记数要 5 格，于是挑短的那个。
+ *
+ * 两步分别在 `sciFnDecl()`（那格数的三个数）与 `fmtPickStmts()`（挑与算宽）。
+ * 排版本身不自己写：`(sfix x n)` / `(ssci x n)` 就是 C 的 `%.nf` / `%.ne`
+ * （两条腿上都是按位算的十进制，就近取偶、指数至少两位），正是 `EncodeReal0` 用的那两格。
+ */
+function numFmtStmts() {
+  const nm = (name) => ({ kind: 'name', name });
+  const I = (value) => ({ kind: 'int', value });
+  const x = nm('x');
+  const slot = (i) => call1('toint', { kind: 'deref', expr: call1('padd', nm('p'), I(i)) });
+  const V = {
+    neg: 'neg', mxl: 'left', mnl: 'left', mxsl: 'sleft', rgt: 'rgt', mxns: 'nsig',
+    wf: 'wf', ee: 'ee', dd: 'dd', w: 'w',
+  };
+  return [
+    { kind: 'let', name: 'p', type: PTR_REAL, init: call1('pnew', tyArg(PTR_REAL), I(3)) },
+    { kind: 'expr-stmt', expr: lglCall('r_sci', x, nm('p')) },
+    { kind: 'let', name: 'neg', type: INT, init: slot(0) },
+    { kind: 'let', name: 'left', type: INT, init: slot(1) },
+    { kind: 'let', name: 'nsig', type: INT, init: slot(2) },
+    /* 一格数的极值就是它自己：`mxl = mnl = left`、`mxns = nsig` */
+    { kind: 'let', name: 'sleft', type: INT, init: b('+', nm('neg'), I(1)) },
+    {
+      kind: 'if',
+      cond: b('>', nm('left'), I(0)),
+      then: [{ kind: 'assign', target: nm('sleft'), value: b('+', nm('neg'), nm('left')) }],
+      else_: null,
+    },
+    { kind: 'let', name: 'rgt', type: INT, init: b('-', nm('nsig'), nm('left')) },
+    ...fmtPickStmts(V),
+    {
+      kind: 'if',
+      cond: b('==', nm('ee'), I(0)),
+      then: [{ kind: 'return', values: [call1('sfix', x, nm('dd'))] }],
+      else_: null,
+    },
+    { kind: 'return', values: [call1('ssci', x, nm('dd'))] },
+  ];
+}
+
+/**
+ * `print()` 与**顶层自动印**那一族生成出来的函数。
+ *
+ * R 印一条向量不是"每格各自印"：它先把整条向量的宽度取极值、**挑一次**定点还是科学记数
+ * （`formatReal`），然后每格按同一套 `(w, d, e)` 右对齐排版，行首带 `[k]` 标号、
+ * 到 80 列换行（`printVector` / `printRealVector`）。所以：
+ *
+ *   print(c(1.5, 22.25, 333))   [1]   1.50  22.25 333.00     ← 共用 6 格宽、2 位小数
+ *   print(c(0.001, 1000))       [1] 1e-03 1e+03              ← 定点要 8 格、科学记数 5 格
+ *   print(1:25)                  [1]  1  2  3 … 25           ← 标号宽按最后一格算（`[25]`）
+ *
+ * 标号那一格也是对齐的：宽度按**最后一个标号**算，所以 25 格的向量行首是 ` [1]`（前面一格空）。
+ */
+function printFnDecl(name) {
+  const nm = (n) => ({ kind: 'name', name: n });
+  const I = (v) => ({ kind: 'int', value: v });
+  const R = (v) => ({ kind: 'real', value: v });
+  const S = (v) => ({ kind: 'string', value: v });
+  const rm = (f, ...a) => call1('rmath', { kind: 'strlit', value: f }, ...a);
+  const letI = (n, init) => ({ kind: 'let', name: n, type: INT, init });
+  const letS = (n, init) => ({ kind: 'let', name: n, type: STR, init });
+  const letBo = (n, init) => ({ kind: 'let', name: n, type: BOOL, init });
+  const set = (n, v) => ({ kind: 'assign', target: nm(n), value: v });
+  const iff = (cond, then, else_ = null) => ({ kind: 'if', cond, then, else_ });
+  const wr = (s) => ({ kind: 'builtin-stmt', name: 'write', args: [s] });
+  const isNa = (e) => ({ kind: 'call', fn: { kind: 'name', name: useFn('r_is_na') }, args: [e] });
+  const isNan = (e) => ({ kind: 'call', fn: { kind: 'name', name: useFn('r_is_nan') }, args: [e] });
+  const x = nm('x');
+  const v = nm('v');
+  const i = nm('i');
+  const j = nm('j');
+  const ret = (e) => ({ kind: 'return', values: [e] });
+
+  if (name === 'r_num_fmt') {
+    /* 一格元素按定好的 `(d, e)` 排版。三处非有限值照 `EncodeReal0`：`NA` / `NaN` / `±Inf`。 */
+    cabiUsed.add('omni_r_is_infinite');
+    rmathSig('omni_r_is_infinite');
+    const inf = b('!=', { kind: 'ccall', sym: 'omni_r_is_infinite', args: [x] }, I(0));
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'x', type: REAL }, { name: 'd', type: INT }, { name: 'e', type: INT }],
+      ret: STR,
       body: [
-        set('al', b('/', al, R(10))),
-        iff(b('==', al, rm('floor', al)),
-          [set('nsig', b('-', nsig, I(1)))],
-          [{ kind: 'break', label: null }]),
+        iff(isNa(x), [iff(isNan(x), [ret(S('NaN'))]), ret(S('NA'))]),
+        iff(inf, [iff(b('>', x, R(0)), [ret(S('Inf'))]), ret(S('-Inf'))]),
+        iff(b('==', nm('e'), I(0)), [ret(call1('sfix', x, nm('d')))]),
+        ret(call1('ssci', x, nm('d'))),
+      ],
+    };
+  }
+
+  /* 标号 + 换行那一圈（两个印法共用）。`elem` 给"第 j 格的文本"。 */
+  const pad = (s, w) => ({
+    kind: 'ternary',
+    cond: b('<', call1('slen', s), w),
+    then: call1('srep', S(' '), b('-', w, call1('slen', s))),
+    else_: S(''),
+  });
+  const wrapStmts = (elem) => [
+    letS('lab', b('+', b('+', S('['), call1('tostr', nm('n'))), S(']'))),
+    letI('lw', call1('slen', nm('lab'))),
+    /* 一行几格：`(80 - 标号宽) / (每格宽 + 1)`。**按实数算再取整** —— 方言里两格 int
+       相除是不是整除这一层不打包票，而这儿要的就是向下取整。 */
+    letI('per', call1('toint', rm('floor', b('/',
+      call1('toreal', b('-', I(80), nm('lw'))), call1('toreal', b('+', nm('w'), I(1))))))),
+    iff(b('<', nm('per'), I(1)), [set('per', I(1))]),
+    letI('i', I(0)),
+    {
+      kind: 'while',
+      cond: b('<', i, nm('n')),
+      body: [
+        letS('l2', b('+', b('+', S('['), call1('tostr', b('+', i, I(1)))), S(']'))),
+        wr(pad(nm('l2'), nm('lw'))),
+        wr(nm('l2')),
+        letI('j', i),
+        {
+          kind: 'while',
+          cond: b('&&', b('<', j, nm('n')), b('<', j, b('+', i, nm('per')))),
+          body: [
+            letS('s', elem(j)),
+            wr(S(' ')),
+            wr(pad(nm('s'), nm('w'))),
+            wr(nm('s')),
+            set('j', b('+', j, I(1))),
+          ],
+        },
+        wr(S('\n')),
+        set('i', b('+', i, nm('per'))),
       ],
     },
-    iff(b('==', nsig, I(0)), [set('nsig', I(1)), set('kp', b('+', kp, I(1)))]),
-    letI('kpw', b('+', kp, I(DIG - 1))),
-    /* roundingwidens：科学记数那一支会把 x 舍到 10^kpower 上去（9996 → 1e+04），
-       而定点不会 —— 那时左边的位数按舍入前算 */
-    letI('rgt_t', b('-', I(DIG), kpw)),
-    iff(b('<', rgtT, I(0)), [set('rgt_t', I(0))]),
-    iff(b('>', rgtT, I(KP_MAX)), [set('rgt_t', I(KP_MAX))]),
-    letR('fuzz', b('/', R(0.5), p10(rgtT))),
-    letI('left', b('+', kpw, I(1))),
-    iff(b('&&', b('&&', b('>', kpw, I(0)), b('<=', kpw, I(KP_MAX))),
-      b('<', r, b('-', p10(kpw), fuzz))), [set('left', b('-', left, I(1)))]),
-    /* 定点那一支的宽：符号 + 点左边（至多一位 0）+ 点 + 点右边 */
-    letI('sleft', b('+', nm('neg'), I(1))),
-    iff(b('>', left, I(0)), [set('sleft', b('+', nm('neg'), left))]),
-    letI('rgt', b('-', nsig, left)),
-    iff(b('<', rgt, I(0)), [set('rgt', I(0))]),
-    letI('wf', b('+', sleft, rgt)),
-    iff(b('!=', rgt, I(0)), [set('wf', b('+', wf, I(1)))]),
-    /* 科学记数那一支的宽：符号 + 首位 + 点 + nsig-1 位 + `e+XX`（指数三位时多一格） */
-    letI('ee', I(1)),
-    iff(b('||', b('>', left, I(100)), b('<=', left, I(-99))), [set('ee', I(2))]),
-    letI('dd', b('-', nsig, I(1))),
-    letI('w', b('+', b('+', b('+', nm('neg'), dd), I(4)), ee)),
-    iff(b('>', dd, I(0)), [set('w', b('+', w, I(1)))]),
-    /* `scipen` 是 0，平手偏定点 —— 这正是 `wF <= *w + R_print.scipen` 那一句 */
-    iff(b('<=', wf, w), [{ kind: 'return', values: [call1('sfix', x, rgt)] }]),
-    { kind: 'return', values: [call1('ssci', x, dd)] },
   ];
+
+  if (name === 'r_print_lgl') {
+    /* `formatLogical`：宽从 1 起，见过 `NA` 至少 2、见过 `TRUE` 至少 4、见过 `FALSE` 就是 5。 */
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RVEC }],
+      ret: { kind: 'void' },
+      body: [
+        letI('n', vecLen(v)),
+        letI('w', I(1)),
+        {
+          kind: 'for',
+          init: letI('i', I(0)),
+          cond: b('<', i, nm('n')),
+          post: set('i', b('+', i, I(1))),
+          body: [
+            iff(isNa(vecGet(v, i)),
+              [iff(b('<', nm('w'), I(2)), [set('w', I(2))])],
+              [iff(b('!=', vecGet(v, i), R(0)),
+                [iff(b('<', nm('w'), I(4)), [set('w', I(4))])],
+                [iff(b('<', nm('w'), I(5)), [set('w', I(5))])])]),
+          ],
+        },
+        ...wrapStmts((k) => lglCall('r_lgl_str', vecGet(v, k))),
+      ],
+    };
+  }
+
+  /* 数值向量：先把每格的 `(neg, left, nsig)` 取极值（`r_sci`），再挑一次、算出共用的宽。 */
+  const BIG = 1000000000;
+  const inf1 = (e) => b('!=', { kind: 'ccall', sym: 'omni_r_is_infinite', args: [e] }, I(0));
+  cabiUsed.add('omni_r_is_infinite');
+  rmathSig('omni_r_is_infinite');
+  const el = vecGet(v, i);
+  return {
+    kind: 'fn',
+    name,
+    params: [{ name: 'v', type: RVEC }],
+    ret: { kind: 'void' },
+    body: [
+      letI('n', vecLen(v)),
+      { kind: 'let', name: 'p', type: PTR_REAL, init: call1('pnew', tyArg(PTR_REAL), I(3)) },
+      letI('neg', I(0)),
+      letI('mxl', I(-BIG)),
+      letI('mnl', I(BIG)),
+      letI('mxsl', I(-BIG)),
+      letI('rgt', I(-BIG)),
+      letI('mxns', I(-BIG)),
+      letI('fin', I(0)),
+      letBo('hasna', { kind: 'bool', value: false }),
+      letBo('hasnan', { kind: 'bool', value: false }),
+      letBo('haspi', { kind: 'bool', value: false }),
+      letBo('hasni', { kind: 'bool', value: false }),
+      {
+        kind: 'for',
+        init: letI('i', I(0)),
+        cond: b('<', i, nm('n')),
+        post: set('i', b('+', i, I(1))),
+        body: [
+          iff(isNa(el),
+            [iff(isNan(el),
+              [set('hasnan', { kind: 'bool', value: true })],
+              [set('hasna', { kind: 'bool', value: true })])],
+            [iff(inf1(el),
+              [iff(b('>', el, R(0)),
+                [set('haspi', { kind: 'bool', value: true })],
+                [set('hasni', { kind: 'bool', value: true })])],
+              [
+                set('fin', b('+', nm('fin'), I(1))),
+                { kind: 'expr-stmt', expr: lglCall('r_sci', el, nm('p')) },
+                letI('ng', call1('toint', { kind: 'deref', expr: call1('padd', nm('p'), I(0)) })),
+                letI('lf', call1('toint', { kind: 'deref', expr: call1('padd', nm('p'), I(1)) })),
+                letI('ns', call1('toint', { kind: 'deref', expr: call1('padd', nm('p'), I(2)) })),
+                letI('sl', b('+', nm('ng'), I(1))),
+                iff(b('>', nm('lf'), I(0)), [set('sl', b('+', nm('ng'), nm('lf')))]),
+                letI('rt', b('-', nm('ns'), nm('lf'))),
+                iff(b('>', nm('rt'), nm('rgt')), [set('rgt', nm('rt'))]),
+                iff(b('>', nm('lf'), nm('mxl')), [set('mxl', nm('lf'))]),
+                iff(b('<', nm('lf'), nm('mnl')), [set('mnl', nm('lf'))]),
+                iff(b('>', nm('sl'), nm('mxsl')), [set('mxsl', nm('sl'))]),
+                iff(b('>', nm('ns'), nm('mxns')), [set('mxns', nm('ns'))]),
+                iff(b('!=', nm('ng'), I(0)), [set('neg', I(1))]),
+              ])]),
+        ],
+      },
+      ...fmtPickStmts({
+        neg: 'neg', mxl: 'mxl', mnl: 'mnl', mxsl: 'mxsl', rgt: 'rgt', mxns: 'mxns',
+        wf: 'wf', ee: 'ee', dd: 'dd', w: 'w',
+      }),
+      /* 一格有限值都没有时那几个极值还是哨兵，按 `formatReal` 的口径清零（`w` 由下面那四条撑） */
+      iff(b('==', nm('fin'), I(0)), [set('w', I(0)), set('dd', I(0)), set('ee', I(0))]),
+      /* `NA` 占 2 格、`NaN` 与 `Inf` 占 3、`-Inf` 占 4（`R_print.na_width` 是 2） */
+      iff(b('&&', nm('hasna'), b('<', nm('w'), I(2))), [set('w', I(2))]),
+      iff(b('&&', nm('hasnan'), b('<', nm('w'), I(3))), [set('w', I(3))]),
+      iff(b('&&', nm('haspi'), b('<', nm('w'), I(3))), [set('w', I(3))]),
+      iff(b('&&', nm('hasni'), b('<', nm('w'), I(4))), [set('w', I(4))]),
+      ...wrapStmts((k) => lglCall('r_num_fmt', vecGet(v, k), nm('dd'), nm('ee'))),
+    ],
+  };
 }
 
 /**
@@ -2174,6 +2516,8 @@ function vecFnDecl(name) {
       ],
     };
   }
+  if (name === 'r_sci') return sciFnDecl();
+  if (name === 'r_num_fmt' || name === 'r_print_num' || name === 'r_print_lgl') return printFnDecl(name);
   if (name === NUM_STR) return numStrDecl();
   throw new Error(`r->IR: 不认识的辅助函数 ${name}`);
 }
@@ -2305,7 +2649,7 @@ export function rToIR(tree) {
   /* 顶层剩下的那些：拼成一格假的 `(block …)` 交给同一条推断与同一条降级。 */
   const mainBlock = { kind: 'list', items: [{ kind: 'atom', value: 'block' }, ...rest] };
   const types = inferTypes(mainBlock, []);
-  const stmts = rest.map((k) => stmtOf(k, types));
+  const stmts = rest.map((k) => topStmtOf(k, types));
   const lets = [];
   for (const [n, t] of types) {
     lets.push({ kind: 'let', name: n, type: t, init: zeroInit(t) });
