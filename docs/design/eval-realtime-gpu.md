@@ -2104,3 +2104,51 @@ CPU 备选收下不管），量出来：
    —— 它是"改完立刻能跑"那条路（不等 cc），实时那一栏最该跑的就是它；
 3. `interp` 那一档在这一份上跑不起来（另有账）。
 
+### 29.4 第二轮三刀：`int()` 内联 / 名字按指针认 / 一整张矩阵一句（2026-09-25）
+
+**先量再改**。`--gfx null`（设备零成本）那一档用运行期采样器量原生腿：
+
+```
+node src/cli.js build "…/disco ball.pss" -o /tmp/db.bin
+OMNI_GFX=null OMNI_FRAMES=30 OMNI_PROF=sample:997 OMNI_PROF_OUT=/tmp/db.folded /tmp/db.bin
+```
+
+第一张表把上一轮的猜想**推翻了**：栈顶 52.4% 是 `omni_trunc`，`omni_gfx_call` 那串
+101 个 `strcmp` 只有 0.2% —— 录制那一档在链子的第一格就回了，压根走不到那串比较。
+
+三刀（按量出来的顺序）：
+
+1. **`int(real)` 在调用点内联**（`src/runtime/omni.h` + `omni_int.c`）。方言里 real 是唯一的数，
+   所以每个 `a[i]` 都要过一趟 `int()`：一帧 12 万顶点 × 16 格 ⇒ 一个跨编译单元的真调用
+   （`isfinite` + `trunc` + 两次范围判，-O0 的 clang 与 tcc 都内联不了）。
+   宏的快路只认 **|v| < 2^53**：那一段里 `(int64_t)v` 与 `trunc(v)` 逐位相同，一次比较就够；
+   NaN/Inf 与 2^53 以上落 `omni_trunc_oob`，判断与从前**逐句相同**。真符号照旧留着
+   （run-llvm 那条腿发的是 `call omni_trunc`），定义它的 TU 用 `OMNI_INT_IMPL_TU` 关掉宏。
+   **112 -> 71ms/帧**（`--gfx null`，30 帧取最好）。
+2. **图形调用的名字按指针认**（`omni_fmt.c` 的 `gfx_name`）。生成的代码递进来的是
+   `.rodata` 上的字面量，（指针, 长度）就是名字的身份 —— 先前每趟一份 `omni_cstr`
+   （arena 上抄一份带 NUL 的副本），第二张表里那是 21.6%（`omni_gfx_call;_platform_memmove`）。
+   128 格直接映射的槽，连"这格是不是查询"一起记着。**71 -> 66ms/帧**。
+3. **一整张矩阵一句**：`(gfxarr "batchmvp16" 0 0 0 0 gl_mp)` / `batchmv16`，替掉八句
+   `(gfxcall "batchmvp" 列 m0..m3)`。一帧 3994 段批 ⇒ 31952 句矩阵变成 7988；
+   三档设备（`host/gfx-cpu.js`、`runtime/omni_fmt.c`、`studio/gfx-gl.js`）收到这一句
+   照旧按列摆下去，语义与那八句逐字相同。单位矩阵那一档（满屏四边形）照旧走老路四句。
+   **66 -> 64ms/帧**（这一刀主要是省调用次数；`gl_mvpsend` 里贵的那一半是
+   `gl_mp = gl_pj · gl_mv` 那 64 个乘法，不是那八句）。
+
+判据那两栏（`node tests/eval/perf.js --only "disco ball"`）：
+
+* **c 腿 127.3 -> 93.9ms/帧**（参考 36.3ms，比参考 3.37x -> **2.59x**）；
+* js 腿 182.9 -> 167.9ms/帧（js 那条腿吃不到第一刀 —— 那是 C 运行时里的事）。
+
+**正确性一格没动**：`node tests/eval/correct.js` 全跑 **42 过 / 7 红 / 13 不计**，
+七个红的 RMSE（84.33 / 75.31 / 67.05 / 51.85 / 28.82 / 10.13 / 8.27）与改之前**逐位相同**；
+`tests/gl/run.js` 11/11、`tests/lower/run.js polydraw evaldraw` 44/44。
+
+剩下的账（`--gfx null` 64ms/帧里的栈顶）：`gl_tri` 35.6%、`gl_mvmul` 23.9%、
+`gl_vertex4` 14.4%、`gl_mvpsend` 12.3% —— 全是语言这一侧的数组搬运：
+每格顶点 16 个 double 抄两趟（`gl_vb` -> `gl_ob`），每格矩阵操作一趟通用 4×4 乘法。
+下一刀是把这两处的**下标基址提成局部量**、`gl_mvmul` 直接写回 `gl_mv`（不再过 `gl_ta`）：
+两处都是"同一个整数值算一次还是算十六次"，答案逐位不变。
+
+

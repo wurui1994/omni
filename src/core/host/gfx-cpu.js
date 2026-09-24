@@ -971,6 +971,15 @@ function gfxArr(name, args, blk) {
   const a2 = Number(args[2]);
   const n = blk === undefined || blk === null ? 0 : blk.length;
   if (glWant()) need(320, 240);
+  /* **一整张矩阵一句**（`batchmvp16` / `batchmv16`，列主序 16 个数）：与四句
+     `batchmvp`/`batchmv` **逐字等价**，只是少 7 句宿主调用（见 `ext/polydraw/gl-rt.js`
+     里那段话）。数组短于 16 格就当没发（不该发生，这一层不猜）。 */
+  if (nm === 'batchmvp16' || nm === 'batchmv16') {
+    if (!G.on || n < 16) return 0;
+    const put = nm === 'batchmvp16' ? G.m.mvp : G.m.mv;
+    for (let c = 0; c < 4; c++) put(c, blk[c * 4], blk[c * 4 + 1], blk[c * 4 + 2], blk[c * 4 + 3]);
+    return 0;
+  }
   /* `gluniform<N><f|i>v`：名字里第 10 个字符是分量数、第 11 个是 f/i。 */
   if (nm.startsWith('gluniform') && nm.length === 12 && nm[11] === 'v'
       && nm[9] >= '1' && nm[9] <= '4' && (nm[10] === 'f' || nm[10] === 'i')) {

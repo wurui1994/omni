@@ -298,6 +298,28 @@ static inline char *omni_alloc_bytes(int64_t n) {
 
 /* omni_int.c */
 int64_t omni_trunc(double v);
+/* 出了 2^53 那一段（含 NaN/Inf 与真越界）交给这一格：与 omni_trunc 同一份判断。 */
+int64_t omni_trunc_oob(double v);
+
+/* **下标那条路上的 int(real) 要内联**（与 omni_arr 那一族同一条理由，见下面）。
+   方言里 real 是唯一的数，所以 `a[i]` 每次都要过一趟 int()：polydraw 的
+   `disco ball` 一帧 12 万个顶点 × 16 格，`omni_trunc` 一个函数就吃掉 52% 的栈顶样本
+   （2026-09-25 用 OMNI_PROF=sample:997 量的）。函数体是 isfinite + trunc + 两次范围判，
+   -O0 的 clang 与 tcc 都内联不了。
+
+   快路只认 **|v| < 2^53** 这一段：那一段里 `(int64_t)v` 与 `trunc(v)` 逐位相同
+   （C 的浮点转整就是朝零截），而且必定落在 int64 里，所以一次比较就够。
+   NaN 两个比较都假 ⇒ 自动落到慢路去报错；2^53 以上（含真越界）也落慢路，
+   那儿的判断与原来那份**逐句相同**，所以报的话与从前一字不差。
+
+   真符号照旧留着：run-llvm 那条腿发的是 `call omni_trunc`。定义它的那个 TU
+   （omni_int.c）在 include 之前 `#define OMNI_INT_IMPL_TU` 把这一段关掉。 */
+#ifndef OMNI_INT_IMPL_TU
+#define omni_trunc(v) (__extension__({ \
+  double omni__t = (v); \
+  (omni__t > -9007199254740992.0 && omni__t < 9007199254740992.0) \
+    ? (int64_t)omni__t : omni_trunc_oob(omni__t); }))
+#endif
 
 /* omni_str.c */
 omni_str omni_str_cat(omni_str a, omni_str b);

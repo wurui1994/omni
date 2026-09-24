@@ -1082,6 +1082,15 @@ function batchIn(kind, n, verts) {
  */
 function arrIn(name, args, blk) {
   const nm = String(name);
+  /* **一整张矩阵一句**（`batchmvp16` / `batchmv16`，列主序 16 个数）：与四句
+     `batchmvp`/`batchmv` 逐字等价，少 7 句宿主调用（见 `ext/polydraw/gl-rt.js`）。 */
+  if (nm === 'batchmvp16' || nm === 'batchmv16') {
+    if (blk.length < 16) return 0;
+    const m = nm === 'batchmvp16' ? B.mvp : B.mv;
+    for (let i = 0; i < 16; i++) m[i] = blk[i];
+    B.mvpVer += 1;
+    return 0;
+  }
   if (nm.startsWith('gluniform') && nm.length === 12 && nm[11] === 'v'
       && nm[9] >= '1' && nm[9] <= '4' && (nm[10] === 'f' || nm[10] === 'i')) {
     const comps = nm.charCodeAt(9) - 48;

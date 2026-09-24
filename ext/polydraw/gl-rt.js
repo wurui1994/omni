@@ -332,27 +332,25 @@ function glShaderDecls() {
       mul.push(aset('gl_mp', num(c * 4 + r), acc));
     }
   }
-  /* 四句 `(gfxcall "batchmvp" 列 m0 m1 m2 m3)`（列主序，一句一列）。 */
-  const send = [];
-  for (let c = 0; c < 4; c++) {
-    send.push(ex(dev('batchmvp', [num(c), aget('gl_mp', num(c * 4)),
-      aget('gl_mp', num(c * 4 + 1)), aget('gl_mp', num(c * 4 + 2)),
-      aget('gl_mp', num(c * 4 + 3))])));
-  }
+  /* **一整张矩阵一句**：`(gfxarr "batchmvp16" 0 0 0 0 gl_mp)`（列主序的 16 个数）。
+     从前是四句 `(gfxcall "batchmvp" 列 m0..m3)` + 四句 `batchmv` —— 一段批八句宿主调用，
+     每句还要在语言这一侧读四格数组。`disco ball` 一帧 3994 段批 ⇒ 31952 句矩阵，
+     `gl_mvpsend` 一格就占 12.3% 的栈顶样本（2026-09-25，`--gfx null` + OMNI_PROF）。
+     三档设备收到这一句照旧按列摆下去，语义与那八句**逐字相同**。 */
+  const send = [ex(bi('gfxarr',
+    [str('batchmvp16'), num(0), num(0), num(0), num(0), nm('gl_mp')]))];
   const sendIdent = [];
   for (let c = 0; c < 4; c++) {
     sendIdent.push(ex(dev('batchmvp', [num(c), num(c === 0 ? 1 : 0), num(c === 1 ? 1 : 0),
       num(c === 2 ? 1 : 0), num(c === 3 ? 1 : 0)])));
   }
   /* **模型视图那一格也要发**（`gl_ModelViewMatrix` / `gl_NormalMatrix` 用它，见 §18.4）：
-     与 `batchmvp` 逐字同形的四句，只是名字不同 —— 法向矩阵在 GLSL 里由它算出来，
-     不另发一份状态。 */
-  const sendMv = [];
+     与 `batchmvp16` 逐字同形的一句，只是名字不同 —— 法向矩阵在 GLSL 里由它算出来，
+     不另发一份状态。单位矩阵那一档（满屏四边形）走的是老路四句，那条路一帧只有几次。 */
+  const sendMv = [ex(bi('gfxarr',
+    [str('batchmv16'), num(0), num(0), num(0), num(0), nm('gl_mv')]))];
   const sendMvIdent = [];
   for (let c = 0; c < 4; c++) {
-    sendMv.push(ex(dev('batchmv', [num(c), aget('gl_mv', num(c * 4)),
-      aget('gl_mv', num(c * 4 + 1)), aget('gl_mv', num(c * 4 + 2)),
-      aget('gl_mv', num(c * 4 + 3))])));
     sendMvIdent.push(ex(dev('batchmv', [num(c), num(c === 0 ? 1 : 0), num(c === 1 ? 1 : 0),
       num(c === 2 ? 1 : 0), num(c === 3 ? 1 : 0)])));
   }

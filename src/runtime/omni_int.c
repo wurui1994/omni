@@ -1,4 +1,7 @@
-/* int 与 real 之间的转换。回绕算术本身在 omni.h 里（static inline，热路径）。 */
+/* int 与 real 之间的转换。回绕算术本身在 omni.h 里（static inline，热路径）。
+   `omni_trunc` 在别处是个宏（快路内联在调用点，见 omni.h），这个 TU 要定义真符号，
+   所以 include 之前先把那个宏关掉。 */
+#define OMNI_INT_IMPL_TU
 #include "omni.h"
 
 int64_t omni_trunc(double v) {
@@ -12,6 +15,10 @@ int64_t omni_trunc(double v) {
   }
   return (int64_t)t;
 }
+
+/* 宏那条快路（|v| < 2^53）之外的那一段：判断与上面这一份是同一份，所以答案与报的话
+   都与从前逐字相同。单独一格是为了让调用点上只留一次比较 + 一次冷调用。 */
+int64_t omni_trunc_oob(double v) { return omni_trunc(v); }
 
 /* 把一格整数截到 n 位（ADR-0031 §8.2）。先前这两件事是前端拿三个算子拼出来的
    （`(bin "-" (bin "^" (bin "&" v M) S) S)` 就是"截到 8 位有符号"）—— 拼出来的东西读的人

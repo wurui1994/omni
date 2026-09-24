@@ -846,6 +846,17 @@ double omni_gfx_arr(omni_str name, double a0, double a1, double a2, double a3,
   if (gfx_gl_want()) gfx_need();
   long n = blk == NULL ? 0 : (long)blk->len;
   double *items = blk == NULL ? NULL : blk->items;
+  /* **一整张矩阵一句**（`batchmvp16` / `batchmv16`，列主序 16 个数）：与四句
+     `batchmvp`/`batchmv` **逐字等价**，只是少 7 句宿主调用（理由见
+     `ext/polydraw/gl-rt.js` 里那段话）。不够 16 格就当没发。 */
+  if (strcmp(nm, "batchmvp16") == 0 || strcmp(nm, "batchmv16") == 0) {
+    gfx_gl_mvp_fn put = nm[7] == 'p' ? g_gl.mvp : g_gl.mv;
+    if (!g_gl.on || put == NULL || n < 16) return 0.0;
+    for (int c = 0; c < 4; c++) {
+      put(c, items[c * 4], items[c * 4 + 1], items[c * 4 + 2], items[c * 4 + 3]);
+    }
+    return 0.0;
+  }
   /* `gluniform<N><f|i>v`：名字里第 10 个字符是分量数、第 11 个是 f/i。 */
   if (strncmp(nm, "gluniform", 9) == 0 && nm[9] >= '1' && nm[9] <= '4'
       && (nm[10] == 'f' || nm[10] == 'i') && nm[11] == 'v') {
@@ -934,15 +945,47 @@ static void gfx_perf_report(void) {
   if (gfx_rec()) fprintf(stderr, "#perf calls total=%lld\n", (long long)g_greccnt);
 }
 
+/* ── **名字那一格按指针记账**（2026-09-25 量的）：生成的代码每趟递进来的是同一个字符串
+ * **字面量**（`omni_gfx_call(omni_str_new("vertex", 6), …)`），所以（指针, 长度）这一对
+ * 就是名字的身份。先前每一趟都先过一次 `omni_cstr`——在 arena 上抄一份带 NUL 的副本。
+ * `disco ball` 一帧 3.6 万次图形调用，那份 memcpy 在 `--gfx null` 上占到 **21.6%** 的
+ * 栈顶样本（`omni_gfx_call;_platform_memmove`）。
+ *
+ * 现在按指针直接映射到一份**记住的**副本：命中就不抄、不分配。`isq`（录制那一档要问的
+ * "这格是不是查询"）一起记着，那也是每趟一串 strcmp。
+ *
+ * 为什么敢按指针认：字面量在 .rodata 上，地址与长度都不动。万一哪天递进来的是算出来的
+ * 名字（指针会变），未命中那一路照旧抄一份 —— 答案一模一样，只是不省事。
+ * 槽是直接映射的，撞了就重抄一份（名字总共一百来个，撞不起来）。 */
+#define GFX_NCACHE 128
+static struct { const char *p; int64_t len; char *cs; int isq; } g_gfxnc[GFX_NCACHE];
+
+static char *gfx_name(omni_str s, int *isq) {
+  uintptr_t u = (uintptr_t)s.p;
+  size_t h = (size_t)(((u >> 4) ^ (u >> 2) ^ (uintptr_t)s.len) & (GFX_NCACHE - 1));
+  if (g_gfxnc[h].p == s.p && g_gfxnc[h].len == s.len) {
+    *isq = g_gfxnc[h].isq;
+    return g_gfxnc[h].cs;
+  }
+  char *cs = omni_cstr(s);
+  g_gfxnc[h].p = s.p;
+  g_gfxnc[h].len = s.len;
+  g_gfxnc[h].cs = cs;
+  g_gfxnc[h].isq = gfx_is_query(cs);
+  *isq = g_gfxnc[h].isq;
+  return cs;
+}
+
 double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a2,
                      double a3, double a4, double a5, double a6, double a7, double a8,
                      double a9, double a10, double a11) {
-  char *nm = omni_cstr(name);
+  int nm_isq = 0;
+  char *nm = gfx_name(name, &nm_isq);
   (void)a6; (void)a7; (void)a8; (void)a9; (void)a10; (void)a11;
   /* 录制那一档：记一笔，画图那一族到此为止（查询与帧循环照旧往下走）。 */
   if (gfx_rec()) {
     g_greccnt += 1;
-    if (!gfx_is_query(nm)) return 0.0;
+    if (!nm_isq) return 0.0;
   }
   if (!strcmp(nm, "cls") && argc == 3) {
     gfx_need();
