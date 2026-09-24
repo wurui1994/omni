@@ -1609,13 +1609,19 @@ RMSE 183 变成"逐像素相同" —— 那是**参考也变全黑了**，不是
 
 ### 28.4 这一轮之后的账
 
-**37 过 / 21 红 / 4 不计**（其中 **27 份逐像素相同**、9 份够近、1 份只差一小撮格子）。
+**37 过 / 20 红 / 5 不计**（其中 **27 份逐像素相同**、9 份够近、1 份只差一小撮格子）。
 剩下的按族：纹理四份（`texture` 49.2 / `mipmap` 48.4 / `cubetex` 39.3 / `texture3d` 28.8）、
 几何着色器两份（`geo_test` / `geo_duptris` 全黑）、四份跑不起来
 （`curvybuild` / `drawcone2` / `drawcone2_asm` / `particules morphing`）、
 `ribbons invasion` 我们全黑、`gpgpu` 参考全黑、再加
-`disco blur` 84.3 / `disco ball` 67.1 / `balls` 26.1 / `clock` 19.1（这一份三刀都让它更糟一点，
-单独查）/ `heightmap` 14.9 / `gspiral` 12.2 / `orthoglobe` 9.7 / `tree` 8.3。
+`disco blur` 84.3 / `disco ball` 67.1 / `balls` 26.1 / `heightmap` 14.9 /
+`gspiral` 12.2 / `orthoglobe` 9.7 / `tree` 8.3。
+
+`clock.pss` 这一轮裁进了不计分：它头一句是 `klock(1)`（打包的**本地日期时间**，
+`polydraw.c:1662`），参考**压根不看实参**（`pd_polyhost.c:88`）所以永远是 00:00:00，
+而我们照正本给真日期 —— 于是**我们自己两趟都不一样**（隔 2 秒两张 `.rgba` 不同，
+参考两趟逐字节相同）。前面几刀让它 RMSE 一上一下，全是这一格噪声。
+顺带记着：哪天要给 `.pss` 做金标，render 模式下日期那几格也得定一个纪元。
 
 
 
