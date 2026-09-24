@@ -112,5 +112,55 @@ if (only.length > 0 && !only.some((x) => 'gram.y'.includes(x) || x === 'y')) {
   }
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed（R：对 Rscript + gram.y 漂移守卫）\n`);
+/* ─── 三、`NA` 的载荷能存在哪儿 —— **量 V8，不猜** ─────────────────────────────
+ *
+ * R 的 `NA_real_` 是"带 1954 载荷的 NaN"，所以"这个载荷在哪种存法里活得下来"直接决定
+ * R 的向量能用什么表示。这一节不测我们的代码，测的是**这台 V8 的行为** ——
+ * 因为它是一条设计约束，而约束不该靠记忆传下去。
+ *
+ * 量出来的两条（`node tests/r/oracle.js` 会守着它们）：
+ *   * `Float64Array` / 普通对象字段 / 局部量：载荷**留得住**；
+ *   * **只装 double 的 JS 数组：载荷被抹掉**（V8 的 PACKED_DOUBLE_ELEMENTS 会把 NaN
+ *     规范化 —— 那种数组里"洞"本身就是一个特殊 NaN，所以它必须规范化）。
+ *
+ * 第二条是 R 这一门的硬约束：后端把 `(arr real)` 落成 JS 数组（`$anew` 出 `[]`），
+ * 于是**R 的数值向量不能用 `(arr real)`**，得走线性内存（`(ptr real)`，`$pload_r` /
+ * `$pstore_r` 是 DataView 的 getFloat64/setFloat64，按位进出）。
+ *
+ * 这一条是一路量出来的：C 里对 → 按值过 N-API 丢 → 按指针不丢 → 存进 `(arr real)` 又丢。
+ * 前三格已经落成 `ext/r/adapter.js` 的 `PTR_REAL` 那段账，这一格落在这儿。
+ */
+if (only.length === 0 || only.some((x) => 'nanpayload'.includes(x))) {
+  const buf = new Float64Array(1);
+  const words = new Uint32Array(buf.buffer);
+  words[0] = 1954;
+  words[1] = 0x7ff80000;
+  const NA = buf[0];
+  const low = (x) => { const t = new Float64Array(1); t[0] = x; return new Uint32Array(t.buffer)[0]; };
+
+  const keeps = [
+    ['Float64Array', () => { const f = new Float64Array(2); f[1] = NA; return f[1]; }],
+    ['对象字段', () => { const o = { v: 0.0 }; o.v = NA; return o.v; }],
+    ['局部量', () => NA],
+    ['混着别的东西的 JS 数组', () => { const g = [1.0, 'x', 3.0]; g[1] = NA; return g[1]; }],
+  ];
+  for (const [what, f] of keeps) {
+    const got = low(f());
+    if (got === 1954) ok(`nanpayload/${what} 留得住载荷`);
+    else no(`nanpayload/${what}`, `载荷没了（low=${got}）—— 这台 V8 与量的时候不一样了，`
+      + 'R 的值该换成这种存法了，去看 ext/r/adapter.js 的 PTR_REAL 那段');
+  }
+  /* 反过来那一条：**抹掉**才是对的（它是 `(arr real)` 不能用的理由）。
+     哪天 V8 不抹了，这一格会红 —— 那时该去掉那条约束，而不是删掉这个判据。 */
+  const dbl = [1.0, 0.0, 3.0];
+  dbl[1] = NA;
+  if (low(dbl[1]) === 1954) {
+    no('nanpayload/只装 double 的 JS 数组', '这台 V8 **不再**抹载荷了 ——'
+      + ' 那么 R 的向量可以直接用 `(arr real)`，去改 ext/r/adapter.js 那段约束');
+  } else {
+    ok('nanpayload/只装 double 的 JS 数组 会抹掉载荷（所以 R 的向量不能用 (arr real)）');
+  }
+}
+
+process.stdout.write(`\n${pass} passed, ${fail} failed（R：对 Rscript + gram.y 漂移守卫 + NaN 载荷）\n`);
 process.exit(fail === 0 ? 0 : 1);

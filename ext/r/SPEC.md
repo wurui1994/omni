@@ -128,6 +128,19 @@ R 那两条区别由此立住：`is.na(NaN)` 真、`is.nan(NA)` 假。
 
 `is.finite` / `is.infinite` 照旧**按值**过：`Inf` 没有载荷可丢。
 
+### 由此定下的一条：**R 的向量不能用 `(arr real)`**
+
+"载荷能存在哪儿"一路量下来还有第四格，它把向量那一层的表示定死了：
+
+- `Float64Array` / 普通对象字段 / 局部量 / 混着别的东西的 JS 数组：载荷**留得住**
+- **只装 double 的 JS 数组：载荷被抹掉** —— V8 的 `PACKED_DOUBLE_ELEMENTS` 会把 NaN
+  规范化（那种数组里"洞"本身就是一个特殊 NaN，所以它必须规范化）
+
+而后端把 `(arr real)` 落成的正是一个 JS 数组（`$anew` 出 `[]`）。所以 R 的数值向量得走
+**线性内存**（`(ptr real)` —— `$pload_r` / `$pstore_r` 是 DataView 的 getFloat64/setFloat64，
+按位进出）。这一格有判据守着（`tests/r/oracle.js` 第三节）：哪天 V8 不抹了那一行会红，
+那时该去掉这条约束，而不是删掉判据。
+
 **`NA_integer_` / `NA_character_` 还没接** —— 它们在 R 那边是另外两种表示
 （`INT_MIN` 与一格特殊的 CHARSXP），要"带缺失的整数/串"那一层。
 
