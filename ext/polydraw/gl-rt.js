@@ -735,8 +735,23 @@ function glMatrixDecls() {
   return [
     fn('gl_mvmul', [], [...mul, ...back, ret(num(0))]),
     fn('gl_xf', ['x', 'y', 'z', 'w'], [...xf, ret(num(0))]),
+    /**
+     * **矩阵要变了：先把攒着的批交出去**（只有脚本着色器那一档要）。
+     *
+     * 可编程管线那一档位置是**物体坐标**，变换随批走（`batchmvp`/`batchmv`）——
+     * 所以"矩阵变了"才是断批的那条线。从前断在 `glEnd` 上（一组 `glBegin/glEnd`
+     * 一个 draw call），量出来那是这一层最贵的一格：`tigrou/disco ball.pss` 一帧
+     * **19970 段批 + 159760 句矩阵**（一段 8 句），光语言那一半（`--gfx null`）就 182ms。
+     * 一片镜片是 `push/translate/rotate/rotate/scale` + 5 组 `glBegin/glEnd` + `pop`，
+     * 五组之间矩阵一个字没变 —— 断在矩阵上，这五组就并成一段批、矩阵也只发一次。
+     */
+    fn('gl_mvdirty', [], [
+      iff(bin('!=', nm('gl_prog'), num(0)), [ex(call('gl_flush', []))]),
+      ret(num(0)),
+    ]),
     fn('gl_push', [], [
       ex(call('gl_need', [])),
+      ex(call('gl_mvdirty', [])),
       /* 栈满了就**不推**（GL 那边是 GL_STACK_OVERFLOW，画面照旧）。 */
       iff(bin('>=', nm('gl_sp'), num(31)), [ret(num(0))]),
       ...push,
@@ -745,6 +760,7 @@ function glMatrixDecls() {
     ]),
     fn('gl_pop', [], [
       ex(call('gl_need', [])),
+      ex(call('gl_mvdirty', [])),
       iff(bin('<=', nm('gl_sp'), num(0)), [ret(num(0))]),
       set('gl_sp', bin('-', nm('gl_sp'), num(1))),
       ...pop,
@@ -760,6 +776,7 @@ function glMatrixDecls() {
      */
     fn('gl_lookat', ['px', 'py', 'pz', 'fx', 'fy', 'fz', 'ux', 'uy', 'uz'], [
       ex(call('gl_need', [])),
+      ex(call('gl_mvdirty', [])),
       letR('f0', bin('-', nm('px'), nm('fx'))),
       letR('f1', bin('-', nm('py'), nm('fy'))),
       letR('f2', bin('-', nm('pz'), nm('fz'))),
@@ -829,6 +846,7 @@ function glMatrixDecls() {
     ]),
     fn('gl_translate', ['x', 'y', 'z'], [
       ex(call('gl_need', [])),
+      ex(call('gl_mvdirty', [])),
       ...tmIdent(),
       aset('gl_tm', num(12), nm('x')),
       aset('gl_tm', num(13), nm('y')),
@@ -838,6 +856,7 @@ function glMatrixDecls() {
     ]),
     fn('gl_scale', ['x', 'y', 'z'], [
       ex(call('gl_need', [])),
+      ex(call('gl_mvdirty', [])),
       ...tmIdent(),
       aset('gl_tm', num(0), nm('x')),
       aset('gl_tm', num(5), nm('y')),
@@ -849,6 +868,7 @@ function glMatrixDecls() {
        轴长为 0 就当单位矩阵（GL 那边是未定义，画面上等于什么都没转）。 */
     fn('gl_rotate', ['a', 'ax', 'ay', 'az'], [
       ex(call('gl_need', [])),
+      ex(call('gl_mvdirty', [])),
       ...tmIdent(),
       letR('len', rm('sqrt', [bin('+', bin('+', bin('*', nm('ax'), nm('ax')),
         bin('*', nm('ay'), nm('ay'))), bin('*', nm('az'), nm('az')))])),
@@ -897,6 +917,7 @@ function glMatrixDecls() {
      */
     fn('gl_perspt', ['ft', 'aspect', 'zn', 'zf'], [
       ex(call('gl_need', [])),
+      ex(call('gl_mvdirty', [])),
       ...matIdent('gl_pj'),
       letR('f', bin('/', num(1), nm('ft'))),
       aset('gl_pj', num(0), bin('/', nm('f'), nm('aspect'))),
@@ -1082,11 +1103,8 @@ function glDrawDecls() {
           ex(call('gl_tri', [bin('-', nm('i'), num(2)), bin('-', nm('i'), num(1)), nm('i')])),
           ex(call('gl_tri', [bin('-', nm('i'), num(1)), bin('+', nm('i'), num(1)), nm('i')])),
         ])),
-      /* **可编程管线那一档：这一组顶点当场交出去**。理由是那张 `u_mvp` ——
-         位置是物体坐标，变换随批一起过去（`batchmvp`），而矩阵是**这一刻**的：
-         脚本一出 `glEnd` 常常就 `glPopMatrix`，攒到帧末再算就成了单位矩阵
-         （踩过一次：整帧全黑）。于是这一档是"一组 glBegin/glEnd 一个 draw call"。 */
-      iff(bin('!=', nm('gl_prog'), num(0)), [ex(call('gl_flush', []))]),
+      /* **矩阵变了才断批**（见 `gl_mvdirty` 那段头注）—— 从前这儿无条件断，
+         `disco ball` 一帧就断成 19970 段。 */
       ret(num(0)),
     ]),
   ];

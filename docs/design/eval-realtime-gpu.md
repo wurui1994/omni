@@ -2057,14 +2057,50 @@ CPU 备选收下不管），量出来：
 而同样用数组纹理的 `curvybuild` / `texture3d` 它却采得上。也就是说参考的
 `glsettex(槽, 数组, …)` 在某种最小写法下会静默失效；查清了才好拿它当这一族的尺子。
 
+## 29 实时性那一轴：`disco ball` 从 370ms/帧 推到 183ms/帧（第一轮两刀）
 
+判据是 `tests/eval/perf.js` 的实时那一栏（每帧 ≤ 16.7ms = 60fps；四份重例子）。
+起点（`tigrou/disco ball.pss`、60 帧、320×320）：**js 370.1ms/帧、c 235.5ms/帧，参考 36.6ms**。
 
+**先量**（`npm run prof:self -- run … --gfx gl --frames 12`）：`batch` 自用 40%
+（那一栏里含着 N-API 与 GL 的时间）、`env` 5%（**热路径上读环境变量**）。
+再用 `OMNI_GFX=null --perf` 数设备调用：一帧 **179742 句**
+（`gfxbatch` 19970、`batchmvp`/`batchmv` 各 79880 = 一段批 8 句）。
 
+### 29.1 两刀
 
+**一、设备那一层别重复发**（`src/runtime-gl/omni_ev_gl.c`）：
 
+* `u_mvp`/`u_mv` 与四格属性的位置**按 program 记住**（`g_loc`）——
+  从前每段批 6 句**按名字查**（驱动那侧是字符串比较，微秒级）；
+* float 缓冲**复用**（`g_vbuf` + `realloc`）—— 从前每段批一次 `malloc`/`free`；
+* 属性指针只在"换了 program 或常量属性动过"时重设（`g_vattr_dirty`）——
+  从前画完把四格数组全 disable、下一段又全设一遍；
+* 深度 / 剔除 / 混合 / program / 视口 / FBO 走**影子状态**，只在真变了时才发。
 
+**二、断批的线从 `glEnd` 挪到"矩阵要变"**（`ext/polydraw/gl-rt.js` 的 `gl_mvdirty`）：
+可编程管线那一档位置是物体坐标、变换随批走，所以真正要断批的是**矩阵变了**那一刻，
+不是 `glEnd`。一片镜片是 `push/translate/rotate/rotate/scale` + **5 组 `glBegin/glEnd`** + `pop`
+—— 五组之间矩阵一个字没变，从前断成 5 段、矩阵发 5 遍。
+（宿主那侧同时把 `recOn()`/`traceV()` 读环境变量那两句改成只读一次。）
 
+### 29.2 量出来的账（同一条命令、同一台机器）
 
+* 设备三刀之后：js 370.1 → **274.7**、c 235.5 → **208.8**；
+* 批合并之后：js → **182.9**、c → **127.3**（设备调用 179742 → **35958**，批 19970 → 3994）。
 
+**正确性一格没动**：`tests/gl/run.js` 11/11、`tests/lower/run.js polydraw evaldraw` 44/44，
+`disco ball` 67.05 / `texture3d` 28.82 / `tree` 8.27 与改之前逐位相同，
+`town textured` / `drawsph` / `snake tube` / `menger sponge` / `creepers_asm` / `04-shader` /
+`06-texture` 照旧逐像素相同。
 
+### 29.3 下一轮的线头（按预计收益排）
+
+1. **语言那一半**：现在每帧还要写 ~120k 个顶点 × 16 个 double。c 腿 127ms 里
+   `--gfx null`（设备零成本）量到 154ms/帧 ⇒ **瓶颈已经从设备挪到语言侧的顶点装配**。
+   两条路：顶点结构体一次写满（别走通用的 `$aset` 边界检查）、或者
+   **`batchmvp`/`batchmv` 一句发 16 个数**（现在一句发一列 = 一段批 8 句宿主调用）；
+2. **jit 那一档修好**：`--backend jit` 现在报 `gfx_call.string 要 14 个实参，实得 1`
+   —— 它是"改完立刻能跑"那条路（不等 cc），实时那一栏最该跑的就是它；
+3. `interp` 那一档在这一份上跑不起来（另有账）。
 

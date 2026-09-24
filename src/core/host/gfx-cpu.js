@@ -77,8 +77,18 @@ function modeOf() {
  * 脚本靠它们分支，回 0 会让整份脚本走上另一条路（那时量的就不是同一件事了）。
  */
 let REC = null;
+/**
+ * `OMNI_GFX=null` 那一档只判**一次**（-1 还没判 / 0 不是 / 1 是）。
+ *
+ * **为什么要记住**：`recOn()` 在每一格图形调用、每一段批、每一张纹理上都问一次，
+ * 而 `process.env[…]` 在 node 里是**原生存取器**（一次约一微秒）—— 量出来
+ * `disco ball` 那一份里 `env` 自用 72ms / 1398ms（5%），全是这一句问出来的。
+ * 环境在一趟进程里不变，所以记住是安全的。
+ */
+let REC_MODE = -1;
 function recOn() {
-  if (REC === null && env('OMNI_GFX') === 'null') REC = new Map();
+  if (REC_MODE < 0) REC_MODE = env('OMNI_GFX') === 'null' ? 1 : 0;
+  if (REC_MODE === 1 && REC === null) REC = new Map();
   return REC !== null;
 }
 
@@ -859,9 +869,11 @@ function tri(v, ia, ib, ic) {
  * 三档设备都从这一格过，所以 `--gfx gl` 也照印。
  */
 let TRACED = 0;
+let TRACE_LIM = -1;
 function traceV(kind, n, verts) {
-  const lim = intEnv('OMNI_GFX_TRACE', 0);
-  if (!(TRACED < lim)) return;
+  /* 上限也只问一次环境（同 `recOn` 那条注：这一句从前在**每一段批**上都读一次环境）。 */
+  if (TRACE_LIM < 0) TRACE_LIM = intEnv('OMNI_GFX_TRACE', 0);
+  if (!(TRACED < TRACE_LIM)) return;
   const id = TRACED;
   TRACED++;
   for (let i = 0; i < n; i++) {

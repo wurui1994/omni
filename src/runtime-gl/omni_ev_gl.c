@@ -61,6 +61,22 @@ static int g_w, g_h;
 static int g_vpw, g_vph;
 /** 抓屏那一趟的尺寸（照 c_impl 就是整帧）。 */
 static int g_capw, g_caph;
+#define EV_MAXLOC 32
+/** 按 program 记住的那几个位置 / 复用的 float 缓冲 / 属性指针的脏记号（`ev_loc_at`）。 */
+static int g_nloc;
+static float *g_vbuf;
+static size_t g_vbufn;
+static GLuint g_vattr_prog;
+static int g_vattr_dirty = 1;
+static struct { GLuint prog; GLint mvp, mv, a[4]; } g_loc[EV_MAXLOC];
+/** 影子状态（-1 = 还不知道）：**只在真的变了的时候才发给 GL**，见 `ev_loc_at` 那段头注。 */
+static GLuint g_st_prog;
+static int g_st_depth = -1;
+static int g_st_cull = -1;
+static int g_st_blend = -1;
+static int g_st_vp = -1;
+static int g_st_bound = 0;
+
 static int g_on;
 static int g_depth_test;
 /** 面剔除（语言那一侧的 `glcull` 转过来的）：0 关 / 1 剔背面 / 2 剔正面。 */
@@ -215,6 +231,16 @@ int omni_ev_gl_open(int w, int h) {
   g_on = 1;
   g_depth_test = 0;
   g_cull = 0;
+  /* 那几格"查一次记住"的缓存跟着这一趟重来（工人里会开第二趟，见 §16）。 */
+  g_nloc = 0;
+  g_vattr_prog = 0;
+  g_vattr_dirty = 1;
+  g_st_prog = 0;
+  g_st_depth = -1;
+  g_st_cull = -1;
+  g_st_blend = -1;
+  g_st_vp = -1;
+  g_st_bound = 0;
   return 0;
 }
 
@@ -924,6 +950,8 @@ int omni_ev_gl_capbegin(int siz) {
   g_caph = g_h;
   glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
   glViewport(0, 0, g_vpw, g_vph);
+  g_st_bound = 0;
+  g_st_vp = g_vpw * 65536 + g_vph;
   /* 从干净的黑底起（照 c_impl）：后处理那一趟按 >1 的坐标采样时，采到的只该是
      这一趟画下来的东西，不该是上一帧留下的。 */
   glClearColor(0, 0, 0, 1);
@@ -973,6 +1001,35 @@ void omni_ev_gl_activetex(int unit) {
 
 
 
+/* ── 画一段批时那几格**每趟都一样**的东西：查一次记住 ─────────────────────────────
+ *
+ * 一帧上千段批的脚本（`tigrou/disco ball.pss` 每帧 ~1000 段，每段一格自己的 MVP）
+ * 把这一层的**每段固定开销**放大了 1000 倍。量出来（`tests/eval/perf.js` 的实时那一栏）：
+ * 每帧 235ms，而参考 36.6ms —— 差的不是像素，是每段批里这几句：
+ *
+ *   * `glGetUniformLocation` × 2 + `glGetAttribLocation` × 4 —— **按名字查**，
+ *     驱动那侧是字符串比较，每句都是微秒级；
+ *   * `malloc`/`free` 一份 float 缓冲；
+ *   * 画完把四格属性数组全 `glDisableVertexAttribArray`，下一段又全设一遍。
+ *
+ * 所以：位置按 program 记住（`g_loc`）、缓冲复用（`g_vbuf`）、属性指针只在
+ * "program 变了或常量属性动过"时重设（`g_vattr_prog` / `g_vattr_dirty`）。
+ * **一句语义都不改** —— 发给 GL 的状态序列是等价的，只是不重复发。
+ */
+
+/** 这格 program 的那几个位置（查一次记住）。回 -1 = 表满了（那就照旧每趟查）。 */
+static int ev_loc_at(GLuint prog) {
+  for (int i = 0; i < g_nloc; i++) if (g_loc[i].prog == prog) return i;
+  if (g_nloc >= EV_MAXLOC) return -1;
+  static const char *nm[4] = { "a_pos", "a_col", "a_tex", "a_nrm" };
+  int i = g_nloc++;
+  g_loc[i].prog = prog;
+  g_loc[i].mvp = glGetUniformLocation(prog, "u_mvp");
+  g_loc[i].mv = glGetUniformLocation(prog, "u_mv");
+  for (int k = 0; k < 4; k++) g_loc[i].a[k] = glGetAttribLocation(prog, nm[k]);
+  return i;
+}
+
 /**
  * **收一段顶点批**：一格顶点 16 个 double（位置 4 裁剪空间 / 颜色 4 / 纹理坐标 4 /
  * 法向 4），类 0 线段 / 1 三角 / 2 点。这一层只做"转 float + 上传 + 一次 draw"。
@@ -983,22 +1040,40 @@ void omni_ev_gl_activetex(int unit) {
 void omni_ev_gl_batch(int kind, long n, const double *verts) {
   if (!g_on || n <= 0 || verts == NULL) return;
   CGLSetCurrentContext(g_ctx);
-  float *buf = (float *)malloc(sizeof(float) * EV_VS * (size_t)n);
-  if (buf == NULL) return;
-  for (long i = 0; i < n * EV_VS; i++) buf[i] = (float)verts[i];
+  size_t want = EV_VS * (size_t)n;
+  if (want > g_vbufn) {
+    float *nb = (float *)realloc(g_vbuf, sizeof(float) * want);
+    if (nb == NULL) return;
+    g_vbuf = nb;
+    g_vbufn = want;
+  }
+  float *buf = g_vbuf;
+  for (size_t i = 0; i < want; i++) buf[i] = (float)verts[i];
 
-  glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
-  glBindVertexArray(g_vao);
-  glViewport(0, 0, g_vpw, g_vph);
-  if (g_depth_test) glEnable(GL_DEPTH_TEST);
-  else glDisable(GL_DEPTH_TEST);
+  if (!g_st_bound) {
+    glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
+    glBindVertexArray(g_vao);
+    g_st_bound = 1;
+  }
+  if (g_st_vp != (g_vpw * 65536 + g_vph)) {
+    glViewport(0, 0, g_vpw, g_vph);
+    g_st_vp = g_vpw * 65536 + g_vph;
+  }
+  if (g_depth_test != g_st_depth) {
+    if (g_depth_test) glEnable(GL_DEPTH_TEST);
+    else glDisable(GL_DEPTH_TEST);
+    g_st_depth = g_depth_test;
+  }
   /* 面剔除（`glcull` 那一格；正面是 CW —— 照正本，见 `omni_ev_gl_cull`）。 */
-  if (g_cull != 0) {
-    glEnable(GL_CULL_FACE);
-    glFrontFace(GL_CW);
-    glCullFace(g_cull == 2 ? GL_FRONT : GL_BACK);
-  } else {
-    glDisable(GL_CULL_FACE);
+  if (g_cull != g_st_cull) {
+    if (g_cull != 0) {
+      glEnable(GL_CULL_FACE);
+      glFrontFace(GL_CW);
+      glCullFace(g_cull == 2 ? GL_FRONT : GL_BACK);
+    } else {
+      glDisable(GL_CULL_FACE);
+    }
+    g_st_cull = g_cull;
   }
   /* 这一段用哪格 program 由 `batchprog` 说：0 是内建那对（位置**已是裁剪空间** ⇒
      `u_mvp` 单位矩阵），≠0 是脚本 `glsetshader` 挑的那格（位置是**物体坐标**，
@@ -1008,44 +1083,57 @@ void omni_ev_gl_batch(int kind, long n, const double *verts) {
   const float *m = I4;
   const float *mv = I4;
   if (g_useprog && (g_cur != 0 || ev_need_prog())) { prog = g_cur; m = g_mvp; mv = g_mv; }
-  glUseProgram(prog);
-  GLint mvp = glGetUniformLocation(prog, "u_mvp");
+  if (prog != g_st_prog) { glUseProgram(prog); g_st_prog = prog; }
+  int li = ev_loc_at(prog);
+  GLint mvp = li >= 0 ? g_loc[li].mvp : glGetUniformLocation(prog, "u_mvp");
   if (mvp >= 0) glUniformMatrix4fv(mvp, 1, GL_FALSE, m);
   /* `u_mv` 是模型视图那一格（`gl_ModelViewMatrix` / `gl_NormalMatrix` 用它）——
      只有脚本那格着色器引用了它才有位置，内建那对没有。 */
-  GLint mvloc = glGetUniformLocation(prog, "u_mv");
+  GLint mvloc = li >= 0 ? g_loc[li].mv : glGetUniformLocation(prog, "u_mv");
   if (mvloc >= 0) glUniformMatrix4fv(mvloc, 1, GL_FALSE, mv);
   /* 混合：`glquad(0)` 那一档要 alpha 混合（语言那一侧发的 `batchblend`）。 */
-  if (g_blend == 0) {
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-  } else {
-    glDisable(GL_BLEND);
+  if (g_blend != g_st_blend) {
+    if (g_blend == 0) {
+      glEnable(GL_BLEND);
+      glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    } else {
+      glDisable(GL_BLEND);
+    }
+    g_st_blend = g_blend;
   }
 
   glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
-  glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(sizeof(float) * EV_VS * (size_t)n), buf,
+  glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(sizeof(float) * want), buf,
                GL_STREAM_DRAW);
-  const char *names[4] = { "a_pos", "a_col", "a_tex", "a_nrm" };
-  GLint locs[4];
-  for (int k = 0; k < 4; k++) {
-    locs[k] = glGetAttribLocation(prog, names[k]);
-    if (locs[k] < 0) continue;
-    glEnableVertexAttribArray((GLuint)locs[k]);
-    glVertexAttribPointer((GLuint)locs[k], 4, GL_FLOAT, GL_FALSE,
-                          (GLsizei)(sizeof(float) * EV_VS),
-                          (const void *)(size_t)(sizeof(float) * 4 * (size_t)k));
+  /* **属性指针只在"换了 program 或常量属性动过"时重设**：同一格 program 上每段批的
+     布局、步长、偏移、VBO 都一样，重设一遍等于白发 4 句 `glVertexAttribPointer`
+     加 4 句按名字查位置（见这一节头注那三条）。 */
+  GLint locs[4] = { -1, -1, -1, -1 };
+  if (li >= 0) { for (int k = 0; k < 4; k++) locs[k] = g_loc[li].a[k]; }
+  else {
+    static const char *names[4] = { "a_pos", "a_col", "a_tex", "a_nrm" };
+    for (int k = 0; k < 4; k++) locs[k] = glGetAttribLocation(prog, names[k]);
   }
-  /* `glVertexAttrib*` 设的那几格是**常量属性**（数组关着时 GL 用的就是当前值）。 */
+  if (g_vattr_dirty || g_vattr_prog != prog) {
+    for (int k = 0; k < 4; k++) {
+      if (locs[k] < 0) continue;
+      glEnableVertexAttribArray((GLuint)locs[k]);
+      glVertexAttribPointer((GLuint)locs[k], 4, GL_FLOAT, GL_FALSE,
+                            (GLsizei)(sizeof(float) * EV_VS),
+                            (const void *)(size_t)(sizeof(float) * 4 * (size_t)k));
+    }
+    g_vattr_prog = prog;
+    g_vattr_dirty = 0;
+  }
+  /* `glVertexAttrib*` 设的那几格是**常量属性**（数组关着时 GL 用的就是当前值）——
+     它关掉了某几格的数组，所以下一段批要把指针重设一遍。 */
   for (int k = 0; k < g_nattr; k++) {
     glDisableVertexAttribArray((GLuint)g_attr[k].loc);
     glVertexAttrib4fv((GLuint)g_attr[k].loc, g_attr[k].v);
+    g_vattr_dirty = 1;
   }
   GLenum mode = kind == 0 ? GL_LINES : (kind == 2 ? GL_POINTS : GL_TRIANGLES);
   glDrawArrays(mode, 0, (GLsizei)n);
-  for (int k = 0; k < 4; k++) if (locs[k] >= 0) glDisableVertexAttribArray((GLuint)locs[k]);
-  glDisable(GL_BLEND);
-  free(buf);
 }
 
 
