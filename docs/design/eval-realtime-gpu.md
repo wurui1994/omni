@@ -1885,6 +1885,47 @@ CPU 备选收下不管），量出来：
 **严格超集**（参考独有 0 格）、而 `GL_BACK` 那一档我们只剩 9583 格（参考 24976）——
 下一步得按批对照（glspy 那种手法，`reference_glspy_tool`）才看得清。
 
+### 28.14 几何着色器那两份：**我们全黑，可参考压根没有几何段**
+
+`ken/geo_test.pss` / `ken/geo_duptris.pss` 现在的账是"黑图"（我们 0 格、参考 8312 / 11342 格）。
+动手之前先查了两边，两侧**各有一格错**：
+
+**正本的口径**（`polydraw.c:2210`）：`GLSETSHADER($,$,$)` 是 **(v, g, f)** ——
+`kglsetshader3(st0,st1,st2)` 把三个名字分别当**顶点 / 几何 / 片元**查
+（`polydraw.txt:350` 也写着 `glSetShader("vnam","gnam","fnam")`）。
+段首那一行是 `@g,输入图元,输出图元,最大顶点数:名字`（`polydraw.txt:203-205`）。
+
+**参考错在两处**：`rh_glSetShader`（`pd_polyhost_tex.c:352`）的注释写的是
+`glsetshader(vname, fname[, gname])` —— 它把**第二个实参当片元名**查、第三个**压根不看**；
+而且整份 `c_impl` 里 `PD_SEC_GEOMETRY` 只在切段那儿赋过值
+（`pd_section.c:54`），**没有一处消费它** —— 它从来不编、也不挂几何段。
+所以参考那两张图是"顶点 + 第 0 号片元"画出来的**普通三角**，不是几何段的输出。
+
+**我们错在**：`splitSections` 的段首正则 `^@([vgfh]?)(?::([A-Za-z0-9_$]+))?`
+（`ext/polydraw/adapter.js:178`）碰上 `@g,GL_TRIANGLES,GL_TRIANGLE_STRIP,15:g`
+只吃到 `@g`、**名字与那三个参数一起丢了**（段落拿到内部名 `$N`）⇒
+`glsetshader("v","g","f")` 找不着 `g` ⇒ 这一趟什么都没画（还是**静默**的，连一句话都没报）。
+
+**所以这一族不能拿参考当尺子**（照它做等于把几何段扔掉 —— 那是"对着错的答案抄"）。
+正事按正本做，分三步，都在编译期那一层（设备一个字不改）：
+
+1. 段首那一行照 `polydraw.txt:203` 解出**名字 + 三个参数**，参数随 `(gfxdef geom …)` 一起下去
+   （或者直接在翻译时写成 `layout(triangles) in; layout(triangle_strip, max_vertices=15) out;`）；
+2. `glslAlign('geom', …)`：`gl_VerticesIn` -> `gl_in.length()`、`gl_PositionIn[i]` ->
+   `gl_in[i].gl_Position`、`gl_FrontColorIn[i]` / `gl_TexCoordIn[i][0]` -> 顶点段那两格跨段量的
+   数组形式、`gl_FrontColor` / `gl_TexCoord[0]` -> 几何段的 out；`#version 120` 与
+   `#extension GL_EXT_geometry_shader4` 那两行切掉（现在 `glslAlign` 见到 `#version` 就整段原样回，
+   所以这两份**压根没被翻过**）；
+3. **跨段量的名字**：core 里同一段不能有同名的 in 与 out，而片元段读的是 `v_col0`/`v_tex0` ——
+   挂了几何段之后得给顶点段那两格换个名字（这一格是设计活：`glsetshader` 是运行期才配对的，
+   而翻译在编译期。最省的一条是"有 `@g` 的脚本里，顶点段同时发两份名字"，
+   可 Apple 的链接器把"顶点输出没人读"当链接失败（§见 `glsl.js` 那段头注）—— 要先量一趟）。
+
+判据：这一族**没有参考**，所以做完只能靠"自己那张图讲得通"（四个小四边形 + 一个三角，
+`geo_test` 的几何段明写着）加上与参考**故意不同**的记录；那两份在账上先继续记红（黑图），
+**不许写进 `REF_WRONG` 白拿分** —— 我们这一侧现在确实是黑的。
+
+
 
 
 
