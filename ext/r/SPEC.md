@@ -257,3 +257,36 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
    要么 ≥1e5 才碰得到。
 9. 随机数那一族（`r*` / `set.seed`）没接 —— 见第二节。
 10. `NA_integer_` / `NA_character_` 没接（实数的 `NA` 已经立住了）—— 见第二节那一小节。
+
+## 五、另一档：libR（ADR-0046）
+
+上面四节说的是**编译器那一档**：R 的源码 → 我们的 IR → JS / 原生。它快（`bench/r/run.js`
+上标量循环比 Rscript 快 40 倍），但它只认我们接过的那些形状。
+
+要跑 **CRAN 的包**（ggplot2、Rcpp…）就是另一件事了：那一层是 13.5 万行 R + 10 万行 C/C++，
+而那些 C/C++ 引用了 **388 个 R 内部 C API 符号**（`Rf_eval` / `Rf_allocVector` / …）。
+所以那一档走的是**真的 libR**，由我们自己从 r-source 的 C 编出来：
+
+```
+node ext/r/build-libR.js      # 405 条边：libR.dylib + R.bin + 12 个基础包 + Meta + 验一趟
+node ext/r/install-cran.js    # 从 CRAN 下 tarball、按拓扑序装（默认那一串是 ggplot2 的闭包）
+node ext/r/install-cran.js Rcpp
+node tests/r/libr.js          # 这一档的尺子：六格都真跑
+```
+
+`R_HOME` 在 `.omni-cache/r-rt/libR/home`，`bin/R` / `bin/exec/R` 都在那儿。
+两档的判据分开：编译器那一档是 `tests/r/oracle.js`（逐字节对 `Rscript`），
+libR 那一档是 `tests/r/libr.js`（base / stats+LAPACK / methods 的 S4 / quartz 出 PNG /
+ggplot2 的 `ggsave` / Rcpp 的 `cppFunction`）。
+
+**这一档明写的两条口径**（都在 ADR-0046 里有账）：
+
+* **R 自己那个用 R 写的字节码编译器不要**（`compiler` 包装着但永不开，`R_ENABLE_JIT=0`），
+  base 那几个包按**源码**装。代价量过：R 级代码比本机那个 R 慢 **2~10 倍**
+  （`bench/r/run.js` 第二列）。理由是快的那一侧在我们自己的编译器上 —— 同一张表里
+  原生腿比 Rscript 快 17~76 倍。
+* **窗口走 R 自己那份 Cocoa 设备**（`devQuartz.c` + `qdCocoa.m`），不走浏览器：
+  `quartz()` 开的是真 `NSWindow`。例子在 `ext/r/libr-demo/ggplot.R`
+  （`OMNI_R_WINDOW=1` 才开窗 —— 没有窗口服务的场合开它会报错）。
+
+本机装的那个 R 在这一档里也只是**尺子**（`bench/r/run.js` 的参考列），运行时一格不借。
