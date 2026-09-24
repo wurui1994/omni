@@ -76,6 +76,19 @@ const CFG = {
  * 里头还有一类不是"参考错"而是**脚本自己是未定义行为**（`gears.pss`）：那种谁也对不上谁。
  */
 const REF_WRONG = new Map([
+  ['balls.pss',
+    '**参考的 `nrnd` 有一处无符号回绕**：`c_impl/src/eval/pd_interp.c:46` 写的是'
+    + ' `(double)(pd_krand() - 1073741824u)`，而 `pd_krand()` 回的是 `unsigned long`'
+    + '（这台机器 64 位）⇒ 取到的数**小于 2^30 时整个回绕成约 1.8e19**，`r = x²+y²`'
+    + '当场 ≥ 1、那一对被拒。于是它的 Box-Muller 只收得下"两个数都 ≥ 2^30"的采样'
+    + '（等于只取第一象限）。正本 `eval.c:515` 那儿是 **signed long**，x/y 落在 -1..1。'
+    + '这一份每个球取两次 `nrnd`（16384 个球）⇒ 位置/颜色全不一样（RMSE 26.07、'
+    + '非黑数只差 40 格：覆盖一样、颜色全错）。我们这一侧照 `eval.c:504-523` 写'
+    + '（**包括它把第二个正态数存下来、下一次调用不再取 krand** —— 这一格 2026-09-25 补上了）'],
+  ['particules sparks.pss',
+    '同 `balls`：每个火花的初速与位置都是 `nrnd`（`x=nrnd*.5; vx=nrnd*1.5; …`），'
+    + '而参考那一格有无符号回绕（见那一条）。**这一条会盖住这一份别的差**'
+    + '（它还读 `glalphaenable` 那一族、第 30 帧才有东西），修完之后要重裁'],
   ['heightmap.pss',
     '**参考的 `noise()` 是它自己写着的"占位实现"**：`c_impl/src/eval_impl/ed_misc.c:96`'
     + '（"Simple hash-based noise. Not as good as Ken\'s, but functional."）与 `:101`'

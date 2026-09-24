@@ -1670,6 +1670,14 @@ function rndDecls() {
   };
   return [
     { kind: 'global', name: 'pd_rndst', type: INT },
+    /* **`nrnd` 的第二格**：Box-Muller 一趟出两个正态数，原版把另一个存下来
+       （`eval.c:504` 的 `static double srand2` + `snormstat`），**下一次调用直接回它、
+       一格 `krand()` 都不再取**。我们从前每趟都重算 ⇒ 第二次起序列就与正本分家：
+       `ken/balls.pss` 每个球取两次 `nrnd`（16384 个球），于是整张图每个像素都不一样
+       （量出来 RMSE 26.07、非黑数只差 40 格 —— 覆盖一样、颜色全错，就是这一格）。
+       `SRAND` 也要把它清掉（`ksrand` 里 `snormstat = 0`）。 */
+    { kind: 'global', name: 'pd_nrnd2', type: REAL },
+    { kind: 'global', name: 'pd_nrhas', type: REAL },
     {
       kind: 'fn',
       name: 'pd_srand',
@@ -1682,6 +1690,8 @@ function rndDecls() {
           value: bin('&', { kind: 'builtin', name: 'toint', args: [nameRef('seed')] },
             { kind: 'int', value: '4294967295' }),
         },
+        /* `ksrand` 也把 Box-Muller 那格存货清掉（`eval.c:493`）。 */
+        { kind: 'assign', target: nameRef('pd_nrhas'), value: num(0) },
         { kind: 'return', values: [num(0)] },
       ],
     },
@@ -1705,6 +1715,16 @@ function rndDecls() {
       params: [],
       ret: REAL,
       body: [
+        /* 上一趟存下的那一格：直接回它，一格 `krand()` 都不取（`eval.c:508-512`）。 */
+        {
+          kind: 'if',
+          cond: bin('!=', nameRef('pd_nrhas'), num(0)),
+          then: [
+            { kind: 'assign', target: nameRef('pd_nrhas'), value: num(0) },
+            { kind: 'return', values: [nameRef('pd_nrnd2')] },
+          ],
+          else_: [],
+        },
         { kind: 'let', name: 'x', type: REAL, init: num(0) },
         { kind: 'let', name: 'y', type: REAL, init: num(0) },
         { kind: 'let', name: 'r', type: REAL, init: num(2) },
@@ -1729,11 +1749,16 @@ function rndDecls() {
           then: [{ kind: 'return', values: [num(0)] }],
           else_: [],
         },
+        /* `r = sqrt(-2·ln r / r)`、存下 `x·r`、回 `y·r`（`eval.c:520-523` 的次序）。 */
         {
-          kind: 'return',
-          values: [bin('*', nameRef('y'), rmath('sqrt', [bin('/', bin('*', num(-2),
-            rmath('log', [nameRef('r')])), nameRef('r'))]))],
+          kind: 'assign',
+          target: nameRef('r'),
+          value: rmath('sqrt', [bin('/', bin('*', num(-2),
+            rmath('log', [nameRef('r')])), nameRef('r'))]),
         },
+        { kind: 'assign', target: nameRef('pd_nrnd2'), value: bin('*', nameRef('x'), nameRef('r')) },
+        { kind: 'assign', target: nameRef('pd_nrhas'), value: num(1) },
+        { kind: 'return', values: [bin('*', nameRef('y'), nameRef('r'))] },
       ],
     },
   ];
