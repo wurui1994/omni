@@ -71,6 +71,23 @@ const NEWFOV = `        case GLCMD_SETFOV:
                      * atan((double)rd->h / (double)rd->w) * 360.0 / M_PI;
             break;`;
 
+/**
+ * **第三格：立方图那一竖条里哪一格是哪一面。** 参考是 `row = (5 - f) * fh`
+ * （注释写的是 "faces are stored bottom-to-top"）—— 一个直接倒过来的次序。
+ * 原版**有一张表**：`cubemapindex[6] = {1,3,4,5,0,2}`（`polydraw.c:1093`），
+ * 文件那条路在 `polydraw.c:1338` 用它（`gbmp + sizx*sizx*4*cubemapindex[i]`，
+ * `i` 是 GL 那六面的次序）。倒序是 `{5,4,3,2,1,0}` —— **不是同一个置换**，
+ * 于是 `ken/cubetex.pss` 整张天空朝向都不一样（RMSE 75.31、100% 的格有差）。
+ * 两边那一竖条在内存里次序是相同的（都是解码出来自上而下 —— 2D 那一格已经对齐过，§28.4），
+ * 所以只差这一格置换。"尺子错成一整类"就补 fork，不记 `REF_WRONG`。
+ */
+const OLDCUBE = `                    /* faces are stored bottom-to-top in the strip */
+                    int row = (5 - f) * fh;`;
+const NEWCUBE = `                    /* 补过（Omni 判据）：照 polydraw.c:1093 那张 cubemapindex ——
+                       原版挑面用的是 {1,3,4,5,0,2}，不是倒序。 */
+                    static const int cubemapindex[6] = { 1, 3, 4, 5, 0, 2 };
+                    int row = cubemapindex[f] * fh;`;
+
 if (!existsSync(SRC)) {
   process.stdout.write(`这台机器上没有 ${SRC} —— 没东西可补\n`);
   process.exit(1);
@@ -86,13 +103,14 @@ rmSync(join(DST, 'build'), { recursive: true, force: true });
 
 const f = join(DST, 'src/render/gl_renderer.c');
 const s = readFileSync(f, 'utf8');
-if (!s.includes(OLD) || !s.includes(OLDFOV)) {
-  process.stdout.write('`mat4_rotate` / `GLCMD_SETFOV` 那两处与记着的原样对不上 ——'
-    + ' 参考那边改过源码了，得重新裁一次（别盲目补）\n');
+if (!s.includes(OLD) || !s.includes(OLDFOV) || !s.includes(OLDCUBE)) {
+  process.stdout.write('`mat4_rotate` / `GLCMD_SETFOV` / 立方图挑面那三处与记着的原样'
+    + '对不上 —— 参考那边改过源码了，得重新裁一次（别盲目补）\n');
   process.exit(1);
 }
-writeFileSync(f, s.replace(OLD, NEW).replace(OLDFOV, NEWFOV));
-process.stdout.write(`补好了 ${f}（两处：mat4_rotate / GLCMD_SETFOV）\n开始 make（约 40s）…\n`);
+writeFileSync(f, s.replace(OLD, NEW).replace(OLDFOV, NEWFOV).replace(OLDCUBE, NEWCUBE));
+process.stdout.write(`补好了 ${f}（三处：mat4_rotate / GLCMD_SETFOV / 立方图挑面）\n`
+  + '开始 make（约 40s）…\n');
 
 const mk = spawnSync('make', ['-j8'], { cwd: DST, encoding: 'utf8' });
 const bin = join(DST, 'build/polydraw-render');
