@@ -862,7 +862,12 @@ function hostStore(ht, op, val, C) {
  * `goto` 的函数摊这份）。
  *
  * **往后跳**（`goto` 在标号后头，`games/kenken.kc:909` 的 `goto back2it` 那种循环）
- * 这一版不接 —— 那要把那一段变成真循环，判据是"哪几句在环里"，另一笔账。
+ * 落成"标号到这段末尾包进 `while (旗子)`"（见 `stmtsOf`）。
+ *
+ * **跳进块里**（标号在 `if {}` 里头、`goto` 在外层，`ken/drawcone2.pss` 的 `goto singsph`）
+ * 落成**照抄那一段**：护卫那一招只退得出去、退不进去，而那一段（标号到它那格语句表末尾）
+ * 只要**不会走到底**（末句是 `goto`/`return`）就可以原样在跳转点再降一份 —— 原处那一段
+ * 照旧留着给顺着走下来的那条路。见 `stmtOf1` 的 `goto` 那一格。
  */
 const gotoFlag = (name) => `pd_go_${name}`;
 
@@ -919,7 +924,10 @@ function stmtsOf(list, C) {
     }
     const region = list.slice(0, at);
     if (!fwd) {
-      /* 这标号没人跳（语料里有留着不用的）—— 丢掉就是。 */
+      /* 这标号这一格里没人跳（语料里有留着不用的，也有**外层跳进来**的那种）——
+         标号这一句丢掉，两段照常降。**顺手把标号后头那一段登记下来**：
+         外层的 `goto` 跳进来时照抄一份（见 `stmtOf1` 的 `goto` 那一格）。 */
+      C.innerLabels.set(name, list.slice(at + 1));
       return [...stmtsOf(region, C), ...stmtsOf(list.slice(at + 1), C)];
     }
     C.gotoActive.push(flag);
@@ -1085,8 +1093,27 @@ function stmtOf1(s, C) {
     const name = idOf(kids(s)[0]);
     const flag = gotoFlag(name);
     if (!C.gotoActive.includes(flag)) {
+      /* **跳进块里那一档**（`ken/drawcone2.pss`：`singsph:` 在 `if {}` 里头，而
+         `goto singsph` 在函数体这一层）—— 标准 IR 里没有无条件跳转，护卫那一招也退不进去。
+         落法是**照抄那一段**：标号到它所在那格语句表末尾的那几句，原样在这儿降一份。
+         **前提是那一段不会走到底**（末句是 `goto` 或 `return`）—— 不然抄完还要接着往下走，
+         那就不是同一件事了。`drawcone2` 那一段末句正是 `goto skipcone`，
+         而 `skipcone:` 在函数体这一层、`goto` 在它前头 ⇒ 抄进来那句照旧走旗子那条路。
+         原处那一段**照旧留着**（顺着走下来的那条路要用），所以这一格的代价是代码多一份。 */
+      const region = C.innerLabels.get(name);
+      if (region !== undefined && !C.expanding.has(name) && region.length > 0) {
+        const last = tag(region[region.length - 1]);
+        if (last === 'goto' || last === 'return' || last === 'retexpr') {
+          C.expanding.add(name);
+          const copy = stmtsOf(region, C);
+          C.expanding.delete(name);
+          return copy;
+        }
+        throw new Error(`eval->IR: \`goto ${name}\` 要跳进一格块里，可那一段会**走到底**`
+          + `（末句是 ${last}，不是 goto/return）—— 照抄一份就不是同一件事了`);
+      }
       throw new Error(`eval->IR: \`goto ${name}\` 找不到往前跳的那个标号 ——`
-        + ' 这一版只接"同一函数里、往前跳到某一格语句表上的标号"');
+        + ' 这一版只接"同一函数里、往前跳到某一格语句表上的标号"与"跳进块里那一段"');
     }
     /* 置旗。后面每一句都在 `if (旗子 == 0)` 里头（见 `stmtOf`），所以控制流一路退到标号。
        注意这一句自己也被那层护卫裹着 —— 置旗只在"还没跳"的时候发生。 */
@@ -2175,6 +2202,10 @@ export function evalToIR(cst, host, src = '') {
     boxedAll: new Set(),                /* 整份程序那一张（`C.boxed` 是**当前这个函数**那一张） */
     valParams: new Set(),               /* 当前函数**按值**收的形参（`&x` 碰上它要报） */
     gotoActive: [],                     /* 正在降哪几格标号前头那一段（`goto` 的旗子名） */
+    /* **块里头那些标号**（名字 -> 那一段原文语句）：外层的 `goto` 跳进来时照抄一份，
+       见 `stmtOf1` 的 `goto` 那一格与 `stmtsOf` 头上那段。`expanding` 是防自套的记号。 */
+    innerLabels: new Map(),
+    expanding: new Set(),
     needRnd: false,                     /* 用过 `RND`/`NRND`/`SRAND` 没有 */
     need3D: false,                      /* 用过 3D 那一族没有（`gfx3-rt.js`：投影在语言这一侧） */
     needNoise: false,                   /* 用过 `NOISE`/`NOISE3D` 没有（`noise-rt.js`） */
@@ -2324,6 +2355,8 @@ export function evalToIR(cst, host, src = '') {
        （`demos/planpos.kc` 里 `year` 在一处是 `&year`、在 `getday(year,…)` 里是按值的形参）。 */
     C.valParams = new Set(ps.filter((p) => p.type === REAL).map((p) => p.name));
     C.boxed = new Set([...C.boxedAll].filter((nm) => !C.valParams.has(nm)));
+    /* 标号那张表**按函数算**（同名的标号在另一个函数里是另一回事）。 */
+    C.innerLabels = new Map();
     /* 这一份函数体里"收整块的形参"各自那格偏移（`名字$o`）—— 下标都要加上它。 */
     C.offs = new Map(ps.filter((p) => p.type === ARR).map((p) => [p.name, offName(p.name)]));
     decls.push({
@@ -2342,6 +2375,7 @@ export function evalToIR(cst, host, src = '') {
   C.boxed = new Set([...C.boxedAll].filter((nm) => !C.valParams.has(nm)));
   /* 主函数的形参都是按值的 real —— 上一份函数留下的偏移表不许串到这儿。 */
   C.offs = new Map();
+  C.innerLabels = new Map();
   const mainBody = [
     ...mainPs.map((p) => ({ kind: 'let', name: p, type: REAL })),
     ...bodyOf(kids(mainNode)[1], mainPs, C, '主函数'),

@@ -1095,6 +1095,8 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
   /* `glprogramenvparam`：**ARB 汇编专用**（`polydraw.c:2111` 那一行写着 "for arb asm"）。
      core profile / WebGL 都没有 ARB 汇编，参考实现也是 no-op —— 收下不管（§19.2）。 */
   if (!strcmp(nm, "glprogramenvparam") && argc == 5) { return 0.0; }
+  /* `glprogramlocalparam`：同上（`polydraw.c:2110`，走 `glProgramLocalParameter4fARB`）。 */
+  if (!strcmp(nm, "glprogramlocalparam") && argc == 5) { return 0.0; }
   if (!strcmp(nm, "sleep") && argc == 1) { return 0.0; }
   /* **深度测试**（语言那一侧的 `gl_enable(GL_DEPTH_TEST)` 转过来的）：这一档没有
      z 缓冲，收下记着不用 —— 与 `host/gfx-cpu.js` 那一份同一句话。 */

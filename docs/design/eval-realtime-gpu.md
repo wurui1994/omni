@@ -1972,6 +1972,29 @@ CPU 备选收下不管），量出来：
 可正本说的是"光标在窗口正中" ⇒ 320×240 那一档本该是 **(160,120)**。
 `mipmap` 这一份对它最敏感（`dep` 直接由 `mousy/yres` 定）。哪天拿到原版的输出要重裁。
 
+### 28.16 `goto` **跳进块里**那一档（`drawcone2` 两份跑起来了）
+
+`ken/drawcone2.pss` 的 `singsph:` 在 `if {}` 里头，而 `goto singsph` 在**函数体那一层**
+（`:315`）—— 护卫那一招（`stmtsOf` 头上那段）只退得出去、退不进去，于是从前当场报
+"找不到往前跳的那个标号"，两份都跑不起来。
+
+落法是**照抄那一段**：标号到它所在那格语句表末尾的那几句，原样在跳转点再降一份；
+**前提是那一段不会走到底**（末句是 `goto`/`return`）—— 不然抄完还要接着往下走，
+就不是同一件事了（不满足就照旧报，话里写着为什么）。`drawcone2` 那一段末句正是
+`goto skipcone`，而 `skipcone:` 在函数体这一层、`goto` 在它前头 ⇒ 抄进来那句照旧走旗子
+那条路。原处那一段照旧留着（顺着走下来的那条路要用），代价是代码多一份。
+标号那张表（`C.innerLabels`）**按函数算**，另有一格 `C.expanding` 防自套。
+
+顺手补上 `glprogramlocalparam`（5 个实参）：**ARB 汇编专用**（`polydraw.c:2110`，走
+`glProgramLocalParameter4fARB`），与已有的 `glprogramenvparam` 同一句话 —— core profile
+没有 ARB 汇编那条路，参考也是 no-op（`pd_polyhost_tex.c:613`），收下不管。
+`drawcone2_asm` 就卡在这一格上（跳转那一刀之后才露出来）。
+
+量出来：`drawcone2_asm` **7.77、只差 247 格（0.24%）⇒ 过**（"够近"那条线）；
+`drawcone2` 10.13、差 2409 格（3.1%）—— 还红着，但从"跑不起来"变成了"差一小撮"。
+判据：`tests/lower/run.js polydraw evaldraw` 44/44（`.kc` 那几份 goto 照旧）、`check:self` ok。
+
+
 
 
 

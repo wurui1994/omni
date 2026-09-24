@@ -738,11 +738,14 @@ export function gfxCall(name, args) {
     case 'glklockstart/0': case 'glklockelapsed/0':
     /* `gltextdisable`：关掉画布文字那一层（`polydraw.c` 的 myext[]）—— 我们没有那一层。 */
     case 'gltextdisable/0':
-    /* `glprogramenvparam(目标, 序号, x,y,z,w)`：**ARB 汇编专用**（`polydraw.c:2111`
-       那一行就写着 "for arb asm"）。core profile / WebGL 都没有 ARB 汇编那条路，
-       参考实现也把它写成 no-op（`c_impl/.../pd_polyhost_tex.c:547`）—— 收下不管。
+    /* `glprogramenvparam(目标, 序号, x,y,z,w)` / `glprogramlocalparam(…)`：**ARB 汇编专用**
+       （`polydraw.c:2110`/`:2111` 那两行就写着 "for arb asm"，一个走
+       `glProgramEnvParameter4fARB`、一个走 `glProgramLocalParameter4fARB`）。
+       core profile / WebGL 都没有 ARB 汇编那条路，参考实现也把这两格写成 no-op
+       （`c_impl/.../pd_polyhost_tex.c:547`/`:613`）—— 收下不管。
        ARB 汇编那几段着色器由设备认出来退回内建那对，见 §19.2。 */
     case 'glprogramenvparam/5':
+    case 'glprogramlocalparam/5':
     case 'sleep/1':
       return 0;
     default:
