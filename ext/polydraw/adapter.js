@@ -354,12 +354,16 @@ function exprOf(x, C, want = 'val') {
     const op = unquote(leaf(kids(x)[0]));
     const a = kids(x)[1];
     const b = kids(x)[2];
-    /* `^` 是幂、`%` 是 fmod（不是整数取模）。两格都可能**直接站在条件位置**
+    /* `^` 是幂、`%` 是**按 |除数| 向下取整的模**（不是 `fmod`，不是整数取模 ——
+       见 `needModSig` 那段注释里抄的 `eval.c:5141`）。两格都可能**直接站在条件位置**
        （`if (bstatus % 2)` 就是说明书里"消一次点击"的写法）—— 所以也要按位置补 truthy。 */
     if (op === '^' || op === '%') {
-      const v = op === '^'
-        ? rmath('pow', [exprOf(a, C), exprOf(b, C)])
-        : rmath('fmod', [exprOf(a, C), exprOf(b, C)]);
+      let v;
+      if (op === '^') {
+        v = rmath('pow', [exprOf(a, C), exprOf(b, C)]);
+      } else {
+        v = modIR(C, exprOf(a, C), exprOf(b, C));
+      }
       return want === 'cond' ? truthy(v) : v;
     }
     if (CMP.has(op)) {
@@ -814,14 +818,14 @@ function hostStore(ht, op, val, C) {
     const tgt = nameRef(hvName(ht.name));
     if (op === '=') return { kind: 'assign', target: tgt, value: val };
     const core = op.slice(0, 1);
-    const v = core === '%' ? rmath('fmod', [tgt, val]) : bin(core, tgt, val);
+    const v = core === '%' ? modIR(C, tgt, val) : bin(core, tgt, val);
     return { kind: 'assign', target: tgt, value: v };
   }
   let v = val;
   if (op !== '=') {
     const read = ht.index === null ? gfxCallIR(ht.name) : gfxCallIR(ht.name, [ht.index]);
     const core = op.slice(0, 1);
-    v = core === '%' ? rmath('fmod', [read, val]) : bin(core, read, val);
+    v = core === '%' ? modIR(C, read, val) : bin(core, read, val);
   }
   const args = ht.index === null ? [v] : [ht.index, v];
   return { kind: 'expr-stmt', expr: gfxCallIR(`set${ht.name}`, args) };
@@ -1139,9 +1143,9 @@ function exprStmtOf(e, C) {
     const tgt = targetOf(kids(e)[1], C);
     const val = exprOf(kids(e)[2], C);
     if (op === '=') return [{ kind: 'assign', target: tgt, value: val }];
-    /* `a %= b` 是 fmod，不是整数取模。 */
+    /* `a %= b` 是那格按 |除数| 向下取整的模，不是 fmod、也不是整数取模。 */
     const core = op.slice(0, 1);
-    const v = core === '%' ? rmath('fmod', [tgt, val]) : bin(core, tgt, val);
+    const v = core === '%' ? modIR(C, tgt, val) : bin(core, tgt, val);
     return [{ kind: 'assign', target: tgt, value: v }];
   }
   if (t === 'postinc' || t === 'preinc') return [stepOf(e, C, +1)];
@@ -1292,7 +1296,11 @@ function constOf(e, C) {
     if (op === '-') return a - b;
     if (op === '*') return a * b;
     if (op === '/') return b === 0 ? null : a / b;
-    if (op === '%') return b === 0 ? null : a % b;
+    /* `%` 照 `eval.c:5141`：按 |除数| 向下取整的模（见 `needModSig`）—— 折的时候也得一样，
+       不然同一个式子"编译期折出来"与"运行时算出来"两个答案。 */
+    if (op === '%') {
+      return b === 0 ? null : a - Math.floor(a / Math.abs(b)) * Math.abs(b);
+    }
     if (op === '^') return a ** b;
     return null;
   }
@@ -1598,6 +1606,46 @@ function needRndSigs(C) {
   C.fns.set('pd_rnd', { params: [], ret: REAL });
   C.fns.set('pd_nrnd', { params: [], ret: REAL });
   C.fns.set('pd_srand', { params: [REAL], ret: REAL });
+}
+
+/**
+ * **`%` 不是 `fmod`** —— 照 `eval.c:5141`（与 5709 那份逐字相同）：
+ *
+ *     case PERC: p0 = (*p1) - floor((*p1) / fabs(*p2)) * fabs(*p2);
+ *
+ * 也就是**按 |除数| 向下取整的模**，结果与除数同号无关、永远落在 `[0, |b|)`。
+ * C 的 `fmod` / JS 的 `%` 是"向零截断"，被除数是负的时候给负数 —— 两者只在负数上分家，
+ * 所以这一格藏得久：`town no texture.pss` 的楼高是 `(i*895 + j + 2) % 10`，
+ * `i` 取到 -5 时那半边楼整个不是一个高度（我们 -8、正本 2），图上左半城全错。
+ * `FMOD(a,b)` 是**另一个**东西（说明书里是 2 参函数），照旧是真 fmod —— 别混。
+ *
+ * 为什么要一格函数而不是当场展开：`a` 与 `b` 在式子里各出现两次，展开会把副作用
+ * （`rnd % 3`、`i++ % 4`）做两遍。
+ */
+function needModSig(C) {
+  C.needMod = true;
+  C.fns.set('pd_mod', { params: [REAL, REAL], ret: REAL });
+}
+
+/** 一格 `a % b`（`%=` 那几处也走它）。 */
+function modIR(C, a, b) {
+  needModSig(C);
+  return { kind: 'call', fn: nameRef('pd_mod'), args: [a, b] };
+}
+
+function modDecl() {
+  const a = nameRef('a');
+  const ab = rmath('fabs', [nameRef('b')]);
+  return {
+    kind: 'fn',
+    name: 'pd_mod',
+    params: [{ name: 'a', type: REAL }, { name: 'b', type: REAL }],
+    ret: REAL,
+    body: [{
+      kind: 'return',
+      values: [bin('-', a, bin('*', rmath('floor', [bin('/', a, ab)]), ab))],
+    }],
+  };
 }
 
 function rndDecls() {
@@ -2279,6 +2327,8 @@ export function evalToIR(cst, host, src = '') {
   }
 
   if (C.needFact) decls.push(factDecl());
+  /* `%` 那格模（照 `eval.c:5141`，不是 fmod）。 */
+  if (C.needMod) decls.push(modDecl());
   /* `RND`/`NRND`/`SRAND` 那一摊（生成出来的 LCG + Box-Muller，三条腿逐字节相同）。 */
   if (C.needRnd) decls.push(...rndDecls());
   /* **噪声那一族**（`NOISE(x[,y[,z]])` / `NOISE3D`）：照 `polydraw.c:852` 那份算法生成 ——
