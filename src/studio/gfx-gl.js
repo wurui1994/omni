@@ -346,12 +346,13 @@ const ident = () => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
  * `.pss` 的后半是 `@v` / `@f` / `@g` 区段（GLSL 原文）。语言那一侧把它们**原样**交到
  * 这儿（方言的 `(gfxdef 种类 名字 内容)`），运行期的 `glsetshader(名字下标…)` 再按名字挑。
  *
- * ## 原文要翻一遍（这一档是 WebGL2 = GLSL ES 300）
+ * ## 原文在**编译期**就翻好了
  *
  * PolyDraw 跑的是真 OpenGL 1.x/2.x，脚本里的着色器是**旧式 GLSL**（`ftransform()`、
- * `gl_FragColor`、`attribute`/`varying`）。WebGL2 只认 GLSL ES 300，所以这儿翻一遍 ——
- * 翻的是**明白的那几格**（下面 `toEs300`），认不出的原文照原样递下去，让驱动去报
- * （报里带着原文与行号，比我们猜着改好）。本机 OpenGL 那一档**不必翻**（真 GL 认旧式）。
+ * `gl_FragColor`、`attribute`/`varying`）。翻成对齐后的 GLSL 那一步在
+ * `ext/polydraw/glsl.js`（adapter 在 `(gfxdef …)` 发出去之前调它）—— 于是这一档与本机
+ * OpenGL 那一档收到的是**同一份文本**，各自只补一行 `#version`（见 `toEs300`）。
+ * 口径：`docs/design/eval-realtime-gpu.md` 13.2（**必须与 WebGL 对齐，不许两种模型**）。
  */
 const SH = {
   /** 名字 -> `{ kind: 'vert'|'frag'|'geom', text }`（`(gfxdef …)` 登记进来的）。 */

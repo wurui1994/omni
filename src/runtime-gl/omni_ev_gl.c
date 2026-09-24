@@ -57,6 +57,40 @@ static int g_w, g_h;
 static int g_on;
 static int g_depth_test;
 
+/* ── 可编程管线那一摊（与 `src/studio/gfx-gl.js` 的 `SH`/`UNI`/`TX` 一一对应）─────────
+ *
+ * 语言那一侧把 `.pss` 的 `@v`/`@f`/`@g` 区段与那张名字表**原样**交过来
+ * （方言的 `(gfxdef 种类 名字 内容)`，GLSL 已经在编译期对齐好了，见 §13.7），
+ * 运行期 `glsetshader(名字下标…)` 按名字挑一对。这儿是那半的 C 实现。
+ *
+ * 表都是定长的（脚本里这几样都是个位数级）—— 满了就报，不悄悄丢。 */
+#define EV_MAXSH 32
+#define EV_MAXNAME 256
+#define EV_MAXPROG 16
+#define EV_MAXUNI 256
+#define EV_MAXATTR 16
+#define EV_MAXTEX 64
+
+static struct { char name[64]; int kind; char *text; } g_sh[EV_MAXSH];  /* kind 0 vert 1 frag 2 geom */
+static int g_nsh;
+static struct { int idx; char name[64]; } g_nm[EV_MAXNAME];
+static int g_nnm;
+static struct { int vi, fi; GLuint prog; } g_progs[EV_MAXPROG];
+static int g_nprogs;
+static struct { GLuint prog; GLint loc; } g_uni[EV_MAXUNI];
+static int g_nuni;
+static struct { GLint loc; float v[4]; } g_attr[EV_MAXATTR];
+static int g_nattr;
+static struct { GLuint id; int w, h, fmt; int slot; } g_tex[EV_MAXTEX];
+static int g_ntex;
+
+static GLuint g_cur;             /* 现在挑着的那格 program（0 = 还没挑） */
+static int g_useprog;           /* `batchprog`：0 内建那对、≠0 脚本那格 */
+static int g_blend = 1;         /* `batchblend`：0 = alpha 混合 */
+static float g_mvp[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+static int g_texunit;           /* `glactivetexture` 挑的那格单元 */
+
+
 /**
  * 内建那对着色器。**与 `src/studio/gfx-gl.js` 里 WebGL2 那一档逐句对应** ——
  * 差的只有 `#version` 那一行（那边 `300 es` + precision，这边 `410 core`）与属性名之外
@@ -183,6 +217,317 @@ void omni_ev_gl_depth(int on) {
   g_depth_test = on ? 1 : 0;
 }
 
+/* ── 登记那两张表（`(gfxdef 种类 名字 内容)`）──────────────────────────────────────
+ *
+ * 收到的着色器主体**已经是对齐后的 GLSL**（编译期翻好的，见 §13.7）—— 这一档只在编的
+ * 时候补一行 `#version 410 core`（脚本自带 `#version` 的原样用）。**不在这儿翻**。
+ */
+void omni_ev_gl_def(const char *kind, const char *name, const char *text) {
+  if (kind == NULL || name == NULL || text == NULL) return;
+  if (strcmp(kind, "name") == 0) {
+    /* 名字表：`名字` 是下标（十进制），`内容` 是那个串。 */
+    if (g_nnm >= EV_MAXNAME) return;
+    g_nm[g_nnm].idx = atoi(name);
+    snprintf(g_nm[g_nnm].name, sizeof(g_nm[0].name), "%s", text);
+    g_nnm++;
+    return;
+  }
+  int k = strcmp(kind, "vert") == 0 ? 0 : (strcmp(kind, "frag") == 0 ? 1
+    : (strcmp(kind, "geom") == 0 ? 2 : -1));
+  if (k < 0 || g_nsh >= EV_MAXSH) return;
+  snprintf(g_sh[g_nsh].name, sizeof(g_sh[0].name), "%s", name);
+  g_sh[g_nsh].kind = k;
+  g_sh[g_nsh].text = strdup(text);
+  g_nsh++;
+}
+
+/** 名字表里那个下标对应的串（没有回 NULL）。 */
+static const char *ev_name(int idx) {
+  for (int i = 0; i < g_nnm; i++) if (g_nm[i].idx == idx) return g_nm[i].name;
+  return NULL;
+}
+
+/** 按名字找登记过的那份着色器（回下标，没有回 -1）。 */
+static int ev_sh_by_name(const char *name) {
+  if (name == NULL) return -1;
+  for (int i = 0; i < g_nsh; i++) if (strcmp(g_sh[i].name, name) == 0) return i;
+  return -1;
+}
+
+/** 第一份某一类的着色器（脚本没挑过时的默认那一对）。 */
+static int ev_first_of(int kind) {
+  for (int i = 0; i < g_nsh; i++) if (g_sh[i].kind == kind) return i;
+  return -1;
+}
+
+/** 编一份脚本的着色器：**只补一行头**（脚本自带 `#version` 的原样用）。 */
+static GLuint ev_compile_user(GLenum stage, const char *src) {
+  if (strstr(src, "#version") != NULL) return ev_compile(stage, src);
+  size_t n = strlen(src) + 32;
+  char *buf = (char *)malloc(n);
+  if (buf == NULL) return 0;
+  snprintf(buf, n, "#version 410 core\n%s", src);
+  GLuint s = ev_compile(stage, buf);
+  free(buf);
+  return s;
+}
+
+/**
+ * 挑一对着色器、编好链好（一对只编一次）。回 0 = 不成（话在 `g_err` 里）。
+ *
+ * **采样器按名字约定接单元**（与 WebGL2 那一档同一句话）：`tex0..tex7` 那几个 uniform
+ * 设成 0..7 号纹理单元 —— PolyDraw 的脚本就是 `glactivetexture(GL_TEXTURE0+i);
+ * glbindtexture(i)` 加片元里 `uniform sampler2D tex0`，除此之外没有别的绑定办法。
+ */
+static GLuint ev_use_program(int vi, int fi) {
+  if (vi < 0 || fi < 0) { ev_err("glsetshader：没有这一对着色器（缺 @v 或 @f 区段）", NULL); return 0; }
+  for (int i = 0; i < g_nprogs; i++) {
+    if (g_progs[i].vi == vi && g_progs[i].fi == fi) { g_cur = g_progs[i].prog; return g_cur; }
+  }
+  if (g_nprogs >= EV_MAXPROG) { ev_err("glsetshader：program 太多（上限 16）", NULL); return 0; }
+  GLuint vs = ev_compile_user(GL_VERTEX_SHADER, g_sh[vi].text);
+  GLuint fs = ev_compile_user(GL_FRAGMENT_SHADER, g_sh[fi].text);
+  if (vs == 0 || fs == 0) return 0;
+  GLuint p = glCreateProgram();
+  glAttachShader(p, vs);
+  glAttachShader(p, fs);
+  glLinkProgram(p);
+  GLint ok = 0;
+  glGetProgramiv(p, GL_LINK_STATUS, &ok);
+  if (!ok) {
+    char log[512];
+    GLsizei n = 0;
+    glGetProgramInfoLog(p, sizeof(log) - 1, &n, log);
+    log[n] = 0;
+    ev_err("glsetshader：program 链不上：%s", log);
+    return 0;
+  }
+  glUseProgram(p);
+  for (int i = 0; i < 8; i++) {
+    char nm[8];
+    snprintf(nm, sizeof(nm), "tex%d", i);
+    GLint loc = glGetUniformLocation(p, nm);
+    if (loc >= 0) glUniform1i(loc, i);
+  }
+  g_progs[g_nprogs].vi = vi;
+  g_progs[g_nprogs].fi = fi;
+  g_progs[g_nprogs].prog = p;
+  g_nprogs++;
+  g_cur = p;
+  return p;
+}
+
+/** `glsetshader(…)` 的实参是**名字表的下标**；旧式的数字那一档（`glsetshader(0)`）按序号取。 */
+static int ev_sh_at(double v) {
+  int idx = (int)v;
+  const char *nm = ev_name(idx);
+  int i = ev_sh_by_name(nm);
+  if (i >= 0) return i;
+  return (idx >= 0 && idx < g_nsh) ? idx : -1;
+}
+
+/**
+ * `glsetshader(…)`：挑一对。回 0 = 成了。
+ * **负下标 = "第一对"** —— 语言那一侧的 `gl_quad` 在脚本没挑过 program 时发的那句
+ * （`glquad` 在 PolyDraw 里本来就默认拿 `@v`/`@f` 那一对）。
+ */
+int omni_ev_gl_shader(int argc, const double *args) {
+  if (!g_on) return 1;
+  CGLSetCurrentContext(g_ctx);
+  if (argc <= 0 || args == NULL) return 1;
+  if (argc == 1 && (int)args[0] < 0) {
+    return ev_use_program(ev_first_of(0), ev_first_of(1)) == 0 ? 1 : 0;
+  }
+  if (argc == 1) {
+    int fi = ev_sh_at(args[0]);
+    if (fi < 0) fi = ev_first_of(1);
+    return ev_use_program(ev_first_of(0), fi) == 0 ? 1 : 0;
+  }
+  int vi = ev_sh_at(args[0]);
+  int fi = ev_sh_at(argc >= 3 ? args[2] : args[1]);
+  return ev_use_program(vi, fi) == 0 ? 1 : 0;
+}
+
+/** 脚本还没挑过 program 时，替它挑第一对（uniform/attrib 那两格要当前 program）。 */
+static int ev_need_prog(void) {
+  if (g_cur != 0) return 1;
+  return ev_use_program(ev_first_of(0), ev_first_of(1)) != 0;
+}
+
+/** `glgetuniformloc(名字下标)` -> 一格句柄（**按 program 记**）。回 -1 = 不认得那个下标。 */
+double omni_ev_gl_uniloc(double idx) {
+  if (!g_on) return -1.0;
+  CGLSetCurrentContext(g_ctx);
+  const char *nm = ev_name((int)idx);
+  if (nm == NULL || !ev_need_prog()) return -1.0;
+  GLint loc = glGetUniformLocation(g_cur, nm);
+  for (int i = 0; i < g_nuni; i++) {
+    if (g_uni[i].prog == g_cur && g_uni[i].loc == loc && loc >= 0) return (double)i;
+  }
+  if (g_nuni >= EV_MAXUNI) return -1.0;
+  g_uni[g_nuni].prog = g_cur;
+  g_uni[g_nuni].loc = loc;
+  return (double)(g_nuni++);
+}
+
+/** `gluniform{1,2,3,4}f(句柄, …)`。着色器里没用到那个名字（loc < 0）就静默 —— 与 GL 同。 */
+int omni_ev_gl_uni(double h, int n, const double *v) {
+  if (!g_on || v == NULL) return 1;
+  int i = (int)h;
+  if (i < 0 || i >= g_nuni) return 1;
+  if (g_uni[i].loc < 0) return 0;
+  CGLSetCurrentContext(g_ctx);
+  glUseProgram(g_uni[i].prog);
+  if (n == 1) glUniform1f(g_uni[i].loc, (float)v[0]);
+  else if (n == 2) glUniform2f(g_uni[i].loc, (float)v[0], (float)v[1]);
+  else if (n == 3) glUniform3f(g_uni[i].loc, (float)v[0], (float)v[1], (float)v[2]);
+  else glUniform4f(g_uni[i].loc, (float)v[0], (float)v[1], (float)v[2], (float)v[3]);
+  return 0;
+}
+
+/** `glgetattribloc(名字下标)` -> 属性在当前 program 里的位置（就是 GL 那个号）。 */
+double omni_ev_gl_attrloc(double idx) {
+  if (!g_on) return -1.0;
+  CGLSetCurrentContext(g_ctx);
+  const char *nm = ev_name((int)idx);
+  if (nm == NULL || !ev_need_prog()) return -1.0;
+  return (double)glGetAttribLocation(g_cur, nm);
+}
+
+/** `glvertexattrib*f(位置, …)`：记下那格**常量属性**，画的时候一次性摆上。 */
+int omni_ev_gl_attr(double loc, const double *v) {
+  if (!g_on || v == NULL) return 1;
+  GLint k = (GLint)loc;
+  if (k < 0) return 0;
+  for (int i = 0; i < g_nattr; i++) {
+    if (g_attr[i].loc == k) {
+      for (int j = 0; j < 4; j++) g_attr[i].v[j] = (float)v[j];
+      return 0;
+    }
+  }
+  if (g_nattr >= EV_MAXATTR) return 1;
+  g_attr[g_nattr].loc = k;
+  for (int j = 0; j < 4; j++) g_attr[g_nattr].v[j] = (float)v[j];
+  g_nattr++;
+  return 0;
+}
+
+/** `batchprog` / `batchmvp 列 m0..m3` / `batchblend`（批上带的那点状态）。 */
+void omni_ev_gl_prog(int on) { g_useprog = on ? 1 : 0; }
+
+void omni_ev_gl_mvp(int col, double m0, double m1, double m2, double m3) {
+  if (col < 0 || col > 3) return;
+  g_mvp[col * 4 + 0] = (float)m0;
+  g_mvp[col * 4 + 1] = (float)m1;
+  g_mvp[col * 4 + 2] = (float)m2;
+  g_mvp[col * 4 + 3] = (float)m3;
+}
+
+void omni_ev_gl_blend(int mode) { g_blend = mode; }
+
+/* ── 纹理（`(gfxtex 槽 宽 高 层 格 数组)`）─────────────────────────────────────────
+ *
+ * 与 `src/studio/gfx-gl.js` 的 `texIn` 逐句对应。`格` 是 `KGL_*` 那个打包好的数：
+ * 低 4 位像素格式、`0xf0` 过滤、`0xf00` 环绕（`polydraw.c:190-193`）。
+ * **槽是脚本自己编号的**（`glbindtexture(槽)` 用的就是它）。
+ *
+ * 与 WebGL2 那一档的唯一差别：真 GL 有 `GL_BGRA`，但一格 double 是一格打包好的像素、
+ * 摊开那一步两边都要做 —— 所以这儿也摊成 RGBA（同一份算法，不给自己留第二条路）。
+ */
+static int ev_tex_slot(int slot) {
+  for (int i = 0; i < g_ntex; i++) if (g_tex[i].slot == slot) return i;
+  if (g_ntex >= EV_MAXTEX) return -1;
+  g_tex[g_ntex].slot = slot;
+  glGenTextures(1, &g_tex[g_ntex].id);
+  return g_ntex++;
+}
+
+/** 过滤与环绕那两段位（`0xf0` / `0xf00`）-> GL 的参数。回 1 = 要 mipmap。 */
+static int ev_tex_params(int fmt) {
+  int filt = fmt & 0xf0;
+  int wrap = fmt & 0xf00;
+  int mip = filt >= 0x20;
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filt == 0x10 ? GL_NEAREST : GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                  mip ? GL_LINEAR_MIPMAP_LINEAR : (filt == 0x10 ? GL_NEAREST : GL_LINEAR));
+  GLint w = wrap == 0x100 ? GL_MIRRORED_REPEAT : (wrap == 0 ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, w);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, w);
+  return mip;
+}
+
+int omni_ev_gl_tex(int slot, int w, int h, int d, int fmt, const double *px) {
+  if (!g_on || px == NULL) return 1;
+  if (d != 1) { ev_err("gfxtex：这一档只接 2D 纹理（3D 纹理还没接）", NULL); return 1; }
+  CGLSetCurrentContext(g_ctx);
+  int i = ev_tex_slot(slot);
+  if (i < 0) return 1;
+  glActiveTexture(GL_TEXTURE0 + g_texunit);
+  glBindTexture(GL_TEXTURE_2D, g_tex[i].id);
+  long n = (long)w * (long)h;
+  int kind = fmt & 15;
+  if (kind == 0) {
+    unsigned char *b = (unsigned char *)malloc((size_t)n * 4);
+    if (b == NULL) return 1;
+    for (long k = 0; k < n; k++) {
+      unsigned int v = (unsigned int)(long long)px[k];
+      b[k * 4] = (unsigned char)((v >> 16) & 255);
+      b[k * 4 + 1] = (unsigned char)((v >> 8) & 255);
+      b[k * 4 + 2] = (unsigned char)(v & 255);
+      unsigned int al = (v >> 24) & 255;
+      b[k * 4 + 3] = (unsigned char)(al == 0 ? 255 : al);
+    }
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, b);
+    free(b);
+  } else if (kind == 1) {
+    unsigned char *b = (unsigned char *)malloc((size_t)n);
+    if (b == NULL) return 1;
+    for (long k = 0; k < n; k++) {
+      double v = px[k];
+      b[k] = (unsigned char)(v < 0 ? 0 : (v > 255 ? 255 : (int)v));
+    }
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, w, h, 0, GL_RED, GL_UNSIGNED_BYTE, b);
+    free(b);
+  } else if (kind == 4 || kind == 5) {
+    long per = kind == 5 ? 4 : 1;
+    float *f = (float *)malloc(sizeof(float) * (size_t)(n * per));
+    if (f == NULL) return 1;
+    for (long k = 0; k < n * per; k++) f[k] = (float)px[k];
+    if (kind == 4) glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w, h, 0, GL_RED, GL_FLOAT, f);
+    else glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, f);
+    free(f);
+  } else {
+    ev_err("gfxtex：这一档没接 KGL 格式（有的是 BGRA32(0)/CHAR(1)/FLOAT(4)/VEC4(5)）", NULL);
+    return 1;
+  }
+  if (ev_tex_params(fmt)) glGenerateMipmap(GL_TEXTURE_2D);
+  g_tex[i].w = w;
+  g_tex[i].h = h;
+  g_tex[i].fmt = fmt;
+  return 0;
+}
+
+/** `glbindtexture(槽)` / `glactivetexture(单元)`：把那一槽挂到现在这格单元上。 */
+void omni_ev_gl_bindtex(int slot) {
+  if (!g_on) return;
+  CGLSetCurrentContext(g_ctx);
+  int i = ev_tex_slot(slot);
+  if (i < 0) return;
+  glActiveTexture(GL_TEXTURE0 + g_texunit);
+  glBindTexture(GL_TEXTURE_2D, g_tex[i].id);
+}
+
+void omni_ev_gl_activetex(int unit) {
+  if (!g_on) return;
+  g_texunit = unit < 0 ? 0 : (unit > 7 ? 7 : unit);
+  CGLSetCurrentContext(g_ctx);
+  glActiveTexture(GL_TEXTURE0 + g_texunit);
+}
+
+
+
+
+
 /**
  * **收一段顶点批**：一格顶点 12 个 double（位置 4 裁剪空间 / 颜色 4 / 纹理坐标 4），
  * 类 0 线段 / 1 三角 / 2 点。这一层只做"转 float + 上传 + 一次 draw"。
@@ -202,11 +547,23 @@ void omni_ev_gl_batch(int kind, long n, const double *verts) {
   glViewport(0, 0, g_w, g_h);
   if (g_depth_test) glEnable(GL_DEPTH_TEST);
   else glDisable(GL_DEPTH_TEST);
-  glUseProgram(g_prog);
-  /* 内建那一档的位置已经是裁剪空间 ⇒ `u_mvp` 是单位矩阵。 */
+  /* 这一段用哪格 program 由 `batchprog` 说：0 是内建那对（位置**已是裁剪空间** ⇒
+     `u_mvp` 单位矩阵），≠0 是脚本 `glsetshader` 挑的那格（位置是**物体坐标**，
+     `u_mvp` 由语言那一侧发的四句 `batchmvp` 给）。 */
   static const float I4[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
-  GLint mvp = glGetUniformLocation(g_prog, "u_mvp");
-  if (mvp >= 0) glUniformMatrix4fv(mvp, 1, GL_FALSE, I4);
+  GLuint prog = g_prog;
+  const float *m = I4;
+  if (g_useprog && (g_cur != 0 || ev_need_prog())) { prog = g_cur; m = g_mvp; }
+  glUseProgram(prog);
+  GLint mvp = glGetUniformLocation(prog, "u_mvp");
+  if (mvp >= 0) glUniformMatrix4fv(mvp, 1, GL_FALSE, m);
+  /* 混合：`glquad(0)` 那一档要 alpha 混合（语言那一侧发的 `batchblend`）。 */
+  if (g_blend == 0) {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  } else {
+    glDisable(GL_BLEND);
+  }
 
   glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
   glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(sizeof(float) * 12 * (size_t)n), buf,
@@ -214,18 +571,25 @@ void omni_ev_gl_batch(int kind, long n, const double *verts) {
   const char *names[3] = { "a_pos", "a_col", "a_tex" };
   GLint locs[3];
   for (int k = 0; k < 3; k++) {
-    locs[k] = glGetAttribLocation(g_prog, names[k]);
+    locs[k] = glGetAttribLocation(prog, names[k]);
     if (locs[k] < 0) continue;
     glEnableVertexAttribArray((GLuint)locs[k]);
     glVertexAttribPointer((GLuint)locs[k], 4, GL_FLOAT, GL_FALSE,
                           (GLsizei)(sizeof(float) * 12),
                           (const void *)(size_t)(sizeof(float) * 4 * (size_t)k));
   }
+  /* `glVertexAttrib*` 设的那几格是**常量属性**（数组关着时 GL 用的就是当前值）。 */
+  for (int k = 0; k < g_nattr; k++) {
+    glDisableVertexAttribArray((GLuint)g_attr[k].loc);
+    glVertexAttrib4fv((GLuint)g_attr[k].loc, g_attr[k].v);
+  }
   GLenum mode = kind == 0 ? GL_LINES : (kind == 2 ? GL_POINTS : GL_TRIANGLES);
   glDrawArrays(mode, 0, (GLsizei)n);
   for (int k = 0; k < 3; k++) if (locs[k] >= 0) glDisableVertexAttribArray((GLuint)locs[k]);
+  glDisable(GL_BLEND);
   free(buf);
 }
+
 
 /**
  * 把这一帧读回来（`out` 要 `w*h*4` 字节，RGBA）。

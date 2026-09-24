@@ -119,6 +119,68 @@ for (const [src, tol] of [['ext/polydraw/examples/02-gl.pss', 0.05],
   }
 }
 
+/* ── 第三节：**着色器那一族**（§13.5 第 3 条）────────────────────────────────────
+ *
+ * 这三份 `.pss` 整幅图都在片元着色器里 —— CPU 备选一格都画不出来（`batchprog != 0`
+ * 当场报），所以这一节判的就是"真编真画"那三条，与浏览器那一档同一套探针：
+ *   铺满（非黑的比例）/ 片元真在算（不同颜色的个数，不是一片纯色）/
+ *   uniform 真喂进去（第 0 帧与第 30 帧的图**不一样** —— 时间那格 uniform 在动）。
+ */
+const stat = (p) => {
+  const b = rgba(p);
+  const hist = new Set();
+  let nz = 0;
+  for (let i = 0; i < b.length; i += 4) {
+    if (b[i] | b[i + 1] | b[i + 2]) nz++;
+    hist.add((b[i] << 16) | (b[i + 1] << 8) | b[i + 2]);
+  }
+  return { n: b.length / 4, nz, colors: hist.size };
+};
+const runFrame = (src, outPath, frame) => spawnSync(process.execPath,
+  [join(ROOT, 'src/cli.js'), 'run', join(ROOT, src), '--backend', 'c'],
+  { encoding: 'utf8', cwd: ROOT, timeout: 120000,
+    env: { ...process.env, OMNI_GFX: 'gl', OMNI_GFX_OUT: outPath,
+      ...(frame === undefined ? {} : { OMNI_GFX_FRAME: String(frame) }) } });
+
+/* 每份的两个下界（都比量到的数留了余量）：铺满的比例、不同颜色的个数。 */
+for (const [name, minFill, minColors] of [['04-shader.pss', 0.9, 1000],
+  ['05-shader-geom.pss', 0.05, 1000], ['06-texture.pss', 0.9, 500]]) {
+  const src = `ext/polydraw/examples/${name}`;
+  const p0 = join(out, `${name}.f0.rgba`);
+  const r0 = runFrame(src, p0);
+  if (r0.status !== 0 || !existsSync(p0)) {
+    no(`${name} 在本机 GL 上真编真画`, (r0.stderr ?? '').trim().slice(0, 300));
+    continue;
+  }
+  const s = stat(p0);
+  if (s.nz >= s.n * minFill && s.colors >= minColors) {
+    ok(`${name} 真编真画（铺满 + 片元真在算）`, `非黑 ${s.nz}/${s.n}、${s.colors} 种颜色`);
+  } else {
+    no(`${name} 真编真画`, `非黑 ${s.nz}/${s.n}（要 ≥ ${minFill}）、`
+      + `${s.colors} 种颜色（要 ≥ ${minColors}）`);
+  }
+}
+
+/* uniform 那一条单判一份（跑第二趟要钱，挑铺满那一份最省）。 */
+{
+  const src = 'ext/polydraw/examples/04-shader.pss';
+  const p30 = join(out, '04-shader.pss.f30.rgba');
+  const r30 = runFrame(src, p30, 30);
+  const p0 = join(out, '04-shader.pss.f0.rgba');
+  if (r30.status !== 0 || !existsSync(p30) || !existsSync(p0)) {
+    no('04-shader.pss 的 uniform 真喂进去了', (r30.stderr ?? '').trim().slice(0, 300));
+  } else {
+    const a = rgba(p0);
+    const b = rgba(p30);
+    let d = 0;
+    for (let i = 0; i < a.length; i += 4) {
+      if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2]) d++;
+    }
+    if (d >= (a.length / 4) * 0.5) ok('04-shader.pss 的 uniform 真喂进去了（第 0 帧 ≠ 第 30 帧）', `${d} 格不同`);
+    else no('04-shader.pss 的 uniform 真喂进去了', `只有 ${d} 格不同（时间那格 uniform 没动）`);
+  }
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed（本机 OpenGL 设备）\n`);
 process.exit(fail === 0 ? 0 : 1);
 

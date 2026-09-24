@@ -738,4 +738,31 @@ program 与纹理接上（那时着色器那 22 份就出得来图了）。
 `omni_ev_gl.c` —— 那时着色器那 22 份 `.pss` 就出得来图。现在 `batchprog != 0` 在这一档
 是当场报，报的话里明写"还没接"。
 
+### 13.9 已落地（2026-09-24）：**可编程管线与纹理**（第五刀最后一格）
+
+`omni_ev_gl.c` 补上与 `gfx-gl.js` 逐句对应的那半（名字表 / 着色器登记 / program 缓存 /
+uniform 句柄 / 常量属性 / 纹理四格式），ABI 多这几个：
+
+    _def(种类,名字,内容)   vert/frag/geom/name —— 收到的主体已是对齐后的 GLSL（§13.7）
+    _shader(argc,args)     glsetshader（实参是名字表下标；负数 = 第一对，glquad 那一句）
+    _uniloc / _uni         glgetuniformloc / gluniform{1,2,3,4}f（句柄按 program 记）
+    _attrloc / _attr       glgetattribloc / glvertexattrib*f（常量属性，画的时候摆上）
+    _prog / _mvp / _blend  batchprog / batchmvp 列 m0..m3 / batchblend
+    _tex / _bindtex / _activetex   (gfxtex …) + glbindtexture/glactivetexture
+
+两格接法照 WebGL2 那一档一字不差：**采样器按名字约定接单元**（`tex0..tex7` 链好就设成
+0..7 号单元 —— PolyDraw 的脚本除此之外没有别的绑定办法）、**KGL_BGRA32 摊成 RGBA**
+（真 GL 有 `GL_BGRA`，但"一格 double 是一格打包像素"那步两边都要做，不给自己留第二条路）。
+
+宿主那侧有一格要记：`(gfxdef …)` 在**设备开起来之前**就来了（产物开头那一摊登记语句），
+所以 `omni_fmt.c` 先把它们存下来（自己的一份拷贝），GL 挂上之后一趟补给插件。
+`glsetshader` 也可能是这一趟的第一句图形调用 —— 所以转发之前先 `gfx_need()`。
+
+判据（`tests/gl/run.js` 第三节，11/11）：
+* `04-shader.pss` 非黑 76800/76800、**72259 种颜色** —— 铺满 + 片元真在算；
+* `05-shader-geom.pss` 非黑 9216、9217 种颜色；`06-texture.pss` 非黑 76780、4096 种颜色
+  （棋盘正好 64×64 = 4096 —— 纹理真上传真采样了）；
+* `04-shader.pss` 第 0 帧与第 30 帧 **76632 格不同** —— 时间那格 uniform 真喂进去了。
+
+
 

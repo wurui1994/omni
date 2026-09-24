@@ -456,6 +456,15 @@ typedef void (*gfx_gl_depth_fn)(int);
 typedef void (*gfx_gl_batch_fn)(int, long, const double *);
 typedef int (*gfx_gl_read_fn)(unsigned char *);
 typedef const char *(*gfx_gl_err_fn)(void);
+/* 可编程管线与纹理那几格（第五刀最后一格）—— 老库上 dlsym 不到就当这一族没有。 */
+typedef void (*gfx_gl_def_fn)(const char *, const char *, const char *);
+typedef int (*gfx_gl_shader_fn)(int, const double *);
+typedef double (*gfx_gl_loc_fn)(double);
+typedef int (*gfx_gl_uni_fn)(double, int, const double *);
+typedef int (*gfx_gl_attr_fn)(double, const double *);
+typedef void (*gfx_gl_int_fn)(int);
+typedef void (*gfx_gl_mvp_fn)(int, double, double, double, double);
+typedef int (*gfx_gl_tex_fn)(int, int, int, int, int, const double *);
 
 static struct {
   int tried, on;
@@ -465,7 +474,22 @@ static struct {
   gfx_gl_batch_fn batch;
   gfx_gl_read_fn read;
   gfx_gl_err_fn err;
+  gfx_gl_def_fn def;
+  gfx_gl_shader_fn shader;
+  gfx_gl_loc_fn uniloc, attrloc;
+  gfx_gl_uni_fn uni;
+  gfx_gl_attr_fn attr;
+  gfx_gl_int_fn prog, blend, bindtex, activetex;
+  gfx_gl_mvp_fn mvp;
+  gfx_gl_tex_fn tex;
 } g_gl;
+
+/* `(gfxdef …)` 登记进来的那几份串（着色器原文与名字表）。它们**在设备开起来之前**就来了
+   （产物开头那一摊登记语句），所以先存下来，GL 那一档挂上之后再一趟补给插件。 */
+#define GFX_MAXDEF 128
+static struct { char *kind, *name, *text; } g_gdefs[GFX_MAXDEF];
+static int g_ngdefs;
+
 
 static unsigned char *g_glpx = NULL;  /* 读回那一格（w*h*4，RGBA） */
 static int64_t *g_gout = NULL;        /* 合成出来的那一帧（0xRRGGBB，喂 omni_gfx_emit） */
@@ -500,6 +524,18 @@ static int gfx_gl_need(void) {
     g_gl.batch = (gfx_gl_batch_fn)dlsym(h, "omni_ev_gl_batch");
     g_gl.read = (gfx_gl_read_fn)dlsym(h, "omni_ev_gl_read");
     g_gl.err = (gfx_gl_err_fn)dlsym(h, "omni_ev_gl_error");
+    g_gl.def = (gfx_gl_def_fn)dlsym(h, "omni_ev_gl_def");
+    g_gl.shader = (gfx_gl_shader_fn)dlsym(h, "omni_ev_gl_shader");
+    g_gl.uniloc = (gfx_gl_loc_fn)dlsym(h, "omni_ev_gl_uniloc");
+    g_gl.attrloc = (gfx_gl_loc_fn)dlsym(h, "omni_ev_gl_attrloc");
+    g_gl.uni = (gfx_gl_uni_fn)dlsym(h, "omni_ev_gl_uni");
+    g_gl.attr = (gfx_gl_attr_fn)dlsym(h, "omni_ev_gl_attr");
+    g_gl.prog = (gfx_gl_int_fn)dlsym(h, "omni_ev_gl_prog");
+    g_gl.blend = (gfx_gl_int_fn)dlsym(h, "omni_ev_gl_blend");
+    g_gl.bindtex = (gfx_gl_int_fn)dlsym(h, "omni_ev_gl_bindtex");
+    g_gl.activetex = (gfx_gl_int_fn)dlsym(h, "omni_ev_gl_activetex");
+    g_gl.mvp = (gfx_gl_mvp_fn)dlsym(h, "omni_ev_gl_mvp");
+    g_gl.tex = (gfx_gl_tex_fn)dlsym(h, "omni_ev_gl_tex");
     if (g_gl.open == NULL || g_gl.batch == NULL || g_gl.read == NULL) continue;
     if (g_gl.open((int)g_gw, (int)g_gh) != 0) {
       fprintf(stderr, "#gfx gl 开不出来（%s）—— 这一趟走 CPU 备选\n",
@@ -510,6 +546,12 @@ static int gfx_gl_need(void) {
     g_gout = (int64_t *)malloc(sizeof(int64_t) * (size_t)(g_gw * g_gh));
     if (g_glpx == NULL || g_gout == NULL) return 0;
     g_gl.on = 1;
+    /* 设备开起来之前登记的那几份串（着色器原文与名字表）一趟补过去。 */
+    if (g_gl.def != NULL) {
+      for (int k = 0; k < g_ngdefs; k++) {
+        g_gl.def(g_gdefs[k].kind, g_gdefs[k].name, g_gdefs[k].text);
+      }
+    }
     return 1;
   }
   fprintf(stderr, "#gfx gl 挂不上 libomnigl（OMNI_GL_LIB 没指到那份库）"
@@ -704,6 +746,7 @@ static struct { int64_t w, h, d, fmt, n; } g_gtex[GFX_TEXMAX];
 double omni_gfx_tex(int64_t slot, int64_t w, int64_t h, int64_t d, int64_t fmt,
                     struct omni_arr_f64_s *px) {
   if (gfx_rec()) { g_greccnt += 1; return 0.0; }
+  if (gfx_gl_want()) gfx_need();   /* GL 那一档：真上传要设备已经开着 */
   if (slot < 0 || slot >= GFX_TEXMAX) {
     omni_errorf("gfxtex: 槽 %lld 出界（0..%d）", (long long)slot, GFX_TEXMAX - 1);
   }
@@ -717,6 +760,12 @@ double omni_gfx_tex(int64_t slot, int64_t w, int64_t h, int64_t d, int64_t fmt,
   int64_t have = px == NULL ? 0 : px->len;
   if (have < want) {
     omni_errorf("gfxtex: 像素不够（%lld 格，要 %lld）", (long long)have, (long long)want);
+  }
+  /* GL 那一档：真上传（`glTexImage2D`）。这一层仍记下形状 —— 报错的话里要用。 */
+  if (g_gl.on && g_gl.tex != NULL) {
+    if (g_gl.tex((int)slot, (int)w, (int)h, (int)d, (int)fmt, px->items) != 0) {
+      omni_errorf("本机 OpenGL：%s", g_gl.err != NULL ? g_gl.err() : "gfxtex 不成");
+    }
   }
   g_gtex[slot].w = w;
   g_gtex[slot].h = h;
@@ -814,6 +863,57 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
     for (int64_t i = 0; i < g_gw * g_gh; i++) g_gfb[i] = c;
     return 0.0;
   }
+  /* ── **可编程管线与纹理那一族**：GL 那一档转给插件，别的档照旧往下走（收下不用/报）。
+     句柄那两格（uniform / attrib）回的是插件给的数，脚本原样拿着再递回来。
+     这几格可能是这一趟的**第一句**图形调用（`glsetshader` 在清屏之前），所以先把设备开起来。 */
+  if (gfx_gl_want()) gfx_need();
+  if (g_gl.on) {
+    if (!strcmp(nm, "glsetshader") && argc >= 1 && argc <= 3 && g_gl.shader != NULL) {
+      double av[3] = { a0, a1, a2 };
+      if (g_gl.shader((int)argc, av) != 0) {
+        omni_errorf("本机 OpenGL：%s", g_gl.err != NULL ? g_gl.err() : "glsetshader 不成");
+      }
+      return 0.0;
+    }
+    if (!strcmp(nm, "glgetuniformloc") && argc == 1 && g_gl.uniloc != NULL) {
+      return g_gl.uniloc(a0);
+    }
+    if (!strcmp(nm, "glgetattribloc") && argc == 1 && g_gl.attrloc != NULL) {
+      return g_gl.attrloc(a0);
+    }
+    if (g_gl.uni != NULL && argc >= 2 && argc <= 5
+        && (!strcmp(nm, "gluniform1f") || !strcmp(nm, "gluniform2f")
+            || !strcmp(nm, "gluniform3f") || !strcmp(nm, "gluniform4f")
+            || !strcmp(nm, "gluniform"))) {
+      double v[4] = { a1, a2, a3, a4 };
+      return (double)g_gl.uni(a0, (int)argc - 1, v);
+    }
+    if (g_gl.attr != NULL && argc >= 2 && argc <= 5
+        && (!strcmp(nm, "glvertexattrib1f") || !strcmp(nm, "glvertexattrib2f")
+            || !strcmp(nm, "glvertexattrib3f") || !strcmp(nm, "glvertexattrib4f"))) {
+      /* 少给的那几格照 GL 的默认补（x,y,z 是 0、w 是 1）。 */
+      double v[4] = { a1, argc >= 3 ? a2 : 0.0, argc >= 4 ? a3 : 0.0, argc >= 5 ? a4 : 1.0 };
+      return (double)g_gl.attr(a0, v);
+    }
+    if (!strcmp(nm, "batchmvp") && argc == 5 && g_gl.mvp != NULL) {
+      g_gl.mvp((int)a0, a1, a2, a3, a4);
+      return 0.0;
+    }
+    if (!strcmp(nm, "batchblend") && argc == 1 && g_gl.blend != NULL) {
+      g_gl.blend((int)a0);
+      return 0.0;
+    }
+    if (!strcmp(nm, "glbindtexture") && argc == 1 && g_gl.bindtex != NULL) {
+      g_gl.bindtex((int)a0);
+      return 0.0;
+    }
+    if (!strcmp(nm, "glactivetexture") && argc == 1 && g_gl.activetex != NULL) {
+      /* 实参是 `GL_TEXTURE0 + i`（0x84c0）或者直接是 i —— 两种写法都有。 */
+      int u = (int)a0;
+      g_gl.activetex(u >= 0x84c0 ? u - 0x84c0 : u);
+      return 0.0;
+    }
+  }
   /* ── 收下但这一档做不到的那几格（与 `host/gfx-cpu.js` 逐句相同）──────────────
      `framebegin` 每帧初态：GL 的状态机在语言那一侧，设备这侧只把画布清掉；
      `clz`/`gldepth`：这一档没有 z 缓冲；剩下几格（点大小/剔除/alpha/垂直同步/线宽/sleep）
@@ -885,10 +985,11 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
      可编程管线，所以 `batchprog` 非零是当场报（不静默按内建那对画）；那张 `u_mvp`
      与混合开关在这一档没有落点，收下记着不用。 */
   if (!strcmp(nm, "batchprog") && argc == 1) {
+    if (g_gl.on && g_gl.prog != NULL) { g_gl.prog((int)a0 != 0 ? 1 : 0); return 0.0; }
     if ((int64_t)a0 != 0) {
       if (g_gl.on) {
-        omni_errorf("本机 OpenGL 那一档还没接可编程管线（glsetshader）—— "
-                    "第五刀的后半（见 docs/design/eval-realtime-gpu.md §13.8）");
+        omni_errorf("本机 OpenGL：挂上的那份 libomnigl 里没有可编程管线那几格符号"
+                    "（omni_ev_gl_prog…）—— 库旧了，重编一趟");
       }
       omni_errorf("这格设备（CPU 备选）没有可编程管线 —— 脚本挑了自己那格 program"
                   "（glsetshader），顶点是物体坐标，这一档接不了；要 GPU 那两档设备"
@@ -1022,11 +1123,20 @@ double omni_gfx_frame_fn(void *f) {
   return 0.0;
 }
 
-/* `(gfxdef 种类 名字 内容)`：往设备上登记一格有名字的串。CPU 备选这一档**记下不用**
-   —— 可编程管线那一族在这儿没有落点（真去 `glsetshader` 才报，报里说清是哪一格）。
-   留着这个符号是为了"一格 op 四条腿都认得"。 */
+/* `(gfxdef 种类 名字 内容)`：往设备上登记一格有名字的串（着色器原文 / 名字表）。
+   CPU 备选这一档用不上（可编程管线在那儿没有落点），但**本机 OpenGL 那一档要** ——
+   而这几句在设备开起来之前就到了，所以先存下来，`gfx_gl_need` 挂上之后一趟补过去。
+   存的是自己的一份拷贝：`omni_str` 那几格的寿命不由我们说。 */
 double omni_gfx_def(omni_str kind, omni_str name, omni_str text) {
-  (void)kind; (void)name; (void)text;
+  if (g_gl.on && g_gl.def != NULL) {
+    g_gl.def(omni_cstr(kind), omni_cstr(name), omni_cstr(text));
+    return 0.0;
+  }
+  if (g_ngdefs >= GFX_MAXDEF) return 0.0;
+  g_gdefs[g_ngdefs].kind = strdup(omni_cstr(kind));
+  g_gdefs[g_ngdefs].name = strdup(omni_cstr(name));
+  g_gdefs[g_ngdefs].text = strdup(omni_cstr(text));
+  g_ngdefs++;
   return 0.0;
 }
 
