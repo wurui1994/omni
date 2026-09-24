@@ -28,6 +28,7 @@
 
 import { evalToIR } from '../polydraw/adapter.js';
 import { EVALDRAW_2D } from '../polydraw/gfx-rt.js';
+import { GL_CONSTS } from '../polydraw/gl-rt.js';
 
 /** EvalDraw 那张宿主表。名字照 `evaldraw_ref.md` 那几节抄，**不是前缀猜的**。 */
 export const EVALDRAW_HOST = {
@@ -35,12 +36,21 @@ export const EVALDRAW_HOST = {
   spec: 'evaldraw_ref.md / evaldraw.txt（那棵树里没有源码）',
   /** **已经接上设备的那几格**（`gfx-rt.js` 的 `EVALDRAW_2D`）：名字/元数 -> 生成出来的函数。 */
   draw: EVALDRAW_2D,
+  /** GL 那几格常量（`GL_QUADS` / `GL_TEXTURE0` …）—— EvalDraw 的脚本里也有 GL 子集，
+      所以这张表两门语言共用（语料里 `demos/sprite2d.kc` 就写 `glbegin(GL_QUADS)`）。 */
+  consts: GL_CONSTS,
   gfx: [
     /* 2D */
     'cls', 'setcol', 'setpix', 'moveto', 'lineto', 'drawsph', 'drawcone', 'drawspr',
     'setfont', 'printnum', 'refresh', 'drawpix', 'drawrect', 'fillpoly',
+    /* 画布上的文字与杂项（`printchar`/`printg` 那一族） */
+    'printchar', 'printg', 'noise',
     /* 3D 与相机 */
     'clz', 'setcam', 'setview', 'setzrange',
+    /* 体素那一族（KV6） */
+    'drawkv6', 'drawvox',
+    /* 输入那一族里"一次读一整组"的那格（`readmouse(&x,&y,&b)`） */
+    'readmouse',
     /* GL 子集 */
     'gl',
     /* 声音 */

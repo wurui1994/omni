@@ -105,6 +105,15 @@ export const GL_CONSTS = new Map([
   ['gl_dst_alpha', 0x0304], ['gl_one_minus_dst_alpha', 0x0305],
   ['gl_dst_color', 0x0306], ['gl_one_minus_dst_color', 0x0307],
   ['gl_src_alpha_saturate', 0x0308],
+  /* 纹理单元（`glactivetexture(GL_TEXTURE0)`）与那几格开关 —— 语料里 `.kc` 的 GL 子集
+     用到的（`demos/sprite2d.kc`、`treemake.kc`）。值照 GL 的头文件，不是我们编的号。 */
+  ['gl_texture0', 0x84c0], ['gl_texture1', 0x84c1], ['gl_texture2', 0x84c2],
+  ['gl_texture3', 0x84c3],
+  ['gl_texture_1d', 0x0de0], ['gl_texture_2d', 0x0de1],
+  ['gl_blend', 0x0be2], ['gl_cull_face', 0x0b44], ['gl_alpha_test', 0x0bc0],
+  ['gl_lighting', 0x0b50], ['gl_fog', 0x0b60],
+  ['gl_modelview', 0x1700], ['gl_projection', 0x1701],
+  ['gl_cw', 0x0900], ['gl_ccw', 0x0901],
 ]);
 
 /* ─── 生成出来的那一摊函数 ──────────────────────────────────────────── */

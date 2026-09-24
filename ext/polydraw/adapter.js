@@ -204,7 +204,9 @@ export const POLYDRAW_HOST = {
   glrt: true,
   /* **每帧要把 GL 摆回初态**（`polydraw.c:3572-3579`）—— EvalDraw 那张表没有这一格。 */
   frameReset: true,
-  gfx: ['gl', 'glu', 'kgl', 'setfov', 'printg', 'playnote', 'mountzip'],
+  gfx: ['gl', 'glu', 'kgl', 'setfov', 'printg', 'playnote', 'mountzip',
+    /* `myext[]` 里还有这几族（`polydraw.c:2070`）：噪声、体素、画布文字、一次读一组输入。 */
+    'noise', 'drawkv6', 'drawspr', 'drawvox', 'printchar', 'readmouse', 'setfont'],
 };
 
 const rmath = (fn, args) => ({ kind: 'rmath', fn, args });
@@ -430,10 +432,11 @@ function callOf(x, C) {
     if (C.host.glrt === true && drawFn.startsWith('gl_')) C.needGL = true;
     return { kind: 'call', fn: nameRef(drawFn), args };
   }
-  /* 宿主那边无参的函数（`KLOCK()`）—— 同一条路，也是问设备一句。 */
-  if (C.gfxHost && HOST_FNS0.includes(n) && args.length === 0) {
+  /* 宿主那边的 `KLOCK()` / `KLOCK(档)` —— 同一条路，也是问设备一句
+     （`tigrou/clock.pss:10` 用的是一参那档：`klock(1)`）。 */
+  if (C.gfxHost && HOST_FNS0.includes(n) && args.length <= 1) {
     C.needGfx = true;
-    return gfxCallIR(n);
+    return gfxCallIR(n, args);
   }
 
   /* 画图那一族：**按这一门的宿主表判**（`C.host`）。两门语言共用这一份 adapter，

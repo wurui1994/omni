@@ -181,7 +181,11 @@ function evalExpr(ts, macros, where) {
 export function preprocess(text, where = 'eval') {
   const src = String(text ?? '');
   if (!/^[ \t]*#/m.test(src)) return src;        /* 一行指令都没有：原样回（常见情况） */
-  const lines = src.split('\n');
+  /* **按 `\r?\n` 切、用 `\n` 接**：语料里一半的文件是 CRLF，而 JS 的 `.` 不匹配 `\r`
+     （它算行终止符）—— `(.*)$` 那一段会在 `\r` 前停住、`$` 再匹配不上，于是
+     `#if 1\r` 整行被当成普通代码递给词法器（14 份 `.kc` 就红在这一格，查了两趟）。
+     行数不变这条仍然成立，列号也不动（`\r` 只在行尾）。 */
+  const lines = src.split(/\r?\n/);
   const macros = new Map();
   /* 条件栈：`{ live, taken }` —— `live` 是这一层现在收不收，`taken` 是这一层已经有分支中过。 */
   const stack = [];

@@ -19,7 +19,7 @@
 // **像素算法与 `ext/polydraw/gfx-rt.js` 逐句相同**（Bresenham、中点画圆、沿线铺圆）——
 // 那是有意的：换路之后同一份例子的表面要**逐字节相同**，这条才是"搬家不改语义"的判据。
 
-import { writeBinary, mkdirAll, stdout, stderr, env, nowMs } from './native.js';
+import { writeBinary, mkdirAll, stdout, stderr, env, nowMs, localStamp } from './native.js';
 import { pngFromRgba, surfaceKind } from './png.js';
 
 /** 设备的那几格状态。**一格进程一格设备**（EVAL 的宿主本来就是这个形状）。 */
@@ -79,6 +79,74 @@ function recOn() {
 /** 录制那一档里**仍然要给真答案**的那几格（脚本靠它们分支 / 帧循环靠它转）。 */
 const QUERY = new Set(['nextframe', 'numframes', 'klock', 'xres', 'yres',
   'mousx', 'mousy', 'bstatus', 'setbstatus', 'keystatus', 'setkeystatus', 'rgb']);
+
+/**
+ * **`klock(i)` 的日期那一族**（口径照 `polydraw_src/polydraw.c:1662` 的 `myklock`）：
+ *
+ *   i = 0        从开跑起的秒数（render 模式下是"帧号/60"的确定性时钟，见下面那一格）
+ *   |i| in 1..9  日期分量：**i>0 本地时间、i<0 UTC**
+ *     1 = YYYYMMDDHHMMSS.sss（那个打包的数 × .001）  2 = 年   3 = 月
+ *     4 = 星期（0 = 周日）  5 = 日   6 = 时   7 = 分   8 = 秒   9 = 毫秒
+ *   别的 i      0
+ *
+ * 本地那一档走宿主的 `localStamp()`（封闭 ABI 里现成的一格："读一次时钟"回 14 位数字），
+ * UTC 那一档从 `nowMs()` 用整数算（`civil_from_days` 那套算法）—— 两条都不碰 `new Date()`
+ * （它不在我们自己那台 JS 前端认的构造里，写了自举那一路就编不过）。
+ */
+function klockParts(i) {
+  const ms = nowMs();
+  const msec = Math.trunc(ms) % 1000;
+  let y = 0;
+  let mo = 0;
+  let d = 0;
+  let h = 0;
+  let mi = 0;
+  let s = 0;
+  if (i < 0) {
+    /* UTC：从 epoch 毫秒往回算（Hinnant 的 civil_from_days，整数运算）。 */
+    const days = Math.floor(ms / 86400000);
+    const secOfDay = Math.floor(ms / 1000) - days * 86400;
+    h = Math.floor(secOfDay / 3600);
+    mi = Math.floor(secOfDay / 60) % 60;
+    s = secOfDay % 60;
+    const z = days + 719468;
+    const era = Math.floor(z / 146097);
+    const doe = z - era * 146097;
+    const yoe = Math.floor((doe - Math.floor(doe / 1460) + Math.floor(doe / 36524)
+      - Math.floor(doe / 146096)) / 365);
+    const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100));
+    const mp = Math.floor((5 * doy + 2) / 153);
+    d = doy - Math.floor((153 * mp + 2) / 5) + 1;
+    mo = mp < 10 ? mp + 3 : mp - 9;
+    y = yoe + era * 400 + (mo <= 2 ? 1 : 0);
+  } else {
+    const st = localStamp();                    /* YYYYMMDDHHMMSS（本地、同一个瞬间） */
+    y = Number(st.slice(0, 4));
+    mo = Number(st.slice(4, 6));
+    d = Number(st.slice(6, 8));
+    h = Number(st.slice(8, 10));
+    mi = Number(st.slice(10, 12));
+    s = Number(st.slice(12, 14));
+  }
+  /* 星期：Sakamoto 那张表（0 = 周日）。 */
+  const T = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+  const yy = mo < 3 ? y - 1 : y;
+  const dow = (yy + Math.floor(yy / 4) - Math.floor(yy / 100) + Math.floor(yy / 400)
+    + T[mo - 1] + d) % 7;
+  const k = Math.abs(Math.trunc(i));
+  if (k === 1) {
+    return ((((((y * 100 + mo) * 100 + d) * 100 + h) * 100 + mi) * 100 + s) * 1000 + msec) * 0.001;
+  }
+  if (k === 2) return y;
+  if (k === 3) return mo;
+  if (k === 4) return dow;
+  if (k === 5) return d;
+  if (k === 6) return h;
+  if (k === 7) return mi;
+  if (k === 8) return s;
+  if (k === 9) return msec;
+  return 0;
+}
 
 /**
  * **输入那一族的来源**：CPU 这一档没有窗口，所以从环境变量读一次 ——
@@ -379,6 +447,12 @@ export function gfxCall(name, args) {
      */
     case 'klock/0':
       return modeOf() === 'view' ? nowMs() / 1000 : (D.fno > 0 ? D.fno - 1 : 0) / 60;
+    /* `klock(i)`：0 与 klock() 同；|i| 在 1..9 是日期分量（见 `klockParts` 的头注）。 */
+    case 'klock/1':
+      if (Math.trunc(a(0)) === 0) {
+        return modeOf() === 'view' ? nowMs() / 1000 : (D.fno > 0 ? D.fno - 1 : 0) / 60;
+      }
+      return klockParts(a(0));
     case 'xres/0': need(320, 240); return D.w;
     case 'yres/0': need(320, 240); return D.h;
     /* ── 输入那一族（读四格、写两格）。写的两格照说明书：`bstatus` 与 `keystatus[k]`

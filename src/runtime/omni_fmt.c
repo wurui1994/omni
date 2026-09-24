@@ -618,6 +618,39 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
     return gfx_mode() == 2 ? gfx_now_ms() / 1000.0
                            : (double)(g_gfno > 0 ? g_gfno - 1 : 0) / 60.0;
   }
+  /* `klock(i)`：0 与 klock() 同；|i| 在 1..9 是日期分量（i>0 本地、i<0 UTC）——
+     口径照 polydraw_src/polydraw.c:1662 的 myklock，与 host/gfx-cpu.js 的 klockParts 同。 */
+  if (!strcmp(nm, "klock") && argc == 1) {
+    int i = (int)a0;
+    if (i == 0) {
+      return gfx_mode() == 2 ? gfx_now_ms() / 1000.0
+                             : (double)(g_gfno > 0 ? g_gfno - 1 : 0) / 60.0;
+    }
+    if (i > -10 && i < 10) {
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      time_t t = (time_t)ts.tv_sec;
+      struct tm tmv;
+      if (i < 0) gmtime_r(&t, &tmv); else localtime_r(&t, &tmv);
+      int msec = (int)(ts.tv_nsec / 1000000);
+      int k = i < 0 ? -i : i;
+      int y = tmv.tm_year + 1900, mo = tmv.tm_mon + 1, d = tmv.tm_mday;
+      if (k == 1) {
+        double q = ((((((double)y * 100 + mo) * 100 + d) * 100 + tmv.tm_hour) * 100
+                     + tmv.tm_min) * 100 + tmv.tm_sec) * 1000 + msec;
+        return q * 0.001;
+      }
+      if (k == 2) return (double)y;
+      if (k == 3) return (double)mo;
+      if (k == 4) return (double)tmv.tm_wday;
+      if (k == 5) return (double)d;
+      if (k == 6) return (double)tmv.tm_hour;
+      if (k == 7) return (double)tmv.tm_min;
+      if (k == 8) return (double)tmv.tm_sec;
+      if (k == 9) return (double)msec;
+    }
+    return 0.0;
+  }
   if (!strcmp(nm, "xres") && argc == 0) { gfx_need(); return (double)g_gw; }
   if (!strcmp(nm, "yres") && argc == 0) { gfx_need(); return (double)g_gh; }
   /* 输入那一族（与 host/gfx-cpu.js 的那几格一字不差）：这一档没有窗口，来源是
