@@ -491,6 +491,28 @@ export function gfxCall(name, args) {
       return 0;
     }
     case 'clz/1': return 0;
+    /* ── **收下但这一档画不出来的那几族**（2026-09-24 第七刀）────────────────────
+       纹理与贴图（`glsettex`/`glbindtexture`/`glactivetexture`/`glcapture`/`drawspr`/
+       体素那几格）、画布文字（`setfont`/`printg`/`printchar`）：这一档是个平面的帧缓冲，
+       没有纹理采样也没有字模 ⇒ **收下记着不用**。
+       为什么不报：这些脚本的主体是几何（3D 的球/锥/线），贴图与文字只是点缀 ——
+       报了整份图都出不来，收下则"图能出、少了贴图与文字"。这一条偏差明写在
+       `docs/design/eval-realtime-gpu.md` 第 12 节，真要贴图与文字得走 GPU 那两档设备。 */
+    case 'glsettex/1': case 'glsettex/2': case 'glsettex/3': case 'glsettex/4':
+    case 'glsettex/5': case 'glsettex/6':
+    case 'glgettex/4': case 'glgettex/5':
+    case 'glbindtexture/1': case 'glactivetexture/1':
+    case 'glcapture/0': case 'glcapture/4': case 'glcaptureend/0':
+    case 'drawspr/4': case 'drawspr/5': case 'drawspr/6':
+    case 'drawkv6/4': case 'drawkv6/5': case 'drawkv6/7': case 'drawkv6/8':
+    case 'drawvox/4': case 'drawvox/5':
+    case 'setfont/2': case 'setfont/3':
+    case 'printg/1': case 'printg/2': case 'printg/3': case 'printg/4': case 'printg/5':
+    case 'printchar/3': case 'printchar/4':
+    case 'setview/4': case 'setview/7':
+    case 'glnormal/3': case 'gltexcoord/2': case 'gltexcoord/3': case 'gltexcoord/4':
+      return 0;
+
     /* ── **批上带的那点状态**（第四刀）。这一档没有可编程管线，所以 `batchprog` 非零是
        **当场报**（不静默按内建那对画 —— 那就成了"图不对但没人知道"）；那张 `u_mvp`
        与混合开关在这一档没有落点，收下记着不用。 */

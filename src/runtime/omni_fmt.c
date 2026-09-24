@@ -715,6 +715,45 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
     return 0.0;
   }
   if (!strcmp(nm, "clz") && argc == 1) { return 0.0; }
+  /* ── **收下但这一档画不出来的那几族**（与 `host/gfx-cpu.js` 逐句相同，见那份的头注）：
+     纹理与贴图、体素、画布文字 —— 这一档是个平面帧缓冲，收下记着不用，图照旧出得来。 */
+  if (!strcmp(nm, "glsettex") && argc == 1) { return 0.0; }
+  if (!strcmp(nm, "glsettex") && argc == 2) { return 0.0; }
+  if (!strcmp(nm, "glsettex") && argc == 3) { return 0.0; }
+  if (!strcmp(nm, "glsettex") && argc == 4) { return 0.0; }
+  if (!strcmp(nm, "glsettex") && argc == 5) { return 0.0; }
+  if (!strcmp(nm, "glsettex") && argc == 6) { return 0.0; }
+  if (!strcmp(nm, "glgettex") && argc == 4) { return 0.0; }
+  if (!strcmp(nm, "glgettex") && argc == 5) { return 0.0; }
+  if (!strcmp(nm, "glbindtexture") && argc == 1) { return 0.0; }
+  if (!strcmp(nm, "glactivetexture") && argc == 1) { return 0.0; }
+  if (!strcmp(nm, "glcapture") && argc == 0) { return 0.0; }
+  if (!strcmp(nm, "glcapture") && argc == 4) { return 0.0; }
+  if (!strcmp(nm, "glcaptureend") && argc == 0) { return 0.0; }
+  if (!strcmp(nm, "drawspr") && argc == 4) { return 0.0; }
+  if (!strcmp(nm, "drawspr") && argc == 5) { return 0.0; }
+  if (!strcmp(nm, "drawspr") && argc == 6) { return 0.0; }
+  if (!strcmp(nm, "drawkv6") && argc == 4) { return 0.0; }
+  if (!strcmp(nm, "drawkv6") && argc == 5) { return 0.0; }
+  if (!strcmp(nm, "drawkv6") && argc == 7) { return 0.0; }
+  if (!strcmp(nm, "drawkv6") && argc == 8) { return 0.0; }
+  if (!strcmp(nm, "drawvox") && argc == 4) { return 0.0; }
+  if (!strcmp(nm, "drawvox") && argc == 5) { return 0.0; }
+  if (!strcmp(nm, "setfont") && argc == 2) { return 0.0; }
+  if (!strcmp(nm, "setfont") && argc == 3) { return 0.0; }
+  if (!strcmp(nm, "printg") && argc == 1) { return 0.0; }
+  if (!strcmp(nm, "printg") && argc == 2) { return 0.0; }
+  if (!strcmp(nm, "printg") && argc == 3) { return 0.0; }
+  if (!strcmp(nm, "printg") && argc == 4) { return 0.0; }
+  if (!strcmp(nm, "printg") && argc == 5) { return 0.0; }
+  if (!strcmp(nm, "printchar") && argc == 3) { return 0.0; }
+  if (!strcmp(nm, "printchar") && argc == 4) { return 0.0; }
+  if (!strcmp(nm, "setview") && argc == 4) { return 0.0; }
+  if (!strcmp(nm, "setview") && argc == 7) { return 0.0; }
+  if (!strcmp(nm, "glnormal") && argc == 3) { return 0.0; }
+  if (!strcmp(nm, "gltexcoord") && argc == 2) { return 0.0; }
+  if (!strcmp(nm, "gltexcoord") && argc == 3) { return 0.0; }
+  if (!strcmp(nm, "gltexcoord") && argc == 4) { return 0.0; }
   if (!strcmp(nm, "glpointsize") && argc == 1) { return 0.0; }
   if (!strcmp(nm, "glcullface") && argc == 1) { return 0.0; }
   if (!strcmp(nm, "gllinewidth") && argc == 1) { return 0.0; }

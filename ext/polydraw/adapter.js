@@ -31,6 +31,7 @@ import { isList, tag, kids, leaf } from '../../src/core/lower/cst.js';
 import { cUnescape, fmtToStmts } from '../../src/core/lower/fmt.js';
 import { gfxGlobalDecls, gfxFnDecls, gfxPresentDecl } from './gfx-rt.js';
 import { POLYDRAW_GL, GL_CONSTS, glGlobalDecls, glFnDecls } from './gl-rt.js';
+import { gfx3FnDecls, gfx3GlobalDecls } from './gfx3-rt.js';
 import { NOISE_FNS, noiseGlobalDecls, noiseFnDecls } from './noise-rt.js';
 import { env } from '../../src/core/host/native.js';
 
@@ -49,7 +50,14 @@ import { env } from '../../src/core/host/native.js';
  */
 function gfxMode() {
   const m = env('OMNI_GFX');
-  return m === undefined || m === null || m === '' ? 'ir' : String(m);
+  /* **默认是 `host`**（2026-09-24 第七刀换的）：设备在宿主那一侧（node 上是
+     `host/gfx-cpu.js` 的 CPU 备选、浏览器里是 WebGL2、往后是本机 OpenGL）。
+     换默认的条件早就写在这儿了 —— GL 与 3D 那两族现在都在**语言这一侧**变顶点/变 2D
+     图元（`gl-rt.js` / `gfx3-rt.js`），设备只收批与 2D，于是宿主那条路已经比生成出来的
+     那一份全（它还有 `klock`/输入/每帧初态/纹理收下那几格）。
+     `ir` 那一档留着（`OMNI_GFX=ir`）—— 它是"整份产物自带一台光栅器、不要宿主设备"
+     那种用法，判据里 `evaldraw+2d` 那一格判的正是它。 */
+  return m === undefined || m === null || m === '' ? 'host' : String(m);
 }
 
 /**
@@ -579,6 +587,12 @@ function callOf(x, C) {
        一张图都出不来。 */
     if (C.host.glrt === true && drawFn.startsWith('gl_')) {
       C.needGL = true;
+      return { kind: 'call', fn: nameRef(drawFn), args };
+    }
+    /* **3D 那一族永远走生成出来的那一份**（`gfx3-rt.js`）：投影是纯算术，按"只有一个
+       模型"放在语言这一侧 —— 设备只收投影完的 2D 图元（声音那几格也在这张表里，收下不响）。 */
+    if (drawFn.startsWith('g3_')) {
+      C.need3D = true;
       return { kind: 'call', fn: nameRef(drawFn), args };
     }
     /* **宿主调用那条路**：一格 `(gfxcall "名字" 实参…)`，设备在宿主那一侧。
@@ -1903,6 +1917,7 @@ export function evalToIR(cst, host, src = '') {
     valParams: new Set(),               /* 当前函数**按值**收的形参（`&x` 碰上它要报） */
     gotoActive: [],                     /* 正在降哪几格标号前头那一段（`goto` 的旗子名） */
     needRnd: false,                     /* 用过 `RND`/`NRND`/`SRAND` 没有 */
+    need3D: false,                      /* 用过 3D 那一族没有（`gfx3-rt.js`：投影在语言这一侧） */
     needNoise: false,                   /* 用过 `NOISE`/`NOISE3D` 没有（`noise-rt.js`） */
     usedGL: false,                      /* 这份脚本用过 GL 那一族没有（每帧初态要不要发） */
     needFact: false,
@@ -2140,6 +2155,10 @@ export function evalToIR(cst, host, src = '') {
       /* **GL 那一族的命令 -> 顶点批**（`gl-rt.js`）也跟着产物走：它做变换、拆 mode、
          合批，设备只收 `(gfxbatch …)`。一帧的末尾要把攒着的批交出去（`gl_flush`）——
          设备是在 `nextframe` 那一格交图的，交之前批必须已经画下去。 */
+      if (C.need3D) {
+        decls.unshift(...gfx3GlobalDecls());
+        decls.push(...gfx3FnDecls(true));
+      }
       if (C.needGL) {
         decls.unshift(...glGlobalDecls());
         decls.push(...glFnDecls());
@@ -2184,6 +2203,10 @@ export function evalToIR(cst, host, src = '') {
     const H = 240;
     decls.unshift(...gfxGlobalDecls());
     decls.push(...gfxFnDecls(W, H), gfxPresentDecl('.omni-cache/gfx/frame.png'));
+    if (C.need3D) {
+      decls.unshift(...gfx3GlobalDecls());
+      decls.push(...gfx3FnDecls(false));
+    }
     if (C.needGL) {
       decls.unshift(...glGlobalDecls());
       decls.push(...glFnDecls());

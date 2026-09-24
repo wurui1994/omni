@@ -28,6 +28,7 @@
 
 import { evalToIR } from '../polydraw/adapter.js';
 import { EVALDRAW_2D } from '../polydraw/gfx-rt.js';
+import { EVALDRAW_3D } from '../polydraw/gfx3-rt.js';
 import { GL_CONSTS, POLYDRAW_GL } from '../polydraw/gl-rt.js';
 
 /**
@@ -62,7 +63,7 @@ export const EVALDRAW_HOST = {
   /** **已经接上设备的那几格**（`gfx-rt.js` 的 `EVALDRAW_2D`）：名字/元数 -> 生成出来的函数。
       GL 那个子集与 PolyDraw 共用 `gl-rt.js` 那一份（见 `EVALDRAW_GL`）—— 这门自己的名字
       写在后头，撞上就以它为准。 */
-  draw: new Map([...EVALDRAW_GL, ...EVALDRAW_2D]),
+  draw: new Map([...EVALDRAW_GL, ...EVALDRAW_2D, ...EVALDRAW_3D]),
   /** GL 那一族走 `gl-rt.js`（命令 -> 顶点批），不是"把名字递给设备"。 */
   glrt: true,
   /** GL 那几格常量（`GL_QUADS` / `GL_TEXTURE0` …）—— EvalDraw 的脚本里也有 GL 子集，
