@@ -3178,20 +3178,27 @@ function glPlugin() {
   // macOS 之外还没有实现（上下文那一段是 CGL）。判据用框架目录，不新增宿主 ABI。
   if (!exists('/System/Library/Frameworks/OpenGL.framework')) return null;
   if (!isDir(GL_DIR)) return null;
-  const src = join(GL_DIR, 'omni_r3_gl.c');
+  /* **两份源码一份 dylib**：`omni_r3_gl.c` 是三维那一档的后端、`omni_ev_gl.c` 是 EVAL
+     两门语言的设备（`docs/design/eval-realtime-gpu.md` §13）。两者没有共用的语义，共用的
+     只是这套"顺手编一下、拿不到就回落"的挂法 —— 所以同一份库里两组符号，两侧各自 dlsym
+     自己那几个名字。缺一份就只编另一份（`omni_ev_gl.c` 还没进 dist 的那种树上照旧能跑）。 */
+  const srcs = ['omni_r3_gl.c', 'omni_ev_gl.c'].map((f) => join(GL_DIR, f))
+    .filter((f) => exists(f));
   const hdr = join(GL_DIR, 'omni_gl.h');
-  if (!exists(src) || !exists(hdr)) return null;
+  if (srcs.length === 0 || !exists(hdr)) return null;
   const cc = findClang();
   const slot = cacheSlot(cacheRoot(), 'gl', basename(cc),
-    hash16([cc, `${mtimeMs(src)}:${fileSize(src)}`, `${mtimeMs(hdr)}:${fileSize(hdr)}`].join('|')));
+    hash16([cc, ...srcs.map((f) => `${f}:${mtimeMs(f)}:${fileSize(f)}`),
+      `${mtimeMs(hdr)}:${fileSize(hdr)}`].join('|')));
   const dir = slot.dir;
   const key = slot.stamp;
   const lib = join(dir, 'libomnigl.dylib');
   if (slot.fresh && exists(lib)) return lib;
   const stage = workDirFor('gl-stage', key);
   const staged = join(stage, 'libomnigl.dylib');
-  const r = spawn(cc, ['-O2', '-w', '-dynamiclib', '-o', staged, src,
+  const r = spawn(cc, ['-O2', '-w', '-dynamiclib', '-o', staged, ...srcs,
     '-I', GL_DIR, '-framework', 'OpenGL'], 'c');
+
   if (r[0] !== 0) {
     vStep(`gl plugin  ${cc} 编不过，这一趟走 CPU 光栅器`);
     return null;

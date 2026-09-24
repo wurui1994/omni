@@ -711,17 +711,31 @@ program 与纹理接上（那时着色器那 22 份就出得来图了）。
 （本地参照、浏览器腿、第 3 节那个 probe）—— 那几条判的是"产物自带光栅器"那一档，
 从前靠"默认恰好是 ir"，默认换成 host 之后就假红了。默认值不是判据，写明才是。
 
-### 13.8 转发那一层（第五刀的后半，正在做）
+### 13.8 已落地（2026-09-24）：**转发那一层**（`OMNI_GFX=gl`）
 
-    cli.js glPlugin()      两份源码一起编进 libomnigl.dylib（omni_r3_gl.c + omni_ev_gl.c）
-    omni_fmt.c  OMNI_GFX=gl  dlopen 那一份 -> 拿到六格函数指针 -> 开 w×h 的离屏设备
-                 cls/gldepth/batch  转发；别的名字照旧走 CPU 备选那一摊（查询/帧循环/输入）
-                 present            _read(rgba) -> 摊成 0xRRGGBB 的 int64 帧缓冲 -> 走同一个 PNG 出口
+    cli.js glPlugin()      两份源码一份 dylib（omni_r3_gl.c + omni_ev_gl.c，各自 dlsym 自己的符号）
+    omni_fmt.c  OMNI_GFX=gl  dlopen（OMNI_GL_LIB） -> 六格函数指针 -> open(w,h)
+                 cls / framebegin / gldepth / (gfxbatch …)   转发
+                 别的名字                                    照旧走 CPU 备选（查询/帧循环/输入/2D）
+                 present   _read(rgba) -> 与宿主那一层合成 -> 同一个 PNG 出口
 
 三条定下来的：
 * **挂不上就回落**（与 `omni_r3.c` 那侧同一手）：没有 `OpenGL.framework`、编不过、
-  `open` 回非 0 —— 一律退回 CPU 备选，`OMNI_GFX=gl` 只是"想要"，不是"必须"；
-* **帧缓冲仍然是宿主这一侧那一格**：`gfx_px` 那一族（`setpix`/文字/以后的字模）与 GPU
-  画的东西要能叠在同一帧上 —— 所以 present 时先读回 GPU 那一层、再让 CPU 那一层盖上去；
-* **一帧一次读回**：`_read` 是同步的（`glFinish`），每帧只许一次。
+  `open` 回非 0 —— 一律退回 CPU 备选并在 stderr 上印一行 `#gfx gl …`。
+  `OMNI_GFX=gl` 是"想要"，不是"必须"；
+* **两层合成**：GPU 画顶点批，`setpix`/`lineto`/`drawsph` 那一族仍落在宿主那格帧缓冲上
+  （语言那一侧没把它们变顶点）。所以 GL 开着时宿主那格的初值是 **-1 = 这一格没人画**，
+  交帧时 GPU 那一层当底、宿主那一层盖上去。连带一格：`getpix` 读到 -1 回背景 0
+  （不为一次查询去 `glReadPixels` 一整帧）；
+* **一帧一次读回**：`_read` 里是 `glFinish` + `glReadPixels`，同步的。
+
+判据（`tests/gl/run.js` 第二节，7/7）：
+* `02-gl.pss` 在 `gl` 与 `host` 两档上**非黑格数 10223 / 10228**（差 0.05%，两个渲染器不逐字节），
+  且 `gl` 那趟 stderr 上没有 `#gfx gl` —— 没有偷偷回落（不判这一条的话它会变成自己判自己）；
+* `draw2d.kc` 两档**逐字节相同** —— 钉住合成那一格没把宿主的 2D 弄坏。
+
+下一步（第五刀最后一格）：program / uniform / 纹理（`glsetshader` 那一族）接进
+`omni_ev_gl.c` —— 那时着色器那 22 份 `.pss` 就出得来图。现在 `batchprog != 0` 在这一档
+是当场报，报的话里明写"还没接"。
+
 

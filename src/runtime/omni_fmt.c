@@ -433,6 +433,95 @@ static int gfx_is_query(const char *nm) {
   return 0;
 }
 
+/* ── **本机 OpenGL 那一档**（`OMNI_GFX=gl`）：dlopen 那份插件，把批转给 GPU ──────────
+ *
+ * 口径 `docs/design/eval-realtime-gpu.md` §13.8。挂法照三维那一档（`omni_r3.c` 的
+ * `r3_gl_entry`）：主体运行时对 GL **零编译期依赖**（只两句 extern，不 include 任何 GL 头
+ * —— tcc 那条腿也要编这份文件），库在运行期 `dlopen`，路径由 `cli.js` 摆进 `OMNI_GL_LIB`。
+ *
+ * **挂不上就回落**：没有 `OpenGL.framework`、编不过、`open` 回非 0 —— 一律退回上面那一摊
+ * CPU 备选。`OMNI_GFX=gl` 是"想要"，不是"必须"（与 `OMNI_R3_BACKEND` 同一手）。
+ *
+ * **两层怎么合**：GPU 画的是顶点批（`(gfxbatch …)`）；`setpix`/`lineto`/`drawsph` 那一族
+ * 仍然落在宿主这一侧的帧缓冲上（语言那一侧没把它们变顶点 —— 见 §9）。所以 GL 开着的时候
+ * 宿主那格帧缓冲的初值是 **-1 = 这一格没人画**，交帧时 GPU 那一层当底、宿主那一层盖上去。
+ */
+#define GFX_RTLD_NOW 2
+extern void *dlopen(const char *, int);
+extern void *dlsym(void *, const char *);
+
+typedef int (*gfx_gl_open_fn)(int, int);
+typedef void (*gfx_gl_cls_fn)(unsigned int);
+typedef void (*gfx_gl_depth_fn)(int);
+typedef void (*gfx_gl_batch_fn)(int, long, const double *);
+typedef int (*gfx_gl_read_fn)(unsigned char *);
+typedef const char *(*gfx_gl_err_fn)(void);
+
+static struct {
+  int tried, on;
+  gfx_gl_open_fn open;
+  gfx_gl_cls_fn cls;
+  gfx_gl_depth_fn depth;
+  gfx_gl_batch_fn batch;
+  gfx_gl_read_fn read;
+  gfx_gl_err_fn err;
+} g_gl;
+
+static unsigned char *g_glpx = NULL;  /* 读回那一格（w*h*4，RGBA） */
+static int64_t *g_gout = NULL;        /* 合成出来的那一帧（0xRRGGBB，喂 omni_gfx_emit） */
+
+/* 想不想要 GL 那一档（`OMNI_GFX=gl`）。 */
+static int gfx_gl_want(void) {
+  static int w = -1;
+  if (w < 0) {
+    const char *m = getenv("OMNI_GFX");
+    w = (m != NULL && strcmp(m, "gl") == 0) ? 1 : 0;
+  }
+  return w;
+}
+
+/* 挂上那份插件（尺寸已经定了才能开 —— 所以这一格由 `gfx_need` 叫）。回 1 = GL 这一档活着。 */
+static int gfx_gl_need(void) {
+  if (g_gl.tried) return g_gl.on;
+  g_gl.tried = 1;
+  if (!gfx_gl_want()) return 0;
+  const char *cands[3];
+  int nc = 0;
+  const char *e = getenv("OMNI_GL_LIB");
+  if (e != NULL && e[0] != '\0') cands[nc++] = e;
+  cands[nc++] = ".omni-cache/gl/libomnigl.dylib";
+  cands[nc++] = ".omni-cache/gl/libomnigl.so";
+  for (int i = 0; i < nc; i++) {
+    void *h = dlopen(cands[i], GFX_RTLD_NOW);
+    if (h == NULL) continue;
+    g_gl.open = (gfx_gl_open_fn)dlsym(h, "omni_ev_gl_open");
+    g_gl.cls = (gfx_gl_cls_fn)dlsym(h, "omni_ev_gl_cls");
+    g_gl.depth = (gfx_gl_depth_fn)dlsym(h, "omni_ev_gl_depth");
+    g_gl.batch = (gfx_gl_batch_fn)dlsym(h, "omni_ev_gl_batch");
+    g_gl.read = (gfx_gl_read_fn)dlsym(h, "omni_ev_gl_read");
+    g_gl.err = (gfx_gl_err_fn)dlsym(h, "omni_ev_gl_error");
+    if (g_gl.open == NULL || g_gl.batch == NULL || g_gl.read == NULL) continue;
+    if (g_gl.open((int)g_gw, (int)g_gh) != 0) {
+      fprintf(stderr, "#gfx gl 开不出来（%s）—— 这一趟走 CPU 备选\n",
+              g_gl.err != NULL ? g_gl.err() : "没话");
+      return 0;
+    }
+    g_glpx = (unsigned char *)malloc((size_t)(g_gw * g_gh * 4));
+    g_gout = (int64_t *)malloc(sizeof(int64_t) * (size_t)(g_gw * g_gh));
+    if (g_glpx == NULL || g_gout == NULL) return 0;
+    g_gl.on = 1;
+    return 1;
+  }
+  fprintf(stderr, "#gfx gl 挂不上 libomnigl（OMNI_GL_LIB 没指到那份库）"
+                  "—— 这一趟走 CPU 备选\n");
+  return 0;
+}
+
+/* GL 开着时：宿主那格帧缓冲清成"没人画"（-1），GPU 那一层自己清。 */
+static void gfx_gl_clear_host(void) {
+  for (int64_t i = 0; i < g_gw * g_gh; i++) g_gfb[i] = -1;
+}
+
 static int64_t gfx_clamp255(double v) {
   int64_t i = gfx_rnd(v);
   return i < 0 ? 0 : (i > 255 ? 255 : i);
@@ -453,6 +542,8 @@ static void gfx_need(void) {
   g_gcol = 0xffffff;
   g_gx = 0.0;
   g_gy = 0.0;
+  /* GL 那一档（`OMNI_GFX=gl`）：尺寸定下来了才开得出离屏那一格。挂不上就照旧 CPU 备选。 */
+  if (gfx_gl_need()) gfx_gl_clear_host();
 }
 
 static void gfx_px(double x, double y, int64_t c) {
@@ -563,6 +654,12 @@ double omni_gfx_batch(int64_t kind, int64_t n, struct omni_arr_f64_s *verts) {
   }
   gfx_need();
   const double *v = verts->items;
+  /* GL 那一档：一段批直接上传 + 一次 draw（软件光栅化那一摊一格都不走）。 */
+  if (g_gl.on) {
+    g_gl.batch((int)kind, (long)n, v);
+    g_gdirty = 1;
+    return (double)n;
+  }
   if (kind == 0) {
     for (int64_t i = 0; i + 1 < n; i += 2) {
       const double *a = v + i * GFX_VSTRIDE, *b = a + GFX_VSTRIDE;
@@ -642,7 +739,18 @@ static void gfx_present(void) {
   if (!g_gon) return;
   const char *p = getenv("OMNI_GFX_OUT");
   if (p == NULL || p[0] == '\0') p = ".omni-cache/gfx/frame.png";
-  omni_gfx_emit(omni_str_new(p, (int64_t)strlen(p)), g_gw, g_gh, NULL, g_gfb);
+  int64_t *fb = g_gfb;
+  /* GL 那一档：把 GPU 那一层读回来当底，宿主那一层（-1 = 没人画）盖上去。
+     一帧只读一次（`_read` 里是 `glFinish` + `glReadPixels`，同步的）。 */
+  if (g_gl.on && g_gl.read(g_glpx) == 0) {
+    for (int64_t i = 0; i < g_gw * g_gh; i++) {
+      if (g_gfb[i] >= 0) { g_gout[i] = g_gfb[i]; continue; }
+      const unsigned char *q = g_glpx + i * 4;
+      g_gout[i] = ((int64_t)q[0] << 16) | ((int64_t)q[1] << 8) | (int64_t)q[2];
+    }
+    fb = g_gout;
+  }
+  omni_gfx_emit(omni_str_new(p, (int64_t)strlen(p)), g_gw, g_gh, NULL, fb);
   /* 指针那一行把种类带上（默认 png、`.rgba` 是备选）—— 与 host/gfx-cpu.js 一字不差。 */
   size_t pl = strlen(p);
   const char *kind = (pl >= 5 && strcmp(p + pl - 5, ".rgba") == 0) ? "rgba" : "png";
@@ -694,6 +802,7 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
   if (!strcmp(nm, "cls") && argc == 3) {
     gfx_need();
     int64_t c = gfx_rgb(a0, a1, a2);
+    if (g_gl.on) { g_gl.cls((unsigned int)c); gfx_gl_clear_host(); g_gdirty = 1; return 0.0; }
     for (int64_t i = 0; i < g_gw * g_gh; i++) g_gfb[i] = c;
     return 0.0;
   }
@@ -701,6 +810,7 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
   if (!strcmp(nm, "cls") && argc == 1) {
     gfx_need();
     int64_t c = ((int64_t)a0) & 0xffffff;
+    if (g_gl.on) { g_gl.cls((unsigned int)c); gfx_gl_clear_host(); g_gdirty = 1; return 0.0; }
     for (int64_t i = 0; i < g_gw * g_gh; i++) g_gfb[i] = c;
     return 0.0;
   }
@@ -710,6 +820,7 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
      在这一档没有意思，收下记着不用。 */
   if (!strcmp(nm, "framebegin") && argc == 0) {
     gfx_need();
+    if (g_gl.on) { g_gl.cls(0); gfx_gl_clear_host(); g_gdirty = 1; return 0.0; }
     for (int64_t i = 0; i < g_gw * g_gh; i++) g_gfb[i] = 0;
     g_gdirty = 1;
     return 0.0;
@@ -766,12 +877,19 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
   if (!strcmp(nm, "sleep") && argc == 1) { return 0.0; }
   /* **深度测试**（语言那一侧的 `gl_enable(GL_DEPTH_TEST)` 转过来的）：这一档没有
      z 缓冲，收下记着不用 —— 与 `host/gfx-cpu.js` 那一份同一句话。 */
-  if (!strcmp(nm, "gldepth") && argc == 1) { return 0.0; }
+  if (!strcmp(nm, "gldepth") && argc == 1) {
+    if (g_gl.on && g_gl.depth != NULL) g_gl.depth((int)a0 != 0 ? 1 : 0);
+    return 0.0;
+  }
   /* ── **批上带的那点状态**（第四刀，与 `host/gfx-cpu.js` 逐句相同）：这一档没有
      可编程管线，所以 `batchprog` 非零是当场报（不静默按内建那对画）；那张 `u_mvp`
      与混合开关在这一档没有落点，收下记着不用。 */
   if (!strcmp(nm, "batchprog") && argc == 1) {
     if ((int64_t)a0 != 0) {
+      if (g_gl.on) {
+        omni_errorf("本机 OpenGL 那一档还没接可编程管线（glsetshader）—— "
+                    "第五刀的后半（见 docs/design/eval-realtime-gpu.md §13.8）");
+      }
       omni_errorf("这格设备（CPU 备选）没有可编程管线 —— 脚本挑了自己那格 program"
                   "（glsetshader），顶点是物体坐标，这一档接不了；要 GPU 那两档设备"
                   "（浏览器 WebGL2 / 本机 OpenGL）");
@@ -861,7 +979,10 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
     gfx_need();
     int64_t gx = (int64_t)a0, gy = (int64_t)a1;
     if (gx < 0 || gy < 0 || gx >= g_gw || gy >= g_gh) return 0.0;
-    return (double)g_gfb[gy * g_gw + gx];
+    int64_t c = g_gfb[gy * g_gw + gx];
+    /* GL 那一档里 -1 是"这一格宿主没画"（GPU 那一层上的像素要等交帧才读回来）。
+       读那一格回背景 0 —— 不为了一次 `getpix` 去 `glReadPixels` 一整帧。 */
+    return c < 0 ? 0.0 : (double)c;
   }
   if (!strcmp(nm, "xres") && argc == 0) { gfx_need(); return (double)g_gw; }
   if (!strcmp(nm, "yres") && argc == 0) { gfx_need(); return (double)g_gh; }

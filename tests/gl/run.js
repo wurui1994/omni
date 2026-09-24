@@ -3,16 +3,19 @@
 // 口径在 `docs/design/eval-realtime-gpu.md` 第 13 节。这一档是**命令行那一侧的 GPU**：
 // 浏览器那一档（WebGL2）早就通了，CPU 备选画得了几何、画不了着色器。
 //
-// 这份判据判两件事，都不靠"看上去对"：
+// 这份判据判两节，都不靠"看上去对"：
+//   第一节（插件本身）
 //   1. 那份插件在这台机器上**编得出来**（`clang -dynamiclib -framework OpenGL`）；
 //   2. `dlopen` 挂上之后**离屏真拿到像素**：清成 `0x102030`、画一个裁剪空间的红三角，
 //      读回来 **红 = 9600、背景 = 67200**（320×240 里三角占 1/8 —— 那两个数是算出来的，
 //      所以它同时钉住"顶点是裁剪空间"这条契约）。
+//   第二节（转发那一层，`OMNI_GFX=gl`）：真跑两份例子，`gl` 与 `host` 两档对比 ——
+//   判据写在那一节的注里。
 //
 // 没有 `OpenGL.framework`（不是 macOS）就整份**跳过**，不算红 —— 与 `omni_r3.c` 那一侧
 // "拿不到插件就回落 CPU"同一条口径。
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -60,5 +63,62 @@ if (r1.status !== 0) {
   }
 }
 
+/* ── 第二节：**转发那一层**（`OMNI_GFX=gl`，§13.8）────────────────────────────────
+ *
+ * 判的是"真走了 GPU"而不是"图看上去对"：
+ *   1. `02-gl.pss`（GL 立即模式那一族）在 `--gfx gl` 与 `--gfx host`（CPU 备选）两档上
+ *      **非黑格数差 5% 以内** —— 两个渲染器，不逐字节；同时 `gl` 那趟 stderr 上不许有
+ *      "挂不上 / 开不出来"（有的话它其实偷偷回落了 CPU，这条判据就成了自己判自己）；
+ *   2. `draw2d.kc`（全是宿主那一侧的 2D：setpix/lineto/drawsph）两档**逐字节相同** ——
+ *      钉住"GPU 那一层当底、宿主那一层盖上去"那格合成没有把 2D 弄坏。
+ */
+const rgba = (p) => {
+  const b = readFileSync(p);
+  return b.subarray(b.indexOf(10) + 1);   /* 头是一行 `#gbga 宽 高\n` */
+};
+const nonBlack = (b) => {
+  let n = 0;
+  for (let i = 0; i < b.length; i += 4) if (b[i] | b[i + 1] | b[i + 2]) n++;
+  return n;
+};
+const runLeg = (src, mode, out) => spawnSync(process.execPath,
+  [join(ROOT, 'src/cli.js'), 'run', join(ROOT, src), '--backend', 'c'],
+  { encoding: 'utf8', cwd: ROOT, timeout: 120000,
+    env: { ...process.env, OMNI_GFX: mode, OMNI_GFX_OUT: out } });
+
+for (const [src, tol] of [['ext/polydraw/examples/02-gl.pss', 0.05],
+  ['ext/evaldraw/examples/draw2d.kc', 0]]) {
+  const name = src.slice(src.lastIndexOf('/') + 1);
+  const pg = join(out, `${name}.gl.rgba`);
+  const pc = join(out, `${name}.cpu.rgba`);
+  const rg = runLeg(src, 'gl', pg);
+  const rc = runLeg(src, 'host', pc);
+  if (rg.status !== 0 || rc.status !== 0 || !existsSync(pg) || !existsSync(pc)) {
+    no(`${name} 两档都跑得出一帧`, `${(rg.stderr ?? '').trim()} | ${(rc.stderr ?? '').trim()}`.slice(0, 300));
+    continue;
+  }
+  const err = (rg.stderr ?? '');
+  if (err.includes('#gfx gl')) {
+    no(`${name} 真走了本机 GL（没回落）`, err.trim().slice(0, 200));
+    continue;
+  }
+  ok(`${name} 真走了本机 GL（没回落 CPU 备选）`);
+  const a = rgba(pg);
+  const b = rgba(pc);
+  const na = nonBlack(a);
+  const nb = nonBlack(b);
+  if (tol === 0) {
+    let diff = 0;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) diff++;
+    if (diff === 0) ok(`${name} 两档逐字节相同（宿主那一层的 2D 没被合成弄坏）`, `非黑 ${na}`);
+    else no(`${name} 两档逐字节相同`, `${diff} 个字节不同（非黑 ${na} vs ${nb}）`);
+  } else if (nb > 0 && Math.abs(na - nb) <= nb * tol) {
+    ok(`${name} 与 CPU 备选结构一致（非黑格数差 ${tol * 100}% 以内）`, `gl ${na} / cpu ${nb}`);
+  } else {
+    no(`${name} 与 CPU 备选结构一致`, `非黑 gl ${na} vs cpu ${nb}（差要在 ${tol * 100}% 以内）`);
+  }
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed（本机 OpenGL 设备）\n`);
 process.exit(fail === 0 ? 0 : 1);
+
