@@ -690,6 +690,19 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
   /* **深度测试**（语言那一侧的 `gl_enable(GL_DEPTH_TEST)` 转过来的）：这一档没有
      z 缓冲，收下记着不用 —— 与 `host/gfx-cpu.js` 那一份同一句话。 */
   if (!strcmp(nm, "gldepth") && argc == 1) { return 0.0; }
+  /* ── **批上带的那点状态**（第四刀，与 `host/gfx-cpu.js` 逐句相同）：这一档没有
+     可编程管线，所以 `batchprog` 非零是当场报（不静默按内建那对画）；那张 `u_mvp`
+     与混合开关在这一档没有落点，收下记着不用。 */
+  if (!strcmp(nm, "batchprog") && argc == 1) {
+    if ((int64_t)a0 != 0) {
+      omni_errorf("这格设备（CPU 备选）没有可编程管线 —— 脚本挑了自己那格 program"
+                  "（glsetshader），顶点是物体坐标，这一档接不了；要 GPU 那两档设备"
+                  "（浏览器 WebGL2 / 本机 OpenGL）");
+    }
+    return 0.0;
+  }
+  if (!strcmp(nm, "batchmvp") && argc == 5) { return 0.0; }
+  if (!strcmp(nm, "batchblend") && argc == 1) { return 0.0; }
   if (!strcmp(nm, "setcol") && argc == 3) { gfx_need(); g_gcol = gfx_rgb(a0, a1, a2); return 0.0; }  if (!strcmp(nm, "setcol") && argc == 1) { gfx_need(); g_gcol = ((int64_t)a0) & 0xffffff; return 0.0; }
   if (!strcmp(nm, "setpix") && argc == 2) { gfx_need(); gfx_px(a0, a1, g_gcol); return 0.0; }
   if (!strcmp(nm, "moveto") && argc == 2) { gfx_need(); g_gx = a0; g_gy = a1; return 0.0; }

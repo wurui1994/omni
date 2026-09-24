@@ -11,11 +11,12 @@
 // `glTranslate` / `glRotate` / `glScale` / `glPushMatrix` / `glPopMatrix` /
 // `gluPerspective` / `setfov`，外加 `glEnable`/`glDisable`/`glCullFace`/`glBlendFunc`/
 // `glLineWidth`/`glNormal` 这几格**收下但不管**（这条腿上没有光照与混合）。
+// **可编程管线那一族也在这儿**（第四刀）：`glSetShader` / `glGetUniformLoc` /
+// `glUniform*` / `glGetAttribLoc` / `glVertexAttrib*` / `glTexCoord` / `glQuad` ——
+// 顶点与批留在这一层（`gl_prog != 0` 时存**物体坐标**），program 与 uniform 转给设备。
 //
-// **不接**（当场报，不静默画错）：着色器那一族（`glSetShader`/`glUniform*`/`glGetUniformLoc`）、
-// 纹理那一族（`glSetTex`/`glGetTex`/`glBindTexture`/`glTexCoord`）、`glMultMatrix`
-// （要一格数组形参）、`glCapture`。PolyDraw 里最漂亮的那些例子（`ken/gspiral.pss` 之类）
-// 正是**可编程管线 + 纹理**那一路 —— 它们在这条腿上跑不了，这一点不该含糊。
+// **不接**（当场报，不静默画错）：纹理那一族（`glSetTex`/`glGetTex`/`glBindTexture`）、
+// `glMultMatrix`（要一格数组形参）、`glCapture`。
 //
 // ## 三个约定
 //
@@ -67,13 +68,19 @@ const copyV = (dst, cnt, i) => {
 /** 设备那几格模块级的量（名字都带 `gl_` 前缀）。 */
 export const GL_GLOBALS = ['gl_on', 'gl_mode', 'gl_n', 'gl_r', 'gl_g', 'gl_b',
   'gl_sp', 'gl_fov', 'gl_fovt', 'gl_cx', 'gl_cy', 'gl_cz', 'gl_cw',
-  'gl_w', 'gl_h', 'gl_no', 'gl_nl', 'gl_np'];
+  'gl_w', 'gl_h', 'gl_no', 'gl_nl', 'gl_np',
+  /* 可编程管线那一档（第四刀）：`gl_prog` 是"脚本自己那格 program 在用着没有"
+     （0 = 内建那对着色器），`gl_ts…gl_tq` 是现在的纹理坐标（`glTexCoord`），
+     `gl_qid` 是"这一趟交批用单位矩阵"（满屏四边形那一格，见 `gl_quad`）。 */
+  'gl_prog', 'gl_ts', 'gl_tt', 'gl_tp', 'gl_tq', 'gl_qid'];
 
 export function glGlobalDecls() {
   return [
     ...GL_GLOBALS.map((n) => glob(n)),
     glob('gl_mv', ARR), glob('gl_pj', ARR), glob('gl_st', ARR),
     glob('gl_tm', ARR), glob('gl_ta', ARR), glob('gl_vb', ARR),
+    /* 交批时那格 MODELVIEW·PROJECTION（可编程管线那一档的 `u_mvp`）。 */
+    glob('gl_mp', ARR),
     /* 三条顶点批：三角 / 线段 / 点（`(gfxbatch …)` 的三个类）。 */
     glob('gl_ob', ARR), glob('gl_lb', ARR), glob('gl_pb', ARR),
   ];
@@ -103,6 +110,28 @@ export const POLYDRAW_GL = new Map([
   ['setfov/1', 'gl_setfov'],
   /* **每帧的 GL 初态**（照 `polydraw.c:3572-3579`）：adapter 在每帧开头发这一格。 */
   ['framebegin/0', 'gl_framebegin'],
+  /* **可编程管线那一族**（第四刀）：也走这一份 —— 挑 program 与设 uniform 是设备状态，
+     所以这几格只做两件事：把攒着的批交出去（状态一变就得断批），再把那句原样转给设备。
+     顶点那一半留在这儿：`gl_prog != 0` 时 `gl_vertex4` 存**物体坐标**、`gl_flush`
+     先发四句 `batchmvp`（见 `docs/design/eval-realtime-gpu.md` 第 9.4 节）。 */
+  ['glsetshader/1', 'gl_setshader1'],
+  ['glsetshader/2', 'gl_setshader2'],
+  ['glsetshader/3', 'gl_setshader3'],
+  ['glquad/1', 'gl_quad'],
+  ['gltexcoord/2', 'gl_texcoord2'],
+  ['gltexcoord/3', 'gl_texcoord3'],
+  ['gltexcoord/4', 'gl_texcoord4'],
+  ['glgetuniformloc/1', 'gl_uniloc'],
+  ['gluniform/2', 'gl_uni1'],
+  ['gluniform1f/2', 'gl_uni1'],
+  ['gluniform2f/3', 'gl_uni2'],
+  ['gluniform3f/4', 'gl_uni3'],
+  ['gluniform4f/5', 'gl_uni4'],
+  ['glgetattribloc/1', 'gl_attrloc'],
+  ['glvertexattrib1f/2', 'gl_attr1'],
+  ['glvertexattrib2f/3', 'gl_attr2'],
+  ['glvertexattrib3f/4', 'gl_attr3'],
+  ['glvertexattrib4f/5', 'gl_attr4'],
   /* 收下但不管的那几格（这条腿上没有光照/混合/剔除）。 */
   ['glnormal/3', 'gl_nop3'],
   ['glenable/1', 'gl_enable'],
@@ -171,6 +200,129 @@ export function glFnDecls() {
     ...glSetupDecls(),
     ...glMatrixDecls(),
     ...glDrawDecls(),
+    ...glShaderDecls(),
+  ];
+}
+
+/**
+ * **可编程管线那一族**（第 9.4 节"批带上状态"）。
+ *
+ * 分工只有一条线：**顶点与批在这儿，program 与 uniform 在设备**。
+ *   * `glsetshader` / `gluniform*` / `glvertexattrib*` 都是**按 draw call 生效**的状态，
+ *     所以每一格先 `gl_flush()`（把攒着的批交出去），再把那句原样转给设备；
+ *   * `gl_prog != 0` 之后 `gl_vertex4` 存的是**物体坐标**（不乘矩阵、也不丢 `w<=0` ——
+ *     变换与裁剪都是脚本那格顶点着色器与 GPU 的事），`gl_flush` 先发四句 `batchmvp`。
+ *   * `glquad(mode)` 也是**顶点**（满屏两个三角形，位置就是 NDC）—— 不是设备自己造一份
+ *     几何：那就是第二个模型了。它那一趟的 `u_mvp` 是单位矩阵，用 `gl_qid` 说。
+ */
+function glShaderDecls() {
+  /* `gl_mp = gl_pj · gl_mv`（列主序）：mp[c*4+r] = Σ_k pj[k*4+r] * mv[c*4+k]。 */
+  const mul = [];
+  for (let c = 0; c < 4; c++) {
+    for (let r = 0; r < 4; r++) {
+      let acc = null;
+      for (let k = 0; k < 4; k++) {
+        const t = bin('*', aget('gl_pj', num(k * 4 + r)), aget('gl_mv', num(c * 4 + k)));
+        acc = acc === null ? t : bin('+', acc, t);
+      }
+      mul.push(aset('gl_mp', num(c * 4 + r), acc));
+    }
+  }
+  /* 四句 `(gfxcall "batchmvp" 列 m0 m1 m2 m3)`（列主序，一句一列）。 */
+  const send = [];
+  for (let c = 0; c < 4; c++) {
+    send.push(ex(dev('batchmvp', [num(c), aget('gl_mp', num(c * 4)),
+      aget('gl_mp', num(c * 4 + 1)), aget('gl_mp', num(c * 4 + 2)),
+      aget('gl_mp', num(c * 4 + 3))])));
+  }
+  const sendIdent = [];
+  for (let c = 0; c < 4; c++) {
+    sendIdent.push(ex(dev('batchmvp', [num(c), num(c === 0 ? 1 : 0), num(c === 1 ? 1 : 0),
+      num(c === 2 ? 1 : 0), num(c === 3 ? 1 : 0)])));
+  }
+
+  /* 满屏四边形那六个顶点（位置就是 NDC、纹理坐标 0..1，颜色是现在这一格）。 */
+  const quadV = [[-1, -1, 0, 0], [1, -1, 1, 0], [-1, 1, 0, 1],
+    [1, -1, 1, 0], [1, 1, 1, 1], [-1, 1, 0, 1]];
+  const quad = [];
+  for (const [x, y, s, t] of quadV) {
+    const vals = [num(x), num(y), num(0), num(1),
+      nm('gl_r'), nm('gl_g'), nm('gl_b'), num(1),
+      num(s), num(t), num(0), num(1)];
+    vals.forEach((v, k) => {
+      quad.push(aset('gl_ob', bin('+', bin('*', nm('gl_no'), num(VS)), num(k)), v));
+    });
+    quad.push(set('gl_no', bin('+', nm('gl_no'), num(1))));
+  }
+
+  /** 挑 program 那一格：断批 + 转给设备 + 记下"脚本那格在用着"。 */
+  const setShader = (args) => [
+    ex(call('gl_need', [])),
+    ex(call('gl_flush', [])),
+    ex(dev('glsetshader', args.map((a) => nm(a)))),
+    set('gl_prog', num(1)),
+    ex(dev('batchprog', [num(1)])),
+    ret(num(0)),
+  ];
+  /** 一格"按 draw call 生效"的状态：断批 + 原样转给设备。 */
+  const stateFn = (name, hostName, args) => fn(name, args, [
+    ex(call('gl_need', [])),
+    ex(call('gl_flush', [])),
+    ret(dev(hostName, args.map((a) => nm(a)))),
+  ]);
+
+  return [
+    fn('gl_mvpsend', [], [
+      iff(bin('!=', nm('gl_qid'), num(0)), [...sendIdent, ret(num(0))]),
+      ...mul,
+      ...send,
+      ret(num(0)),
+    ]),
+    fn('gl_setshader1', ['a'], setShader(['a'])),
+    fn('gl_setshader2', ['a', 'b'], setShader(['a', 'b'])),
+    fn('gl_setshader3', ['a', 'b', 'c'], setShader(['a', 'b', 'c'])),
+    fn('gl_texcoord4', ['s', 't', 'p', 'q'], [
+      ex(call('gl_need', [])),
+      set('gl_ts', nm('s')), set('gl_tt', nm('t')),
+      set('gl_tp', nm('p')), set('gl_tq', nm('q')),
+      ret(num(0)),
+    ]),
+    fn('gl_texcoord2', ['s', 't'], [
+      ex(call('gl_texcoord4', [nm('s'), nm('t'), num(0), num(1)])), ret(num(0))]),
+    fn('gl_texcoord3', ['s', 't', 'p'], [
+      ex(call('gl_texcoord4', [nm('s'), nm('t'), nm('p'), num(1)])), ret(num(0))]),
+    stateFn('gl_uniloc', 'glgetuniformloc', ['a']),
+    stateFn('gl_uni1', 'gluniform1f', ['h', 'x']),
+    stateFn('gl_uni2', 'gluniform2f', ['h', 'x', 'y']),
+    stateFn('gl_uni3', 'gluniform3f', ['h', 'x', 'y', 'z']),
+    stateFn('gl_uni4', 'gluniform4f', ['h', 'x', 'y', 'z', 'w']),
+    stateFn('gl_attrloc', 'glgetattribloc', ['a']),
+    stateFn('gl_attr1', 'glvertexattrib1f', ['h', 'x']),
+    stateFn('gl_attr2', 'glvertexattrib2f', ['h', 'x', 'y']),
+    stateFn('gl_attr3', 'glvertexattrib3f', ['h', 'x', 'y', 'z']),
+    stateFn('gl_attr4', 'glvertexattrib4f', ['h', 'x', 'y', 'z', 'w']),
+    /**
+     * `glquad(mode)`：满屏四边形。`0` 走 alpha 混合、`1` 不透明（说明书那一行）。
+     * 六个顶点在这儿造（**一个模型**），设备只收那一段批 —— 它那一趟的 `u_mvp`
+     * 是单位矩阵（`gl_qid`），因为位置已经是 NDC 了。
+     */
+    fn('gl_quad', ['mode'], [
+      ex(call('gl_need', [])),
+      ex(call('gl_flush', [])),
+      /* 没挑过 program 的脚本（只有 `@v`/`@f` 两段）：让设备拿第一对。 */
+      iff(bin('==', nm('gl_prog'), num(0)), [
+        ex(dev('glsetshader', [num(-1)])),
+        set('gl_prog', num(1)),
+        ex(dev('batchprog', [num(1)])),
+      ]),
+      ex(dev('batchblend', [nm('mode')])),
+      ...quad,
+      set('gl_qid', num(1)),
+      ex(call('gl_flush', [])),
+      set('gl_qid', num(0)),
+      ex(dev('batchblend', [num(1)])),
+      ret(num(0)),
+    ]),
   ];
 }
 
@@ -186,6 +338,10 @@ function glSetupDecls() {
       set('gl_tm', anew(num(16))),
       set('gl_ta', anew(num(16))),
       set('gl_vb', anew(num(VMAX * VS))),
+      set('gl_mp', anew(num(16))),
+      set('gl_prog', num(0)),
+      set('gl_qid', num(0)),
+      set('gl_ts', num(0)), set('gl_tt', num(0)), set('gl_tp', num(0)), set('gl_tq', num(1)),
       set('gl_ob', anew(num(OMAX * VS))),
       set('gl_lb', anew(num(OMAX * VS))),
       set('gl_pb', anew(num(OMAX * VS))),
@@ -213,6 +369,12 @@ function glSetupDecls() {
      * `glBegin`/`glEnd` 合并，这正是"少几个 draw call"那件事）。
      */
     fn('gl_flush', [], [
+      /* 可编程管线那一档：位置是**物体坐标**，所以变换要随批一起过去（`u_mvp`）。
+         空批不必发（那趟白花四句宿主调用）。 */
+      iff(bin('!=', nm('gl_prog'), num(0)), [
+        iff(bin('>', bin('+', bin('+', nm('gl_np'), nm('gl_nl')), nm('gl_no')), num(0)),
+          [ex(call('gl_mvpsend', []))]),
+      ]),
       iff(bin('>', nm('gl_np'), num(0)), [
         ex(devBatch(2, nm('gl_np'), 'gl_pb')),
         set('gl_np', num(0)),
@@ -464,15 +626,23 @@ function glDrawDecls() {
     fn('gl_vertex3', ['x', 'y', 'z'], [
       ex(call('gl_vertex4', [nm('x'), nm('y'), nm('z'), num(1)])), ret(num(0))]),
     /**
-     * 一格顶点：变换 -> **裁剪空间**（x,y,z,w 原样存着，透视除法与视口是设备那一侧的事 ——
-     * 那道算式三档设备只许有一份）。`w <= 0`（在眼睛后头/近平面外）**整格丢掉**：
-     * 这一版没有近平面插值。颜色存 0..1（与 `(gfxbatch …)` 的契约同一格）。
+     * 一格顶点。**两种顶点空间，看 `gl_prog`**：
+     *   * 内建那对着色器（`gl_prog == 0`）收**裁剪空间** —— 这儿乘两个矩阵，
+     *     `w <= 0`（在眼睛后头/近平面外）**整格丢掉**（这一版没有近平面插值）；
+     *   * 脚本自己那格顶点着色器（`gl_prog != 0`）收**物体坐标** —— 原样存下，
+     *     变换（`ftransform()` / `u_mvp`）与裁剪都是它与 GPU 的事。
+     * 颜色存 0..1、纹理坐标存现在这一格（与 `(gfxbatch …)` 的契约同一格）。
      */
     fn('gl_vertex4', ['x', 'y', 'z', 'w'], [
       ex(call('gl_need', [])),
       iff(bin('>=', nm('gl_n'), num(VMAX)), [ret(num(0))]),
-      ex(call('gl_xf', [nm('x'), nm('y'), nm('z'), nm('w')])),
-      iff(bin('<=', nm('gl_cw'), num(0)), [ret(num(0))]),
+      iff(bin('!=', nm('gl_prog'), num(0)), [
+        set('gl_cx', nm('x')), set('gl_cy', nm('y')),
+        set('gl_cz', nm('z')), set('gl_cw', nm('w')),
+      ], [
+        ex(call('gl_xf', [nm('x'), nm('y'), nm('z'), nm('w')])),
+        iff(bin('<=', nm('gl_cw'), num(0)), [ret(num(0))]),
+      ]),
       vbset(nm('gl_n'), 0, nm('gl_cx')),
       vbset(nm('gl_n'), 1, nm('gl_cy')),
       vbset(nm('gl_n'), 2, nm('gl_cz')),
@@ -481,10 +651,10 @@ function glDrawDecls() {
       vbset(nm('gl_n'), 5, nm('gl_g')),
       vbset(nm('gl_n'), 6, nm('gl_b')),
       vbset(nm('gl_n'), 7, num(1)),
-      vbset(nm('gl_n'), 8, num(0)),
-      vbset(nm('gl_n'), 9, num(0)),
-      vbset(nm('gl_n'), 10, num(0)),
-      vbset(nm('gl_n'), 11, num(1)),
+      vbset(nm('gl_n'), 8, nm('gl_ts')),
+      vbset(nm('gl_n'), 9, nm('gl_tt')),
+      vbset(nm('gl_n'), 10, nm('gl_tp')),
+      vbset(nm('gl_n'), 11, nm('gl_tq')),
       set('gl_n', bin('+', nm('gl_n'), num(1))),
       ret(num(0)),
     ]),
@@ -551,6 +721,11 @@ function glDrawDecls() {
           ex(call('gl_tri', [bin('-', nm('i'), num(2)), bin('-', nm('i'), num(1)), nm('i')])),
           ex(call('gl_tri', [bin('-', nm('i'), num(1)), bin('+', nm('i'), num(1)), nm('i')])),
         ])),
+      /* **可编程管线那一档：这一组顶点当场交出去**。理由是那张 `u_mvp` ——
+         位置是物体坐标，变换随批一起过去（`batchmvp`），而矩阵是**这一刻**的：
+         脚本一出 `glEnd` 常常就 `glPopMatrix`，攒到帧末再算就成了单位矩阵
+         （踩过一次：整帧全黑）。于是这一档是"一组 glBegin/glEnd 一个 draw call"。 */
+      iff(bin('!=', nm('gl_prog'), num(0)), [ex(call('gl_flush', []))]),
       ret(num(0)),
     ]),
   ];

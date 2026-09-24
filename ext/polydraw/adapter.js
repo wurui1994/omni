@@ -390,7 +390,9 @@ function callOf(x, C) {
   const n = idOf(head);
   /* **可编程管线那一族**先看：它的实参里可能有**串**（着色器名 / uniform 名），
      而 `exprOf` 把串落成 `{kind:'string'}` —— 那格进不了宿主面（只收 double）。
-     所以这儿把串内部到名字表里换成下标（表在入口里登记，见 `gfxDefIR`）。 */
+     所以这儿把串内部到名字表里换成下标（表在入口里登记，见 `gfxDefIR`）。
+     换完之后**照 `draw` 那张表走**（第四刀：这一族也落在 `gl-rt.js` 上 —— 顶点与批
+     在语言这一侧，program 与 uniform 才转给设备）。 */
   if (C.gfxHost) {
     const raw = kids(x).slice(1);
     const strAt = SHADER_FNS.get(`${n}/${raw.length}`);
@@ -403,6 +405,11 @@ function callOf(x, C) {
         }
         return exprOf(a, C);
       });
+      const glFn = C.host.glrt === true ? C.host.draw?.get(`${n}/${as.length}`) : undefined;
+      if (glFn !== undefined) {
+        C.needGL = true;
+        return { kind: 'call', fn: nameRef(glFn), args: as };
+      }
       return gfxCallIR(n, as);
     }
   }
@@ -489,7 +496,7 @@ function callOf(x, C) {
        原来在宿主那条路上把 `glbegin/glvertex/…` 原样递给设备，于是 CPU 备选那一档
        （它那张名字表里没有 GL）当场报"不认识 framebegin" —— 语料里 39 份 GL 脚本
        一张图都出不来。 */
-    if (C.host.glrt === true && drawFn.startsWith('gl_') && !C.shaderGL) {
+    if (C.host.glrt === true && drawFn.startsWith('gl_')) {
       C.needGL = true;
       return { kind: 'call', fn: nameRef(drawFn), args };
     }
@@ -1730,32 +1737,12 @@ function usesGL(x, host) {
   return kids(x).some((k) => usesGL(k, host));
 }
 
-/**
- * 这份脚本用过**着色器那一族**没有（`glsetshader`/`gluniform*`/`glquad`…）。
- *
- * **过渡期的一格开关**：着色器那一档的顶点位置要递**物体坐标**（变换交给脚本自己那格
- * 顶点着色器，`u_mvp` 由设备喂），而顶点批这条路上递的是**裁剪空间** —— 两者对不上。
- * 所以用了着色器的脚本暂时还走"GL 名字原样交给设备"那条老路（浏览器 WebGL2 那一档）。
- * 第 9.3 节第四刀（设备砍掉自己那半合批 + 批的状态里带上 program 与 mvp）之后这一格删掉。
- */
-function usesShaderGL(x) {
-  if (!isList(x)) return false;
-  if (tag(x) === 'call') {
-    const head = kids(x)[0];
-    if (isList(head) && tag(head) === 'name'
-      && SHADER_FNS.has(`${idOf(head)}/${kids(x).length - 1}`)) return true;
-  }
-  return kids(x).some((k) => usesShaderGL(k));
-}
-
 export function evalToIR(cst, host, src = '') {
-  /* GL 那一族只在设备那条路上有（见 `usesGL` 的头注）。 */
-  const shaderGL = usesShaderGL(cst);
-  const glUsed = host.glrt === true && !shaderGL && usesGL(cst, host);
+  /* GL 那一族只在设备那条路上有（见 `usesGL` 的头注）。**着色器那一族也在里头** ——
+     第四刀之后它与固定管线走的是同一条路（顶点与批在语言这一侧，见 `gl-rt.js`）。 */
+  const glUsed = host.glrt === true && usesGL(cst, host);
   const C = {
     host,
-    /* 着色器那一族在不在（过渡期：用了它的脚本仍走"GL 名字交给设备"那条老路）。 */
-    shaderGL,
     /* 画图走宿主调用（`(gfxcall …)`）还是生成出来的 CPU 光栅器 —— 见 `gfxMode()` 的头注。
        `null` 是**录制那一档**（设备只记账不画，量语言这一半与量覆盖用它）—— 它也是宿主调用。 */
     gfxHost: glUsed || ['host', 'gl', 'auto', 'null'].includes(gfxMode()),
@@ -1940,7 +1927,8 @@ export function evalToIR(cst, host, src = '') {
       kind: 'expr-stmt',
       expr: C.needGL
         ? { kind: 'call', fn: nameRef('gl_framebegin'), args: [] }
-        /* 着色器那一族那条老路（过渡期，见 `usesShaderGL` 的头注）：设备自己做每帧初态。 */
+        /* 没走 `gl-rt.js` 那一份的那几门（宿主表里没有 `glrt`，例如 EvalDraw 的 GL 子集）：
+           每帧初态交给设备自己做。 */
         : gfxCallIR('framebegin'),
     });
   }

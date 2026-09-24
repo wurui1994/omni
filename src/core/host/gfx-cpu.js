@@ -491,6 +491,17 @@ export function gfxCall(name, args) {
       return 0;
     }
     case 'clz/1': return 0;
+    /* ── **批上带的那点状态**（第四刀）。这一档没有可编程管线，所以 `batchprog` 非零是
+       **当场报**（不静默按内建那对画 —— 那就成了"图不对但没人知道"）；那张 `u_mvp`
+       与混合开关在这一档没有落点，收下记着不用。 */
+    case 'batchprog/1':
+      if (Math.trunc(a(0)) !== 0) {
+        throw new Error('这格设备（CPU 备选）没有可编程管线 —— 脚本挑了自己那格'
+          + ' program（glsetshader），顶点是**物体坐标**，这一档接不了；'
+          + ' 要 GPU 那两档设备（浏览器 WebGL2 / 本机 OpenGL）');
+      }
+      return 0;
+    case 'batchmvp/5': case 'batchblend/1': return 0;
     case 'glpointsize/1': case 'glcullface/1': case 'gllinewidth/1':
     case 'glswapinterval/1': case 'glalphaenable/1': case 'glalphadisable/1':
     case 'sleep/1':

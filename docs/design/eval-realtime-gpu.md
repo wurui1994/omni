@@ -391,32 +391,48 @@ GL calls into a flat command buffer"）：立即模式的调用先记进一条�
 **不许出现的东西**（写在这儿免得再走回头路）：本机那一档的立即模式（`glBegin`/`glVertex`
 转发给驱动）、两份变换/合批逻辑、"某一档设备自己多一套语义"。
 
-### 9.4 第四刀的设计：**批带上状态**，着色器那一族并进同一条路
+### 9.4 第四刀（**已落地** 2026-09-24）：批带上状态，着色器那一族并进同一条路
 
-第三刀之后还剩一格**过渡开关**（`adapter.js` 的 `usesShaderGL`）：用了着色器的脚本仍走
+从前还剩一格**过渡开关**（`adapter.js` 的 `usesShaderGL`）：用了着色器的脚本走
 "GL 名字原样交给设备"那条老路。原因是两种顶点空间：
 
 * 内建那对着色器（2D 与固定管线）收的是**裁剪空间** —— 语言那一侧已经乘过矩阵；
 * 脚本自己那格顶点着色器收的是**物体坐标** —— 变换是它自己做的（`ftransform()`），
   `u_mvp` 由设备喂。
 
-所以"批"上要带一格状态说清位置是哪一种。落法（`(gfxcall …)` 摆状态、`(gfxbatch …)` 交批）：
+于是"批"上带一格状态说清位置是哪一种。落法（`(gfxcall …)` 摆状态、`(gfxbatch …)` 交批）：
 
     (gfxcall "batchprog" p)                 p = 0 内建（裁剪空间）；≠0 脚本那格 program（物体坐标）
-    (gfxcall "batchmvp" 行 m0 m1 m2 m3)     只有 p≠0 才发（四行，列主序的 MODELVIEW·PROJECTION）
-    (gfxcall "gldepth" 0|1)                 深度测试（已落地）
-    (gfxcall "batchattr" loc x y z w)       常量属性（`glVertexAttrib*`）
+    (gfxcall "batchmvp" 列 m0 m1 m2 m3)     四句一张 u_mvp（列主序，只在 p≠0 时发）
+    (gfxcall "batchblend" mode)             0 = alpha 混合、别的不透明（glquad(mode) 那一格）
+    (gfxcall "gldepth" 0|1)                 深度测试
 
-语言那一侧（`gl-rt.js`）跟着改三处：`gl_prog` 记当前 program（`glsetshader` 时 flush +
-记下 + 转给设备）；`gl_vertex4` 在 `gl_prog != 0` 时存**物体坐标**（不乘矩阵、也不丢
-`w<=0` —— 裁剪交给 GPU）；`gl_flush` 在 `gl_prog != 0` 时先发四句 `batchmvp` 再发批。
+语言那一侧（`gl-rt.js` 新的 `glShaderDecls()`）：`glsetshader` / `gluniform*` /
+`glvertexattrib*` / `glgetuniformloc` / `glgetattribloc` 都是**按 draw call 生效**的状态，
+所以每一格先 `gl_flush()` 再原样转给设备；`gl_prog != 0` 之后 `gl_vertex4` 存**物体坐标**
+（不乘矩阵、也不丢 `w<=0` —— 裁剪交给 GPU），`gl_flush` 先发四句 `batchmvp`
+（`gl_mp = gl_pj · gl_mv`）。`glTexCoord` 也落在这一层（顶点的第 9..12 格）。
 
-设备那一侧：WebGL2 把 `glbegin/glvertex/矩阵栈/glXf/mvpNow` 那一整摊**删掉**（那是第二份
-变换与合批），只留"收批 + 编 program + uniform + 纹理 + 读回 + 查询/输入"；CPU 备选两份
-在 `p≠0` 时**当场报**（没有可编程管线，不静默画错）；本机 OpenGL（第五刀）照 `p` 选 program。
+**`glquad(mode)` 的六个顶点也在语言这一侧造**（位置就是 NDC、纹理坐标 0..1）——
+设备自己造一份满屏几何就是第二个模型了。它那一趟的 `u_mvp` 是单位矩阵：`gl_qid` 说。
+脚本只写了 `@v`/`@f` 却没调 `glsetshader` 时发 `(gfxcall "glsetshader" -1)`
+= "拿第一对"（PolyDraw 里 `glquad` 本来就是这个默认）。
 
-判完就把 `usesShaderGL` 那格开关删掉 —— 判据是 `tests/studio/run.js` 里着色器那两条
-（`@v`/`@f` + `glsetshader` + uniform + `glquad`、着色器 + 立即模式几何）不许变。
+设备那一侧：WebGL2 那一档的批多带三格（`prog`/`mvpVer`/`blend`，任一格变就断段），
+`batchIn` 在 `prog≠0` 时**原样**把物体坐标递进去；CPU 备选那两份（JS 与 C）在
+`batchprog p≠0` 时**当场报**（没有可编程管线，不静默按内建那对画）。
+
+判据：`tests/studio/run.js` 里着色器那两条（`04-shader.pss` 的 `@v`/`@f` + `glsetshader`
++ uniform + `glquad`、`05-shader-geom.pss` 的着色器 + 立即模式几何 + `u_mvp`）——
+真浏览器、判像素，全绿。`usesShaderGL` 已经删掉。
+
+**还留着的一摊**（下一刀）：WebGL2 那一档自己那份立即模式（`glbegin`/`glvertex`/矩阵栈）
+只给 EvalDraw 的 GL 子集（`.kc`）用着 —— 它那张宿主表还没有 `glrt`。把它也切到
+`gl-rt.js` 上之后，设备里那两百来行第二份模型就整段删掉。
+
+**常量属性**（`glVertexAttrib*`）没有单开一格 `batchattr`：设备那一侧本来就按
+"位置 -> 四个数 + 版本号"记着（`G.attrs`/`attrVer`，值一变就断段），语言那一侧只要
+先 `gl_flush()` 再把那句原样转过去就够了 —— 少一格 op。
 
 ## 10. 宿主面按**份数**补齐（`--gfx host` 那把尺子）
 

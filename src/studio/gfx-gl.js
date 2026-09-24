@@ -172,18 +172,35 @@ function installInput(canvas) {
 const clamp01 = (v) => (v < 0 ? 0 : (v > 255 ? 1 : v / 255));
 
 /**
- * 现在该往哪一段里攒。**四样都一致才接着上一段**：图元类、深度测试、用哪格 program、
- * 那批常量属性的版本 —— 换了任一样就新开一段（于是脚本的次序与状态都保住了）。
+ * **批上带的那点状态**（第四刀，`docs/design/eval-realtime-gpu.md` 9.4）。
  *
- * `prog` 是 `null` 表示走内建那对着色器（2D 与固定管线）；不是 null 就是脚本自己
+ * 语言那一侧在交批之前用三句宿主调用把它摆好：
+ *   * `(gfxcall "batchprog" p)` —— `0` 内建那对（顶点是**裁剪空间**）、`≠0` 脚本挑的那格
+ *     （顶点是**物体坐标**，变换交给它的顶点着色器）；
+ *   * `(gfxcall "batchmvp" 列 m0 m1 m2 m3)` —— 四句一张 `u_mvp`（列主序）；
+ *   * `(gfxcall "batchblend" mode)` —— `0` 走 alpha 混合、别的不透明（`glquad(mode)`）。
+ *
+ * `mvpVer` 是 `u_mvp` 的版本号：变了就把顶点断成另一段（uniform 是**按 draw call** 摆的）。
+ */
+const B = { prog: 0, mvp: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], mvpVer: 0, blend: 1 };
+
+/**
+ * 现在该往哪一段里攒。**几样都一致才接着上一段**：图元类、深度测试、用哪格 program、
+ * 那批常量属性的版本、那格 `u_mvp` 的版本、混合开着没有 —— 换了任一样就新开一段
+ * （于是脚本的次序与状态都保住了）。
+ *
+ * `prog` 是 `null` 表示走内建那对着色器（2D 那一族）；不是 null 就是脚本自己
  * `glsetshader` 挑的那格 —— 那时顶点位置递的是**物体坐标**，变换交给它的顶点着色器
- * （`u_mvp` 由我们喂：MODELVIEW 与 PROJECTION 的积，按这一段攒的时候那一刻记下）。
+ * （`u_mvp` 由语言那一侧发的四句 `batchmvp` 给，见 `docs/design/eval-realtime-gpu.md` 9.4）。
  */
 function batch(kind, prog = null, mvp = null) {
   const last = D.batches[D.batches.length - 1];
   if (last !== undefined && last.kind === kind && last.depth === G.depth
-    && last.prog === prog && last.attrVer === G.attrVer) return last;
-  const b = { kind, depth: G.depth, prog, mvp, attrVer: G.attrVer, v: [] };
+    && last.prog === prog && last.attrVer === G.attrVer
+    && last.mvpVer === B.mvpVer && last.blend === B.blend) return last;
+  const b = {
+    kind, depth: G.depth, prog, mvp, attrVer: G.attrVer, mvpVer: B.mvpVer, blend: B.blend, v: [],
+  };
   D.batches.push(b);
   return b;
 }
@@ -295,8 +312,16 @@ function flush() {
     }
     if (b.depth) gl.enable(gl.DEPTH_TEST);
     else gl.disable(gl.DEPTH_TEST);
+    /* 混合：`glquad(0)` 那一档要 alpha 混合（语言那一侧发的 `batchblend`）。 */
+    if (b.blend === 0) {
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    } else {
+      gl.disable(gl.BLEND);
+    }
     gl.drawArrays(b.kind === 'tri' ? gl.TRIANGLES : gl.LINES, 0, b.v.length / 12);
   }
+  gl.disable(gl.BLEND);
   D.batches.length = 0;
 }
 
@@ -619,6 +644,18 @@ function useProgram(vName, fName) {
 /** `glsetshader(…)`：实参是**名字表的下标**（见 `gfxdef`）；旧式的数字那一档按序号取。 */
 function setShader(args) {
   glNeed();
+  /* **负下标 = "第一对"**（语言那一侧的 `gl_quad` 在脚本没挑过 program 时发的那句 ——
+     `glquad` 在 PolyDraw 里本来就默认拿 `@v`/`@f` 那一对）。 */
+  if (args.length === 1 && Math.trunc(Number(args[0])) < 0) {
+    const v = firstOf('vert');
+    const f = firstOf('frag');
+    if (v === null || f === null) {
+      throw new Error('glquad：还没有着色器 —— `.pss` 里要有 @v 与 @f 区段'
+        + '（或者先 glsetshader(…) 挑一对）');
+    }
+    useProgram(v, f);
+    return 0;
+  }
   const nameAt = (i) => {
     const k = String(Math.trunc(Number(args[i])));
     const s = SH.names.get(k);
@@ -918,6 +955,19 @@ function call(name, args) {
     /* **深度测试那一格设备状态**（语言那一侧的 `gl_enable` 转过来的 —— 只有一个模型：
        GL 的状态机在语言那一侧，"开不开 z 缓冲"这件事只有设备做得到）。 */
     case 'gldepth/1': glNeed(); G.depth = Math.trunc(a(0)) !== 0; return 0;
+    /* ── **批上带的那点状态**（第四刀，见 `B` 的头注）。 */
+    case 'batchprog/1':
+      glNeed();
+      B.prog = Math.trunc(a(0));
+      return 0;
+    case 'batchmvp/5': {
+      const c = Math.trunc(a(0)) & 3;
+      for (let k = 0; k < 4; k++) B.mvp[c * 4 + k] = a(1 + k);
+      /* 版本号一动，下一段顶点就不会并进上一段（uniform 是按 draw call 摆的）。 */
+      B.mvpVer += 1;
+      return 0;
+    }
+    case 'batchblend/1': B.blend = Math.trunc(a(0)); return 0;
     /* 收下但不管的那几格（光照/混合/剔除/线宽）。 */
     case 'glnormal/3':
     case 'glcullface/1':
@@ -1059,6 +1109,12 @@ function reset() {
   G.depth = false;
   G.attrs.clear();
   G.attrVer = 0;
+  /* 批上带的那点状态也归零（`batchprog`/`batchmvp`/`batchblend`）—— 上一份脚本挑的
+     program 不许跟到下一份头上。 */
+  B.prog = 0;
+  B.mvp = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  B.mvpVer = 0;
+  B.blend = 1;
   /* 着色器那一摊也要清：`SH.progs` 是**按名字**缓存的，改过 `@f` 区段之后名字没变、
      原文变了 —— 不清的话下一趟还拿着上一趟编好的那份（"改了没反应"就是这么来的）。 */
   SH.src.clear();
@@ -1099,11 +1155,22 @@ function reset() {
  * 2D 图元变顶点 / 合批全在语言那一侧，这一层只把那一段攒进当前段里，`flush` 时
  * 一次上传 + 一次 `drawArrays`（`docs/design/eval-realtime-gpu.md` 第 9 节）。
  *
- * 进来的位置是**裁剪空间**（x,y,z,w），而内建那对着色器收的是**屏幕坐标** ——
- * 所以这儿按 `x/w*0.5+0.5` 换一次（与 CPU 备选那一档、本机 OpenGL 那一档同一道算式，
- * 三档设备的口径必须是同一个）。
+ * 位置是哪一种空间由 `batchprog` 说（见 `B`）：
+ *   * `B.prog === 0` —— **裁剪空间**，而内建那对着色器收的是屏幕坐标，所以这儿按
+ *     `x/w*0.5+0.5` 换一次（与 CPU 备选那一档、本机 OpenGL 那一档同一道算式）；
+ *   * `B.prog !== 0` —— **物体坐标**，原样递给脚本那格顶点着色器（`u_mvp` 是
+ *     语言那一侧发来的那张，见 `batchmvp`）。
  */
 function batchIn(kind, n, verts) {
+  const prog = B.prog === 0 ? null : SH.cur;
+  if (prog !== null) {
+    const b = batch(kind === 0 ? 'line' : 'tri', prog, B.mvp.slice());
+    for (let i = 0; i < n; i++) {
+      const o = i * 12;
+      for (let k = 0; k < 12; k++) b.v.push(verts[o + k]);
+    }
+    return n;
+  }
   const sx = (o) => {
     const w = verts[o + 3] === 0 ? 1 : verts[o + 3];
     return [(verts[o] / w * 0.5 + 0.5) * D.w, (0.5 - verts[o + 1] / w * 0.5) * D.h, verts[o + 2] / w];
