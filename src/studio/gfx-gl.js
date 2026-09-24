@@ -915,6 +915,9 @@ function call(name, args) {
     /* `glEnable`/`glDisable`：只认深度测试那一格，别的收下不管（这一档没有光照）。 */
     case 'glenable/1': glNeed(); if (Math.trunc(a(0)) === 0x0b71) G.depth = true; return 0;
     case 'gldisable/1': glNeed(); if (Math.trunc(a(0)) === 0x0b71) G.depth = false; return 0;
+    /* **深度测试那一格设备状态**（语言那一侧的 `gl_enable` 转过来的 —— 只有一个模型：
+       GL 的状态机在语言那一侧，"开不开 z 缓冲"这件事只有设备做得到）。 */
+    case 'gldepth/1': glNeed(); G.depth = Math.trunc(a(0)) !== 0; return 0;
     /* 收下但不管的那几格（光照/混合/剔除/线宽）。 */
     case 'glnormal/3':
     case 'glcullface/1':
@@ -1101,12 +1104,28 @@ function reset() {
  * 三档设备的口径必须是同一个）。
  */
 function batchIn(kind, n, verts) {
+  const sx = (o) => {
+    const w = verts[o + 3] === 0 ? 1 : verts[o + 3];
+    return [(verts[o] / w * 0.5 + 0.5) * D.w, (0.5 - verts[o + 1] / w * 0.5) * D.h, verts[o + 2] / w];
+  };
+  /* 点那一档：一格顶点摊成一个 1×1 的四边形（WebGL 里 `gl_PointSize` 不可靠 ——
+     与 `setpix` 同一手）。"一个点多大"是设备的事，语言那一侧不知道像素。 */
+  if (kind === 2) {
+    const b = batch('tri');
+    for (let i = 0; i < n; i++) {
+      const o = i * 12;
+      const [x, y, z] = sx(o);
+      const c = [verts[o + 4], verts[o + 5], verts[o + 6], verts[o + 7]];
+      const quad = [[x, y], [x + 1, y], [x + 1, y + 1], [x, y], [x + 1, y + 1], [x, y + 1]];
+      for (const [qx, qy] of quad) b.v.push(qx, qy, z, 1, c[0], c[1], c[2], c[3], 0, 0, 0, 1);
+    }
+    return n;
+  }
   const b = batch(kind === 0 ? 'line' : 'tri');
   for (let i = 0; i < n; i++) {
     const o = i * 12;
-    const w = verts[o + 3] === 0 ? 1 : verts[o + 3];
-    b.v.push((verts[o] / w * 0.5 + 0.5) * D.w, (0.5 - verts[o + 1] / w * 0.5) * D.h,
-      verts[o + 2] / w, 1,
+    const [x, y, z] = sx(o);
+    b.v.push(x, y, z, 1,
       verts[o + 4], verts[o + 5], verts[o + 6], verts[o + 7],
       verts[o + 8], verts[o + 9], verts[o + 10], verts[o + 11]);
   }

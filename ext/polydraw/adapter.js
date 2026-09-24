@@ -482,11 +482,19 @@ function callOf(x, C) {
     C.needGfx = true;
     /* GL 那一族（固定管线 + 着色器）用过没有 —— 每帧的 GL 初态只给用过的脚本发。 */
     if (drawFn.startsWith('gl_')) C.usedGL = true;
+    /* **GL 那一族永远走生成出来的那一份**（`gl-rt.js`），连宿主设备那条路也走它 ——
+       "只有一个模型"（`docs/design/eval-realtime-gpu.md` 第 9 节）：命令变顶点、合批、
+       拆 mode 全在语言这一侧，设备只收顶点批。
+       原来在宿主那条路上把 `glbegin/glvertex/…` 原样递给设备，于是 CPU 备选那一档
+       （它那张名字表里没有 GL）当场报"不认识 framebegin" —— 语料里 39 份 GL 脚本
+       一张图都出不来。 */
+    if (C.host.glrt === true && drawFn.startsWith('gl_') && !C.shaderGL) {
+      C.needGL = true;
+      return { kind: 'call', fn: nameRef(drawFn), args };
+    }
     /* **宿主调用那条路**：一格 `(gfxcall "名字" 实参…)`，设备在宿主那一侧。
        名字与元数原样交过去 —— 设备按 `名字/个数` 分派（与这张表同一条口径）。 */
     if (C.gfxHost) return gfxCallIR(n, args);
-    /* GL 立即模式那一摊（`gl-rt.js`）只在真用到时才带上 —— 它比 2D 那一摊大得多。 */
-    if (C.host.glrt === true && drawFn.startsWith('gl_')) C.needGL = true;
     return { kind: 'call', fn: nameRef(drawFn), args };
   }
   /* 宿主那边的 `KLOCK()` / `KLOCK(档)` —— 同一条路，也是问设备一句
@@ -1690,12 +1698,55 @@ function renameParams(psNode, body, fname, C) {
  *
  * 形状：`(program <文件级的 static/enum>… (main (params …) (block …)) (fn 名 (params …) (block …))…)`
  */
+/**
+ * 这份脚本用过 **GL 那一族**没有（整棵树扫一遍调用名）。
+ *
+ * 用过就**只走设备那条路**（`gfxHost`）：GL 的命令在语言这一侧变成顶点批
+ * （`gl-rt.js`），2D 那几格也交给同一格设备 —— 不然一趟里会有两块帧缓冲
+ * （生成出来那块 + 设备那块），出两份图。见 `docs/design/eval-realtime-gpu.md` 第 9 节。
+ */
+function usesGL(x, host) {
+  if (!isList(x)) return false;
+  if (tag(x) === 'call') {
+    const head = kids(x)[0];
+    if (isList(head) && tag(head) === 'name') {
+      const key = `${idOf(head)}/${kids(x).length - 1}`;
+      const f = host.draw?.get(key);
+      if (f !== undefined && f.startsWith('gl_')) return true;
+    }
+  }
+  return kids(x).some((k) => usesGL(k, host));
+}
+
+/**
+ * 这份脚本用过**着色器那一族**没有（`glsetshader`/`gluniform*`/`glquad`…）。
+ *
+ * **过渡期的一格开关**：着色器那一档的顶点位置要递**物体坐标**（变换交给脚本自己那格
+ * 顶点着色器，`u_mvp` 由设备喂），而顶点批这条路上递的是**裁剪空间** —— 两者对不上。
+ * 所以用了着色器的脚本暂时还走"GL 名字原样交给设备"那条老路（浏览器 WebGL2 那一档）。
+ * 第 9.3 节第四刀（设备砍掉自己那半合批 + 批的状态里带上 program 与 mvp）之后这一格删掉。
+ */
+function usesShaderGL(x) {
+  if (!isList(x)) return false;
+  if (tag(x) === 'call') {
+    const head = kids(x)[0];
+    if (isList(head) && tag(head) === 'name'
+      && SHADER_FNS.has(`${idOf(head)}/${kids(x).length - 1}`)) return true;
+  }
+  return kids(x).some((k) => usesShaderGL(k));
+}
+
 export function evalToIR(cst, host, src = '') {
+  /* GL 那一族只在设备那条路上有（见 `usesGL` 的头注）。 */
+  const shaderGL = usesShaderGL(cst);
+  const glUsed = host.glrt === true && !shaderGL && usesGL(cst, host);
   const C = {
     host,
+    /* 着色器那一族在不在（过渡期：用了它的脚本仍走"GL 名字交给设备"那条老路）。 */
+    shaderGL,
     /* 画图走宿主调用（`(gfxcall …)`）还是生成出来的 CPU 光栅器 —— 见 `gfxMode()` 的头注。
        `null` 是**录制那一档**（设备只记账不画，量语言这一半与量覆盖用它）—— 它也是宿主调用。 */
-    gfxHost: ['host', 'gl', 'auto', 'null'].includes(gfxMode()),
+    gfxHost: glUsed || ['host', 'gl', 'auto', 'null'].includes(gfxMode()),
     /* 录制那一档（`--gfx null`）：设备认所有名字 ⇒ adapter 这一层也不拦（见 callOf 那一段）。 */
     recGfx: gfxMode() === 'null',
     fns: new Map(),
@@ -1864,16 +1915,21 @@ export function evalToIR(cst, host, src = '') {
    * **每帧的 GL 初态**：PolyDraw 的宿主在调脚本之前会把 GL 摆回去
    * （`polydraw.c:3572-3579`：清 color/depth/stencil、开深度测试、
    * PROJECTION = `gluPerspective(gfov, 宽/高, 0.1, 1000)`、MODELVIEW = 单位）。
-   * 所以**用了 GL 那一族的脚本**每帧开头发一格 `framebegin` —— 两档设备各自照那几行做。
+   * 所以**用了 GL 那一族的脚本**每帧开头发一格 `gl_framebegin`（生成出来那一份 ——
+   * GL 的状态机在语言这一侧，设备只收顶点批与清屏，见第 9 节"只有一个模型"）。
    *
    * 只给用过 GL 的脚本发（`C.usedGL`）：纯算术的 `.pss`（`01-arith.pss`）不该因此把
    * 整摊 GL 运行时带进来。EvalDraw 那张表没有这一格 —— 它是 2D，"要不要清"是
    * 脚本自己用 `cls()` 说的。
    */
   if (C.host.frameReset === true && C.usedGL) {
-    mainBody.unshift({ kind: 'expr-stmt', expr: C.gfxHost
-      ? gfxCallIR('framebegin')
-      : { kind: 'call', fn: nameRef('gl_framebegin'), args: [] } });
+    mainBody.unshift({
+      kind: 'expr-stmt',
+      expr: C.needGL
+        ? { kind: 'call', fn: nameRef('gl_framebegin'), args: [] }
+        /* 着色器那一族那条老路（过渡期，见 `usesShaderGL` 的头注）：设备自己做每帧初态。 */
+        : gfxCallIR('framebegin'),
+    });
   }
 
   if (C.needFact) decls.push(factDecl());
@@ -1928,6 +1984,17 @@ export function evalToIR(cst, host, src = '') {
        本机 OpenGL 那一档 poll 事件 + 交换缓冲 + 窗口没关就接着画。
        `static` 是模块级的量，所以它天然跨帧活 —— 那正是 EVAL 里 `static` 的意思。 */
     if (C.gfxHost) {
+      /* **GL 那一族的命令 -> 顶点批**（`gl-rt.js`）也跟着产物走：它做变换、拆 mode、
+         合批，设备只收 `(gfxbatch …)`。一帧的末尾要把攒着的批交出去（`gl_flush`）——
+         设备是在 `nextframe` 那一格交图的，交之前批必须已经画下去。 */
+      if (C.needGL) {
+        decls.unshift(...glGlobalDecls());
+        decls.push(...glFnDecls());
+        mainBody.push({
+          kind: 'expr-stmt',
+          expr: { kind: 'call', fn: nameRef('gl_flush'), args: [] },
+        });
+      }
       decls.push({
         kind: 'fn', name: 'eval$frame', params: [], ret: REAL, body: mainBody,
       });

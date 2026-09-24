@@ -580,7 +580,17 @@ double omni_gfx_batch(int64_t kind, int64_t n, struct omni_arr_f64_s *verts) {
     }
     return (double)n;
   }
-  omni_errorf("gfxbatch: 不认识的类 %lld（0 = 线段、1 = 三角）", (long long)kind);
+  if (kind == 2) {
+    /* 点那一档：一格顶点一个像素（"一个点多大"是设备的事）。 */
+    for (int64_t i = 0; i < n; i++) {
+      const double *a = v + i * GFX_VSTRIDE;
+      double ax, ay;
+      gfx_vxy(a, &ax, &ay);
+      gfx_px(ax, ay, gfx_vcol(a));
+    }
+    return (double)n;
+  }
+  omni_errorf("gfxbatch: 不认识的类 %lld（0 = 线段、1 = 三角、2 = 点）", (long long)kind);
   return 0.0;
 }
 
@@ -659,6 +669,9 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
     for (int64_t i = 0; i < g_gw * g_gh; i++) g_gfb[i] = c;
     return 0.0;
   }
+  /* **深度测试**（语言那一侧的 `gl_enable(GL_DEPTH_TEST)` 转过来的）：这一档没有
+     z 缓冲，收下记着不用 —— 与 `host/gfx-cpu.js` 那一份同一句话。 */
+  if (!strcmp(nm, "gldepth") && argc == 1) { return 0.0; }
   if (!strcmp(nm, "setcol") && argc == 3) { gfx_need(); g_gcol = gfx_rgb(a0, a1, a2); return 0.0; }  if (!strcmp(nm, "setcol") && argc == 1) { gfx_need(); g_gcol = ((int64_t)a0) & 0xffffff; return 0.0; }
   if (!strcmp(nm, "setpix") && argc == 2) { gfx_need(); gfx_px(a0, a1, g_gcol); return 0.0; }
   if (!strcmp(nm, "moveto") && argc == 2) { gfx_need(); g_gx = a0; g_gy = a1; return 0.0; }

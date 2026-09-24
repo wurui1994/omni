@@ -396,6 +396,10 @@ export function gfxCall(name, args) {
       return 0;
     }
     case 'setcol/3': need(320, 240); D.col = rgb(a(0), a(1), a(2)); return 0;
+    /* **深度测试**（语言那一侧的 `gl_enable(GL_DEPTH_TEST)` 转过来的）：这一档**没有
+       z 缓冲**，所以收下记着不用 —— 3D 那一族在这一档只对"没有互相遮挡"的图成立，
+       真 3D 要 GPU 那两档设备。 */
+    case 'gldepth/1': return 0;
     case 'setcol/1': need(320, 240); D.col = Math.trunc(a(0)) & 0xffffff; return 0;
     case 'setpix/2': need(320, 240); px(a(0), a(1), D.col); return 0;
     case 'moveto/2': need(320, 240); D.x = a(0); D.y = a(1); return 0;
@@ -587,7 +591,16 @@ function batch(kind, n, verts) {
     }
     return n;
   }
-  throw new Error(`gfxbatch: 不认识的类 ${kind}（0 = 线段、1 = 三角）`);
+  if (kind === 2) {
+    /* 点那一档：一格顶点一个像素（"一个点多大"是设备的事 —— 语言那一侧不知道像素）。 */
+    for (let i = 0; i < n; i++) {
+      const ia = i * VSTRIDE;
+      const [ax, ay] = vxy(verts, ia);
+      px(ax, ay, vcol(verts, ia));
+    }
+    return n;
+  }
+  throw new Error(`gfxbatch: 不认识的类 ${kind}（0 = 线段、1 = 三角、2 = 点）`);
 }
 
 export const GFX_CPU = { call: gfxCall, batch, present, kind: 'cpu' };

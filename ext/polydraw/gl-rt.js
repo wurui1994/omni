@@ -21,31 +21,61 @@
 //
 // 1. **矩阵是列主序**（与 GL 一样）：`m[col*4+row]`，`gl_mv` / `gl_pj` 各 16 格。
 //    `glTranslate`/`Rotate`/`Scale` 一律**右乘** MODELVIEW（`M = M · T`），与 GL 同。
-// 2. 顶点先攒着（`gl_vb`，一格顶点 6 个数：屏幕 x、屏幕 y、深度、r、g、b），
-//    `glEnd` 那一刻按 `mode` 拆成点/线段/三角形。**上限 1024 个顶点**，超了丢掉。
+// 2. 顶点先攒着（`gl_vb`，一格顶点 **12 个数**：位置 x,y,z,w（**裁剪空间**）、颜色 r,g,b,a
+//    （0..1）、纹理坐标 s,t,p,q），`glEnd` 那一刻按 `mode` 拆成点/线段/三角形**抄进批里**。
+//    **上限 1024 个顶点**，超了丢掉。
 // 3. `w <= 0` 的顶点**整格丢掉**（近平面裁剪这一版没做插值）—— 透视图里跨近平面的
 //    三角形会缺一块，记在这儿。
+//
+// ## 只有一个模型（2026-09-24 用户定的口径）
+//
+// 这一层**不自己光栅化**：拆开的点/线/三角抄进三条顶点批（`gl_pb`/`gl_lb`/`gl_ob`），
+// 攒够一段就交给设备一格 `(gfxbatch 类 数 顶点)` —— 设备那一侧（WebGL2 / 本机 OpenGL /
+// CPU 备选）只管"上传 + 一次 draw"。变换、拆 mode、丢顶点、合批都在这儿，**四条腿共用
+// 这一份**。批跨 `glBegin`/`glEnd` 合并（顶点已经在裁剪空间里，后头改矩阵影响不到它们），
+// 只在"设备状态变了 / 攒满了 / 一帧完了"这三种时候交出去。
+// 详见 `docs/design/eval-realtime-gpu.md` 第 9 节。
 import {
-  ARR, num, nm, bin, call, rm, set, letR, ret, iff, whil, ex, aset, aget, fn, glob, anew, tern,
+  ARR, num, str, nm, bin, bi, call, rm, set, letR, ret, iff, whil, ex, aset, aget, ix, fn, glob,
+  anew,
 } from './ir.js';
 
-/** 一格顶点占 6 个数。 */
-const VS = 6;
+/** 设备那一面：一格宿主调用 / 一段顶点批。 */
+const dev = (name, args = []) => bi('gfxcall', [str(name), ...args]);
+const devBatch = (kind, cnt, arr) => bi('gfxbatch', [ix(num(kind)), ix(cnt), nm(arr)]);
+
+/** 一格顶点占 12 个数（位置 4 / 颜色 4 / 纹理坐标 4）—— 与 `(gfxbatch …)` 的契约同一格。 */
+const VS = 12;
 const VMAX = 1024;
+/** 一条批最多攒几个顶点（攒满就交出去）。 */
+const OMAX = 3072;
 
 /** `gl_vb` 的第 i 个顶点的第 k 格。 */
 const vb = (i, k) => aget('gl_vb', bin('+', bin('*', i, num(VS)), num(k)));
 const vbset = (i, k, v) => aset('gl_vb', bin('+', bin('*', i, num(VS)), num(k)), v);
 
+/** 一格顶点从 `gl_vb[i]` 抄到某条批的第 `c` 格（12 个数一格一格抄）。 */
+const copyV = (dst, cnt, i) => {
+  const out = [];
+  for (let k = 0; k < VS; k++) {
+    out.push(aset(dst, bin('+', bin('*', nm(cnt), num(VS)), num(k)), vb(i, k)));
+  }
+  out.push(set(cnt, bin('+', nm(cnt), num(1))));
+  return out;
+};
+
 /** 设备那几格模块级的量（名字都带 `gl_` 前缀）。 */
 export const GL_GLOBALS = ['gl_on', 'gl_mode', 'gl_n', 'gl_r', 'gl_g', 'gl_b',
-  'gl_sp', 'gl_fov', 'gl_fovt', 'gl_cx', 'gl_cy', 'gl_cz', 'gl_cw'];
+  'gl_sp', 'gl_fov', 'gl_fovt', 'gl_cx', 'gl_cy', 'gl_cz', 'gl_cw',
+  'gl_w', 'gl_h', 'gl_no', 'gl_nl', 'gl_np'];
 
 export function glGlobalDecls() {
   return [
     ...GL_GLOBALS.map((n) => glob(n)),
     glob('gl_mv', ARR), glob('gl_pj', ARR), glob('gl_st', ARR),
     glob('gl_tm', ARR), glob('gl_ta', ARR), glob('gl_vb', ARR),
+    /* 三条顶点批：三角 / 线段 / 点（`(gfxbatch …)` 的三个类）。 */
+    glob('gl_ob', ARR), glob('gl_lb', ARR), glob('gl_pb', ARR),
   ];
 }
 
@@ -75,8 +105,8 @@ export const POLYDRAW_GL = new Map([
   ['framebegin/0', 'gl_framebegin'],
   /* 收下但不管的那几格（这条腿上没有光照/混合/剔除）。 */
   ['glnormal/3', 'gl_nop3'],
-  ['glenable/1', 'gl_nop1'],
-  ['gldisable/1', 'gl_nop1'],
+  ['glenable/1', 'gl_enable'],
+  ['gldisable/1', 'gl_disable'],
   ['glcullface/1', 'gl_nop1'],
   ['gllinewidth/1', 'gl_nop1'],
   ['glswapinterval/1', 'gl_nop1'],
@@ -148,8 +178,6 @@ export function glFnDecls() {
 function glSetupDecls() {
   return [
     fn('gl_need', [], [
-      /* 设备（帧缓冲）先开着 —— GL 这一层只往它上头画。 */
-      ex(call('gfx_need', [])),
       iff(bin('!=', nm('gl_on'), num(0)), [ret(num(0))]),
       set('gl_on', num(1)),
       set('gl_mv', anew(num(16))),
@@ -158,6 +186,13 @@ function glSetupDecls() {
       set('gl_tm', anew(num(16))),
       set('gl_ta', anew(num(16))),
       set('gl_vb', anew(num(VMAX * VS))),
+      set('gl_ob', anew(num(OMAX * VS))),
+      set('gl_lb', anew(num(OMAX * VS))),
+      set('gl_pb', anew(num(OMAX * VS))),
+      set('gl_no', num(0)), set('gl_nl', num(0)), set('gl_np', num(0)),
+      /* 画布尺寸问设备一句（它才知道 —— 窗口/离屏表面是它的）。 */
+      set('gl_w', dev('xres')),
+      set('gl_h', dev('yres')),
       ...matIdent('gl_mv'),
       ...matIdent('gl_pj'),
       set('gl_r', num(1)), set('gl_g', num(1)), set('gl_b', num(1)),
@@ -166,12 +201,55 @@ function glSetupDecls() {
          **算出来的那个数**（fovy，度），不是 90：`tan(45°)=1`，所以就是 atan(高/宽) 那一项。
          `gl_fovt` 是它的 `tan(fovy/2)`：默认这一档**正好是高/宽**（一格除法，不碰 libm ——
          那是三条腿逐字节相同的前提，见 `gl_perspt` 的头注）。 */
-      set('gl_fov', bin('*', rm('atan', [bin('/', nm('gfx_h'), nm('gfx_w'))]),
+      set('gl_fov', bin('*', rm('atan', [bin('/', nm('gl_h'), nm('gl_w'))]),
         num(360 / Math.PI))),
-      set('gl_fovt', bin('/', nm('gfx_h'), nm('gfx_w'))),
+      set('gl_fovt', bin('/', nm('gl_h'), nm('gl_w'))),
+      ret(num(0)),
+    ]),
+    /**
+     * **把攒着的三条批交出去**（`(gfxbatch 类 数 顶点)`）：设备只管上传 + 一次 draw。
+     * 交出去的时机只有三种：设备状态要变（清屏 / 每帧初态）、攒满了、一帧完了 ——
+     * 顶点已经在裁剪空间里，所以后头改矩阵影响不到已经攒下的那些（批可以跨
+     * `glBegin`/`glEnd` 合并，这正是"少几个 draw call"那件事）。
+     */
+    fn('gl_flush', [], [
+      iff(bin('>', nm('gl_np'), num(0)), [
+        ex(devBatch(2, nm('gl_np'), 'gl_pb')),
+        set('gl_np', num(0)),
+      ]),
+      iff(bin('>', nm('gl_nl'), num(0)), [
+        ex(devBatch(0, nm('gl_nl'), 'gl_lb')),
+        set('gl_nl', num(0)),
+      ]),
+      iff(bin('>', nm('gl_no'), num(0)), [
+        ex(devBatch(1, nm('gl_no'), 'gl_ob')),
+        set('gl_no', num(0)),
+      ]),
       ret(num(0)),
     ]),
     fn('gl_nop1', ['a'], [ret(num(0))]),
+    /**
+     * `glEnable(cap)` / `glDisable(cap)`：**深度测试那一格是设备状态**，要转给设备
+     * （`(gfxcall "gldepth" 0|1)`）—— 它一变就断一段批，所以先 `gl_flush`。
+     * 别的 cap（混合、剔除、光照、雾）这一版收下不管，与从前一样。
+     * `GL_DEPTH_TEST` = 0x0b71（`GL_CONSTS` 里那一格）。
+     */
+    fn('gl_enable', ['cap'], [
+      ex(call('gl_need', [])),
+      iff(bin('==', nm('cap'), num(0x0b71)), [
+        ex(call('gl_flush', [])),
+        ex(dev('gldepth', [num(1)])),
+      ]),
+      ret(num(0)),
+    ]),
+    fn('gl_disable', ['cap'], [
+      ex(call('gl_need', [])),
+      iff(bin('==', nm('cap'), num(0x0b71)), [
+        ex(call('gl_flush', [])),
+        ex(dev('gldepth', [num(0)])),
+      ]),
+      ret(num(0)),
+    ]),
     fn('gl_nop2', ['a', 'b'], [ret(num(0))]),
     fn('gl_nop3', ['a', 'b', 'c'], [ret(num(0))]),
     /* `SETFOV(fov)`：照 `ksetfov`（`polydraw.c:1484`）—— 它只算一格 `gfov` 并回它，
@@ -179,16 +257,18 @@ function glSetupDecls() {
     fn('gl_setfov', ['fov'], [
       ex(call('gl_need', [])),
       set('gl_fov', bin('*', bin('*', rm('tan', [bin('/', bin('*', nm('fov'), num(Math.PI)), num(360))]),
-        rm('atan', [bin('/', nm('gfx_h'), nm('gfx_w'))])), bin('/', num(360), num(Math.PI)))),
+        rm('atan', [bin('/', nm('gl_h'), nm('gl_w'))])), bin('/', num(360), num(Math.PI)))),
       /* 下一帧的初态要拿它当 `tan(fovy/2)`（见 `gl_perspt`）。 */
       set('gl_fovt', rm('tan', [bin('/', bin('*', nm('gl_fov'), num(Math.PI)), num(360))])),
       ret(nm('gl_fov')),
     ]),
     /* `glClear(mask)`：GL 的清屏色从没被设过（`myext[]` 里没有 GLCLEARCOLOR），
-       所以是**黑**。mask 给 0 时 `qglClear` 清全部（`polydraw.c:622`）—— 对我们一样。 */
+       所以是**黑**。mask 给 0 时 `qglClear` 清全部（`polydraw.c:622`）—— 对我们一样。
+       清屏是**设备状态**：先把攒着的批交出去（不然清屏会把它们抹掉），再让设备清。 */
     fn('gl_clear', ['mask'], [
       ex(call('gl_need', [])),
-      ex(call('gfx_cls', [num(0), num(0), num(0)])),
+      ex(call('gl_flush', [])),
+      ex(dev('cls', [num(0)])),
       ret(num(0)),
     ]),
     /**
@@ -200,11 +280,12 @@ function glSetupDecls() {
      */
     fn('gl_framebegin', [], [
       ex(call('gl_need', [])),
+      ex(call('gl_flush', [])),
       ...matIdent('gl_mv'),
       set('gl_sp', num(0)),
-      ex(call('gl_perspt', [nm('gl_fovt'), bin('/', nm('gfx_w'), nm('gfx_h')),
+      ex(call('gl_perspt', [nm('gl_fovt'), bin('/', nm('gl_w'), nm('gl_h')),
         num(0.1), num(1000)])),
-      ex(call('gfx_cls', [num(0), num(0), num(0)])),
+      ex(dev('cls', [num(0)])),
       ret(num(0)),
     ]),
   ];
@@ -350,11 +431,8 @@ function glMatrixDecls() {
   ];
 }
 
-/** 画的那一摊：攒顶点、`glEnd` 那一刻按 mode 拆成点 / 线段 / 三角形。 */
+/** 画的那一摊：攒顶点、`glEnd` 那一刻按 mode 拆成点 / 线段 / 三角形**抄进批里**。 */
 function glDrawDecls() {
-  const min3 = (a, b, c) => tern(bin('<', a, b), tern(bin('<', a, c), a, c), tern(bin('<', b, c), b, c));
-  const max3 = (a, b, c) => tern(bin('>', a, b), tern(bin('>', a, c), a, c), tern(bin('>', b, c), b, c));
-  const col = (i) => call('gfx_rgb', [vb(i, 3), vb(i, 4), vb(i, 5)]);
   /* 一档 mode 的展开：`i` 从 `from` 起、每轮 `step`、条件是 `i + ahead < n`。 */
   const loop = (from, ahead, step, body) => [
     letR('i', from),
@@ -386,87 +464,52 @@ function glDrawDecls() {
     fn('gl_vertex3', ['x', 'y', 'z'], [
       ex(call('gl_vertex4', [nm('x'), nm('y'), nm('z'), num(1)])), ret(num(0))]),
     /**
-     * 一格顶点：变换 -> 透视除法 -> 视口。GL 的 y 朝上、我们的帧缓冲 y 朝下，所以 y 翻过来。
-     * `w <= 0`（在眼睛后头/近平面外）**整格丢掉** —— 这一版没有近平面插值。
+     * 一格顶点：变换 -> **裁剪空间**（x,y,z,w 原样存着，透视除法与视口是设备那一侧的事 ——
+     * 那道算式三档设备只许有一份）。`w <= 0`（在眼睛后头/近平面外）**整格丢掉**：
+     * 这一版没有近平面插值。颜色存 0..1（与 `(gfxbatch …)` 的契约同一格）。
      */
     fn('gl_vertex4', ['x', 'y', 'z', 'w'], [
       ex(call('gl_need', [])),
       iff(bin('>=', nm('gl_n'), num(VMAX)), [ret(num(0))]),
       ex(call('gl_xf', [nm('x'), nm('y'), nm('z'), nm('w')])),
       iff(bin('<=', nm('gl_cw'), num(0)), [ret(num(0))]),
-      letR('iw', bin('/', num(1), nm('gl_cw'))),
-      vbset(nm('gl_n'), 0, bin('*', bin('+', bin('*', bin('*', nm('gl_cx'), nm('iw')), num(0.5)),
-        num(0.5)), nm('gfx_w'))),
-      vbset(nm('gl_n'), 1, bin('*', bin('-', num(0.5), bin('*', bin('*', nm('gl_cy'), nm('iw')),
-        num(0.5))), nm('gfx_h'))),
-      vbset(nm('gl_n'), 2, bin('*', nm('gl_cz'), nm('iw'))),
-      vbset(nm('gl_n'), 3, call('gfx_clamp255', [bin('*', nm('gl_r'), num(255))])),
-      vbset(nm('gl_n'), 4, call('gfx_clamp255', [bin('*', nm('gl_g'), num(255))])),
-      vbset(nm('gl_n'), 5, call('gfx_clamp255', [bin('*', nm('gl_b'), num(255))])),
+      vbset(nm('gl_n'), 0, nm('gl_cx')),
+      vbset(nm('gl_n'), 1, nm('gl_cy')),
+      vbset(nm('gl_n'), 2, nm('gl_cz')),
+      vbset(nm('gl_n'), 3, nm('gl_cw')),
+      vbset(nm('gl_n'), 4, nm('gl_r')),
+      vbset(nm('gl_n'), 5, nm('gl_g')),
+      vbset(nm('gl_n'), 6, nm('gl_b')),
+      vbset(nm('gl_n'), 7, num(1)),
+      vbset(nm('gl_n'), 8, num(0)),
+      vbset(nm('gl_n'), 9, num(0)),
+      vbset(nm('gl_n'), 10, num(0)),
+      vbset(nm('gl_n'), 11, num(1)),
       set('gl_n', bin('+', nm('gl_n'), num(1))),
       ret(num(0)),
     ]),
+    /* 一格点：抄进点那条批（设备画成一个像素 —— 像素多大是设备的事）。 */
     fn('gl_pt', ['i'], [
-      ex(call('gfx_px', [vb(nm('i'), 0), vb(nm('i'), 1), col(nm('i'))])),
+      iff(bin('>=', nm('gl_np'), num(OMAX)), [ex(call('gl_flush', []))]),
+      ...copyV('gl_pb', 'gl_np', nm('i')),
       ret(num(0)),
     ]),
-    /* 线段的颜色取**头一个**顶点的（GL 会插值，这条腿先不插 —— 记在头注的边界里）。 */
+    /* 线段：两个顶点抄进线段那条批。 */
     fn('gl_seg', ['i', 'j'], [
-      set('gfx_col', col(nm('i'))),
-      ex(call('gfx_line', [vb(nm('i'), 0), vb(nm('i'), 1), vb(nm('j'), 0), vb(nm('j'), 1)])),
+      iff(bin('>=', bin('+', nm('gl_nl'), num(2)), num(OMAX)), [ex(call('gl_flush', []))]),
+      ...copyV('gl_lb', 'gl_nl', nm('i')),
+      ...copyV('gl_lb', 'gl_nl', nm('j')),
       ret(num(0)),
     ]),
     /**
-     * 一格三角形：包围盒 + **重心坐标**（顶点色按重心插值 —— GL 的 Gouraud）。
-     * 没有深度缓冲：后画的盖前画的（2D 那一档够用；3D 要 z-buffer，记在头注里）。
+     * 一格三角形：三个顶点抄进三角那条批。
+     * 颜色按**重心插值**那件事交给设备 —— 三档设备各自实现（GPU 天然做、CPU 备选软件做）。
      */
     fn('gl_tri', ['i', 'j', 'k'], [
-      letR('x0', vb(nm('i'), 0)), letR('y0', vb(nm('i'), 1)),
-      letR('x1', vb(nm('j'), 0)), letR('y1', vb(nm('j'), 1)),
-      letR('x2', vb(nm('k'), 0)), letR('y2', vb(nm('k'), 1)),
-      letR('ar', bin('-', bin('*', bin('-', nm('x1'), nm('x0')), bin('-', nm('y2'), nm('y0'))),
-        bin('*', bin('-', nm('x2'), nm('x0')), bin('-', nm('y1'), nm('y0'))))),
-      iff(bin('<', rm('fabs', [nm('ar')]), num(1e-12)), [ret(num(0))]),
-      letR('ia', bin('/', num(1), nm('ar'))),
-      letR('xa', rm('floor', [min3(nm('x0'), nm('x1'), nm('x2'))])),
-      letR('xb', rm('ceil', [max3(nm('x0'), nm('x1'), nm('x2'))])),
-      letR('ya', rm('floor', [min3(nm('y0'), nm('y1'), nm('y2'))])),
-      letR('yb', rm('ceil', [max3(nm('y0'), nm('y1'), nm('y2'))])),
-      iff(bin('<', nm('xa'), num(0)), [set('xa', num(0))]),
-      iff(bin('<', nm('ya'), num(0)), [set('ya', num(0))]),
-      iff(bin('>', nm('xb'), bin('-', nm('gfx_w'), num(1))), [set('xb', bin('-', nm('gfx_w'), num(1)))]),
-      iff(bin('>', nm('yb'), bin('-', nm('gfx_h'), num(1))), [set('yb', bin('-', nm('gfx_h'), num(1)))]),
-      letR('r0', vb(nm('i'), 3)), letR('g0', vb(nm('i'), 4)), letR('b0', vb(nm('i'), 5)),
-      letR('r1', vb(nm('j'), 3)), letR('g1', vb(nm('j'), 4)), letR('b1', vb(nm('j'), 5)),
-      letR('r2', vb(nm('k'), 3)), letR('g2', vb(nm('k'), 4)), letR('b2', vb(nm('k'), 5)),
-      letR('py', nm('ya')),
-      whil(bin('<=', nm('py'), nm('yb')), [
-        letR('px', nm('xa')),
-        whil(bin('<=', nm('px'), nm('xb')), [
-          letR('cx', bin('+', nm('px'), num(0.5))),
-          letR('cy', bin('+', nm('py'), num(0.5))),
-          letR('w0', bin('*', bin('-',
-            bin('*', bin('-', nm('x1'), nm('cx')), bin('-', nm('y2'), nm('cy'))),
-            bin('*', bin('-', nm('x2'), nm('cx')), bin('-', nm('y1'), nm('cy')))), nm('ia'))),
-          letR('w1', bin('*', bin('-',
-            bin('*', bin('-', nm('x2'), nm('cx')), bin('-', nm('y0'), nm('cy'))),
-            bin('*', bin('-', nm('x0'), nm('cx')), bin('-', nm('y2'), nm('cy')))), nm('ia'))),
-          letR('w2', bin('-', bin('-', num(1), nm('w0')), nm('w1'))),
-          iff(bin('&&', bin('&&', bin('>=', nm('w0'), num(0)), bin('>=', nm('w1'), num(0))),
-            bin('>=', nm('w2'), num(0))), [
-            ex(call('gfx_px', [nm('px'), nm('py'), call('gfx_rgb', [
-              bin('+', bin('+', bin('*', nm('w0'), nm('r0')), bin('*', nm('w1'), nm('r1'))),
-                bin('*', nm('w2'), nm('r2'))),
-              bin('+', bin('+', bin('*', nm('w0'), nm('g0')), bin('*', nm('w1'), nm('g1'))),
-                bin('*', nm('w2'), nm('g2'))),
-              bin('+', bin('+', bin('*', nm('w0'), nm('b0')), bin('*', nm('w1'), nm('b1'))),
-                bin('*', nm('w2'), nm('b2'))),
-            ])])),
-          ]),
-          set('px', bin('+', nm('px'), num(1))),
-        ]),
-        set('py', bin('+', nm('py'), num(1))),
-      ]),
+      iff(bin('>=', bin('+', nm('gl_no'), num(3)), num(OMAX)), [ex(call('gl_flush', []))]),
+      ...copyV('gl_ob', 'gl_no', nm('i')),
+      ...copyV('gl_ob', 'gl_no', nm('j')),
+      ...copyV('gl_ob', 'gl_no', nm('k')),
       ret(num(0)),
     ]),
     /**
