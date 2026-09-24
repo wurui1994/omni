@@ -1,0 +1,12 @@
+// tests/eval/hot.pss —— **主脚本那一栏的基准脚本**（`tests/eval/perf.js` 用）。
+//
+// 一帧做 20 万次浮点（sqrt + 乘 + 减）、**一个图形调用都没有** —— 这是"编译到 C
+// 对上那份没优化的解释器"唯一公平的量法：含 GL 调用的脚本在参考那侧是 **no-op stub**
+// （`c_impl/src/pd_polyhost.c:6` 的注：'GPU functions (glBegin, glVertex, ...) are
+// registered as no-op stubs'），拿它比等于比"谁更会空转"。
+()
+{
+   s = 0;
+   for (i = 0; i < 200000; i++) s = s + sqrt(i) * 0.5 - i * 0.25;
+   printf("%g\n", s);
+}

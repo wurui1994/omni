@@ -4733,14 +4733,15 @@ function applyGfxFlags(verb, path, rest) {
   const o = val('-o');
   if (o !== undefined) setEnv('OMNI_GFX_OUT', o);
   if (rest.includes('--perf')) setEnv('OMNI_GFX_PERF', '1');
-  /* `--gfx 哪一档设备`：`host`（设备在宿主，CPU 备选）/ `ir`（生成出来的 CPU 光栅器，
-     眼下的默认）/ **`null`（只记账不画）**。`null` 那一档是量东西用的：一帧的时间里
-     去掉光栅化那一截 = 语言这一半的开销（与 c_impl 的 `bench` 同一个口径），
-     而且它**认所有名字**，所以一份脚本能一路跑到底、账上那串名字就是"它要哪几格 API"。 */
+  /* `--gfx 哪一档设备`：`host`（设备在宿主，CPU 备选）/ **`gl`（本机 OpenGL，真 GPU ——
+     挂不上就自己回落 host）** / `ir`（生成出来的 CPU 光栅器）/ **`null`（只记账不画）**。
+     `null` 那一档是量东西用的：一帧的时间里去掉光栅化那一截 = 语言这一半的开销
+     （与 c_impl 的 `bench` 同一个口径），而且它**认所有名字**，所以一份脚本能一路跑到底、
+     账上那串名字就是"它要哪几格 API"。`gl` 只有原生腿有意思（js 腿不 dlopen 插件）。 */
   const g = val('--gfx');
   if (g !== undefined) {
-    if (!['host', 'ir', 'null'].includes(g)) {
-      throw new OmniError(`--gfx 只有 host|ir|null 三档，拿到 ${g}`);
+    if (!['host', 'gl', 'ir', 'null'].includes(g)) {
+      throw new OmniError(`--gfx 只有 host|gl|ir|null 四档，拿到 ${g}`);
     }
     setEnv('OMNI_GFX', g);
   }

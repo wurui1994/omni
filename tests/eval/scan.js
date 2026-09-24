@@ -165,6 +165,9 @@ if (okRows.length > 0) {
   }
 }
 
-const jsonPath = join(OUT, `${CFG.leg}.json`);
+/* 账按"腿 + 设备"分文件：`--gfx null`（默认，量语言那一半）照旧是 `<腿>.json`，
+   别的设备各自一份（`c-gl.json` / `c-host.json`）—— 不然量 GPU 那一趟会把上一趟的账盖掉，
+   而"gl 比 host 多几份"正是判据本身。 */
+const jsonPath = join(OUT, `${CFG.leg}${CFG.gfx === 'null' ? '' : `-${CFG.gfx}`}.json`);
 writeFileSync(jsonPath, `${JSON.stringify({ cfg: CFG, rows }, null, 2)}\n`);
 P(`\n账落在 ${jsonPath}\n`);
