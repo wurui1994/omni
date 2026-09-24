@@ -77,7 +77,9 @@ export const GL_GLOBALS = ['gl_on', 'gl_mode', 'gl_n', 'gl_r', 'gl_g', 'gl_b',
      `glColor` 同一个味道：设一次，之后每个 `glVertex` 都带着它走。默认 (0,0,1)。
      `clock.pss` 把它当**数据通道**用（`glnormal(shakeshift, shakecolor, xres/yres)`），
      所以原样送，不归一化。 */
-  'gl_nx', 'gl_ny', 'gl_nz'];
+  'gl_nx', 'gl_ny', 'gl_nz',
+  /* 脚本那一格混合状态（`glAlphaEnable`/`Disable`）：**默认 1 = 关着**（`polydraw.c:2256`）。 */
+  'gl_bl'];
 
 export function glGlobalDecls() {
   return [
@@ -209,10 +211,11 @@ export const POLYDRAW_GL = uniqMap([
   ['gllinewidth/1', 'gl_nop1'],
   ['glswapinterval/1', 'gl_nop1'],
   ['glblendfunc/2', 'gl_nop2'],
-  ['glalphaenable/1', 'gl_nop1'],
-  ['glalphaenable/0', 'gl_nop0'],
-  ['glalphadisable/0', 'gl_nop0'],
-  ['glalphadisable/1', 'gl_nop1'],
+  /* `glAlphaEnable` / `glAlphaDisable` 是**真的一对状态**（见 `gl_alphaon` 的头注）。 */
+  ['glalphaenable/0', 'gl_alphaon'],
+  ['glalphaenable/1', 'gl_alphaon1'],
+  ['glalphadisable/0', 'gl_alphaoff'],
+  ['glalphadisable/1', 'gl_alphaoff1'],
   /* `RGB(r,g,b)` / `RGBA(...)` 那两格在上头（`gl_rgb`/`gl_rgba`，夹到 0..255 再打包）——
      这儿**不许再来一条** `['rgb/3','gfx_rgb']`：同键后来者胜，那一条会把上头那格盖掉。 */
 ]);
@@ -474,7 +477,8 @@ function glShaderDecls() {
       set('gl_qid', num(1)),
       ex(call('gl_flush', [])),
       set('gl_qid', num(0)),
-      ex(dev('batchblend', [num(1)])),
+      /* 还回脚本那一格混合状态（原版是 `glPushAttrib`/`glPopAttrib`）。 */
+      ex(dev('batchblend', [nm('gl_bl')])),
       ret(num(0)),
     ]),
     /* `glquad()`（0 实参）—— `myext[]` 里 `GLQUAD()` 就是这一档，语料里九份这么写。
@@ -501,6 +505,7 @@ function glSetupDecls() {
       set('gl_ts', num(0)), set('gl_tt', num(0)), set('gl_tp', num(0)), set('gl_tq', num(1)),
       /* 当前法向的初值照 GL 规范是 (0,0,1)。 */
       set('gl_nx', num(0)), set('gl_ny', num(0)), set('gl_nz', num(1)),
+      set('gl_bl', num(1)),
       set('gl_ob', anew(num(OMAX * VS))),
       set('gl_lb', anew(num(OMAX * VS))),
       set('gl_pb', anew(num(OMAX * VS))),
@@ -574,6 +579,38 @@ function glSetupDecls() {
     ]),
     fn('gl_nop2', ['a', 'b'], [ret(num(0))]),
     fn('gl_nop3', ['a', 'b', 'c'], [ret(num(0))]),
+    /**
+     * **`glAlphaEnable()` / `glAlphaDisable()`**（`polydraw.c:962`/`:969`）——
+     * 语料里 3 份用它（`texture3d` / `creepers_asm` / `particules sparks`）。
+     *
+     * 原版那两格就是一对 GL 状态：`AlphaEnable` = 关深度测试 + 开混合
+     * （`SRC_ALPHA, ONE_MINUS_SRC_ALPHA`），`AlphaDisable` = 开深度测试 + 关混合；
+     * **开机与每次重编都是 `AlphaDisable`**（`polydraw.c:2256`）⇒ 默认"混合关着"。
+     * 参考也实现了这一对（`c_impl/.../pd_polyhost_render.c:112`）。
+     *
+     * 从前这儿是 no-op，于是 `ken/texture3d.pss` 那 362 层体素切片全是不透明的、
+     * 一层盖一层，一盏灯画成一个渐变方块（那份图的 alpha 才是"实心没实心"）。
+     *
+     * 深度测试那一半**不动**（这一档默认就是关着的，与参考同） —— 见 §24。
+     * `gl_bl` 记着脚本这一格状态：`glquad` 那一趟改完要还回来（原版是
+     * `glPushAttrib`/`glPopAttrib`）。
+     */
+    fn('gl_alphaon', [], [
+      ex(call('gl_need', [])),
+      ex(call('gl_flush', [])),
+      set('gl_bl', num(0)),
+      ex(dev('batchblend', [num(0)])),
+      ret(num(0)),
+    ]),
+    fn('gl_alphaoff', [], [
+      ex(call('gl_need', [])),
+      ex(call('gl_flush', [])),
+      set('gl_bl', num(1)),
+      ex(dev('batchblend', [num(1)])),
+      ret(num(0)),
+    ]),
+    fn('gl_alphaon1', ['a'], [ex(call('gl_alphaon', [])), ret(num(0))]),
+    fn('gl_alphaoff1', ['a'], [ex(call('gl_alphaoff', [])), ret(num(0))]),
     /* `SETFOV(fov)`：照 `ksetfov`（`polydraw.c:1484`）—— 它只算一格 `gfov` 并回它，
        **不碰 GL 的矩阵**。视口比例用设备的宽高。 */
     fn('gl_setfov', ['fov'], [

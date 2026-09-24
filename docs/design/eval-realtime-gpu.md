@@ -1385,4 +1385,33 @@ allowed - whichever comes last in the file.」
 黄色变成青色 —— 会把人引到"通道顺序错了""着色器被 miscompile 了"那条岔路上去（踩过，
 为此还去试了改标识符名、改行尾）。要看图就 `tail -c $((宽*高*4))`。
 
+## 24. 第十四刀：**alpha 那一对状态与纹理里的 alpha**
+
+### 24.1 `glAlphaEnable()` / `glAlphaDisable()` 是真的一对 GL 状态
+
+照 `polydraw.c:962`/`:969`：
+
+    glAlphaEnable()  = glDisable(GL_DEPTH_TEST) + glEnable(GL_BLEND) + SRC_ALPHA/ONE_MINUS_SRC_ALPHA
+    glAlphaDisable() = glEnable(GL_DEPTH_TEST)  + glDisable(GL_BLEND)
+
+**开机与每次重编都是 `AlphaDisable`**（`polydraw.c:2256`）⇒ 默认混合是**关着**的。
+参考也实现了这一对（`c_impl/src/render/pd_polyhost_render.c:112`）。我们从前把这两格
+当 no-op 收下，于是任何"靠 alpha 决定看不看得见"的脚本都错。
+
+深度测试那一半**没跟**：这一档默认深度测试是关的，参考也是（`gl_renderer.c:1020`
+只由脚本的 `glEnable(GL_DEPTH_TEST)` 打开）—— 原版默认是开的，这一处偏差明写在这儿。
+
+`glquad(mode)` 那一趟会临时改混合，完事要**还回脚本那一格状态**（原版是
+`glPushAttrib`/`glPopAttrib`）—— 所以语言这一侧记一格 `gl_bl`。
+
+### 24.2 纹理里的 alpha 要原样收（0 就是透明）
+
+`kglsettexarray*` 把那四个字节照原样交给 GL。我们从前有一条"alpha 0 当 255"的
+将就（怕 `rgb()` 造的纹理整块透明），结果 `ken/texture3d.pss` 那块 64³ 体素
+（`rgba(r,g,b,(issol!=0)*48)` —— 空的地方 alpha 就是 0）整块变实心：一盏灯画成一个
+渐变方块。去掉那条将就 + 接上 §24.1 之后：RMSE 65.4 → 28.8，图是一盏灯了
+（剩下的差在灯罩那一圈的形状/叠加层数上）。
+
+`rgb()` 造的纹理不会因此坏掉：那种脚本不开混合，alpha 没人看。
+
 

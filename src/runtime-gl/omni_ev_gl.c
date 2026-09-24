@@ -619,8 +619,12 @@ int omni_ev_gl_tex(int slot, int w, int h, int d, int fmt, const double *px) {
       b[k * 4] = (unsigned char)((v >> 16) & 255);
       b[k * 4 + 1] = (unsigned char)((v >> 8) & 255);
       b[k * 4 + 2] = (unsigned char)(v & 255);
-      unsigned int al = (v >> 24) & 255;
-      b[k * 4 + 3] = (unsigned char)(al == 0 ? 255 : al);
+      /* **alpha 原样收**（0 就是透明）—— 参考那一侧 `kglsettexarray*` 把那四个字节
+         照原样交给 `glTexSubImage`，没有"0 当不透明"这条。从前这儿写着
+         `al == 0 ? 255 : al`，于是 `ken/texture3d.pss` 那块体素（`rgba(r,g,b,(issol!=0)*48)`
+         —— 空的地方 alpha 就是 0）整块都变实心，一盏灯画成一个渐变方块。
+         脚本用 `rgb()` 造的纹理（alpha 0）不受影响：那种脚本不开混合，alpha 没人看。 */
+      b[k * 4 + 3] = (unsigned char)((v >> 24) & 255);
     }
     if (tar == GL_TEXTURE_3D) {
       glTexImage3D(tar, 0, GL_RGBA8, w, h, d, 0, GL_RGBA, GL_UNSIGNED_BYTE, b);
