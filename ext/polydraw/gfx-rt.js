@@ -50,6 +50,7 @@ export const EVALDRAW_2D = new Map([
   ['drawcone/6', 'gfx_cone'],
   ['refresh/0', 'gfx_present'],
   ['rgb/3', 'gfx_rgb'],
+  ['rgba/4', 'gfx_rgba'],
 ]);
 
 /**
@@ -117,6 +118,12 @@ export function gfxFnDecls(defW, defH) {
         bin('*', call('gfx_clamp255', [nm('r')]), num(65536)),
         bin('*', call('gfx_clamp255', [nm('g')]), num(256))),
       call('gfx_clamp255', [nm('b')]))),
+    ]),
+    /* `rgba(r,g,b,a)` -> 一格 32 位色（`polydraw.c:637` 的 `kmyrgba`：alpha 在最高那一字节）。
+       纯算术，所以与 `rgb` 一样在语言这一侧 —— 设备一个字都不用改。 */
+    fn('gfx_rgba', ['r', 'g', 'b', 'a'], [
+      ret(bin('+', bin('*', call('gfx_clamp255', [nm('a')]), num(16777216)),
+        call('gfx_rgb', [nm('r'), nm('g'), nm('b')]))),
     ]),
     /* 一格像素：越界丢掉（**裁剪只在这一处做**，上头的图元都不用再判）。 */
     fn('gfx_px', ['x', 'y', 'c'], [

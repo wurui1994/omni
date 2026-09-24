@@ -112,6 +112,11 @@ export const POLYDRAW_GL = new Map([
   ['glpushmatrix/0', 'gl_push'],
   /* `gluLookAt(眼,看哪儿,上)`：纯矩阵，所以在语言这一侧（`polydraw.c:567` 自带一份）。 */
   ['glulookat/9', 'gl_lookat'],
+  /* `rgb(r,g,b)` / `rgba(r,g,b,a)` -> 一格打包好的颜色（`polydraw.c:636`/`:637` 的
+     `kmyrgb`/`kmyrgba`：各分量先夹到 0..255 再截成整数）。**纯算术**，所以也在语言这一侧 ——
+     `ken/heightmap.pss` 用的是 `rgba`，从前整份跑不起来（"不认识的函数 rgba"）。 */
+  ['rgb/3', 'gl_rgb'],
+  ['rgba/4', 'gl_rgba'],
   ['glpopmatrix/0', 'gl_pop'],
   ['gluperspective/4', 'gl_perspective'],
   ['setfov/1', 'gl_setfov'],
@@ -672,6 +677,25 @@ function glMatrixDecls() {
       aset('gl_mv', num(11), num(0)),
       aset('gl_mv', num(15), num(1)),
       ret(num(0)),
+    ]),
+    /* `rgb`/`rgba`：分量夹到 0..255、截成整数、打包（`polydraw.c:636`/`:637`）。
+       原版是 `(int)` 截断；活下来的值都在 0..255 之间，那一段里 `floor` 与截断同值，
+       所以用 `floor`（我们这套 rmath 里就这一格）。 */
+    fn('gl_c255', ['v'], [
+      letR('i', rm('floor', [nm('v')])),
+      iff(bin('<', nm('i'), num(0)), [ret(num(0))]),
+      iff(bin('>', nm('i'), num(255)), [ret(num(255))]),
+      ret(nm('i')),
+    ]),
+    fn('gl_rgb', ['r', 'g', 'b'], [
+      ret(bin('+', bin('+',
+        bin('*', call('gl_c255', [nm('r')]), num(65536)),
+        bin('*', call('gl_c255', [nm('g')]), num(256))),
+      call('gl_c255', [nm('b')]))),
+    ]),
+    fn('gl_rgba', ['r', 'g', 'b', 'a'], [
+      ret(bin('+', bin('*', call('gl_c255', [nm('a')]), num(16777216)),
+        call('gl_rgb', [nm('r'), nm('g'), nm('b')]))),
     ]),
     fn('gl_translate', ['x', 'y', 'z'], [
       ex(call('gl_need', [])),

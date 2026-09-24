@@ -67,19 +67,31 @@ static napi_value mknum(napi_env env, double d) {
 }
 
 /** 一格普通 JS 数组 -> 一段 double（回 NULL = 拿不到；`*n` 是格数）。调用方 free。 */
-static double *arr(napi_env env, napi_value v, long *n) {
+/**
+ * 一格 JS 数组 -> 自己那份 double 拷贝（调用方 free）。`want < 0` = 整个数组。
+ *
+ * **`want` 那一格是性能命门**：顶点批那几块是**按上限开的**（`gl_ob` 是 OMAX*VS =
+ * 49152 格），一趟 flush 往往只用头上几十格。整块抄的话每个 draw call 就是四万多次
+ * `napi_get_element` —— `tigrou/tree.pss` 一帧 64×64 要 72 秒，而参考只要 0.39 秒
+ * （量过，186 倍）。只抄用得着的那一段之后才谈得上实时。
+ */
+static double *arrN(napi_env env, napi_value v, long want, long *n) {
   uint32_t len = 0;
   if (napi_get_array_length(env, v, &len) != omni_napi_ok) { *n = 0; return NULL; }
-  double *buf = (double *)malloc(sizeof(double) * (len == 0 ? 1 : len));
+  long cnt = (long)len;
+  if (want >= 0 && want < cnt) cnt = want;
+  double *buf = (double *)malloc(sizeof(double) * (size_t)(cnt == 0 ? 1 : cnt));
   if (buf == NULL) { *n = 0; return NULL; }
-  for (uint32_t i = 0; i < len; i++) {
+  for (long i = 0; i < cnt; i++) {
     napi_value e;
-    if (napi_get_element(env, v, i, &e) != omni_napi_ok) { buf[i] = 0; continue; }
+    if (napi_get_element(env, v, (uint32_t)i, &e) != omni_napi_ok) { buf[i] = 0; continue; }
     buf[i] = num(env, e);
   }
-  *n = (long)len;
+  *n = cnt;
   return buf;
 }
+
+static double *arr(napi_env env, napi_value v, long *n) { return arrN(env, v, -1, n); }
 
 /** 一格 JS 串 -> 自己那份拷贝（调用方 free）。 */
 static char *str(napi_env env, napi_value v) {
@@ -113,11 +125,13 @@ static napi_value jsDepth(napi_env env, napi_callback_info info) {
 /** `batch(类, 顶点数, 顶点[])` —— 一格顶点 12 个数（位置 4 / 颜色 4 / 纹理坐标 4）。 */
 static napi_value jsBatch(napi_env env, napi_callback_info info) {
   ARGS(3);
-  long n = 0;
-  double *v = arr(env, a[2], &n);
-  if (v == NULL) return mknum(env, 1);
+  /* 一格顶点 16 个 double（位置/颜色/纹理坐标/法向，§18.3）—— 只抄这一批用得着的那一段。 */
   long cnt = (long)num(env, a[1]);
-  if (cnt * 12 > n) cnt = n / 12;
+  if (cnt <= 0) return mknum(env, 0);
+  long n = 0;
+  double *v = arrN(env, a[2], cnt * 16, &n);
+  if (v == NULL) return mknum(env, 1);
+  if (cnt * 16 > n) cnt = n / 16;
   omni_ev_gl_batch((int)num(env, a[0]), cnt, v);
   free(v);
   return mknum(env, 0);
