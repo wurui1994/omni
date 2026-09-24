@@ -75,12 +75,26 @@ const HOST_VARS = ['xres', 'yres', 'numframes', 'mousx', 'mousy', 'bstatus',
 /** 宿主那侧按下标读的量。 */
 const HOST_ARRS = ['keystatus'];
 /**
- * **脚本写得动的那两格**。说明书里"消掉一次点击/一次按键"就是往它们上写：
- * `if (bstatus%2) { bstatus--; }`（`polydraw.txt:381`）、
- * `if (keystatus[0xc8]) { keystatus[0xc8] = 0; }`（`polydraw.txt:388`）。
- * 写落成 `(gfxcall "setbstatus" v)` / `(gfxcall "setkeystatus" k v)` —— 一格 op 不变。
+ * **脚本写得动的那几格**。那张表里它们全是"名字 -> 一格 double 的地址"
+ * （`polydraw.c:2217-2222`），所以**每一格都写得动** —— 从前这儿只放了两格，
+ * `tigrou/ballsk.pss:17` 的 `xres = 50;` 于是当场报错。分两类：
+ *
+ *   * `HOST_FRAME`（`xres`/`yres`/`mousx`/`mousy`）—— 宿主在调脚本**之前**重新盖一次
+ *     （`polydraw.c:2276-2280`：`dxres = (double)oglxres;` 那四句），所以写只在这一帧里
+ *     算数。落法：语言这一侧一格模块级量，每帧开头问设备一次盖上去。
+ *     顺带它还快了 —— 读不再是每次一句宿主调用（实时性那条线，见 §15）。
+ *   * `bstatus` / `keystatus[k]` —— 宿主**不盖**（只有窗口消息与脚本自己改，
+ *     `polydraw.c:3146-3153`），所以写要落到设备上：`(gfxcall "setbstatus" v)` /
+ *     `(gfxcall "setkeystatus" k v)`。说明书里"消掉一次点击/一次按键"就是这个
+ *     （`polydraw.txt:381`/`:388`）。
+ *
+ * `numframes` 由宿主每帧 `++`（`polydraw.c:2354`），既不属于"每帧盖"也不属于"只脚本改"，
+ * 语料里也没人写它 —— 先仍按只读（真碰上再按设备那条路加 `setnumframes`）。
  */
-const HOST_WRITABLE = new Set(['bstatus', 'keystatus']);
+const HOST_FRAME = ['xres', 'yres', 'mousx', 'mousy'];
+const HOST_WRITABLE = new Set(['bstatus', 'keystatus', ...HOST_FRAME]);
+/** `HOST_FRAME` 那几格在语言这一侧的名字。 */
+const hvName = (n) => `pd_hv_${n}`;
 
 /**
  * **可编程管线那一族**（`名字/元数` -> 哪几格实参是串）。
@@ -304,6 +318,12 @@ function exprOf(x, C, want = 'val') {
        读它们就是问设备一句 —— 每帧都可能不一样，所以不能折成常量。 */
     if (C.gfxHost && HOST_VARS.includes(n)) {
       C.needGfx = true;
+      /* `HOST_FRAME` 那四格走语言这一侧的量（每帧开头盖一次，见 `HOST_WRITABLE` 的头注）。 */
+      if (HOST_FRAME.includes(n)) {
+        C.hostFrame.add(n);
+        const g = nameRef(hvName(n));
+        return want === 'cond' ? truthy(g) : g;
+      }
       const v = gfxCallIR(n);
       return want === 'cond' ? truthy(v) : v;
     }
@@ -769,9 +789,19 @@ function hostTargetOf(x, C) {
 function hostStore(ht, op, val, C) {
   if (!HOST_WRITABLE.has(ht.name)) {
     throw new Error(`${C.host.who}->IR: \`${ht.name}\` 是宿主给的只读量，赋不进去`
-      + '（能写的只有 `bstatus` 与 `keystatus[k]` —— polydraw.txt:381/:388）');
+      + '（`numframes` 由宿主每帧递增 —— polydraw.c:2354）');
   }
   C.needGfx = true;
+  /* `HOST_FRAME` 那四格是**这一帧里的一格量**（宿主下一帧会盖掉）——
+     所以写就是往语言这一侧那格量上写，不发宿主调用。 */
+  if (HOST_FRAME.includes(ht.name)) {
+    C.hostFrame.add(ht.name);
+    const tgt = nameRef(hvName(ht.name));
+    if (op === '=') return { kind: 'assign', target: tgt, value: val };
+    const core = op.slice(0, 1);
+    const v = core === '%' ? rmath('fmod', [tgt, val]) : bin(core, tgt, val);
+    return { kind: 'assign', target: tgt, value: v };
+  }
   let v = val;
   if (op !== '=') {
     const read = ht.index === null ? gfxCallIR(ht.name) : gfxCallIR(ht.name, [ht.index]);
@@ -1966,6 +1996,9 @@ export function evalToIR(cst, host, src = '') {
     need3D: false,                      /* 用过 3D 那一族没有（`gfx3-rt.js`：投影在语言这一侧） */
     needNoise: false,                   /* 用过 `NOISE`/`NOISE3D` 没有（`noise-rt.js`） */
     usedGL: false,                      /* 这份脚本用过 GL 那一族没有（每帧初态要不要发） */
+    /* 用到了宿主那"每帧盖一次"的哪几格（`xres`/`yres`/`mousx`/`mousy`）——
+       用到的那几格各有一格模块级量，每帧开头问设备一次盖上去。 */
+    hostFrame: new Set(),
     needFact: false,
     /* **收整块的形参 -> 它那格偏移形参的名字**（`名字$o`，见 `offName` 的头注）：
        一函数一张，降那一份函数体之前摆好。 */
@@ -2146,6 +2179,15 @@ export function evalToIR(cst, host, src = '') {
            每帧初态交给设备自己做。 */
         : gfxCallIR('framebegin'),
     });
+  }
+
+  /* **宿主那"每帧盖一次"的几格**（`xres`/`yres`/`mousx`/`mousy`，见 `HOST_WRITABLE` 头注）：
+     照 `polydraw.c:2276-2280`，在脚本跑之前盖上去。摆在最前面 —— 那四句在原版里
+     也在 `gevalfunc()` 之前。 */
+  for (const n of [...C.hostFrame].reverse()) {
+    mainBody.unshift({ kind: 'assign', target: nameRef(hvName(n)), value: gfxCallIR(n) });
+    C.globals.set(hvName(n), REAL);
+    decls.push({ kind: 'global', name: hvName(n), type: REAL });
   }
 
   if (C.needFact) decls.push(factDecl());
