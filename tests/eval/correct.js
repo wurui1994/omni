@@ -221,8 +221,9 @@ const t0 = Date.now();
 
 P(`出图正确性（与 c_impl 逐像素对照，${CFG.w}×${CFG.h}，第 ${CFG.frame} 帧，`
   + `fovy ${fovyOf(CFG.w, CFG.h).toFixed(2)}°）：\n`);
-P(`  尺子：${REFDIR}${REFDIR === PATCHED ? '（补过 mat4_rotate 那一格）'
-  : '（**原样** —— `glrotate` 是转置的，转角那一族量不准；跑一趟 tests/eval/mkref.js）'}\n`);
+P(`  尺子：${REFDIR}${REFDIR === PATCHED ? '（补过 mat4_rotate / setfov 两格）'
+  : '（**原样** —— `glrotate` 是转置的、`setfov` 当场就换且不过 ksetfov，那两族量不准；'
+    + '跑一趟 tests/eval/mkref.js）'}\n`);
 if (!existsSync(REF) || !existsSync(DEC)) {
   P(`  --   这台机器上没有那份参考（${REF}）—— 整份跳过\n`);
   P('\n0 passed, 0 failed（出图正确性）\n');

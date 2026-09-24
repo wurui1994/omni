@@ -45,6 +45,32 @@ const NEW = `    /* 补过（Omni 判据）：上面那张字面量按**行**写
         0, 0, 0, 1
     };`;
 
+/**
+ * **第二格：`setfov`。** 参考把实参当 `gluPerspective` 的 fovy 直接用、而且当场换投影；
+ * 原版的 `ksetfov`（`polydraw.c:1484`）是
+ *
+ *     gfov = tan(fov*PI/360) * atan(yres/xres) * 360/PI
+ *
+ * 而且它**只写下 `gfov`** —— 投影是每帧开头那句 `gluPerspective(gfov,…)`
+ * （`polydraw.c:3578`，在跑脚本**之前**）才重算，所以脚本里调 `setfov()`
+ * **要到下一帧才生效**。第 0 帧那一帧用的还是开机那句 `ksetfov(90)`。
+ * 量出来的差：`setfov(62.79)` 在 320×320 上参考给 `tan(f/2)=0.6103`（= 原样 62.79），
+ * 原版第 0 帧是 `1.0`（90°）、第 1 帧起是 `0.5197`（54.94°）——
+ * `menger sponge` 于是整个大 1.57 倍（包围盒 57..262 对我们 94..225）。
+ * 参考这边改法：只记下 `ksetfov` 变换后的值，投影交给下一帧开头那句（1202 行）。
+ */
+const OLDFOV = `        case GLCMD_SETFOV:
+            rd->fovy = c->a;
+            mat4_perspective(rd->proj, rd->fovy, (double)rd->w / rd->h, 0.1, 1000.0);
+            update_mvp(rd);
+            break;`;
+const NEWFOV = `        case GLCMD_SETFOV:
+            /* 补过（Omni 判据）：照 polydraw.c 的 ksetfov —— 只记下变换后的 gfov，
+               投影由**下一帧开头**那句（本函数上头 mat4_perspective 那行）重算。 */
+            rd->fovy = tan(c->a * M_PI / 360.0)
+                     * atan((double)rd->h / (double)rd->w) * 360.0 / M_PI;
+            break;`;
+
 if (!existsSync(SRC)) {
   process.stdout.write(`这台机器上没有 ${SRC} —— 没东西可补\n`);
   process.exit(1);
@@ -60,13 +86,13 @@ rmSync(join(DST, 'build'), { recursive: true, force: true });
 
 const f = join(DST, 'src/render/gl_renderer.c');
 const s = readFileSync(f, 'utf8');
-if (!s.includes(OLD)) {
-  process.stdout.write('`mat4_rotate` 那张字面量与记着的原样对不上 ——'
+if (!s.includes(OLD) || !s.includes(OLDFOV)) {
+  process.stdout.write('`mat4_rotate` / `GLCMD_SETFOV` 那两处与记着的原样对不上 ——'
     + ' 参考那边改过源码了，得重新裁一次（别盲目补）\n');
   process.exit(1);
 }
-writeFileSync(f, s.replace(OLD, NEW));
-process.stdout.write(`补好了 ${f}\n开始 make（约 40s）…\n`);
+writeFileSync(f, s.replace(OLD, NEW).replace(OLDFOV, NEWFOV));
+process.stdout.write(`补好了 ${f}（两处：mat4_rotate / GLCMD_SETFOV）\n开始 make（约 40s）…\n`);
 
 const mk = spawnSync('make', ['-j8'], { cwd: DST, encoding: 'utf8' });
 const bin = join(DST, 'build/polydraw-render');
