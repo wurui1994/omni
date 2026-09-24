@@ -167,20 +167,37 @@ export function splitSections(src) {
   let name = null;
   let buf = [];
   let anon = 0;
+  let geo = null;
   const flush = () => {
     if (kind === null) return;
-    out.push({ kind, name: name === null ? `$${anon++}` : name, text: buf.join('\n') });
+    out.push({
+      kind,
+      name: name === null ? `$${anon++}` : name,
+      text: buf.join('\n'),
+      geo,
+    });
     buf = [];
+    geo = null;
   };
   for (const line of String(src).split('\n')) {
     const t = line.trim();
     if (t.startsWith('@')) {
-      const m = /^@([vgfh]?)(?::([A-Za-z0-9_$]+))?/.exec(t);
+      /* 段首那一行：`@v`/`@f`/`@h`/`@g`，可带 `:名字`。
+         **几何段还带三个参数**（`polydraw.txt:203`）：
+         `@g,输入图元,输出图元,最大顶点数:名字` —— core profile 里那三样是两句 `layout`，
+         所以要解出来带着走（从前这条正则只吃到 `@g`、名字与参数一起丢，
+         于是 `glsetshader("v","g","f")` 找不着那一段、静默画不出东西）。 */
+      const m = /^@([vgfh]?)((?:,[^:\n]*)?)(?::([A-Za-z0-9_$]+))?/.exec(t);
       if (m !== null) {
         flush();
         const k = m[1] === '' ? kind : ({ v: 'vert', g: 'geom', f: 'frag', h: 'host' })[m[1]];
         kind = k;
-        name = m[2] === undefined ? null : m[2];
+        name = m[3] === undefined ? null : m[3];
+        geo = null;
+        if (k === 'geom' && m[2] !== '') {
+          const a = m[2].slice(1).split(',').map((x) => x.trim());
+          geo = { in: a[0] ?? '', out: a[1] ?? '', max: Number(a[2] ?? 0) };
+        }
         continue;
       }
     }
@@ -2465,11 +2482,14 @@ export function evalToIR(cst, host, src = '') {
       /* **登记那几格串**（一趟只做一次，摆在入口最前头）：`@v`/`@f` 区段的原文，
          以及内部到的名字（着色器名 / uniform 名）—— 运行期的调用照旧全是 double。 */
       const regs = [];
+      /* **有没有几何段是整份脚本的属性**（翻译要按它给跨段量起名，见 `glsl.js` 头注）。 */
+      const hasGeom = C.shaders.some((s) => s.kind === 'geom');
       for (const s of C.shaders) {
         /* **着色器原文在这儿（编译期）就翻成对齐后的主体**（`glsl.js`）——
            两档 GPU 设备收到的是同一份文本，各自只补 `#version` 那一行。
            在设备里各翻一遍就是两份实现（口径：`docs/design/eval-realtime-gpu.md` 13.2）。 */
-        const text = s.kind === 'name' ? s.text : glslAlign(s.kind, s.text);
+        const text = s.kind === 'name' ? s.text
+          : glslAlign(s.kind, s.text, { hasGeom, geo: s.geo });
         regs.push({ kind: 'expr-stmt', expr: gfxDefIR(s.kind, s.name, text) });
       }
       for (const [s, i] of C.strs) {

@@ -84,7 +84,7 @@ static struct { char name[64]; int kind; char *text; } g_sh[EV_MAXSH];  /* kind 
 static int g_nsh;
 static struct { int idx; char name[64]; } g_nm[EV_MAXNAME];
 static int g_nnm;
-static struct { int vi, fi; GLuint prog; } g_progs[EV_MAXPROG];
+static struct { int vi, gi, fi; GLuint prog; } g_progs[EV_MAXPROG];
 static int g_nprogs;
 static struct { GLuint prog; GLint loc; } g_uni[EV_MAXUNI];
 static int g_nuni;
@@ -324,25 +324,45 @@ static int ev_is_arb(const char *s) {
 }
 
 /**
- * 挑一对着色器、编好链好（一对只编一次）。回 0 = 不成（话在 `g_err` 里）。
+ * 挑一组着色器、编好链好（一组只编一次）。回 0 = 不成（话在 `g_err` 里）。
+ *
+ * `gi >= 0` 时挂**几何段**（`glsetshader("v","g","f")` 那一档，`polydraw.c:2210` 的
+ * `kglsetshader3` 是 (v, g, f) 三个名字）。几何段的原文在编译期已经翻成
+ * core 的 `layout(...)` + `gl_in[]`（`ext/polydraw/glsl.js` 的 `glslGeom`）。
  *
  * **采样器按名字约定接单元**（与 WebGL2 那一档同一句话）：`tex0..tex7` 那几个 uniform
  * 设成 0..7 号纹理单元 —— PolyDraw 的脚本就是 `glactivetexture(GL_TEXTURE0+i);
  * glbindtexture(i)` 加片元里 `uniform sampler2D tex0`，除此之外没有别的绑定办法。
  */
-static GLuint ev_use_program(int vi, int fi) {
+static GLuint ev_use_program(int vi, int gi, int fi) {
   if (vi < 0 || fi < 0) { ev_err("glsetshader：没有这一对着色器（缺 @v 或 @f 区段）", NULL); return 0; }
   /* ARB 汇编那一档：退回内建那对（它收的也是"物体坐标 + `u_mvp`"，正好对得上）。 */
   if (ev_is_arb(g_sh[vi].text) || ev_is_arb(g_sh[fi].text)) { g_cur = g_prog; return g_prog; }
+  if (gi >= 0 && ev_is_arb(g_sh[gi].text)) gi = -1;
+  /* **没指定几何段、可这一份顶点段是按"有几何段"那条链翻的**（跨段量叫 `gv_*`）——
+     那就挂上第一份几何段。这条链上 `v` 与 `f` 只有**经过几何段**才接得上
+     （顶点出 `gv_*`、几何出 `v_*`、片元读 `v_*`，见 `ext/polydraw/glsl.js`）。
+     **这是明写偏差**（§28.14）：正本里 `glsetshader(v,f)` 与每帧那句 `qglsetshader(0)`
+     的 gshad 都是 -1（旧式 GLSL 的跨段量全是内建名，随便配都接得上），
+     而我们按 core 的规矩显式声明，就得跟着这条链走。 */
+  if (gi < 0 && strstr(g_sh[vi].text, "gv_col0") != NULL) gi = ev_first_of(2);
   for (int i = 0; i < g_nprogs; i++) {
-    if (g_progs[i].vi == vi && g_progs[i].fi == fi) { g_cur = g_progs[i].prog; return g_cur; }
+    if (g_progs[i].vi == vi && g_progs[i].fi == fi && g_progs[i].gi == gi) {
+      g_cur = g_progs[i].prog; return g_cur;
+    }
   }
   if (g_nprogs >= EV_MAXPROG) { ev_err("glsetshader：program 太多（上限 16）", NULL); return 0; }
   GLuint vs = ev_compile_user(GL_VERTEX_SHADER, g_sh[vi].text);
   GLuint fs = ev_compile_user(GL_FRAGMENT_SHADER, g_sh[fi].text);
   if (vs == 0 || fs == 0) return 0;
+  GLuint gs = 0;
+  if (gi >= 0) {
+    gs = ev_compile_user(GL_GEOMETRY_SHADER, g_sh[gi].text);
+    if (gs == 0) return 0;
+  }
   GLuint p = glCreateProgram();
   glAttachShader(p, vs);
+  if (gs != 0) glAttachShader(p, gs);
   glAttachShader(p, fs);
   glLinkProgram(p);
   GLint ok = 0;
@@ -367,6 +387,7 @@ static GLuint ev_use_program(int vi, int fi) {
   }
   g_progs[g_nprogs].vi = vi;
   g_progs[g_nprogs].fi = fi;
+  g_progs[g_nprogs].gi = gi;
   g_progs[g_nprogs].prog = p;
   g_nprogs++;
   g_cur = p;
@@ -406,6 +427,19 @@ static int ev_sh_at(double v, int kind) {
 }
 
 /**
+ * 几何段那一格：**只按名字找、找不着就没有几何段**（回 -1）。
+ *
+ * 与 `ev_sh_at` 的区别是**不夹成第 0 份**：`kglsetshader2`（两个实参那一档）在正本里是
+ * `kglsetshader3(st0,"",st1)` —— 空名字就是"这一趟不挂几何段"（`polydraw.c:1085`）。
+ * 夹的话会把一份不相干的 `@g` 硬塞进去。
+ */
+static int ev_sh_name_at(double v, int kind) {
+  const char *nm = ev_name((int)v);
+  if (nm == NULL || nm[0] == 0) return -1;
+  return ev_sh_by_name(nm, kind);
+}
+
+/**
  * `glsetshader(…)`：挑一对。回 0 = 成了。
  * **负下标 = "第一对"** —— 语言那一侧的 `gl_quad` 在脚本没挑过 program 时发的那句
  * （`glquad` 在 PolyDraw 里本来就默认拿 `@v`/`@f` 那一对）。
@@ -415,7 +449,7 @@ int omni_ev_gl_shader(int argc, const double *args) {
   CGLSetCurrentContext(g_ctx);
   if (argc <= 0 || args == NULL) return 1;
   if (argc == 1 && (int)args[0] < 0) {
-    return ev_use_program(ev_first_of(0), ev_first_of(1)) == 0 ? 1 : 0;
+    return ev_use_program(ev_first_of(0), -1, ev_first_of(1)) == 0 ? 1 : 0;
   }
   if (argc == 1) {
     /* `qglsetshader(d)` = `setshader_int(0, -1, (int)d)`（`polydraw.c:1072`）：
@@ -427,17 +461,19 @@ int omni_ev_gl_shader(int argc, const double *args) {
        `Input of fragment shader 'n' not written by vertex shader`（踩过）。 */
     int fi = ev_nth_of(1, (int)args[0]);
     if (fi < 0) fi = ev_first_of(1);
-    return ev_use_program(ev_first_of(0), fi) == 0 ? 1 : 0;
+    return ev_use_program(ev_first_of(0), -1, fi) == 0 ? 1 : 0;
   }
+  /* 名字那两档（`polydraw.c:2209/2210`）：两个实参是 (v, f)、**三个是 (v, g, f)**。 */
   int vi = ev_sh_at(args[0], 0);
   int fi = ev_sh_at(argc >= 3 ? args[2] : args[1], 1);
-  return ev_use_program(vi, fi) == 0 ? 1 : 0;
+  int gi = argc >= 3 ? ev_sh_name_at(args[1], 2) : -1;
+  return ev_use_program(vi, gi, fi) == 0 ? 1 : 0;
 }
 
 /** 脚本还没挑过 program 时，替它挑第一对（uniform/attrib 那两格要当前 program）。 */
 static int ev_need_prog(void) {
   if (g_cur != 0) return 1;
-  return ev_use_program(ev_first_of(0), ev_first_of(1)) != 0;
+  return ev_use_program(ev_first_of(0), -1, ev_first_of(1)) != 0;
 }
 
 /** `glgetuniformloc(名字下标)` -> 一格句柄（**按 program 记**）。回 -1 = 不认得那个下标。 */
@@ -453,7 +489,24 @@ double omni_ev_gl_uniloc(double idx) {
   if (g_nuni >= EV_MAXUNI) return -1.0;
   g_uni[g_nuni].prog = g_cur;
   g_uni[g_nuni].loc = loc;
-  return (double)(g_nuni++);
+  int base = g_nuni++;
+  /* **数组那一档**：脚本拿 `句柄 + i` 指第 i 格（`ken/geo_duptris.pss` 的
+     `glUniform4f(env+1, …)`；真 GL 里数组元素的位置本来就是连着的，原版的
+     `glGetUniformLoc` 回的就是那个位置）—— 所以这儿把 `名字[1]`、`名字[2]`… 挨着登记，
+     句柄上的加法就成立了。停在第一个查不着的下标。
+     （为什么不直接回 GL 那个位置：WebGL 那一档的位置是**不透明对象**，两档要同一个模型。） */
+  if (loc >= 0) {
+    for (int k = 1; k < 64 && g_nuni < EV_MAXUNI; k++) {
+      char en[96];
+      snprintf(en, sizeof(en), "%s[%d]", nm, k);
+      GLint el = glGetUniformLocation(g_cur, en);
+      if (el < 0) break;
+      g_uni[g_nuni].prog = g_cur;
+      g_uni[g_nuni].loc = el;
+      g_nuni++;
+    }
+  }
+  return (double)base;
 }
 
 /** `gluniform{1,2,3,4}f(句柄, …)`。着色器里没用到那个名字（loc < 0）就静默 —— 与 GL 同。 */

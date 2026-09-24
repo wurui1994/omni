@@ -470,6 +470,14 @@ function useProgram(v, f) {
       + '（`.pss` 里要有 @v / @f 区段）');
   }
   if (isArb(v.text) || isArb(f.text)) return useProgram(ARB_FALLBACK.vert, ARB_FALLBACK.frag);
+  /* **几何段这一档做不到**：WebGL2（GLSL ES 300）压根没有几何着色器。
+     有 `@g` 的脚本在编译期就按"顶点出 `gv_*`、几何出 `v_*`"那条链翻好了
+     （`ext/polydraw/glsl.js`），少了几何段这一节 v/f 是接不上的 —— 所以**当场报**，
+     不静默链一个错的（口径：`docs/design/eval-realtime-gpu.md` §28.14）。 */
+  if (v.text.includes('gv_col0')) {
+    throw new Error('glsetshader：这一档（WebGL2）没有几何着色器 ——'
+      + ' 这份脚本有 `@g` 区段，只有本机 OpenGL 那一档（`--gfx gl`）跑得了');
+  }
   const key = `${v.kind}|${v.text.length}|${f.kind}|${f.text.length}|${v.text}|${f.text}`;
   const had = SH.progs.get(key);
   if (had !== undefined) { SH.cur = had; return had; }
@@ -652,6 +660,18 @@ function uniLoc(idx) {
   UNI.list.push({ prog: SH.cur, loc });
   const h = UNI.list.length - 1;
   per.set(nm, h);
+  /* **数组那一档**：脚本拿 `句柄 + i` 指第 i 格（`ken/geo_duptris.pss` 的
+     `glUniform4f(env+1, …)`；真 GL 里数组元素的位置本来就是连着的）——
+     所以这儿把 `名字[1]`、`名字[2]`… 挨着登记，句柄上的加法就成立了。
+     停在第一个查不着的下标（WebGL 的位置是不透明对象，只能按名字一个个问）。 */
+  if (loc !== null) {
+    for (let k = 1; k < 64; k++) {
+      const el = D.gl.getUniformLocation(SH.cur, `${nm}[${k}]`);
+      if (el === null) break;
+      UNI.list.push({ prog: SH.cur, loc: el });
+      per.set(`${nm}[${k}]`, UNI.list.length - 1);
+    }
+  }
   return h;
 }
 

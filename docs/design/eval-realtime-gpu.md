@@ -1826,7 +1826,8 @@ CPU 备选收下不管），量出来：
 ### 28.12 这一轮之后的账
 
 **40 过 / 13 红 / 9 不计**（**28 份逐像素相同**、11 份够近、1 份只差一小撮格子；
-跑不起来从 4 份降到 3 份、全黑从 3 份降到 2 份）。
+跑不起来从 4 份降到 3 份、全黑从 3 份降到 2 份）。**（2026-09-25 续：剔除与几何段两刀之后
+是 40 过 / 11 红 / 11 不计** —— `geo_test` / `geo_duptris` 从"黑图"变成"参考错"，见 §28.14。）
 剩下的按族：纹理三份（`texture` 49.2 / `mipmap` 48.4 / `texture3d` 28.8 —— 文件那一格已经
 对了，剩下的在**数组/抓屏**那两条路上）、`cubetex` 见 §28.4、几何着色器两份
 （`geo_test` / `geo_duptris` 全黑）、四份跑不起来（`curvybuild` / `drawcone2` /
@@ -1885,7 +1886,7 @@ CPU 备选收下不管），量出来：
 **严格超集**（参考独有 0 格）、而 `GL_BACK` 那一档我们只剩 9583 格（参考 24976）——
 下一步得按批对照（glspy 那种手法，`reference_glspy_tool`）才看得清。
 
-### 28.14 几何着色器那两份：**我们全黑，可参考压根没有几何段**
+### 28.14 几何着色器那两份：按正本接上了（参考压根没有几何段）
 
 `ken/geo_test.pss` / `ken/geo_duptris.pss` 现在的账是"黑图"（我们 0 格、参考 8312 / 11342 格）。
 动手之前先查了两边，两侧**各有一格错**：
@@ -1907,23 +1908,44 @@ CPU 备选收下不管），量出来：
 `glsetshader("v","g","f")` 找不着 `g` ⇒ 这一趟什么都没画（还是**静默**的，连一句话都没报）。
 
 **所以这一族不能拿参考当尺子**（照它做等于把几何段扔掉 —— 那是"对着错的答案抄"）。
-正事按正本做，分三步，都在编译期那一层（设备一个字不改）：
+按正本做，三步都在编译期那一层（设备只多了"挂第三段"那一句）—— **2026-09-25 落地了**：
 
-1. 段首那一行照 `polydraw.txt:203` 解出**名字 + 三个参数**，参数随 `(gfxdef geom …)` 一起下去
-   （或者直接在翻译时写成 `layout(triangles) in; layout(triangle_strip, max_vertices=15) out;`）；
-2. `glslAlign('geom', …)`：`gl_VerticesIn` -> `gl_in.length()`、`gl_PositionIn[i]` ->
-   `gl_in[i].gl_Position`、`gl_FrontColorIn[i]` / `gl_TexCoordIn[i][0]` -> 顶点段那两格跨段量的
-   数组形式、`gl_FrontColor` / `gl_TexCoord[0]` -> 几何段的 out；`#version 120` 与
-   `#extension GL_EXT_geometry_shader4` 那两行切掉（现在 `glslAlign` 见到 `#version` 就整段原样回，
-   所以这两份**压根没被翻过**）；
-3. **跨段量的名字**：core 里同一段不能有同名的 in 与 out，而片元段读的是 `v_col0`/`v_tex0` ——
-   挂了几何段之后得给顶点段那两格换个名字（这一格是设计活：`glsetshader` 是运行期才配对的，
-   而翻译在编译期。最省的一条是"有 `@g` 的脚本里，顶点段同时发两份名字"，
-   可 Apple 的链接器把"顶点输出没人读"当链接失败（§见 `glsl.js` 那段头注）—— 要先量一趟）。
+1. 段首那一行照 `polydraw.txt:203` 解出**名字 + 三个参数**（`splitSections` 的正则加了
+   `((?:,[^:\n]*)?)` 那一格，参数落在 `geo` 上）；翻译时写成
+   `layout(triangles) in; layout(triangle_strip, max_vertices = 15) out;`；
+2. `glslGeom`（`ext/polydraw/glsl.js`）：`gl_VerticesIn` -> `gl_in.length()`、
+   `gl_PositionIn[i]` -> `gl_in[i].gl_Position`、`gl_FrontColorIn[i]` / `gl_TexCoordIn[i][0]`
+   -> 顶点段那两格跨段量的数组形式、`gl_FrontColor` / `gl_TexCoord[0]`（写）-> 这一段的 out、
+   `gl_ModelViewProjectionMatrix` -> `u_mvp`；`#version 1xx` 与 `#extension` 那两行换成空行
+   （行号不动）。段里自带 `#version 3xx/4xx` 的原样回。
+3. **跨段量的名字**按一条链走：顶点出 `gv_*` -> 几何 `in gv_*[]` / `out v_*` -> 片元读 `v_*`。
+   `hasGeom` 是**整份脚本**的属性（段落都来自同一份文件，而 `glsetshader` 的配对是运行期的事）。
+   由此带来一格**明写偏差**：正本里 `glsetshader(v,f)` 与每帧那句 `qglsetshader(0)` 的 gshad 都是
+   -1（旧式 GLSL 的跨段量全是内建名，随便配都接得上），而我们显式声明之后，这条链上的 v/f
+   **只有经过几何段才接得上** —— 所以设备那侧补了一句：`gi < 0` 而顶点段里有 `gv_col0` 时
+   挂上第一份几何段（`omni_ev_gl.c` 的 `ev_use_program`）。
+   `glsetshader` 三个实参的次序照正本认成 **(v, g, f)**；几何段那一格**只按名字找、找不着就没有**
+   （`ev_sh_name_at`，照 `kglsetshader2` 的空名字那一档），不夹成第 0 份。
 
-判据：这一族**没有参考**，所以做完只能靠"自己那张图讲得通"（四个小四边形 + 一个三角，
-`geo_test` 的几何段明写着）加上与参考**故意不同**的记录；那两份在账上先继续记红（黑图），
-**不许写进 `REF_WRONG` 白拿分** —— 我们这一侧现在确实是黑的。
+**顺手治好的一格：`uniform` 数组的句柄加法。** `geo_duptris` 写
+`env = glGetUniformLoc("env"); glUniform4f(env+1, …)` —— 真 GL 里数组元素的位置是**连着的**，
+而我们两档设备的句柄是**自己那张表的下标**，于是 `env+1` 指到一个空槽、`env[1]` 从来没被设上
+（那一份的片元是 `… * env[1].rgba` ⇒ **整张图全黑**，还是静默的）。
+两档都改成：登记 `名字` 时顺手把 `名字[1]`、`名字[2]`… 挨着登记（停在第一个查不着的下标）——
+于是句柄上的加法成立。**为什么不直接回 GL 那个位置**：WebGL 的位置是不透明对象，
+两档要同一个模型。
+
+**WebGL2 那一档做不到几何段**（GLSL ES 300 压根没有），所以 `useProgram` 里见到
+`gv_col0` 就**当场报**"这一档没有几何着色器，只有 `--gfx gl` 跑得了"，不静默链一个错的。
+
+量出来（第 0 帧、320×240）：`geo_test` 我们 12302 格（参考 8312）、
+`geo_duptris` 我们 36060 格（参考 11342）。两份都**从全黑变成了讲得通的图**：
+`geo_test` 是三个顶点各一个贴图小方块（按各自顶点色染）加中间那张贴图三角；
+`geo_duptris` 是输入四边形按 `xyzw`/`yxzw`/两个取反发四趟，出来那个风车形的框 ——
+都与几何段里写的那几行一一对得上。两份记进 `REF_WRONG`（证据就是上面那两处源码行号）。
+判据：`tests/gl/run.js` 11/11、`tests/lower/run.js polydraw evaldraw` 44/44、`check:self` ok、
+`drawsph` / `drawsph_asm` / `metaballs` / `metaballs cube` / `04-shader` 照旧逐像素相同。
+
 
 
 

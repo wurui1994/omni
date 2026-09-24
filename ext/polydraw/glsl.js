@@ -44,6 +44,68 @@
  */
 const GLSL_HAVE = new Set(['GL_ARB_shader_texture_lod']);
 
+/** `@g` 段首那两个图元名 -> GLSL 的 `layout` 名（`polydraw.txt:203-205`）。 */
+const GEO_IN = new Map([
+  ['GL_POINTS', 'points'], ['GL_LINES', 'lines'],
+  ['GL_LINES_ADJACENCY_EXT', 'lines_adjacency'], ['GL_LINES_ADJACENCY', 'lines_adjacency'],
+  ['GL_TRIANGLES', 'triangles'],
+  ['GL_TRIANGLES_ADJACENCY_EXT', 'triangles_adjacency'],
+  ['GL_TRIANGLES_ADJACENCY', 'triangles_adjacency'],
+]);
+const GEO_OUT = new Map([
+  ['GL_POINTS', 'points'], ['GL_LINE_STRIP', 'line_strip'],
+  ['GL_TRIANGLE_STRIP', 'triangle_strip'],
+]);
+/** 那两个图元名各自的"每段几个顶点"由 `layout` 定，`gl_in.length()` 自己会算。 */
+
+/**
+ * **几何段**（`@g`）：`EXT_geometry_shader4` 那一套 -> core / ES 的 `layout` + `gl_in[]`。
+ *
+ * 旧式（脚本写的）                     新式（两档设备要的）
+ *   `#extension GL_EXT_geometry_shader4`  两句 `layout`（段首那三个参数）
+ *   `gl_VerticesIn`                       `gl_in.length()`
+ *   `gl_PositionIn[i]`                    `gl_in[i].gl_Position`
+ *   `gl_FrontColorIn[i]` / `gl_TexCoordIn[i][0]`  顶点段那两格跨段量的**数组**形式
+ *   `gl_FrontColor` / `gl_TexCoord[0]`（写）      这一段自己的 out
+ *   `EmitVertex()` / `EndPrimitive()`     一个字不用动
+ *
+ * 跨段量的名字见 `glslAlign` 头上那段：进来是 `gv_*`、出去是 `v_*`（片元段照旧读 `v_*`）。
+ * 段首那三个参数解在 `adapter.js` 的 `splitSections` 里（`geo`）；没有那一行就按
+ * `triangles` / `triangle_strip` / 64 兜着（脚本不给参数本来就是错的，让驱动去报）。
+ */
+function glslGeom(src, geo) {
+  const gi = GEO_IN.get(String(geo?.in ?? '').toUpperCase()) ?? 'triangles';
+  const go = GEO_OUT.get(String(geo?.out ?? '').toUpperCase()) ?? 'triangle_strip';
+  const mx = Number.isFinite(geo?.max) && geo.max > 0 ? Math.trunc(geo.max) : 64;
+  /* `#version` / `#extension` 那两行切掉（换成空行 —— 行号不动，诊断还照着原文看）：
+     旧式那两行在 core 里要么冲突（`#version 120`）要么是"扩展早并进核心了"。
+     段里自带新式 `#version 3xx/4xx` 的**原样回**（脚本自己写好了就不动它）。 */
+  if (/#\s*version\s+[3-9]\d\d/.test(src)) return src;
+  let s = src.split('\n')
+    .map((l) => (/^\s*#\s*(version|extension)\b/.test(l) ? '' : l)).join('\n');
+  s = glslIfdef(s);
+  s = s.replace(/\bgl_VerticesIn\b/g, 'gl_in.length()');
+  s = s.replace(/\bgl_PositionIn\s*\[([^\]]*)\]/g, 'gl_in[$1].gl_Position');
+  s = s.replace(/\bgl_TexCoordIn\s*\[([^\]]*)\]\s*\[\s*0\s*\]/g, 'gv_tex0[$1]');
+  s = s.replace(/\bgl_FrontColorIn\s*\[([^\]]*)\]/g, 'gv_col0[$1]');
+  s = s.replace(/\bgl_TexCoord\s*\[\s*0\s*\]/g, 'v_tex0');
+  s = s.replace(/\bgl_FrontColor\b/g, 'v_col0');
+  s = s.replace(/\bgl_ModelViewProjectionMatrix\b/g, 'u_mvp');
+  s = s.replace(/\bgl_NormalMatrix\b/g, 'mat3(transpose(inverse(u_mv)))');
+  s = s.replace(/\bgl_ModelViewMatrix\b/g, 'u_mv');
+  s = s.replace(/\btexture(?:1D|2D|3D|Cube)Lod\s*\(/g, 'textureLod(');
+  s = s.replace(/\btexture(?:1D|2D|3D|Cube)\s*\(/g, 'texture(');
+  s = s.replace(/\bvarying\b/g, 'in');
+  const head = [
+    `layout(${gi}) in;`,
+    `layout(${go}, max_vertices = ${mx}) out;`,
+    'uniform mat4 u_mvp;', 'uniform mat4 u_mv;',
+    'in vec4 gv_col0[];', 'in vec4 gv_tex0[];',
+    'out vec4 v_col0;', 'out vec4 v_tex0;',
+  ];
+  return `${head.join('\n')}\n${s}`;
+}
+
 function glslIfdef(src) {
   if (!/^[ \t]*#[ \t]*ifdef/m.test(src)) return src;
   const out = [];
@@ -63,7 +125,16 @@ function glslIfdef(src) {
   return out.join('\n');
 }
 
-export function glslAlign(kind, src) {
+export function glslAlign(kind, src, opt = {}) {
+  /* **有几何段的脚本里，顶点段那两格跨段量要改名**（`gv_*`）：core 里同一段不能有同名的
+     in 与 out，而片元段读的是 `v_col0`/`v_tex0` —— 于是链子是
+     顶点 `gv_*` -> 几何 `in gv_*[]` / `out v_*` -> 片元 `in v_*`。
+     `hasGeom` 是**整份脚本**的属性（段落都来自同一份文件，`glsetshader` 的配对是运行期的事，
+     而翻译在编译期）：有 `@g` 的脚本里所有 v/f 都按这条链走。 */
+  const gv = opt.hasGeom === true;
+  const vCol = gv ? 'gv_col0' : 'v_col0';
+  const vTex = gv ? 'gv_tex0' : 'v_tex0';
+  if (kind === 'geom') return glslGeom(src, opt.geo ?? null);
   if (src.includes('#version')) return src;
   /* **ARB 汇编原样留着**（`!!ARBvp1.0` / `!!ARBfp1.0`，`ken/` 有 5 份）：它不是 GLSL，
      翻译这一层一个字都不该动它 —— 而且**不能在前头补声明**：补了之后设备那一侧就认不出
@@ -71,7 +142,7 @@ export function glslAlign(kind, src) {
      报 `'!' : syntax error`（踩过）。设备收到 ARB 就退回内建那对，见 §19.2。 */
   if (/^\s*!!ARB/.test(src)) return src;
   let s = glslIfdef(src);
-  s = s.replace(/\bgl_TexCoord\s*\[\s*0\s*\]/g, 'v_tex0');
+  s = s.replace(/\bgl_TexCoord\s*\[\s*0\s*\]/g, kind === 'vert' ? vTex : 'v_tex0');
   s = s.replace(/\bgl_MultiTexCoord0\b/g, 'a_tex');
   s = s.replace(/\bftransform\s*\(\s*\)/g, '(u_mvp * a_pos)');
   s = s.replace(/\bgl_ModelViewProjectionMatrix\b/g, 'u_mvp');
@@ -94,7 +165,7 @@ export function glslAlign(kind, src) {
     /* `gl_FrontColor` 是顶点段那格**输出**，片元段读到的就是 `gl_Color`（我们的 `v_col0`）。
        下面注入的 `v_col0 = a_col;` 在它**前面**跑，所以脚本写了就覆盖得掉 ——
        与真固定管线一致（不写就是顶点色）。 */
-    s = s.replace(/\bgl_FrontColor\b/g, 'v_col0');
+    s = s.replace(/\bgl_FrontColor\b/g, vCol);
     s = s.replace(/\bgl_Normal\b/g, 'a_nrm.xyz');
     s = s.replace(/\bvarying\b/g, 'out');
     /* **那两格跨段量两边都无条件声明**（`v_col0` 颜色、`v_tex0` 0 号纹理坐标）：
@@ -104,10 +175,10 @@ export function glslAlign(kind, src) {
        fragment shader" 当**链接失败**（只印 WARNING，`GL_LINK_STATUS` 却是假的 —— 踩过）。
        两边都声明就没有这一类错，而且与内建那对的形状一模一样。 */
     head.push('in vec4 a_pos;', 'in vec4 a_tex;', 'in vec4 a_col;', 'in vec4 a_nrm;',
-      'uniform mat4 u_mvp;', 'uniform mat4 u_mv;', 'out vec4 v_col0;', 'out vec4 v_tex0;');
+      'uniform mat4 u_mvp;', 'uniform mat4 u_mv;', `out vec4 ${vCol};`, `out vec4 ${vTex};`);
     /* 顶点色与纹理坐标要跨段传：`gl_Color` / `gl_TexCoord[0]` 在片元里是**插值过的**那一格，
        所以顶点这边总是把 `a_col`/`a_tex` 抄过去（没人读也无害）。注入点是 main 的左花括号。 */
-    s = s.replace(/void\s+main\s*\(\s*\)\s*\{/, 'void main() { v_col0 = a_col; v_tex0 = a_tex;');
+    s = s.replace(/void\s+main\s*\(\s*\)\s*\{/, `void main() { ${vCol} = a_col; ${vTex} = a_tex;`);
   } else {
     s = s.replace(/\bgl_Color\b/g, 'v_col0');
     s = s.replace(/\bvarying\b/g, 'in');
