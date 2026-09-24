@@ -1,0 +1,16 @@
+// ext/evaldraw/examples/tailexpr.kc —— **末尾那句不带分号的表达式就是返回值**
+//
+// EvalDraw 的表面脚本几乎都这么写（`geeky/gcd.kc:6` 的 `y-.5`、`voxes/*.kc`、`insts/*.kc`
+// 共十八份）：整份文件是一格函数，**最后一格光秃秃的表达式**就是它的值。
+// 语法里是 `program -> (params stmts tail)` 那两支（`tail -> expr` 落成 `(return …)`），
+// 所以 adapter 一个字都不用改。
+//
+// 这一份还顺带判**带值的 `return` 在两条产物形状上都对**：主体落成 `eval$frame`
+// （宿主设备那条路，`ret: REAL`）与落成 `(main …)`（生成出来那条 CPU 路，**void**）
+// 两档都要过 —— 后者由 `voidRets()` 统一把带值的返回摊成"做一句 + 空返回"。
+
+(x,y)
+a = 3 + 4;
+printf("a=%g\n", a);
+if (a < 0) return(-1);
+a*2

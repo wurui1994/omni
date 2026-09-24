@@ -89,7 +89,18 @@
     ;; **`()` 写着、花括号省着**那一档（`demos/magfield.kc:1` 就是 `() cls(0x503070);`
     ;; 接着一串文件级语句）。第一句收的是 `stmtnb`（不以 `{` 开头的语句）—— 于是
     ;; `() { … }` 照旧只有"主函数 + 若干函数"那一种读法，两支的第一个记号互斥。
-    (-> (params stmtnb stmts) (program (main $1 (block $2 $*3))) (prefer 1)))
+    (-> (params stmtnb stmts) (program (main $1 (block $2 $*3))) (prefer 1))
+    ;; ── **末尾那句不带分号的表达式就是返回值**（EvalDraw 的表面脚本几乎都这么写：
+    ;;    `(x,y) … y-.5`，`geeky/gcd.kc:6` / `voxes/*.kc` / `insts/*.kc` 共十八份）。
+    ;;    落成 `(return 那句)`，所以 adapter 一个字都不用改。
+    ;;    **不会与上面三支打架**：那三支的末尾要么是 `}`、要么是带分号的语句 ——
+    ;;    这几支要求最后一格是**光秃秃的 expr**，两种读法不可能同时成立。
+    (-> (stmts tail) (program (main (params) (block $*1 $2))))
+    (-> (params stmts tail) (program (main $1 (block $*2 $3))) (prefer 1)))
+
+  ;; 末尾那句表达式（没有分号）—— 它的值就是这份脚本的返回值。
+  (rule tail
+    (-> (expr) (return $1)))
 
   (rule pre
     (-> () ())

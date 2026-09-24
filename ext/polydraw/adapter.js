@@ -760,12 +760,12 @@ function stmtOf1(s, C) {
        and returns to the caller, with an optional value. **Zero is used if no value is
        supplied**"）。这门语言里函数一律回一个 double，所以不许发空的 `(ret)` ——
        发了下游就报"这个函数要返回 real，(ret) 没给值"（语料里 7 份脚本红在这一格）。
-       **主函数反过来**：它是"每帧一次"那格函数（回 void），`return 0;` 里那个值没人要 ——
-       把它当一句表达式做掉再空返回（3 份脚本写了 `return 0;`）。 */
-    if (C.inMain) {
-      const pre = k.length === 0 ? [] : exprStmtOf(k[0], C);
-      return [...pre, { kind: 'return', values: [] }];
-    }
+       **主函数两条路都照发带值的那一格**：宿主设备那条路上主体落成 `eval$frame`
+       （`ret: REAL` —— `.kc` 的表面脚本回的就是那一格的值）；生成出来那条 CPU 路上
+       主体进的是 `(main …)`（**void**），那儿由 `voidRets()` 统一摊成"做一句 + 空返回"。
+       从前是在这儿按 `C.inMain` 分的，**那是错的**：`C.needGfx` 要等 body 降完才知道
+       （第一句画图调用之后才置上），而 `return` 可能出现在它前头 ⇒ 同一份脚本里两种
+       形状混着发（`geeky/mandel.kc` / `geeky/gcd.kc` 就是这么红的）。 */
     return [{ kind: 'return', values: [k.length === 0 ? num(0) : exprOf(k[0], C)] }];
   }
   if (t === 'break') return [{ kind: 'break' }];
@@ -784,12 +784,31 @@ function stmtOf1(s, C) {
     return [{ kind: 'while', cond: exprOf(k[0], C, 'cond'), body: stmtsOf([k[1]], C) }];
   }
   if (t === 'dowhile') {
-    /* `do{…}while(c);` 摊成"先跑一趟、再 while" —— 标准 IR 里没有 do-while 那一格。
-       **不是等价重写那么简单的地方**：body 里的 `continue` 在真 do-while 里跳到条件判断，
-       摊开之后第一趟那一份里的 `continue` 会跳出。语料里没有那种写法，先这么落，记在这儿。 */
+    /* `do{…}while(c);` —— 标准 IR 里没有 do-while 那一格，落成**一格旗子 + while**：
+     *
+     *     let pd_doN = 1;  while (pd_doN != 0 || c) { pd_doN = 0; body }
+     *
+     * 从前是"body 抄两份（先跑一趟、再 while）"，那样有两个真问题：
+     *   1. **第一份里的 `break` 不在循环里** —— 方言当场报（`geeky/mandel.kc:6` 就是
+     *      `do { … if (…) break; … } while (…)`，语料里这种写法不少）；
+     *   2. body 抄两份，产物大一倍，`continue` 在第一份里也是错的。
+     * 旗子这一手两样都对：`break` 跳出的是同一格循环、`continue` 回去重测条件
+     * （`pd_doN` 已经是 0，所以测的正是 `c` —— 与真 do-while 一致）。
+     */
     const k = kids(s);
-    const body = stmtsOf([k[0]], C);
-    return [...body, { kind: 'while', cond: exprOf(k[1], C, 'cond'), body }];
+    C.doN = (C.doN ?? 0) + 1;
+    const flag = `pd_do${C.doN}`;
+    return [
+      { kind: 'let', name: flag, type: REAL, init: num(1) },
+      {
+        kind: 'while',
+        cond: bin('||', truthy(nameRef(flag)), exprOf(k[1], C, 'cond')),
+        body: [
+          { kind: 'assign', target: nameRef(flag), value: num(0) },
+          ...stmtsOf([k[0]], C),
+        ],
+      },
+    ];
   }
   if (t === 'for') {
     const [init, cond, post, body] = kids(s);
@@ -1767,7 +1786,6 @@ export function evalToIR(cst, host, src = '') {
     needNoise: false,                   /* 用过 `NOISE`/`NOISE3D` 没有（`noise-rt.js`） */
     usedGL: false,                      /* 这份脚本用过 GL 那一族没有（每帧初态要不要发） */
     needFact: false,
-    inMain: false,                      /* 正在降主函数体没有（`return` 那一格看它） */
     fresh: (() => { let i = 0; return (p) => `${p}_pd${i++}`; })(),
     tyCtx: () => ({
       /* 全是 double：`env.get` 一律回 real，`fns` 给格式串那台机器看返回类型。
@@ -1904,13 +1922,10 @@ export function evalToIR(cst, host, src = '') {
   const mainPs = paramInfos(kids(mainNode)[0], C).map((p) => p.name);
   C.valParams = new Set(mainPs);
   C.boxed = new Set([...C.boxedAll].filter((nm) => !C.valParams.has(nm)));
-  /* 主函数体里的 `return` 是"这一帧到此为止"（那格函数回 void）—— 见 `return` 那一段。 */
-  C.inMain = true;
   const mainBody = [
     ...mainPs.map((p) => ({ kind: 'let', name: p, type: REAL })),
     ...bodyOf(kids(mainNode)[1], mainPs, C),
   ];
-  C.inMain = false;
   /**
    * **每帧的 GL 初态**：PolyDraw 的宿主在调脚本之前会把 GL 摆回去
    * （`polydraw.c:3572-3579`：清 color/depth/stencil、开深度测试、
@@ -2051,8 +2066,29 @@ export function evalToIR(cst, host, src = '') {
       expr: { kind: 'call', fn: nameRef('gfx_present'), args: [] },
     });
   }
-  decls.push({ kind: 'main', body: [...initStmts, ...mainBody] });
+  decls.push({ kind: 'main', body: [...initStmts, ...voidRets(mainBody)] });
   return { kind: 'module', decls };
+}
+
+/**
+ * 主体进 `(main …)`（**void**）那一档：把带值的 `return v` 摊成"做一句 + 空返回"。
+ *
+ * 为什么不在降 `return` 那一格分：`C.needGfx`（= 走不走帧函数那条路）要等 body 降完
+ * 才知道，而 `return` 可能出现在第一句画图调用前头 —— 那样同一份脚本里会混着两种形状。
+ * 这一格是**收尾时统一改一遍**，所以两条路各自都只有一种形状。
+ */
+function voidRets(ss) {
+  return ss.flatMap((s) => {
+    if (s.kind === 'return' && (s.values ?? []).length > 0) {
+      return [{ kind: 'expr-stmt', expr: s.values[0] }, { kind: 'return', values: [] }];
+    }
+    if (s.kind === 'if') {
+      return [{ ...s, then: voidRets(s.then ?? []), else_: voidRets(s.else_ ?? []) }];
+    }
+    if (s.kind === 'while' || s.kind === 'for') return [{ ...s, body: voidRets(s.body ?? []) }];
+    if (s.kind === 'block') return [{ ...s, stmts: voidRets(s.stmts ?? []) }];
+    return [s];
+  });
 }
 
 /** `FACT(n)`：说明书说它走 gamma，这一版只对**非负整数**成立（一格循环）。 */

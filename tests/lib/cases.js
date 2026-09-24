@@ -697,6 +697,24 @@ export const PDNOISE = [
 ];
 
 /**
+ * **`do{…}while(c)` 里的 `break` / `continue`**（`ext/evaldraw/examples/dowhile.kc`）。
+ *
+ * 标准 IR 里没有 do-while，落成"一格旗子 + while"。从前是 body 抄两份，于是第一份里的
+ * `break` **不在循环里**（方言当场报，语料里 `geeky/mandel.kc` 就是这个写法）、
+ * `continue` 也会跳出而不是回去重测条件。这两行钉住的正是那两件事。
+ */
+export const EVDOWHILE = ['i=5 n=10', 'j=7 s=16'];
+
+/**
+ * **末尾那句不带分号的表达式就是返回值**（`ext/evaldraw/examples/tailexpr.kc`）。
+ *
+ * EvalDraw 的表面脚本几乎都这么写（语料里十八份）。这一行还顺带钉住"带值的 `return`
+ * 在两条产物形状上都对"（`eval$frame` 是 real、`(main …)` 是 void —— 后者由
+ * `voidRets()` 收尾时统一摊平）。
+ */
+export const EVTAIL = ['a=7'];
+
+/**
  * **cpp 的类模板**（`ext/cpp/examples/ctmpl.cpp`）。`Box<int>` 落成一格叫 `Box__int` 的
  * 普通记录、方法叫 `Box__int_get`。第五、六行钉住"同一格实例只造一遍"（两个变量各自独立、
  * 互不串味），最后一行钉住类模板的记录当**返回值**交出去。期望输出由 `c++` 给。

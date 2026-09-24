@@ -1,0 +1,23 @@
+// ext/evaldraw/examples/dowhile.kc —— **`do{…}while(c)` 里的 `break` / `continue`**
+//
+// 这一格判的是 do-while 的落法（`ext/polydraw/adapter.js` 的 `dowhile` 那一段）：
+// 标准 IR 里没有 do-while，落成**一格旗子 + while**
+//
+//     let pd_doN = 1;  while (pd_doN != 0 || c) { pd_doN = 0; body }
+//
+// 从前是"body 抄两份（先跑一趟、再 while）"—— 那样第一份里的 `break` **不在循环里**，
+// 方言当场报（语料里 `geeky/mandel.kc:6` 就是这个写法），而且 `continue` 在第一份里
+// 会跳出而不是回去重测条件。这一份两样都判：
+//   * `break` 跳出的是同一格循环（i 停在 5、n 只加了 1+2+3+4）；
+//   * `continue` 回去重测条件（j 走到 7、s 只加奇数 1+3+5+7）。
+
+()
+{
+   i = 0; n = 0;
+   do { i++; if (i == 5) break; n += i; } while (i < 100);
+   printf("i=%g n=%g\n", i, n);
+
+   j = 0; s = 0;
+   do { j++; if (j % 2 == 0) continue; s += j; } while (j < 7);
+   printf("j=%g s=%g\n", j, s);
+}
