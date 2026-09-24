@@ -110,6 +110,8 @@ export const POLYDRAW_GL = new Map([
   ['glrotate/4', 'gl_rotate'],
   ['glscale/3', 'gl_scale'],
   ['glpushmatrix/0', 'gl_push'],
+  /* `gluLookAt(眼,看哪儿,上)`：纯矩阵，所以在语言这一侧（`polydraw.c:567` 自带一份）。 */
+  ['glulookat/9', 'gl_lookat'],
   ['glpopmatrix/0', 'gl_pop'],
   ['gluperspective/4', 'gl_perspective'],
   ['setfov/1', 'gl_setfov'],
@@ -611,6 +613,64 @@ function glMatrixDecls() {
       iff(bin('<=', nm('gl_sp'), num(0)), [ret(num(0))]),
       set('gl_sp', bin('-', nm('gl_sp'), num(1))),
       ...pop,
+      ret(num(0)),
+    ]),
+    /**
+     * `gluLookAt(眼 3, 看哪儿 3, 上 3)` —— **照 `polydraw.c:567` 那一份自己的实现抄**
+     * （原版没用 GLU 的，它自己写了一份）：算出一张矩阵之后 `glLoadMatrixd` ——
+     * 注意是**替换**，不是乘上去。
+     *
+     * `f = 眼 - 看哪儿`（**倒着的**，GL 的相机看 -Z），`r = f × 上`、`d = f × r`，
+     * 平移那一列是 `-(那一行 · 眼)`。索引与原版逐格相同（我们这格 `gl_mv` 也是列主序）。
+     */
+    fn('gl_lookat', ['px', 'py', 'pz', 'fx', 'fy', 'fz', 'ux', 'uy', 'uz'], [
+      ex(call('gl_need', [])),
+      letR('f0', bin('-', nm('px'), nm('fx'))),
+      letR('f1', bin('-', nm('py'), nm('fy'))),
+      letR('f2', bin('-', nm('pz'), nm('fz'))),
+      letR('fl', rm('sqrt', [bin('+', bin('+', bin('*', nm('f0'), nm('f0')),
+        bin('*', nm('f1'), nm('f1'))), bin('*', nm('f2'), nm('f2')))])),
+      iff(bin('<=', nm('fl'), num(0)), [ret(num(0))]),
+      letR('g0', bin('/', nm('f0'), nm('fl'))),
+      letR('g1', bin('/', nm('f1'), nm('fl'))),
+      letR('g2', bin('/', nm('f2'), nm('fl'))),
+      letR('r0', bin('-', bin('*', nm('g2'), nm('uy')), bin('*', nm('g1'), nm('uz')))),
+      letR('r1', bin('-', bin('*', nm('g0'), nm('uz')), bin('*', nm('g2'), nm('ux')))),
+      letR('r2', bin('-', bin('*', nm('g1'), nm('ux')), bin('*', nm('g0'), nm('uy')))),
+      letR('rl', rm('sqrt', [bin('+', bin('+', bin('*', nm('r0'), nm('r0')),
+        bin('*', nm('r1'), nm('r1'))), bin('*', nm('r2'), nm('r2')))])),
+      iff(bin('<=', nm('rl'), num(0)), [ret(num(0))]),
+      letR('s0', bin('/', nm('r0'), nm('rl'))),
+      letR('s1', bin('/', nm('r1'), nm('rl'))),
+      letR('s2', bin('/', nm('r2'), nm('rl'))),
+      letR('d0', bin('-', bin('*', nm('g1'), nm('s2')), bin('*', nm('g2'), nm('s1')))),
+      letR('d1', bin('-', bin('*', nm('g2'), nm('s0')), bin('*', nm('g0'), nm('s2')))),
+      letR('d2', bin('-', bin('*', nm('g0'), nm('s1')), bin('*', nm('g1'), nm('s0')))),
+      /* 索引与原版逐格相同：`gl_mv` 这一格是**列主序**（`gl_xf` 里是
+         `e[r] = Σ_k gl_mv[k*4+r]*v[k]`，也就是"矩阵 × 列向量"），
+         而 `mat[0],mat[4],mat[8]` 正是那张矩阵的第 0 行。 */
+      aset('gl_mv', num(0), nm('s0')),
+      aset('gl_mv', num(4), nm('s1')),
+      aset('gl_mv', num(8), nm('s2')),
+      aset('gl_mv', num(12), bin('-', num(0), bin('+', bin('+',
+        bin('*', nm('s0'), nm('px')), bin('*', nm('s1'), nm('py'))),
+        bin('*', nm('s2'), nm('pz'))))),
+      aset('gl_mv', num(1), nm('d0')),
+      aset('gl_mv', num(5), nm('d1')),
+      aset('gl_mv', num(9), nm('d2')),
+      aset('gl_mv', num(13), bin('-', num(0), bin('+', bin('+',
+        bin('*', nm('d0'), nm('px')), bin('*', nm('d1'), nm('py'))),
+        bin('*', nm('d2'), nm('pz'))))),
+      aset('gl_mv', num(2), nm('g0')),
+      aset('gl_mv', num(6), nm('g1')),
+      aset('gl_mv', num(10), nm('g2')),
+      aset('gl_mv', num(14), bin('-', num(0), bin('+', bin('+',
+        bin('*', nm('g0'), nm('px')), bin('*', nm('g1'), nm('py'))),
+        bin('*', nm('g2'), nm('pz'))))),
+      aset('gl_mv', num(3), num(0)),
+      aset('gl_mv', num(7), num(0)),
+      aset('gl_mv', num(11), num(0)),
+      aset('gl_mv', num(15), num(1)),
       ret(num(0)),
     ]),
     fn('gl_translate', ['x', 'y', 'z'], [
