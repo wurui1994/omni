@@ -38,7 +38,7 @@
 // 详见 `docs/design/eval-realtime-gpu.md` 第 9 节。
 import {
   ARR, num, str, nm, bin, bi, call, rm, set, letR, ret, iff, whil, ex, aset, aget, ix, fn, fnT,
-  glob, anew,
+  glob, anew, inum, letI, agetI, asetI,
 } from './ir.js';
 
 /** 设备那一面：一格宿主调用 / 一段顶点批。 */
@@ -66,15 +66,23 @@ const VMAX = 16384;
 /** 一条批最多攒几个顶点（攒满就交出去）。 */
 const OMAX = 3072;
 
-/** `gl_vb` 的第 i 个顶点的第 k 格。 */
-const vb = (i, k) => aget('gl_vb', bin('+', bin('*', i, num(VS)), num(k)));
-const vbset = (i, k, v) => aset('gl_vb', bin('+', bin('*', i, num(VS)), num(k)), v);
+/** `gl_vb` 的第 i 个顶点：**基址先算成一格 int**，十六格一格一格写（`vbset`）。 */
+const vbase = (i) => letI('vb_b', ix(bin('*', i, num(VS))));
+const vbset = (k, v) => asetI('gl_vb', bin('+', nm('vb_b'), inum(k)), v);
 
-/** 一格顶点从 `gl_vb[i]` 抄到某条批的第 `c` 格（16 个数一格一格抄）。 */
-const copyV = (dst, cnt, i) => {
-  const out = [];
+/** 一格顶点从 `gl_vb[i]` 抄到某条批的第 `c` 格（16 个数一格一格抄）。
+ *
+ * **两个基址各提成一格局部量**（`tag` 是调用点的记号，一个函数里可以抄好几格顶点）：
+ * 从前十六句里每句都重算一遍 `i * 16` 与 `cnt * 16`，也就是一格顶点 32 次乘法 + 32 次
+ * `int()`。`disco ball` 一帧 12 万个顶点，`gl_tri` 一个函数就占 35.6% 的栈顶样本
+ * （2026-09-25，`--gfx null` + `OMNI_PROF`）。基址是同一个整数值算一次还是算十六次，
+ * **答案逐位不变**。 */
+const copyV = (dst, cnt, i, tag) => {
+  const s = `cv_s_${tag}`;
+  const d = `cv_d_${tag}`;
+  const out = [letI(s, ix(bin('*', i, num(VS)))), letI(d, ix(bin('*', nm(cnt), num(VS))))];
   for (let k = 0; k < VS; k++) {
-    out.push(aset(dst, bin('+', bin('*', nm(cnt), num(VS)), num(k)), vb(i, k)));
+    out.push(asetI(dst, bin('+', nm(d), inum(k)), agetI('gl_vb', bin('+', nm(s), inum(k)))));
   }
   out.push(set(cnt, bin('+', nm(cnt), num(1))));
   return out;
@@ -100,7 +108,7 @@ export function glGlobalDecls() {
   return [
     ...GL_GLOBALS.map((n) => glob(n)),
     glob('gl_mv', ARR), glob('gl_pj', ARR), glob('gl_st', ARR),
-    glob('gl_tm', ARR), glob('gl_ta', ARR), glob('gl_vb', ARR),
+    glob('gl_tm', ARR), glob('gl_vb', ARR),
     /* 交批时那格 MODELVIEW·PROJECTION（可编程管线那一档的 `u_mvp`）。 */
     glob('gl_mp', ARR),
     /* 三条顶点批：三角 / 线段 / 点（`(gfxbatch …)` 的三个类）。 */
@@ -510,7 +518,6 @@ function glSetupDecls() {
       set('gl_pj', anew(num(16))),
       set('gl_st', anew(num(16 * 32))),
       set('gl_tm', anew(num(16))),
-      set('gl_ta', anew(num(16))),
       set('gl_vb', anew(num(VMAX * VS))),
       set('gl_mp', anew(num(16))),
       set('gl_prog', num(0)),
@@ -688,8 +695,11 @@ function glSetupDecls() {
 
 /** 矩阵那一摊（**右乘** MODELVIEW，与 GL 同）。 */
 function glMatrixDecls() {
-  /* gl_ta = gl_mv · gl_tm，再抄回 gl_mv。十六格**摊开写**（一格是四个乘积的和）——
-     这一层没有循环反而更清楚，而且少两层下标算术。 */
+  /* `gl_mv = gl_mv · gl_tm`。十六格**摊开写**（一格是四个乘积的和）——
+     这一层没有循环反而更清楚，而且少两层下标算术。
+     **十六格先落局部量再写回**（从前是落 `gl_ta` 那格全局数组再抄回来）：读写的次序与
+     算术一个字没变（十六个乘加全在写第一格之前算完），只是省掉 16 次数组写 + 16 次数组读。
+     `gl_mvmul` 在 `disco ball` 上占 23.9% 的栈顶样本（2026-09-25）。 */
   const mul = [];
   for (let c = 0; c < 4; c++) {
     for (let r = 0; r < 4; r++) {
@@ -698,11 +708,11 @@ function glMatrixDecls() {
         const t = bin('*', aget('gl_mv', num(k * 4 + r)), aget('gl_tm', num(c * 4 + k)));
         acc = acc === null ? t : bin('+', acc, t);
       }
-      mul.push(aset('gl_ta', num(c * 4 + r), acc));
+      mul.push(letR(`mm${c * 4 + r}`, acc));
     }
   }
   const back = [];
-  for (let i = 0; i < 16; i++) back.push(aset('gl_mv', num(i), aget('gl_ta', num(i))));
+  for (let i = 0; i < 16; i++) back.push(aset('gl_mv', num(i), nm(`mm${i}`)));
 
   /* 顶点：clip = PROJECTION · (MODELVIEW · v)。 */
   const xf = [];
@@ -723,11 +733,12 @@ function glMatrixDecls() {
     xf.push(set(g, acc));
   }
 
-  const push = [];
-  const pop = [];
+  /* 栈那两格：基址（`gl_sp * 16`）也只算一次，而且存成 int —— 与 `copyV` 同一条理由。 */
+  const push = [letI('psb', ix(bin('*', nm('gl_sp'), num(16))))];
+  const pop = [letI('ppb', ix(bin('*', nm('gl_sp'), num(16))))];
   for (let i = 0; i < 16; i++) {
-    push.push(aset('gl_st', bin('+', bin('*', nm('gl_sp'), num(16)), num(i)), aget('gl_mv', num(i))));
-    pop.push(aset('gl_mv', num(i), aget('gl_st', bin('+', bin('*', nm('gl_sp'), num(16)), num(i)))));
+    push.push(asetI('gl_st', bin('+', nm('psb'), inum(i)), aget('gl_mv', num(i))));
+    pop.push(aset('gl_mv', num(i), agetI('gl_st', bin('+', nm('ppb'), inum(i)))));
   }
 
   return [
@@ -1007,36 +1018,37 @@ function glDrawDecls() {
       ], [
         ex(call('gl_xf', [nm('x'), nm('y'), nm('z'), nm('w')])),
       ]),
-      vbset(nm('gl_n'), 0, nm('gl_cx')),
-      vbset(nm('gl_n'), 1, nm('gl_cy')),
-      vbset(nm('gl_n'), 2, nm('gl_cz')),
-      vbset(nm('gl_n'), 3, nm('gl_cw')),
-      vbset(nm('gl_n'), 4, nm('gl_r')),
-      vbset(nm('gl_n'), 5, nm('gl_g')),
-      vbset(nm('gl_n'), 6, nm('gl_b')),
-      vbset(nm('gl_n'), 7, num(1)),
-      vbset(nm('gl_n'), 8, nm('gl_ts')),
-      vbset(nm('gl_n'), 9, nm('gl_tt')),
-      vbset(nm('gl_n'), 10, nm('gl_tp')),
-      vbset(nm('gl_n'), 11, nm('gl_tq')),
-      vbset(nm('gl_n'), 12, nm('gl_nx')),
-      vbset(nm('gl_n'), 13, nm('gl_ny')),
-      vbset(nm('gl_n'), 14, nm('gl_nz')),
-      vbset(nm('gl_n'), 15, num(0)),
+      vbase(nm('gl_n')),
+      vbset(0, nm('gl_cx')),
+      vbset(1, nm('gl_cy')),
+      vbset(2, nm('gl_cz')),
+      vbset(3, nm('gl_cw')),
+      vbset(4, nm('gl_r')),
+      vbset(5, nm('gl_g')),
+      vbset(6, nm('gl_b')),
+      vbset(7, num(1)),
+      vbset(8, nm('gl_ts')),
+      vbset(9, nm('gl_tt')),
+      vbset(10, nm('gl_tp')),
+      vbset(11, nm('gl_tq')),
+      vbset(12, nm('gl_nx')),
+      vbset(13, nm('gl_ny')),
+      vbset(14, nm('gl_nz')),
+      vbset(15, num(0)),
       set('gl_n', bin('+', nm('gl_n'), num(1))),
       ret(num(0)),
     ]),
     /* 一格点：抄进点那条批（设备画成一个像素 —— 像素多大是设备的事）。 */
     fn('gl_pt', ['i'], [
       iff(bin('>=', nm('gl_np'), num(OMAX)), [ex(call('gl_flush', []))]),
-      ...copyV('gl_pb', 'gl_np', nm('i')),
+      ...copyV('gl_pb', 'gl_np', nm('i'), 'p'),
       ret(num(0)),
     ]),
     /* 线段：两个顶点抄进线段那条批。 */
     fn('gl_seg', ['i', 'j'], [
       iff(bin('>=', bin('+', nm('gl_nl'), num(2)), num(OMAX)), [ex(call('gl_flush', []))]),
-      ...copyV('gl_lb', 'gl_nl', nm('i')),
-      ...copyV('gl_lb', 'gl_nl', nm('j')),
+      ...copyV('gl_lb', 'gl_nl', nm('i'), 'la'),
+      ...copyV('gl_lb', 'gl_nl', nm('j'), 'lb'),
       ret(num(0)),
     ]),
     /**
@@ -1045,9 +1057,9 @@ function glDrawDecls() {
      */
     fn('gl_tri', ['i', 'j', 'k'], [
       iff(bin('>=', bin('+', nm('gl_no'), num(3)), num(OMAX)), [ex(call('gl_flush', []))]),
-      ...copyV('gl_ob', 'gl_no', nm('i')),
-      ...copyV('gl_ob', 'gl_no', nm('j')),
-      ...copyV('gl_ob', 'gl_no', nm('k')),
+      ...copyV('gl_ob', 'gl_no', nm('i'), 'ta'),
+      ...copyV('gl_ob', 'gl_no', nm('j'), 'tb'),
+      ...copyV('gl_ob', 'gl_no', nm('k'), 'tc'),
       ret(num(0)),
     ]),
     /**

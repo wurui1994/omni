@@ -27,8 +27,21 @@ export const whil = (c, body) => ({ kind: 'while', cond: c, body });
 export const ex = (e) => ({ kind: 'expr-stmt', expr: e });
 
 /* real -> int：**发方言的 `toint`**。公共 lower 里 `{kind:'cast'}` 没钩子时是**原样透传**，
-   于是下标仍是 real，方言那侧当场报"下标要是 int" —— 撞过一次。 */
-export const ix = (e) => bi('toint', [e]);
+   于是下标仍是 real，方言那侧当场报"下标要是 int" —— 撞过一次。
+
+   **两格不必绕这一趟**（2026-09-25，实时那一轴）：已经是 int 的表达式、与"取整数值的
+   real 字面量"（`num(3)` 这种，下标里满地都是）直接给 int 字面量。`toint(3.0)` 与 `3`
+   同值，可前者在 C 那条腿上落成一次真调用（`omni_trunc(3.0)`），而且它一出现，
+   后面 `base + 3.0` 那一串就全在 double 上算。 */
+const isIntLit = (e) => e !== null && e !== undefined && e.kind === 'int';
+export const ix = (e) => {
+  if (isIntLit(e)) return e;
+  if (e !== null && e !== undefined && e.kind === 'real') {
+    const v = Number(e.value);
+    if (Number.isInteger(v)) return { kind: 'int', value: v };
+  }
+  return bi('toint', [e]);
+};
 export const aget = (a, i) => bi('aget', [nm(a), ix(i)]);
 /** 语句位置的下标写。**不是** `builtin aset` —— 那一格是表达式。 */
 export const aset = (a, i, v) => ({
@@ -36,6 +49,26 @@ export const aset = (a, i, v) => ({
 });
 /** 一格新数组（长度也必须是 int）。 */
 export const anew = (n) => bi('anew', [{ kind: 'type', type: ARR }, ix(n)]);
+
+/* ── **下标那一路的 int 版**（2026-09-25，实时那一轴）。
+ *
+ * 语言的值只有 real 一种，所以 `a[i]` 每次都要 `toint` 一趟 —— 落到 C 上是
+ * `omni_arr_f64_get(a, omni_trunc(base + 1.0))`。批那几格的下标其实是**整数**
+ * （顶点号 × 16 + 槽号），所以基址存成一格 int 局部量，之后 `base + k` 全在整数上算，
+ * 一趟 `toint` 都不剩。答案不变：`toint` 之后再加整数与先加再 `toint` 在这一段上同值
+ * （两边都是精确整数，且远在 2^53 以内）。
+ *
+ * `INT` / `inum` / `letI` 是标准 IR 里本来就有的形状（`{kind:'int'}`），这门语言先前
+ * 没用过而已。 */
+export const INT = { kind: 'int' };
+export const inum = (v) => ({ kind: 'int', value: v });
+export const letI = (n, v) => ({ kind: 'let', name: n, type: INT, init: v });
+/** 下标**已经是 int** 的读（不再套 `toint`）。 */
+export const agetI = (a, i) => bi('aget', [nm(a), i]);
+/** 下标已经是 int 的写（语句位置）。 */
+export const asetI = (a, i, v) => ({
+  kind: 'assign', target: { kind: 'index', obj: nm(a), index: i }, value: v,
+});
 
 /** 一格函数：形参与返回**一律 real**（EVAL 里只有这一种值）。 */
 export const fn = (name, params, body) => ({

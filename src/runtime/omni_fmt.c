@@ -829,6 +829,38 @@ double omni_gfx_tex(int64_t slot, int64_t w, int64_t h, int64_t d, int64_t fmt,
   return 0.0;
 }
 
+/* ── **名字那一格按指针记账**（2026-09-25 量的）：生成的代码每趟递进来的是同一个字符串
+ * **字面量**（`omni_gfx_call(omni_str_new("vertex", 6), …)`），所以（指针, 长度）这一对
+ * 就是名字的身份。先前每一趟都先过一次 `omni_cstr`——在 arena 上抄一份带 NUL 的副本。
+ * `disco ball` 一帧 3.6 万次图形调用，那份 memcpy 在 `--gfx null` 上占到 **21.6%** 的
+ * 栈顶样本（`omni_gfx_call;_platform_memmove`）；`(gfxarr …)` 那条路也一样
+ * （矩阵改成一句之后它是每段批两次 —— 8.7%）。
+ *
+ * 现在按指针直接映射到一份**记住的**副本：命中就不抄、不分配。`isq`（录制那一档要问的
+ * "这格是不是查询"）一起记着，那也是每趟一串 strcmp。
+ *
+ * 为什么敢按指针认：字面量在 .rodata 上，地址与长度都不动。万一哪天递进来的是算出来的
+ * 名字（指针会变），未命中那一路照旧抄一份 —— 答案一模一样，只是不省事。
+ * 槽是直接映射的，撞了就重抄一份（名字总共一百来个，撞不起来）。 */
+#define GFX_NCACHE 128
+static struct { const char *p; int64_t len; char *cs; int isq; } g_gfxnc[GFX_NCACHE];
+
+static char *gfx_name(omni_str s, int *isq) {
+  uintptr_t u = (uintptr_t)s.p;
+  size_t h = (size_t)(((u >> 4) ^ (u >> 2) ^ (uintptr_t)s.len) & (GFX_NCACHE - 1));
+  if (g_gfxnc[h].p == s.p && g_gfxnc[h].len == s.len) {
+    *isq = g_gfxnc[h].isq;
+    return g_gfxnc[h].cs;
+  }
+  char *cs = omni_cstr(s);
+  g_gfxnc[h].p = s.p;
+  g_gfxnc[h].len = s.len;
+  g_gfxnc[h].cs = cs;
+  g_gfxnc[h].isq = gfx_is_query(cs);
+  *isq = g_gfxnc[h].isq;
+  return cs;
+}
+
 /**
  * `(gfxarr "名字" a0 a1 a2 a3 数组)`：**带一整块数组的宿主调用**（§19.1）。
  *
@@ -841,8 +873,11 @@ double omni_gfx_tex(int64_t slot, int64_t w, int64_t h, int64_t d, int64_t fmt,
  */
 double omni_gfx_arr(omni_str name, double a0, double a1, double a2, double a3,
                     struct omni_arr_f64_s *blk) {
-  const char *nm = omni_cstr(name);
+  /* 录制那一档：这一族一格都不画（连名字都不用认）。 */
   if (gfx_rec()) { g_greccnt += 1; return 0.0; }
+  int nm_isq = 0;
+  const char *nm = gfx_name(name, &nm_isq);
+  (void)nm_isq;
   if (gfx_gl_want()) gfx_need();
   long n = blk == NULL ? 0 : (long)blk->len;
   double *items = blk == NULL ? NULL : blk->items;
@@ -943,37 +978,6 @@ static void gfx_perf_report(void) {
           gfx_mode() == 2 ? "view" : "render", (long long)g_gtn,
           g_gtsum, avg, g_gtmin, g_gtmax, avg > 0.0 ? 1000.0 / avg : 0.0);
   if (gfx_rec()) fprintf(stderr, "#perf calls total=%lld\n", (long long)g_greccnt);
-}
-
-/* ── **名字那一格按指针记账**（2026-09-25 量的）：生成的代码每趟递进来的是同一个字符串
- * **字面量**（`omni_gfx_call(omni_str_new("vertex", 6), …)`），所以（指针, 长度）这一对
- * 就是名字的身份。先前每一趟都先过一次 `omni_cstr`——在 arena 上抄一份带 NUL 的副本。
- * `disco ball` 一帧 3.6 万次图形调用，那份 memcpy 在 `--gfx null` 上占到 **21.6%** 的
- * 栈顶样本（`omni_gfx_call;_platform_memmove`）。
- *
- * 现在按指针直接映射到一份**记住的**副本：命中就不抄、不分配。`isq`（录制那一档要问的
- * "这格是不是查询"）一起记着，那也是每趟一串 strcmp。
- *
- * 为什么敢按指针认：字面量在 .rodata 上，地址与长度都不动。万一哪天递进来的是算出来的
- * 名字（指针会变），未命中那一路照旧抄一份 —— 答案一模一样，只是不省事。
- * 槽是直接映射的，撞了就重抄一份（名字总共一百来个，撞不起来）。 */
-#define GFX_NCACHE 128
-static struct { const char *p; int64_t len; char *cs; int isq; } g_gfxnc[GFX_NCACHE];
-
-static char *gfx_name(omni_str s, int *isq) {
-  uintptr_t u = (uintptr_t)s.p;
-  size_t h = (size_t)(((u >> 4) ^ (u >> 2) ^ (uintptr_t)s.len) & (GFX_NCACHE - 1));
-  if (g_gfxnc[h].p == s.p && g_gfxnc[h].len == s.len) {
-    *isq = g_gfxnc[h].isq;
-    return g_gfxnc[h].cs;
-  }
-  char *cs = omni_cstr(s);
-  g_gfxnc[h].p = s.p;
-  g_gfxnc[h].len = s.len;
-  g_gfxnc[h].cs = cs;
-  g_gfxnc[h].isq = gfx_is_query(cs);
-  *isq = g_gfxnc[h].isq;
-  return cs;
 }
 
 double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a2,
