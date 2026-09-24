@@ -1,0 +1,778 @@
+// ext/r/adapter.js —— **R 的树 → 标准 IR**（ADR-0044 §1.2）
+//
+// 语法那一半照 R 自己的 `gram.y` 复刻（见 `ext/r/r.grammar` 文件头）。这一半是**映射**：
+// 那棵 CST 上的节点 → 标准 IR，语义降级交给 `src/core/lower/` 那一份公共降级器。
+//
+// ## R 这门语言要 adapter 自己消化的五件事
+//
+//   1. **函数是值**。`f <- function(n) …` 在树上是一格赋值，不是声明。所以顶层扫一遍：
+//      右边是 `(fn …)` 的赋值提升成 `{kind:'fn'}`，别的落进 `main`。
+//   2. **最后一句就是返回值**（没有 `return` 也要返）。`return(x)` 在 R 里是**一次调用**，
+//      不是语句 —— 两条都在这儿摆平（`tailOf`）。尾位上的 `if` 要往两支里钻，
+//      不能囫囵包成一格 `ternary`：`if (n == 0) return(1)` 那种只有一支带值。
+//   3. **没有声明**。`acc <- 0` 既是赋值也是"第一次出现"（与 awk 同一格），所以扫一遍
+//      被赋值的名字，在段顶上补一串 `let`。
+//   4. **类型**。方言那一层不推导只检查，所以"这个名字装的是什么"必须在这儿答完。
+//      R 的数其实只有 double，这儿按**字面量的写法**分：没有小数点没有指数的是 `int`
+//      （`5`、`1:n`、`42L`），带小数点或指数的是 `real`。判据是那几份例子的输出
+//      （`cat(15)` 要印 `15` 而不是 `15.0`），与 awk 那一格同一个取舍。
+//   5. **下标从 1 起**。`x[i]` → `aget(x, i-1)`，字面量当场折掉。`x[["k"]]` 是字典
+//      （R 的 `list` 带名字用就是关联表），`x[i]` 是数组 —— 靠上面第 4 条推出来的类型分。
+//
+// ## 明说的不足（**不猜**）
+//
+//   1. **不做向量化**。R 里 `c(1,2) + 1` 是逐元素加、`if (c(TRUE,FALSE))` 是取第一格
+//      加一句警告 —— 这一批一律当标量算。这不是"以后补一格函数"的事，是整套值模型
+//      （长度回收、`NA` 的传播、属性）的事，得单独一版。
+//   2. **不做懒求值**（promise / `missing()` / `substitute()`）、**不做属性**
+//      （`names` / `dim` / `class`）、**不做 S3 / S4 / R5 分派**、**不做环境**
+//      （`<<-` 当普通赋值）、**不做 `...`**。
+//   3. `NA` / `NaN` / `Inf` 认得出记号但落不下来 —— 方言里没有"缺失"这一格。
+//   4. 内建只认下面 `BUILTINS` 那一张表，表外的名字当用户函数调（调不到就是链接期的错）。
+
+import { isList, tag, kids, leaf } from '../../src/core/lower/cst.js';
+
+/* ─── 类型（标准 IR 的类型描述，§1.2） ─────────────────────────────────── */
+
+const INT = { kind: 'int' };
+const REAL = { kind: 'real' };
+const STR = { kind: 'string' };
+const BOOL = { kind: 'bool' };
+const arrOf = (value) => ({ kind: 'arr', elem: value });
+/** R 的 `list` 带名字用就是关联表 —— 键一律是串。 */
+const dictOf = (value) => ({ kind: 'map', key: STR, value });
+
+/**
+ * R 的名字规整成方言收得下的形状：`.` 是 R 里合法的名字字符（`is.null` / `max.2`），
+ * 方言那侧不收。反引号那一支已经由词法层剥干净（`(string SYMBOL "`")`），
+ * 所以这儿只管字符替换。与 `ext/chez/adapter` 把 `-` / `?` / `!` 换成 `_` 是同一手。
+ */
+const mangle = (s) => String(s).replace(/[.]/g, '_');
+
+/** `(sym x)` / `(str x)` / 裸记号都要认（形参表、命名实参那几处是后者）。 */
+const nameOf = (x) => {
+  const t = tag(x);
+  if (t === 'sym' || t === 'str') return leaf(kids(x)[0]);
+  return leaf(x);
+};
+
+/* ─── 字面量 ───────────────────────────────────────────────────────────── */
+
+/** R 的关键字里 `TRUE` / `FALSE` / `NA` / `Inf` / `NaN` 都是 NUM_CONST（gram.y:2176）。 */
+const CONSTS = new Map([
+  ['TRUE', { kind: 'bool', value: true }],
+  ['FALSE', { kind: 'bool', value: false }],
+]);
+
+/** 一格 NUM_CONST 的文本 → 标准 IR 的字面量。写法定类型，见文件头第 4 条。 */
+function numLit(text) {
+  const t = String(text);
+  const c = CONSTS.get(t);
+  if (c !== undefined) return c;
+  if (t === 'NA' || t === 'NaN' || t === 'Inf' || t.startsWith('NA_')) {
+    throw new Error(`r->IR: ${t} 落不下来 —— 方言里没有"缺失"这一格（见 adapter 文件头第 3 条）`);
+  }
+  if (t.endsWith('i')) throw new Error(`r->IR: 复数还没接：${t}`);
+  if (t.endsWith('L')) return { kind: 'int', value: Number(t.slice(0, -1)) };
+  if (/^0[xX]/.test(t)) return { kind: 'int', value: Number(t) };
+  if (t.includes('.') || /[eE]/.test(t)) return { kind: 'real', value: Number(t) };
+  return { kind: 'int', value: Number(t) };
+}
+
+/* ─── 内建（表外的名字当用户函数调） ──────────────────────────────────────
+ *
+ * 这张表是**判据**，不是方便：R 的内建在树上与用户函数完全同形（`length(x)` 与 `f(x)`
+ * 一个形状），分开它们只能靠名字。表外的名字照调 —— 于是"哪些内建接上了"这件事
+ * 有一处说法，而不是散在 `exprOf` 的一串 if 里。
+ */
+const BUILTINS = new Set([
+  'cat', 'paste', 'paste0', 'c', 'list', 'length', 'nchar', 'return', 'is.null',
+  'as.integer', 'as.numeric', 'as.character', 'sqrt', 'abs', 'floor', 'seq_len',
+]);
+
+/* ─── 扫一段：哪些名字被写过、写进去的是什么 ────────────────────────────── */
+
+/** `<-` / `<<-` / `:=` / `=` 都是赋值（前三个是 LEFT_ASSIGN，第四个是 EQ_ASSIGN）。 */
+const ASSIGN_OPS = new Set(['<-', '<<-', ':=', '=']);
+const isAssign = (x) => (tag(x) === 'bin' && ASSIGN_OPS.has(String(leaf(kids(x)[0]))))
+  || tag(x) === 'bin-rev';
+
+/** 一格赋值 → `{target, value}`（`->` / `->>` 那两格实参是反的，见 gram.y:498）。 */
+function assignParts(x) {
+  const [, a, b] = kids(x);
+  return tag(x) === 'bin-rev' ? { target: b, value: a } : { target: a, value: b };
+}
+
+/** 走遍一棵子树，每格赋值回调一次。 */
+function eachAssign(x, fn) {
+  if (!isList(x)) return;
+  if (isAssign(x)) fn(assignParts(x));
+  for (const k of kids(x)) eachAssign(k, fn);
+}
+
+/** 用 `[[…]]` 读写过的名字 —— R 的 `list` 这么用就是关联表（见文件头第 5 条）。 */
+function dictNames(x, out = new Set()) {
+  if (!isList(x)) return out;
+  if (tag(x) === 'sub2' && tag(kids(x)[0]) === 'sym') out.add(nameOf(kids(x)[0]));
+  for (const k of kids(x)) dictNames(k, out);
+  return out;
+}
+
+/* ─── 类型推断 ─────────────────────────────────────────────────────────── */
+
+/** 两格数值类型合起来：有一格是 real 就是 real（`1 + 0.5`）。 */
+const joinNum = (a, b) => (a.kind === 'real' || b.kind === 'real' ? REAL : INT);
+
+/** 一格表达式装的是什么。`types` 是这一段边推边查的那张表。 */
+function typeOfExpr(x, types) {
+  switch (tag(x)) {
+    case 'num': return numLit(leaf(kids(x)[0])).kind === 'real' ? REAL
+      : (numLit(leaf(kids(x)[0])).kind === 'bool' ? BOOL : INT);
+    case 'str': return STR;
+    case 'paren': return typeOfExpr(kids(x)[0], types);
+    case 'sym': return types.get(mangle(nameOf(x))) ?? INT;
+    case 'block': {
+      const ks = kids(x);
+      return ks.length === 0 ? INT : typeOfExpr(ks[ks.length - 1], types);
+    }
+    case 'if': {
+      const ks = kids(x);
+      return typeOfExpr(ks[1], types);
+    }
+    case 'un': {
+      const op = String(leaf(kids(x)[0]));
+      return op === '!' ? BOOL : typeOfExpr(kids(x)[1], types);
+    }
+    case 'sub1': {
+      const a = types.get(mangle(nameOf(kids(x)[0])));
+      return a !== undefined && a.kind === 'arr' ? a.elem : INT;
+    }
+    case 'sub2': {
+      const d = types.get(mangle(nameOf(kids(x)[0])));
+      if (d !== undefined && d.kind === 'map') return d.value;
+      if (d !== undefined && d.kind === 'arr') return d.elem;
+      return INT;
+    }
+    case 'bin': {
+      const op = String(leaf(kids(x)[0]));
+      if (['<', '>', '<=', '>=', '==', '!=', '&', '&&', '|', '||'].includes(op)) return BOOL;
+      if (ASSIGN_OPS.has(op)) return typeOfExpr(kids(x)[2], types);
+      if (op === ':') return INT;
+      if (op === '/') return REAL;                  // R 的 `/` 一律是实数除
+      return joinNum(typeOfExpr(kids(x)[1], types), typeOfExpr(kids(x)[2], types));
+    }
+    case 'bin-rev': return typeOfExpr(kids(x)[1], types);
+    case 'call': return typeOfCall(x, types);
+    default: return INT;
+  }
+}
+
+/** 一次调用的结果类型。内建各自说，用户函数按"这门语言的数"算（见文件头第 4 条）。 */
+function typeOfCall(x, types) {
+  const fn = tag(kids(x)[0]) === 'sym' ? nameOf(kids(x)[0]) : null;
+  const args = argsOf(x).map((a) => a.value).filter((v) => v !== null);
+  switch (fn) {
+    case 'paste': case 'paste0': case 'as.character': return STR;
+    case 'length': case 'nchar': case 'as.integer': return INT;
+    case 'sqrt': case 'as.numeric': return REAL;
+    case 'is.null': return BOOL;
+    case 'abs': case 'floor': return args.length === 0 ? INT : typeOfExpr(args[0], types);
+    case 'return': return args.length === 0 ? INT : typeOfExpr(args[0], types);
+    case 'c': return arrOf(args.length === 0 ? INT
+      : args.map((a) => typeOfExpr(a, types)).reduce(joinNum));
+    case 'list': return dictOf(INT);
+    default: return INT;
+  }
+}
+
+/**
+ * 一段（函数体 / 顶层）里每个名字装什么。
+ *
+ * 次序要紧（与 `ext/awk/adapter.js` 同一条）：字典先定（它决定 `m[["k"]]` 的类型），
+ * 再定别的。同一个名字写过多次而类型不同时**后写的赢** —— 例子里不出现，
+ * 真出现了那是这门语言要单独定的一条规矩，不该在这儿悄悄挑一个。
+ */
+function inferTypes(body, params) {
+  const types = new Map();
+  for (const p of params) types.set(p, INT);
+  const dicts = dictNames(body);
+  for (const d of dicts) {
+    const writes = [];
+    eachAssign(body, ({ target, value }) => {
+      if (tag(target) === 'sub2' && mangle(nameOf(kids(target)[0])) === mangle(d)) writes.push(value);
+    });
+    const vt = writes.length === 0 ? INT
+      : (writes.some((w) => typeOfExpr(w, types).kind === 'string') ? STR
+        : writes.map((w) => typeOfExpr(w, types)).reduce(joinNum, INT));
+    types.set(mangle(d), dictOf(vt));
+  }
+  eachAssign(body, ({ target, value }) => {
+    if (tag(target) !== 'sym') return;
+    const name = mangle(nameOf(target));
+    if (params.includes(name) || types.has(name)) {
+      if (!types.has(name)) types.set(name, typeOfExpr(value, types));
+      return;
+    }
+    const t = typeOfExpr(value, types);
+    types.set(name, t.kind === 'bool' ? INT : t);   // 条件的值装进量里当 0/1
+  });
+  /* `for (v in …)` 的那格循环量也是"没有声明的第一次出现"。 */
+  forNames(body, types);
+  return types;
+}
+
+/** `for (v in seq)` 里那个 `v`：区间是 int，序列是它的元素类型。 */
+function forNames(x, types) {
+  if (!isList(x)) return;
+  if (tag(x) === 'for') {
+    const fc = kids(x)[0];
+    const v = mangle(nameOf(kids(fc)[0]));
+    const seq = kids(fc)[1];
+    if (!types.has(v)) {
+      const st = typeOfExpr(seq, types);
+      types.set(v, st.kind === 'arr' ? st.elem : st);
+    }
+  }
+  for (const k of kids(x)) forNames(k, types);
+}
+
+/* ─── 实参表 ───────────────────────────────────────────────────────────── */
+
+/**
+ * `(call f (arg e) (named-arg (sym k) e) …)` → `[{name, value}]`。
+ *
+ * 空的 `(arg)` 是 R 里真有的一格（`x[, 1]` / `f(a, )`），所以 `value` 可以是 null。
+ * **只有一格而且是空的，那就是"没有实参"** —— R 的语法里 `f()` 走的正是
+ * `sublist -> sub` 加 `sub -> ε`（gram.y:545/549），所以 `list()` 与 `f()` 都长这样。
+ */
+function argsOf(x) {
+  const out = [];
+  for (const a of kids(x).slice(1)) {
+    if (tag(a) === 'arg') out.push({ name: null, value: kids(a)[0] ?? null });
+    else if (tag(a) === 'named-arg') {
+      const ks = kids(a);
+      out.push({ name: nameOf(ks[0]), value: ks[1] ?? null });
+    }
+  }
+  if (out.length === 1 && out[0].name === null && out[0].value === null) return [];
+  return out;
+}
+
+/** 位置实参（命名的挑出去）。 */
+const posArgs = (x) => argsOf(x).filter((a) => a.name === null).map((a) => a.value);
+/** 一格命名实参的值（没有回 undefined）。 */
+const namedArg = (x, k) => argsOf(x).find((a) => a.name === k)?.value;
+
+/* ─── 表达式 ───────────────────────────────────────────────────────────── */
+
+const b = (op, left, right) => ({ kind: 'binop', op, left, right });
+const call1 = (name, ...args) => ({ kind: 'builtin', name, args });
+/** 一格类型当实参用（`(anew (arr int) N)` 的第一格）—— 与 `ext/chez/adapter/expr.js` 同一格。 */
+const tyArg = (type) => ({ kind: 'type', type });
+
+/** 临时量的名字。一趟 `rToIR` 里从 0 起（出来的 `.sx` 要能进快照，不许带上一趟的号）。 */
+let tmpN = 0;
+const fresh = (p) => `r_${p}${tmpN++}`;
+
+/** 下标从 1 起 → 从 0 起。字面量当场折掉（`x[1]` 出 `aget(x, 0)` 而不是 `1-1`）。 */
+function zeroBased(e) {
+  if (e.kind === 'int') return { kind: 'int', value: e.value - 1 };
+  return b('-', e, { kind: 'int', value: 1 });
+}
+
+/** 一格值变成串（串本来就是串，别的走 `tostr`）。 */
+const asStr = (x, types) => (typeOfExpr(x, types).kind === 'string'
+  ? exprOf(x, types) : call1('tostr', exprOf(x, types)));
+
+/** `x[…]` / `x[[…]]` 的读：按对象的类型分数组还是字典（见文件头第 5 条）。 */
+function indexRead(x, types) {
+  const obj = kids(x)[0];
+  const keys = kids(x).slice(1).map((a) => kids(a)[0]).filter((k) => k !== undefined);
+  if (keys.length !== 1) throw new Error(`r->IR: 多维下标（x[i, j]）还没接（这儿给了 ${keys.length} 格）`);
+  const ot = typeOfExpr(obj, types);
+  const o = exprOf(obj, types);
+  if (ot.kind === 'map') return call1('dget', o, exprOf(keys[0], types));
+  if (ot.kind === 'arr') return call1('aget', o, zeroBased(exprOf(keys[0], types)));
+  throw new Error(`r->IR: ${nameOf(obj)} 上的下标读不知道是数组还是表 —— 推出来是 ${ot.kind}`);
+}
+
+function exprOf(x, types, want) {
+  switch (tag(x)) {
+    case 'num': return numLit(leaf(kids(x)[0]));
+    case 'str': return { kind: 'string', value: leaf(kids(x)[0]) };
+    case 'sym': return { kind: 'name', name: mangle(nameOf(x)) };
+    case 'paren': return exprOf(kids(x)[0], types);
+    case 'sub1': case 'sub2': return indexRead(x, types);
+    case 'call': return callOf(x, types, undefined, want);
+    case 'pipe': {
+      /* `x |> f(…)` 就是 `f(x, …)`（R 在语法动作 `xxpipe` 里当场展开，gram.y:495）。 */
+      const [lhs, rhs] = kids(x);
+      if (tag(rhs) !== 'call') throw new Error('r->IR: `|>` 右边必须是一次调用（R 自己也这么要求）');
+      const e = callOf(rhs, types, exprOf(lhs, types));
+      return e;
+    }
+    case 'un': {
+      const op = String(leaf(kids(x)[0]));
+      const operand = kids(x)[1];
+      if (op === '!') return { kind: 'unop', op: '!', operand: condOf(operand, types) };
+      if (op === '-' || op === '+') return { kind: 'unop', op, operand: exprOf(operand, types) };
+      throw new Error(`r->IR: 一元 \`${op}\` 还没接`);
+    }
+    case 'if': {
+      /* 表达式位上的 `if` → `ternary`。**只有两支齐全**才行：R 里少一支的值是
+         `NULL`（不可见），而方言里没有那一格 —— 当场报，别默默塞一个 0。 */
+      const [c, t, e] = kids(x);
+      if (e === undefined) throw new Error('r->IR: 表达式位上的 `if` 缺 `else` —— R 那一档的值是 NULL，方言里没有这一格');
+      return {
+        kind: 'ternary', cond: condOf(c, types), then: exprOf(t, types), else_: exprOf(e, types),
+      };
+    }
+    case 'bin': {
+      const [opN, l, r] = kids(x);
+      const op = String(leaf(opN));
+      if (ASSIGN_OPS.has(op)) throw new Error('r->IR: 表达式位上的赋值还没接（R 里它有值）');
+      /* `&&` / `||` 两边当条件看；`&` / `|` 在 R 里是**向量化**的那一对，标量上同解。 */
+      if (op === '&&' || op === '&') return b('&&', condOf(l, types), condOf(r, types));
+      if (op === '||' || op === '|') return b('||', condOf(l, types), condOf(r, types));
+      if (op === '%%') return b('%', exprOf(l, types), exprOf(r, types));
+      if (op === '%/%') return b('/', exprOf(l, types), exprOf(r, types));
+      if (op === ':') throw new Error('r->IR: `a:b` 只在 `for (v in a:b)` 那一格接了（造向量还没接）');
+      if (op === '$' || op === '@' || op === '::' || op === ':::' || op === '~' || op === '?') {
+        throw new Error(`r->IR: \`${op}\` 还没接`);
+      }
+      return b(op, exprOf(l, types), exprOf(r, types));
+    }
+    default:
+      throw new Error(`r->IR: 这一格表达式还没接：${tag(x) ?? JSON.stringify(x).slice(0, 40)}`);
+  }
+}
+
+/** 条件。R 要求条件是逻辑值（不像 C 收 0/1），所以这儿只在**字面量**上折一格。 */
+function condOf(x, types) {
+  if (tag(x) === 'paren') return condOf(kids(x)[0], types);
+  const t = typeOfExpr(x, types);
+  if (t.kind === 'bool') return exprOf(x, types);
+  /* 数当条件：R 的规矩是"不是 0 就是真"（`if (1)` 合法）。 */
+  if (t.kind === 'int' || t.kind === 'real') {
+    return b('!=', exprOf(x, types), { kind: t.kind, value: 0 });
+  }
+  throw new Error(`r->IR: 这一格当条件用还没接（装的是 ${t.kind}）`);
+}
+
+/* ─── 调用（内建在这儿分岔） ───────────────────────────────────────────── */
+
+/**
+ * 一次调用。`extra` 是 `|>` 塞到第一位的那格实参。
+ * 内建**不是调用** —— 它们落成方言的算子（与 chez 的 `vector-ref` 落 `aget` 同一条）。
+ */
+function callOf(x, types, extra, want) {
+  const fnNode = kids(x)[0];
+  const fn = tag(fnNode) === 'sym' ? nameOf(fnNode) : null;
+  const args = posArgs(x);
+  const all = extra === undefined ? args : [null, ...args];
+  const ev = (i) => (all[i] === null ? extra : exprOf(all[i], types));
+  const n = all.length;
+
+  if (fn !== null && BUILTINS.has(fn)) {
+    switch (fn) {
+      case 'return':
+        throw new Error('r->IR: `return()` 只能摆在语句位上（这儿在表达式里）');
+      case 'length': {
+        if (n !== 1) throw new Error('r->IR: length() 要一格实参');
+        const t = all[0] === null ? INT : typeOfExpr(all[0], types);
+        if (t.kind === 'map') return call1('dlen', ev(0));
+        return call1('alen', ev(0));
+      }
+      case 'nchar':
+        if (n !== 1) throw new Error('r->IR: nchar() 要一格实参');
+        return call1('slen', ev(0));
+      case 'paste0': case 'paste': {
+        /* `paste` 的默认 `sep` 是一个空格，`paste0` 是空串（R 的文档）。
+           接起来的是**串**，所以数要先 `tostr` —— 与 awk 的 `cat` 那一格同一条。 */
+        const sepNode = namedArg(x, 'sep');
+        let sep = fn === 'paste0' ? '' : ' ';
+        if (sepNode !== undefined) {
+          if (tag(sepNode) !== 'str') throw new Error('r->IR: paste() 的 sep= 只接串字面量');
+          sep = leaf(kids(sepNode)[0]);
+        }
+        if (n === 0) return { kind: 'string', value: '' };
+        const parts = all.map((a, i) => (a === null ? call1('tostr', extra) : asStr(a, types)));
+        return parts.reduce((acc, p) => b('+', sep === ''
+          ? acc : b('+', acc, { kind: 'string', value: sep }), p));
+      }
+      case 'c': {
+        /* `c(…)` 造一格向量。方言里"造"与"填"是两件事（`anew` 只给长度，值要 `aset`，
+           而那是语句），所以回一格 `block-expr`：先跑几句，再拿那格临时量当值。 */
+        if (n === 0) throw new Error('r->IR: `c()` 不带实参（空向量）还没接');
+        const et = want !== undefined && want.kind === 'arr' ? want.elem
+          : all.map((a) => (a === null ? INT : typeOfExpr(a, types))).reduce(joinNum);
+        const ty = arrOf(et);
+        const tmp = fresh('vec');
+        const stmts = [{
+          kind: 'let', name: tmp, type: ty,
+          init: call1('anew', tyArg(ty), { kind: 'int', value: n }),
+        }];
+        all.forEach((a, i) => stmts.push({
+          kind: 'assign',
+          target: { kind: 'index', obj: { kind: 'name', name: tmp }, index: { kind: 'int', value: i } },
+          value: ev(i),
+        }));
+        return { kind: 'block-expr', stmts, value: { kind: 'name', name: tmp } };
+      }
+      case 'list': {
+        if (n !== 0) throw new Error('r->IR: `list(…)` 带实参（有名字的表）还没接 —— 只接 `list()` 造空表');
+        /* 空表的**值类型**这一层答不出来（R 里它就是空的），所以听上游那格 `want`——
+           也就是"这个名字装什么"那张表推出来的（见 `inferTypes` 的 dicts 那一段）。 */
+        return call1('dnew', tyArg(want !== undefined && want.kind === 'map' ? want : dictOf(INT)));
+      }
+      case 'is.null': {
+        /* `is.null(m[["k"]])` 是 R 里问"这张表有没有这个键"的写法（缺键回 NULL）。
+           **只认这一种形状** —— 别的 `is.null` 当场报，不假装。 */
+        if (n !== 1 || all[0] === null || tag(all[0]) !== 'sub2') {
+          throw new Error('r->IR: is.null() 只接 `is.null(x[["k"]])` 那一种形状（问表里有没有这个键）');
+        }
+        const obj = kids(all[0])[0];
+        const key = kids(kids(all[0])[1])[0];
+        return { kind: 'unop', op: '!', operand: call1('dhas', exprOf(obj, types), exprOf(key, types)) };
+      }
+      case 'as.integer': return call1('toint', ev(0));
+      case 'as.numeric': return call1('toreal', ev(0));
+      case 'as.character': return call1('tostr', ev(0));
+      case 'sqrt': return call1('rmath', { kind: 'string', value: 'sqrt' }, ev(0));
+      case 'abs': case 'floor': {
+        const t = all[0] === null ? INT : typeOfExpr(all[0], types);
+        if (fn === 'floor' && t.kind !== 'real') return ev(0);
+        if (t.kind === 'real') return call1('rmath', { kind: 'string', value: fn }, ev(0));
+        /* 整数上的 `abs`：方言里没有这一格算子，落成一格三元 */
+        return { kind: 'ternary', cond: b('<', ev(0), { kind: 'int', value: 0 }), then: { kind: 'unop', op: '-', operand: ev(0) }, else_: ev(0) };
+      }
+      case 'cat':
+        throw new Error('r->IR: `cat()` 只能摆在语句位上（这儿在表达式里）');
+      case 'seq_len':
+        throw new Error('r->IR: seq_len() 只在 `for (v in seq_len(n))` 那一格接了');
+      default:
+        throw new Error(`r->IR: 内建 ${fn} 在表里却没有落法 —— BUILTINS 与这个 switch 走散了`);
+    }
+  }
+  if (fn === null) throw new Error('r->IR: 只接"名字 + 实参"那种调用（函数值还没接）');
+  return { kind: 'call', fn: { kind: 'name', name: mangle(fn) }, args: all.map((a, i) => ev(i)) };
+}
+
+/**
+ * `cat(…)` → 一串 `write`。
+ *
+ * **为什么不是 `print`**：方言的 `print` 自带换行，而 R 的 `cat` 不带（换行要自己写
+ * `"\n"`）。那两件事差一个字节，而例子的判据是**逐字节**对 `Rscript` ——
+ * 所以这儿老老实实按 `cat` 的语义发：各实参按 `sep` 连起来，一格不多。
+ */
+function catOf(x, types) {
+  const args = posArgs(x);
+  const sepNode = namedArg(x, 'sep');
+  let sep = ' ';
+  if (sepNode !== undefined) {
+    if (tag(sepNode) !== 'str') throw new Error('r->IR: cat() 的 sep= 只接串字面量');
+    sep = leaf(kids(sepNode)[0]);
+  }
+  const pieces = [];
+  args.forEach((a, i) => {
+    if (i > 0 && sep !== '') pieces.push({ kind: 'string', value: sep });
+    pieces.push(asStr(a, types));
+  });
+  return {
+    kind: 'block',
+    stmts: pieces.map((p) => ({ kind: 'builtin-stmt', name: 'write', args: [p] })),
+  };
+}
+
+/* ─── 语句 ─────────────────────────────────────────────────────────────── */
+
+/** 赋值的左边 → 一条语句（数组/表的下标写落 `aset` / `dset`，标量落 `assign`）。 */
+function assignOf(x, types) {
+  const { target, value } = assignParts(x);
+  const t = tag(target);
+  if (t === 'sym') {
+    const name = mangle(nameOf(target));
+    return {
+      kind: 'assign',
+      target: { kind: 'name', name },
+      value: exprOf(value, types, types.get(name)),
+    };
+  }
+  if (t === 'sub1' || t === 'sub2') {
+    const obj = kids(target)[0];
+    const keys = kids(target).slice(1).map((a) => kids(a)[0]).filter((k) => k !== undefined);
+    if (keys.length !== 1) throw new Error('r->IR: 多维下标的写（x[i, j] <- …）还没接');
+    const ot = typeOfExpr(obj, types);
+    const o = exprOf(obj, types);
+    if (ot.kind === 'map') {
+      return { kind: 'builtin-stmt', name: 'dset', args: [o, exprOf(keys[0], types), exprOf(value, types)] };
+    }
+    if (ot.kind === 'arr') {
+      return { kind: 'builtin-stmt', name: 'aset', args: [o, zeroBased(exprOf(keys[0], types)), exprOf(value, types)] };
+    }
+    throw new Error(`r->IR: ${nameOf(obj)} 上的下标写不知道是数组还是表 —— 推出来是 ${ot.kind}`);
+  }
+  throw new Error(`r->IR: 这一格赋值的左边还没接：${t}`);
+}
+
+/** `for (v in seq)` → 一格计数循环。`continue` 照跑步进，所以步进要摆在 `post` 上。 */
+function forOf(x, types) {
+  const fc = kids(x)[0];
+  const v = mangle(nameOf(kids(fc)[0]));
+  const seq = kids(fc)[1];
+  const body = stmtsOf(kids(x)[1], types);
+  const name = { kind: 'name', name: v };
+  const step = { kind: 'assign', target: name, value: b('+', name, { kind: 'int', value: 1 }) };
+
+  /* `a:b` 那一档：R 最常见的循环头，直接落成"从 a 数到 b"。 */
+  if (tag(seq) === 'bin' && String(leaf(kids(seq)[0])) === ':') {
+    const [, lo, hi] = kids(seq);
+    return {
+      kind: 'for',
+      init: { kind: 'assign', target: name, value: exprOf(lo, types) },
+      cond: b('<=', name, exprOf(hi, types)),
+      post: step,
+      body,
+    };
+  }
+  /* `seq_len(n)` 是 `1:n` 的"n 可能是 0"那一版（R 里 `1:0` 会倒着走 —— 那是个真坑）。 */
+  if (tag(seq) === 'call' && tag(kids(seq)[0]) === 'sym' && nameOf(kids(seq)[0]) === 'seq_len') {
+    const hi = posArgs(seq)[0];
+    return {
+      kind: 'for',
+      init: { kind: 'assign', target: name, value: { kind: 'int', value: 1 } },
+      cond: b('<=', name, exprOf(hi, types)),
+      post: step,
+      body,
+    };
+  }
+  throw new Error('r->IR: `for (v in …)` 只接 `a:b` 与 `seq_len(n)` 两种序列'
+    + '（数组上的遍历要先有向量那一层，见 adapter 文件头第 1 条）');
+}
+
+/** 一格语句。`(block …)` 摊平成一格 block。 */
+function stmtOf(x, types) {
+  switch (tag(x)) {
+    case 'block': return { kind: 'block', stmts: kids(x).map((k) => stmtOf(k, types)) };
+    case 'bin': {
+      if (isAssign(x)) return assignOf(x, types);
+      return { kind: 'expr-stmt', expr: exprOf(x, types) };
+    }
+    case 'bin-rev': return assignOf(x, types);
+    case 'if': {
+      const [c, t, e] = kids(x);
+      return {
+        kind: 'if',
+        cond: condOf(c, types),
+        then: stmtsOf(t, types),
+        else_: e === undefined ? null : stmtsOf(e, types),
+      };
+    }
+    case 'while': return { kind: 'while', cond: condOf(kids(x)[0], types), body: stmtsOf(kids(x)[1], types) };
+    /* `repeat { … }` 就是 `while (true) { … }`（R 里它只能靠 `break` 出来）。 */
+    case 'repeat': return { kind: 'while', cond: { kind: 'bool', value: true }, body: stmtsOf(kids(x)[0], types) };
+    case 'for': return forOf(x, types);
+    case 'break': return { kind: 'break', label: null };
+    case 'next': return { kind: 'continue', label: null };
+    case 'call': {
+      const fnNode = kids(x)[0];
+      const fn = tag(fnNode) === 'sym' ? nameOf(fnNode) : null;
+      /* `cat()` 与 `return()` 在 R 里都是**调用**，落到的却是语句（见文件头第 2 条）。 */
+      if (fn === 'cat') return catOf(x, types);
+      if (fn === 'return') {
+        const vs = posArgs(x);
+        return { kind: 'return', values: vs.length === 0 ? [] : [exprOf(vs[0], types)] };
+      }
+      return { kind: 'expr-stmt', expr: exprOf(x, types) };
+    }
+    case 'paren': return stmtOf(kids(x)[0], types);
+    default:
+      return { kind: 'expr-stmt', expr: exprOf(x, types) };
+  }
+}
+
+/** 一格"体"（可能是 `{…}`，也可能是单独一句）→ 一串语句。 */
+function stmtsOf(x, types) {
+  if (tag(x) === 'block') return kids(x).map((k) => stmtOf(k, types));
+  return [stmtOf(x, types)];
+}
+
+/* ─── 尾位（R 的"最后一句就是返回值"） ────────────────────────────────── */
+
+/**
+ * 函数体 → 一串语句，**最后一句变成 `return`**。
+ *
+ * 往 `if` 的两支里钻，不囫囵包成 `ternary`：`if (n == 0) return(1)` 那种只有一支带值
+ * （另一支往下走到后面的语句），包成三元就要求两支都有值 —— 那是一条假的要求。
+ * `for` / `while` / 赋值 结尾的函数在 R 里回的是不可见的 `NULL`，那时不补 `return`。
+ */
+function tailBody(node, types) {
+  const list = tag(node) === 'block' ? kids(node) : [node];
+  if (list.length === 0) return [];
+  const head = list.slice(0, -1).map((k) => stmtOf(k, types));
+  return [...head, ...tailOf(list[list.length - 1], types)];
+}
+
+/** 尾位上的一格东西 → 一串语句（带 `return` 的那种）。 */
+function tailOf(x, types) {
+  switch (tag(x)) {
+    case 'block': return tailBody(x, types);
+    case 'paren': return tailOf(kids(x)[0], types);
+    case 'if': {
+      const [c, t, e] = kids(x);
+      return [{
+        kind: 'if',
+        cond: condOf(c, types),
+        then: tailOf(t, types),
+        else_: e === undefined ? null : tailOf(e, types),
+      }];
+    }
+    /* 这几格在 R 里的值是不可见的 NULL —— 不补 `return`，照常当语句。 */
+    case 'for': case 'while': case 'repeat': case 'break': case 'next':
+      return [stmtOf(x, types)];
+    case 'bin': case 'bin-rev':
+      if (isAssign(x)) return [stmtOf(x, types)];
+      return [{ kind: 'return', values: [exprOf(x, types)] }];
+    case 'call': {
+      const fnNode = kids(x)[0];
+      const fn = tag(fnNode) === 'sym' ? nameOf(fnNode) : null;
+      if (fn === 'cat' || fn === 'return') return [stmtOf(x, types)];
+      return [{ kind: 'return', values: [exprOf(x, types)] }];
+    }
+    default:
+      return [{ kind: 'return', values: [exprOf(x, types)] }];
+  }
+}
+
+/* ─── 顶层 ─────────────────────────────────────────────────────────────── */
+
+/**
+ * 补出来那格 `let` 的初值。
+ *
+ * 数与串有零值（公共降级器的 `lower/ty.js` 那张表给），**数组与表没有** ——
+ * 那一格必须由这门语言答（`(arr int) 这一格还没有零值` 就是它在报）。
+ * R 里"没赋值过的向量"本来也没有意义，所以给一格空的最诚实：后面那句赋值会盖掉它。
+ */
+function zeroInit(t) {
+  if (t.kind === 'arr') return call1('anew', tyArg(t), { kind: 'int', value: 0 });
+  if (t.kind === 'map') return call1('dnew', tyArg(t));
+  return null;
+}
+
+/** 这条语句（或它里头）有没有一格**带值的** `return`。 */function hasValueReturn(s) {
+  if (s === null || s === undefined) return false;
+  if (s.kind === 'return') return s.values.length > 0;
+  for (const k of ['then', 'else_', 'body', 'stmts']) {
+    const v = s[k];
+    if (Array.isArray(v) && v.some((y) => hasValueReturn(y))) return true;
+  }
+  if (s.kind === 'for' && (hasValueReturn(s.init) || hasValueReturn(s.post))) return true;
+  return false;
+}
+
+/** 一格函数（`(fn (formals …) 体)`）→ 标准 IR 的 `fn`。 */
+function fnDecl(name, node, types) {
+  const formals = kids(node)[0];
+  const params = kids(formals).map((f) => mangle(nameOf(kids(f)[0])));
+  for (const f of kids(formals)) {
+    if (kids(f).length > 1) {
+      throw new Error(`r->IR: 形参默认值（${name} 的 ${nameOf(kids(f)[0])}=…）还没接 ——`
+        + ' R 里它是一格 promise，在函数体里才求值（见 adapter 文件头第 2 条不足）');
+    }
+  }
+  const body = kids(node)[1];
+  const local = inferTypes(body, params);
+  const stmts = tailBody(body, local);
+  const decls = [];
+  for (const [n, t] of local) {
+    if (params.includes(n)) continue;
+    decls.push({ kind: 'let', name: n, type: t, init: zeroInit(t) });
+  }
+  const all = [...decls, ...stmts];
+  /* 回什么：拿最后那一格带值的 `return` 里的表达式类型算（`local` 已经推完了）。 */
+  const ret = all.some((s) => hasValueReturn(s)) ? returnType(body, local) : { kind: 'void' };
+  return {
+    kind: 'fn',
+    name,
+    params: params.map((p) => ({ name: p, type: local.get(p) ?? INT })),
+    ret,
+    body: all,
+  };
+}
+
+/** 函数回的是什么：body 里所有"尾位表达式"与 `return(x)` 的类型合起来（串赢）。 */
+function returnType(body, types) {
+  const seen = [];
+  const walkTail = (x) => {
+    switch (tag(x)) {
+      case 'block': { const ks = kids(x); if (ks.length > 0) walkTail(ks[ks.length - 1]); return; }
+      case 'paren': walkTail(kids(x)[0]); return;
+      case 'if': { const ks = kids(x); walkTail(ks[1]); if (ks[2] !== undefined) walkTail(ks[2]); return; }
+      case 'for': case 'while': case 'repeat': case 'break': case 'next': return;
+      case 'bin': case 'bin-rev': if (isAssign(x)) return; seen.push(typeOfExpr(x, types)); return;
+      case 'call': {
+        const fn = tag(kids(x)[0]) === 'sym' ? nameOf(kids(x)[0]) : null;
+        if (fn === 'cat') return;
+        seen.push(typeOfCall(x, types));
+        return;
+      }
+      default: seen.push(typeOfExpr(x, types));
+    }
+  };
+  walkTail(body);
+  /* `return(x)` 那一族：走遍整棵树把它们也算进来。 */
+  const walkAll = (x) => {
+    if (!isList(x)) return;
+    if (tag(x) === 'call' && tag(kids(x)[0]) === 'sym' && nameOf(kids(x)[0]) === 'return') {
+      const vs = posArgs(x);
+      if (vs.length > 0) seen.push(typeOfExpr(vs[0], types));
+    }
+    for (const k of kids(x)) walkAll(k);
+  };
+  walkAll(body);
+  if (seen.length === 0) return INT;
+  if (seen.some((t) => t.kind === 'string')) return STR;
+  if (seen.some((t) => t.kind === 'arr' || t.kind === 'map')) return seen.find((t) => t.kind === 'arr' || t.kind === 'map');
+  if (seen.some((t) => t.kind === 'real')) return REAL;
+  if (seen.every((t) => t.kind === 'bool')) return BOOL;
+  return INT;
+}
+
+/**
+ * 一棵 R 的 GLR 树（`(program 项…)`）→ 标准 IR 的模块。
+ *
+ * **函数是值**（文件头第 1 条）：顶层那些 `名字 <- function(…) …` 提升成 `fn`，
+ * 别的落进 `main`。提升要先走一遍 —— `main` 里的类型推断会问"这个调用回什么"，
+ * 而那要函数表先在（`fact` 递归调自己就是这一格）。
+ */
+export function rToIR(tree) {
+  if (tag(tree) !== 'program') throw new Error('r->IR: 这不是 (program …)');
+  tmpN = 0;
+  const items = kids(tree);
+  const fns = [];
+  const rest = [];
+  for (const item of items) {
+    if (isAssign(item)) {
+      const { target, value } = assignParts(item);
+      if (tag(target) === 'sym' && tag(value) === 'fn') {
+        fns.push({ name: mangle(nameOf(target)), node: value });
+        continue;
+      }
+    }
+    rest.push(item);
+  }
+  const decls = fns.map((f) => fnDecl(f.name, f.node, new Map()));
+  /* 顶层剩下的那些：拼成一格假的 `(block …)` 交给同一条推断与同一条降级。 */
+  const mainBlock = { kind: 'list', items: [{ kind: 'atom', value: 'block' }, ...rest] };
+  const types = inferTypes(mainBlock, []);
+  const stmts = rest.map((k) => stmtOf(k, types));
+  const lets = [];
+  for (const [n, t] of types) lets.push({ kind: 'let', name: n, type: t, init: zeroInit(t) });
+  decls.push({ kind: 'main', body: [...lets, ...stmts] });
+  return { kind: 'module', decls };
+}
+
+
+
+
+

@@ -42,6 +42,7 @@ import { cppToIR } from '../../../ext/cpp/adapter/index.js';
 import { nimToIR, nimImports } from '../../../ext/nim/adapter/index.js';
 import { vlangToIR, vlangImports } from '../../../ext/vlang/adapter/index.js';
 import { goToIR, goImports } from '../../../ext/go/adapter/index.js';
+import { rToIR } from '../../../ext/r/adapter.js';
 
 /**
  * 这棵树的根。**从宿主那格 `installDir()` 走上去**（`src/core/host` 往上三层）——
@@ -129,6 +130,11 @@ export const LANGS = new Map([
     grammar: 'ext/nim/nim.grammar', toIR: nimToIR, imports: nimImports, exts: ['nim'],
   }],
   ['cpp', { grammar: 'ext/cpp/cpp.grammar', toIR: cppToIR, exts: ['cpp', 'cc', 'cxx', 'hpp'] }],
+  /* R（GNU R）。语法是**照 R 自己那份 bison 复刻的**（`r-source/src/main/gram.y`，
+     ADR-0034 的导入器本来就读得动它）—— 这一门的正确性有真口径：本机有 `Rscript`，
+     例子逐字节对它（`tests/r/oracle.js`）。
+     后缀两格：`.R` 是主流写法，`.r` 也有（大小写在这张表里是两条）。 */
+  ['r', { grammar: 'ext/r/r.grammar', toIR: rToIR, exts: ['R', 'r'] }],
   /* PolyDraw 的脚本（Ken Silverman 的 EVAL）。正确性口径是那棵参考树里的
      `polydraw_src/`（`eval.c` + `eval.txt`）—— 新写的 `c_impl` / `js_impl` 有已知偏差。
      `pre` 是**预处理**那一格（`#define` / `#if` 那一族，语料里真在用）—— 词法之前跑。 */

@@ -117,6 +117,17 @@ const MIGRATED = {
     'defer', 'dict', 'enumval', 'fnval', 'forin', 'hoist', 'index', 'intmath', 'litnone',
     'loopexit', 'match', 'member', 'method', 'method2', 'optres', 'pointer', 'posinit',
     'push', 'record', 'slice', 'strcat', 'values'],
+  /* R：八个家族。这门语言自己带进来的三样（都在 `ext/r/adapter.js` 里消化掉，
+     公共层一格新东西都没加）：
+       * **函数是值** —— `f <- function(n) …` 在树上是一格赋值，顶层扫一遍提升成 `fn`；
+       * **最后一句就是返回值**（而 `return(x)` 在 R 里还是一次**调用**）—— 尾位上的 `if`
+         要往两支里钻，不能囫囵包成三元（`if (n == 0) return(1)` 只有一支带值）；
+       * **下标从 1 起** —— `xs[1]` 落 `aget(xs, 0)`，字面量当场折掉。
+     `unary` 那一格第三行是 `nchar(s)` 而不是 `length(s)`：R 的 `length` 是"这个向量有几个
+     元素"，对一格串回 1 —— 这门语言独有的坑，adapter 按类型分 slen / dlen / alen。
+     **正确性另有一把尺子**：`tests/r/oracle.js` 拿本机的 `Rscript` 把这八份逐字节跑一遍 ——
+     期望值不是我们编的。 */
+  r: ['basics', 'intmath', 'loopexit', 'unary', 'strcat', 'numstr', 'dict', 'index'],
   /* go：**判据的主力在 `tests/go/run.js`**（46 份与 `go run` 逐字节，原生腿），所以这张表里
      只留 `format` 一格 —— 它是"家族表里有期望常量、却没人跑"那个洞的补丁：`fmt.Sprintf` /
      `Printf` 在迁过来之后曾经整格当场报，而 146 份例子那把尺子只看"退出码变没变"，
