@@ -19,15 +19,17 @@
 //   5. **下标从 1 起**。`x[i]` → `aget(x, i-1)`，字面量当场折掉。`x[["k"]]` 是字典
 //      （R 的 `list` 带名字用就是关联表），`x[i]` 是数组 —— 靠上面第 4 条推出来的类型分。
 //
-// ## 明说的不足（**不猜**）
+// ## 明说的不足（**不猜**；正本在 `ext/r/SPEC.md` 第四节）
 //
-//   1. **不做向量化**。R 里 `c(1,2) + 1` 是逐元素加、`if (c(TRUE,FALSE))` 是取第一格
-//      加一句警告 —— 这一批一律当标量算。这不是"以后补一格函数"的事，是整套值模型
-//      （长度回收、`NA` 的传播、属性）的事，得单独一版。
-//   2. **不做懒求值**（promise / `missing()` / `substitute()`）、**不做属性**
+//   1. **向量化做到"逐元素 + 回收 + 逻辑向量"这一层**，缺的三处是量出来的：回收长度不整倍
+//      时 R 的那句**警告**我们不发、`if (c(TRUE,FALSE))` 的"取第一格 + 警告"没有、
+//      nmath 那一族只在第一格实参上逐元素。
+//   2. **逻辑是三态的**（`NA` 真的走到底，见 `RLGL` / `RLGL1`）。两处口径差别：两边都是
+//      int 的比较仍然回方言的 `bool`（这一档没有 `NA_integer_`，那个状态到不了），
+//      而 `&&` / `||` 有三态参与时**不短路**（原因在 `FN_DEPS` 那段账上）。
+//   3. **不做懒求值**（promise / `missing()` / `substitute()`）、**不做属性**
 //      （`names` / `dim` / `class`）、**不做 S3 / S4 / R5 分派**、**不做环境**
-//      （`<<-` 当普通赋值）、**不做 `...`**。
-//   3. `NA` / `NaN` / `Inf` 认得出记号但落不下来 —— 方言里没有"缺失"这一格。
+//      （`<<-` 当普通赋值）、**不做 `...`**。用户函数的形参与返回类型也不跟踪（都按 int 推）。
 //   4. 内建只认下面 `BUILTINS` 那一张表，表外的名字当用户函数调（调不到就是链接期的错）。
 
 import { isList, tag, kids, leaf } from '../../src/core/lower/cst.js';
@@ -106,6 +108,15 @@ const PRED = new Map([
 
 const NUM_STR = 'r_num_str';
 
+/** 比较那六格 → 各自那一格生成出来的三态函数（见 `RLGL1` 那段账）。 */
+const CMP_FNS = new Map([
+  ['<', 'r_lt'], ['<=', 'r_le'], ['>', 'r_gt'], ['>=', 'r_ge'], ['==', 'r_eq'], ['!=', 'r_ne'],
+]);
+/** 这一批由 `lglFnDecl` 发（形状都是"几格 real 进、一格 real 出"）。 */
+const LGL_FNS = new Set([
+  'r_lgl', 'r_and', 'r_or', 'r_not', 'r_cond', 'r_lgl_str', ...CMP_FNS.values(),
+]);
+
 /**
  * **生成出来的辅助函数之间的依赖，明写成一张表。**
  *
@@ -133,6 +144,18 @@ const FN_DEPS = new Map([
   ['r_rev', []],
   ['r_seq_along', []],
   ['r_which', ['r_is_na']],
+  /* 三态逻辑那一族（`RLGL1` 那段账）。比较那六格各发一个函数 —— 不摊在调用点上是
+     因为"两边各读两遍"要临时量，而临时量在**条件位**上没地方摆（`while` 的条件被降级到
+     循环外头，摊开的 `let` 会变成"只算一次"）。一次函数调用是纯表达式，哪儿都放得下。 */
+  ['r_lgl', ['r_is_na', 'r_na']],
+  ['r_and', ['r_is_na', 'r_na']],
+  ['r_or', ['r_is_na', 'r_na']],
+  ['r_not', ['r_is_na', 'r_na']],
+  ['r_cond', ['r_is_na']],
+  ['r_lgl_str', ['r_is_na']],
+  ['r_any', ['r_is_na', 'r_na']],
+  ['r_all', ['r_is_na', 'r_na']],
+  ...[...CMP_FNS.values()].map((n) => [n, ['r_is_na', 'r_na']]),
 ]);
 
 /* ─── 类型（标准 IR 的类型描述，§1.2） ─────────────────────────────────── */
@@ -165,6 +188,22 @@ const nameOf = (x) => {
 const CONSTS = new Map([
   ['TRUE', { kind: 'bool', value: true }],
   ['FALSE', { kind: 'bool', value: false }],
+]);
+
+/**
+ * base 里那几个**有名字的常量**。它们在 R 那边是普通的变量（`pi` 就是 `base::pi`，
+ * `T` / `F` 也是变量、能被赋值盖掉），所以这儿的规矩是：**这一段写过这个名字就不算这张表**。
+ *
+ * 口径差别照实说：这一档没有声明，被赋值的名字是在**段顶**补 `let` 的（文件头第 3 条），
+ * 所以 `T <- 5` 会把整段的 `T` 都变成那格变量 —— 包括赋值**之前**那几句
+ * （R 在那几句里读到的还是 `TRUE`）。这一格与"变量在赋值前读到零值"是同一个来源。
+ *
+ * 只收数值那几格：`LETTERS` / `month.name` 那一批是**字符向量**，而这一档还没有那一层。
+ */
+const BASE_VARS = new Map([
+  ['pi', { expr: { kind: 'real', value: Math.PI }, type: REAL }],
+  ['T', { expr: { kind: 'bool', value: true }, type: BOOL }],
+  ['F', { expr: { kind: 'bool', value: false }, type: BOOL }],
 ]);
 
 /**
@@ -219,8 +258,21 @@ const RVEC = PTR_REAL;
  * `typeToSx` 只看 `kind` 与 `inner`，所以这个记号不会漏到 `.sx` 里去。
  */
 const RLGL = { kind: 'ptr', inner: REAL, lgl: true };
+/**
+ * **一格逻辑标量**（`x > 2` 的那种）：跟逻辑向量同一个理由，存的是 double 的
+ * 1.0 / 0.0 / NA，类型上多带一个记号。
+ *
+ * 为什么不是方言的 `bool`：R 的逻辑是**三态**的（`NA > 2` 是 `NA`，不是 `FALSE`），
+ * 而 `bool` 装不下缺失。从前这一格是 `bool`，于是 `cat(NaN > 2)` 我们印 `FALSE`
+ * 而 R 印 `NA` —— 那是**静默答错**。
+ *
+ * 两边都是 int 的比较仍然回 `bool`：这一档的 int 没有 `NA_integer_`（明写在 SPEC），
+ * 而 `while (i <= n)` 是循环里最热的一格，不值得为一个到不了的状态多绕一趟。
+ */
+const RLGL1 = { kind: 'real', lgl: true };
 const isVecTy = (t) => t !== undefined && t !== null && t.kind === 'ptr';
 const isLglTy = (t) => isVecTy(t) && t.lgl === true;
+const isLgl1 = (t) => t !== undefined && t !== null && t.kind === 'real' && t.lgl === true;
 /** 第 i 格元素的地址（`i` 从 0 数，所以要 +1 跳过长度那一格）。 */
 const vecAt = (v, i) => call1('padd', v, i.kind === 'int'
   ? { kind: 'int', value: i.value + 1 }
@@ -248,6 +300,9 @@ const NA_FNS = new Map([
 /** 这一趟要发哪几格生成出来的辅助函数。 */
 const needFn = new Set();
 const useFn = (name) => { needFn.add(name); return name; };
+
+/** 调一格生成出来的辅助函数（顺手把它记进 `needFn`）。 */
+const lglCall = (name, ...args) => ({ kind: 'call', fn: { kind: 'name', name: useFn(name) }, args });
 
 /**
  *
@@ -287,7 +342,7 @@ function numLit(text) {
 const BUILTINS = new Set([
   'cat', 'paste', 'paste0', 'c', 'list', 'length', 'nchar', 'return', 'is.null',
   'as.integer', 'as.numeric', 'as.character', 'abs', 'seq_len', 'is.na', 'is.nan',
-  'sum', 'mean', 'max', 'min', 'rev', 'seq_along', 'which',
+  'sum', 'mean', 'max', 'min', 'rev', 'seq_along', 'which', 'any', 'all',
   /* libm 那一族：R 自己这几个也是直接调 libm（不在 nmath 里），所以落方言的 `rmath`。
      一格实参、回 double —— `log(x, base)` 那种两格的**当场报**（R 那一档是 `log(x)/log(b)`，
      而"替它算"与"照它算"是两件事）。 */
@@ -348,7 +403,12 @@ function typeOfExpr(x, types) {
     }
     case 'str': return STR;
     case 'paren': return typeOfExpr(kids(x)[0], types);
-    case 'sym': return types.get(mangle(nameOf(x))) ?? INT;
+    case 'sym': {
+      const nm = mangle(nameOf(x));
+      const t = types.get(nm);
+      if (t !== undefined) return t;
+      return BASE_VARS.has(nm) ? BASE_VARS.get(nm).type : INT;
+    }
     case 'block': {
       const ks = kids(x);
       return ks.length === 0 ? INT : typeOfExpr(ks[ks.length - 1], types);
@@ -359,7 +419,12 @@ function typeOfExpr(x, types) {
     }
     case 'un': {
       const op = String(leaf(kids(x)[0]));
-      return op === '!' ? BOOL : typeOfExpr(kids(x)[1], types);
+      if (op !== '!') return typeOfExpr(kids(x)[1], types);
+      /* `!` 跟着被取反的那一格走：逻辑向量进逻辑向量出，三态标量进三态标量出，
+         `bool` 那一格（`!TRUE`）仍然是 `bool`。 */
+      const t = typeOfExpr(kids(x)[1], types);
+      if (isVecTy(t)) return RLGL;
+      return t.kind === 'real' ? RLGL1 : BOOL;
     }
     case 'sub1': {
       const a = types.get(mangle(nameOf(kids(x)[0])));
@@ -367,7 +432,9 @@ function typeOfExpr(x, types) {
       /* 下标是向量 → 挑出来的还是一格向量（逻辑/数值随被挑的那个走）。 */
       const ks = kids(x).slice(1).map((k) => kids(k)[0]).filter((k) => k !== undefined);
       if (ks.length === 1 && isVecTy(typeOfExpr(ks[0], types))) return a;
-      return REAL;
+      /* 一格标量下标：**元素类型跟着向量走** —— 逻辑向量里取一格出来还是逻辑
+         （`zs[1]` 印 `TRUE` 而不是 `1`）。 */
+      return isLglTy(a) ? RLGL1 : REAL;
     }
     case 'sub2': {
       const d = types.get(mangle(nameOf(kids(x)[0])));
@@ -382,9 +449,22 @@ function typeOfExpr(x, types) {
       if (VEC_OPS.has(op)) {
         const a = typeOfExpr(kids(x)[1], types);
         const c2 = typeOfExpr(kids(x)[2], types);
-        if (isVecTy(a) || isVecTy(c2)) return VEC_CMP.has(op) ? RLGL : RVEC;
+        if (isVecTy(a) || isVecTy(c2)) return VEC_CMP.has(op) || LGL_OPS.has(op) ? RLGL : RVEC;
       }
-      if (['<', '>', '<=', '>=', '==', '!=', '&', '&&', '|', '||'].includes(op)) return BOOL;
+      /* 比较：有一边是 double（含三态逻辑本身）就回**三态逻辑**（`NaN > 2` 是 `NA`）。
+         两边都是 int / bool 才回 `bool` —— 那一格没有 NA，见 `RLGL1` 那段账。 */
+      if (CMP_FNS.has(op)) {
+        const a = typeOfExpr(kids(x)[1], types);
+        const c2 = typeOfExpr(kids(x)[2], types);
+        if (a.kind === 'string' || c2.kind === 'string') return BOOL;
+        return a.kind === 'real' || c2.kind === 'real' ? RLGL1 : BOOL;
+      }
+      /* `&` / `&&` / `|` / `||`：任一边是三态就三态（`TRUE && NA` 是 `NA`）。 */
+      if (LGL_OPS.has(op) || op === '&&' || op === '||') {
+        const a = typeOfExpr(kids(x)[1], types);
+        const c2 = typeOfExpr(kids(x)[2], types);
+        return a.kind === 'real' || c2.kind === 'real' ? RLGL1 : BOOL;
+      }
       if (ASSIGN_OPS.has(op)) return typeOfExpr(kids(x)[2], types);
       if (op === ':') return RVEC;
       /* `/` 一律实数除；`^` 走 `R_pow`、`%%` / `%/%` 走那条 floor 的算法 —— 三者都回 double */
@@ -414,6 +494,8 @@ function typeOfCall(x, types) {
     case 'as.numeric': return REAL;
     case 'is.null': return BOOL;
     case 'sum': case 'mean': case 'max': case 'min': return REAL;
+    /* `any` / `all` 回的是**带 NA 的标量逻辑**（`any(c(FALSE, NA))` 是 `NA`）。 */
+    case 'any': case 'all': return RLGL1;
     /* 这三格进出都是向量（`which` 回的是位置，所以是数值向量，不是逻辑向量）。 */
     case 'rev': case 'seq_along': case 'which': return RVEC;
     /* 这一批第一格是向量就逐元素（`sqrt(xs)`），标量进标量出。 */
@@ -614,18 +696,17 @@ function zeroBased(e) {
 /**
  * 一格值变成串。
  *
- * **实数走 `sgen(x, 7)`（`%.7g` 再去尾随零）** —— 这是 R 的 `cat` 对 double 的口径
- * （`getOption("digits")` 默认 7）。原来这儿一律 `tostr`，于是 `cat(dnorm(1))` 印
+ * **实数走 `r_num_str`** —— 那一格是照 `src/main/format.c` 抄的"定点还是科学记数"
+ * （见 `numFmtStmts()`）。原来这儿一律 `tostr`，于是 `cat(dnorm(1))` 印
  * `0.24197072451914337` 而 R 印 `0.2419707` —— 差的不是精度，是"印几位"这条规矩。
  *
- * 明说还欠的一格：R 在**定点与科学记数之间按哪个短**挑（`scipen`），所以
- * `cat(1e5)` 是 `1e+05` 而 `%.7g` 给 `100000`；`cat(123456789)` 是 `123456789` 而
- * `%.7g` 给 `1.234568e+08`。那条挑法在 `src/main/format.c`（解释器那半边）里，
- * 这一版没做 —— 量过：这两种形状要么整数、要么 ≥1e5，例子里都不在这一档。
+ * 三态逻辑（`x > 2` 那种）走 `r_lgl_str`：`TRUE` / `FALSE` / `NA` 三档。
+ * 这一问要**摆在实数前面** —— 它的 `kind` 也是 `real`。
  */
 const asStr = (x, types) => {
   const t = typeOfExpr(x, types);
   if (t.kind === 'string') return exprOf(x, types);
+  if (isLgl1(t)) return lglCall('r_lgl_str', exprOf(x, types));
   if (t.kind === 'real') {
     return { kind: 'call', fn: { kind: 'name', name: useFn(NUM_STR) }, args: [exprOf(x, types)] };
   }
@@ -640,6 +721,30 @@ const asStr = (x, types) => {
   }
   return call1('tostr', exprOf(x, types));
 };
+
+/**
+ * 一格值收成**三态逻辑**（1.0 / 0.0 / NA）。
+ *
+ * `bool` 那一格当场折成 1 / 0（`TRUE && (x > 2)` 里的左边）；已经是三态的原样过；
+ * 别的 double 走 `r_lgl`（R 的 `as.logical`：`NA` 与 `NaN` 都是 `NA`，0 是 `FALSE`，
+ * 别的是 `TRUE`）；int 那一格 `!= 0` 再折。
+ */
+function asLgl(e, t) {
+  if (isLgl1(t)) return e;
+  if (t.kind === 'bool') {
+    return { kind: 'ternary', cond: e, then: { kind: 'real', value: 1 }, else_: { kind: 'real', value: 0 } };
+  }
+  if (t.kind === 'int') {
+    return {
+      kind: 'ternary',
+      cond: b('!=', e, { kind: 'int', value: 0 }),
+      then: { kind: 'real', value: 1 },
+      else_: { kind: 'real', value: 0 },
+    };
+  }
+  if (t.kind === 'real') return lglCall('r_lgl', e);
+  throw new Error(`r->IR: ${t.kind} 当逻辑值用还没接`);
+}
 
 /** `x[…]` / `x[[…]]` 的读：按对象的类型分数组还是字典（见文件头第 5 条）。 */
 function indexRead(x, types) {
@@ -666,7 +771,14 @@ function exprOf(x, types, want) {
   switch (tag(x)) {
     case 'num': return numLit(leaf(kids(x)[0]));
     case 'str': return { kind: 'string', value: leaf(kids(x)[0]) };
-    case 'sym': return { kind: 'name', name: mangle(nameOf(x)) };
+    case 'sym': {
+      const nm = mangle(nameOf(x));
+      /* base 里那几个有名字的常量：**这一段写过这个名字就不算**（见 `BASE_VARS`）。 */
+      if (types !== undefined && types.get(nm) === undefined && BASE_VARS.has(nm)) {
+        return BASE_VARS.get(nm).expr;
+      }
+      return { kind: 'name', name: nm };
+    }
     case 'paren': return exprOf(kids(x)[0], types);
     case 'sub1': case 'sub2': return indexRead(x, types);
     case 'call': return callOf(x, types, undefined, want);
@@ -680,7 +792,14 @@ function exprOf(x, types, want) {
     case 'un': {
       const op = String(leaf(kids(x)[0]));
       const operand = kids(x)[1];
-      if (op === '!') return { kind: 'unop', op: '!', operand: condOf(operand, types) };
+      if (op === '!') {
+        const t = typeOfExpr(operand, types);
+        /* 逻辑向量逐元素取反（`!(xs > 2)`），三态标量走 `r_not`（`!NA` 是 `NA`），
+           `bool` 那一格仍然是方言的 `!`。 */
+        if (isVecTy(t)) return vecMap1(exprOf(operand, types), (e) => lglCall('r_not', e));
+        if (t.kind === 'real') return lglCall('r_not', exprOf(operand, types));
+        return { kind: 'unop', op: '!', operand: condOf(operand, types) };
+      }
       if (op === '-' || op === '+') {
         /* 向量上的一元 `-` 逐元素（`-xs`）—— 方言的 `un` 只吃 int / real。 */
         if (isVecTy(typeOfExpr(operand, types))) {
@@ -704,9 +823,23 @@ function exprOf(x, types, want) {
       const [opN, l, r] = kids(x);
       const op = String(leaf(opN));
       if (ASSIGN_OPS.has(op)) throw new Error('r->IR: 表达式位上的赋值还没接（R 里它有值）');
-      /* `&&` / `||` 两边当条件看；`&` / `|` 在 R 里是**向量化**的那一对，标量上同解。 */
-      if (op === '&&' || op === '&') return b('&&', condOf(l, types), condOf(r, types));
-      if (op === '||' || op === '|') return b('||', condOf(l, types), condOf(r, types));
+      /* 逻辑那四格。**两边都是 `bool` 时照旧落方言的 `&&` / `||`**（短路照旧，循环里最热的
+         那一格不绕）；只要有一边是三态就走 `r_and` / `r_or` 那张三态表。
+         `&` / `|` 在向量上是逐元素的，先问 `vecBin`。 */
+      if (op === '&&' || op === '&' || op === '||' || op === '|') {
+        if (LGL_OPS.has(op)) {
+          const vl = vecBin(op, l, r, types);
+          if (vl !== null) return vl;
+        }
+        const lt0 = typeOfExpr(l, types);
+        const rt0 = typeOfExpr(r, types);
+        if (lt0.kind === 'real' || rt0.kind === 'real') {
+          const fn = op === '&&' || op === '&' ? 'r_and' : 'r_or';
+          return lglCall(fn, asLgl(exprOf(l, types), lt0), asLgl(exprOf(r, types), rt0));
+        }
+        if (op === '&&' || op === '&') return b('&&', condOf(l, types), condOf(r, types));
+        return b('||', condOf(l, types), condOf(r, types));
+      }
       /* `^` 交给 R 自己的 `R_pow`（`src/nmath/mlutils.c`）—— 它对整数指数走反复平方、
          对 `1^x` 与 `x^0` 有明文特例，而 `pow()` 在这几格上与 R 不一样。 */
       if (op === '^' || op === '**') {
@@ -741,6 +874,12 @@ function exprOf(x, types, want) {
       const le = exprOf(l, types);
       const re = exprOf(r, types);
       const numeric = ['+', '-', '*', '/', '<', '<=', '>', '>=', '==', '!='].includes(op);
+      /* **比较那六格：有一边是 double 就回三态逻辑**（`NaN > 2` 是 `NA`）。
+         串比较与两边都是 int 的比较照旧落方言的 `bin`（那两档没有 NA）。 */
+      if (CMP_FNS.has(op) && lt.kind !== 'string' && rt.kind !== 'string'
+          && (lt.kind === 'real' || rt.kind === 'real')) {
+        return lglCall(CMP_FNS.get(op), asReal(le, lt), asReal(re, rt));
+      }
       if (numeric && (op === '/' || lt.kind === 'real' || rt.kind === 'real')
           && lt.kind !== 'string' && rt.kind !== 'string') {
         return b(op, asReal(le, lt), asReal(re, rt));
@@ -755,8 +894,13 @@ function exprOf(x, types, want) {
 /**
  * 逐元素那一族算符。`^` / `%%` / `%/%` 不在里头 —— 它们各自走 `R_pow` 与那条 floor 的算法，
  * 向量化要另摆一层（明写：没做）。
+ *
+ * `&` / `|` 在里头，而 `&&` / `||` **刻意不在**：R 的 `&&` 只收长度 1 的东西
+ * （长向量那一档在新版 R 里是个错误），逐元素的那一对就是 `&` / `|`。
  */
-const VEC_OPS = new Set(['+', '-', '*', '/', '<', '<=', '>', '>=', '==', '!=', '^', '**', '%%', '%/%']);
+const VEC_OPS = new Set(['+', '-', '*', '/', '<', '<=', '>', '>=', '==', '!=', '^', '**', '%%', '%/%', '&', '|']);
+/** 逐元素的逻辑那两格（结果是逻辑向量，每一格按三态表算）。 */
+const LGL_OPS = new Set(['&', '|']);
 
 /**
  * 一格算符在**两个已经是 double 的值**上怎么算。标量那条路与 `vecBin` 里逐元素那条路
@@ -924,13 +1068,16 @@ function vecBin(op, l, r, types) {
         post: { kind: 'assign', target: vr(i), value: b('+', vr(i), { kind: 'int', value: 1 }) },
         /* 比较那几格在 R 里回**逻辑向量**：1.0 / 0.0 / NA，印成 `TRUE` / `FALSE` / `NA`。
            NA 那一格得按 R 的口径传下去 —— `NA > 2` 与 `NaN > 2` 都是 NA（不是 FALSE），
-           而 `is.na` 对这两格都真，所以一问就够。 */
-        body: [VEC_CMP.has(op) ? {
-          kind: 'if',
-          cond: b('||', naQ(at(a)), naQ(at(c))),
-          then: [vecSet(vr(out), vr(i), { kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] })],
-          else_: [vecSet(vr(out), vr(i), { kind: 'ternary', cond: b(op, at(a), at(c)), then: { kind: 'real', value: 1 }, else_: { kind: 'real', value: 0 } })],
-        } : vecSet(vr(out), vr(i), numBin(op, at(a), at(c)))],
+           而 `is.na` 对这两格都真，所以一问就够。
+           `&` / `|` 那两格走三态表（`r_and` / `r_or`）—— 与标量那一侧是同一个函数。 */
+        body: [LGL_OPS.has(op)
+          ? vecSet(vr(out), vr(i), lglCall(op === '&' ? 'r_and' : 'r_or', at(a), at(c)))
+          : (VEC_CMP.has(op) ? {
+            kind: 'if',
+            cond: b('||', naQ(at(a)), naQ(at(c))),
+            then: [vecSet(vr(out), vr(i), { kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] })],
+            else_: [vecSet(vr(out), vr(i), { kind: 'ternary', cond: b(op, at(a), at(c)), then: { kind: 'real', value: 1 }, else_: { kind: 'real', value: 0 } })],
+          } : vecSet(vr(out), vr(i), numBin(op, at(a), at(c))))],
       },
     ],
     value: vr(out),
@@ -938,14 +1085,21 @@ function vecBin(op, l, r, types) {
 }
 const VEC_CMP = new Set(['<', '<=', '>', '>=', '==', '!=']);
 
-/** 条件。R 要求条件是逻辑值（不像 C 收 0/1），所以这儿只在**字面量**上折一格。 */
+/**
+ * 条件。R 要求条件是逻辑值（不像 C 收 0/1），所以这儿只在**字面量**上折一格。
+ *
+ * 三态那一档走 `r_cond`：`if (NA)` 在 R 里是**报错**
+ * （"missing value where TRUE/FALSE needed"），不是当假 —— 那一句在生成出来的函数里
+ * 落成 `(fail …)`。为什么是函数而不是摊开：条件位上没地方摆临时量（见 `FN_DEPS` 那段账）。
+ */
 function condOf(x, types) {
   if (tag(x) === 'paren') return condOf(kids(x)[0], types);
   const t = typeOfExpr(x, types);
   if (t.kind === 'bool') return exprOf(x, types);
+  if (t.kind === 'real') return lglCall('r_cond', asLgl(exprOf(x, types), t));
   /* 数当条件：R 的规矩是"不是 0 就是真"（`if (1)` 合法）。 */
-  if (t.kind === 'int' || t.kind === 'real') {
-    return b('!=', exprOf(x, types), { kind: t.kind, value: 0 });
+  if (t.kind === 'int') {
+    return b('!=', exprOf(x, types), { kind: 'int', value: 0 });
   }
   throw new Error(`r->IR: 这一格当条件用还没接（装的是 ${t.kind}）`);
 }
@@ -1109,6 +1263,19 @@ function callOf(x, types, extra, want) {
         const sym = { kind: 'strlit', value: LIBM.get(fn) };
         if (isVecTy(t)) return vecMap1(ev(0), (e) => call1('rmath', sym, e));
         return call1('rmath', sym, asReal(ev(0), t));
+      }
+      case 'any': case 'all': {
+        /* `any` / `all` 收一格逻辑向量、回**三态标量**：
+           `any` 见到 TRUE 就 TRUE，一个 TRUE 都没有但有 NA 就 NA，否则 FALSE；
+           `all` 见到 FALSE 就 FALSE，一个 FALSE 都没有但有 NA 就 NA，否则 TRUE。
+           标量那一档（`any(x > 2)` 里 x 是标量）R 也收，这儿就是那格值本身。 */
+        if (n !== 1) {
+          throw new Error(`r->IR: ${fn}() 这一批只接一格实参（给了 ${n}）——`
+            + ' R 的 `any(a, b)` 要"任意多格实参"那一层，这一版没有');
+        }
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        if (!isVecTy(t)) return asLgl(ev(0), t);
+        return lglCall(fn === 'any' ? 'r_any' : 'r_all', ev(0));
       }
       case 'sum': case 'mean': case 'max': case 'min': {
         /* 向量那一档走生成出来的函数；标量那一档（`max(a, b)`）归 `pmax`/`pmin` 那张表。 */
@@ -1612,6 +1779,102 @@ function naFnDecl(name) {
 }
 
 /**
+ * 三态逻辑那一族**生成出来的**辅助函数（`RLGL1` 那段账说了为什么是函数）。
+ *
+ * 存法：`1.0` 是 TRUE、`0.0` 是 FALSE、`NA` 是缺失。三态表照 R 的文档
+ * （`&` / `|` 那两格的真值表在 `?Logic` 里）：
+ *
+ *   `a & b`  —— 有一边是 FALSE 就 FALSE（**哪怕另一边是 NA**），否则有 NA 就 NA，否则 TRUE
+ *   `a | b`  —— 有一边是 TRUE 就 TRUE（**哪怕另一边是 NA**），否则有 NA 就 NA，否则 FALSE
+ *   `!a`     —— NA 取反还是 NA
+ *
+ * `NA & FALSE` 是 FALSE 这一格是要紧的：按"有 NA 就 NA"写会答错。
+ */
+function lglFnDecl(name) {
+  const x = { kind: 'name', name: 'x' };
+  const y = { kind: 'name', name: 'y' };
+  const na = () => lglCall('r_na');
+  const isNa = (e) => ({ kind: 'call', fn: { kind: 'name', name: useFn('r_is_na') }, args: [e] });
+  const T = { kind: 'real', value: 1 };
+  const F = { kind: 'real', value: 0 };
+  const isF = (e) => b('==', e, F);
+  const ret = (v) => ({ kind: 'return', values: [v] });
+  const fn2 = (body) => ({
+    kind: 'fn', name, params: [{ name: 'x', type: REAL }, { name: 'y', type: REAL }], ret: REAL, body,
+  });
+  const fn1 = (retTy, body) => ({
+    kind: 'fn', name, params: [{ name: 'x', type: REAL }], ret: retTy, body,
+  });
+
+  if (name === 'r_lgl') {
+    /* R 的 `as.logical`：`NA` 与 `NaN` 都是 `NA`（`is.na` 对两格都真，一问就够）。 */
+    return fn1(REAL, [
+      { kind: 'if', cond: isNa(x), then: [ret(na())], else_: null },
+      ret({ kind: 'ternary', cond: b('!=', x, F), then: T, else_: F }),
+    ]);
+  }
+  if (name === 'r_and') {
+    return fn2([
+      { kind: 'if', cond: b('||', isF(x), isF(y)), then: [ret(F)], else_: null },
+      { kind: 'if', cond: b('||', isNa(x), isNa(y)), then: [ret(na())], else_: null },
+      ret(T),
+    ]);
+  }
+  if (name === 'r_or') {
+    /* "是 TRUE"要连着问一句"不是 NA" —— `NA != 0` 在浮点上是**真**（NA 是个 NaN），
+       所以只写 `x != 0` 会把 `NA | FALSE` 答成 TRUE。反过来"是 FALSE"（`x == 0`）
+       对 NaN 自然为假，那一格不用多问。 */
+    const isT = (e) => b('&&', { kind: 'unop', op: '!', operand: isNa(e) }, b('!=', e, F));
+    return fn2([
+      { kind: 'if', cond: b('||', isT(x), isT(y)), then: [ret(T)], else_: null },
+      { kind: 'if', cond: b('||', isNa(x), isNa(y)), then: [ret(na())], else_: null },
+      ret(F),
+    ]);
+  }
+  if (name === 'r_not') {
+    return fn1(REAL, [
+      { kind: 'if', cond: isNa(x), then: [ret(na())], else_: null },
+      ret({ kind: 'ternary', cond: isF(x), then: T, else_: F }),
+    ]);
+  }
+  if (name === 'r_cond') {
+    /* `if (NA)` 在 R 里是一条**错误**，不是"当假"。`(fail …)` 是方言里停下来的那一格。 */
+    return fn1(BOOL, [
+      {
+        kind: 'if',
+        cond: isNa(x),
+        then: [{
+          /* `(fail …)` 在方言里**只当语句**，包进 `(expr …)` 那侧会报"不认识的表达式" */
+          kind: 'builtin-stmt',
+          name: 'fail',
+          args: [{ kind: 'string', value: 'missing value where TRUE/FALSE needed' }],
+        }],
+        else_: null,
+      },
+      ret(b('!=', x, F)),
+    ]);
+  }
+  if (name === 'r_lgl_str') {
+    return fn1(STR, [
+      { kind: 'if', cond: isNa(x), then: [ret({ kind: 'string', value: 'NA' })], else_: null },
+      ret({
+        kind: 'ternary',
+        cond: b('!=', x, F),
+        then: { kind: 'string', value: 'TRUE' },
+        else_: { kind: 'string', value: 'FALSE' },
+      }),
+    ]);
+  }
+  /* 比较那六格：两边任一是 NA（含 NaN）就 NA，否则按方言的比较折成 1 / 0。 */
+  const op = [...CMP_FNS.entries()].find(([, v]) => v === name);
+  if (op === undefined) throw new Error(`r->IR: 不认识的逻辑辅助函数 ${name}`);
+  return fn2([
+    { kind: 'if', cond: b('||', isNa(x), isNa(y)), then: [ret(na())], else_: null },
+    ret({ kind: 'ternary', cond: b(op[0], x, y), then: T, else_: F }),
+  ]);
+}
+
+/**
  * 向量那几格**生成出来的**辅助函数（用到才发）。
  *
  * 为什么是生成的函数而不是在调用点摊开：`sum` / `cat` 这几格都要一个 `while`，摊在调用点上
@@ -1878,6 +2141,39 @@ function vecFnDecl(name) {
       ], 0)],
     };
   }
+  if (name === 'r_any' || name === 'r_all') {
+    /* `any` / `all` —— R 的口径是"先看有没有决定性的那一格"：
+       `any` 见到一个 TRUE 就交 TRUE（后面还有 NA 也不管），一个都没见到但见过 NA 就 NA；
+       `all` 对称。所以一趟走完、记一格"见过 NA 没有"就够，不用两趟。 */
+    const isAny = name === 'r_any';
+    const seen = { kind: 'name', name: 'q' };
+    const F = { kind: 'real', value: 0 };
+    return {
+      kind: 'fn', name, params: P, ret: REAL,
+      body: [
+        declLen(),
+        { kind: 'let', name: 'q', type: BOOL, init: { kind: 'bool', value: false } },
+        loop([{
+          kind: 'if',
+          cond: naQ(elem),
+          then: [{ kind: 'assign', target: seen, value: { kind: 'bool', value: true } }],
+          else_: [{
+            kind: 'if',
+            cond: isAny ? b('!=', elem, F) : b('==', elem, F),
+            then: [{ kind: 'return', values: [{ kind: 'real', value: isAny ? 1 : 0 }] }],
+            else_: null,
+          }],
+        }], 0),
+        {
+          kind: 'if',
+          cond: seen,
+          then: [{ kind: 'return', values: [{ kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] }] }],
+          else_: null,
+        },
+        { kind: 'return', values: [{ kind: 'real', value: isAny ? 0 : 1 }] },
+      ],
+    };
+  }
   if (name === NUM_STR) return numStrDecl();
   throw new Error(`r->IR: 不认识的辅助函数 ${name}`);
 }
@@ -2019,7 +2315,9 @@ export function rToIR(tree) {
   /* 生成出来的辅助函数：**先按 `FN_DEPS` 闭包**，再一次发完（次序与"谁先被点到"无关）。
      摆在 `main` 之前、按名字排 —— 出来的 `.sx` 要能进快照。 */
   for (const name of closeFns(needFn)) {
-    decls.unshift(NA_FNS.has(name) ? naFnDecl(name) : vecFnDecl(name));
+    if (NA_FNS.has(name)) decls.unshift(naFnDecl(name));
+    else if (LGL_FNS.has(name)) decls.unshift(lglFnDecl(name));
+    else decls.unshift(vecFnDecl(name));
   }
 
   /* **自动 FFI 的那几行**（模块头上）。只发这一趟真用到的符号 —— 一份 271 条声明的头

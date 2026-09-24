@@ -183,6 +183,13 @@ R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不�
 `NA` 那一档是真的走到底的：`NA > 2` 与 `NaN > 2` 都是 `NA`（不是 `FALSE`），
 所以 `sum(c(1,NA,3) > 2)` 印 `NA` —— 判据在 `ext/r/examples/vec.R`。
 
+**一格逻辑标量也是三态的**（`RLGL1`）：同样是 double 的 1.0 / 0.0 / NA，
+只是不带指针。于是 `cat(NaN > 2)` 印 `NA`、`zs[1]` 印 `TRUE`、
+`any` / `all` 回一格带 NA 的逻辑、`NA & FALSE` 是 `FALSE`（三态真值表的那两格反直觉的
+在 `?Logic` 里），而 `if (NA)` 是**停下来**（方言的 `(fail …)`）而不是当假 ——
+判据在 `ext/r/examples/lgl.R`。两边都是 int 的比较仍然回方言的 `bool`：
+这一档没有 `NA_integer_`，那个状态到不了，而 `while (i <= n)` 是循环里最热的一格。
+
 线性内存这条路顺带把**两条腿**都走通了：`omni run`（JS + N-API）与 `omni build`（C 后端，
 `ccall` 直接连 `libomniRmath`）对 `vec.R` 的输出都与 `Rscript` 逐字节相同。
 
@@ -232,22 +239,32 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
 
 ## 四、明说的不足（**不猜**）
 
-1. **向量化到"逐元素 + 回收 + 逻辑向量"这一层**，缺口是量出来的四处：
+1. **向量化到"逐元素 + 回收 + 逻辑向量"这一层**，缺口是量出来的三处：
    * 回收时长的不是短的整倍数，R 会**警告**，我们不发 —— 那要一条输出通道，这一版没有；
    * `if (c(TRUE, FALSE))` 在 R 里是"取第一格 + 一句警告"，我们没有这一格；
-   * nmath 那一族只在**第一格**实参上逐元素（`round(xs, c(1,2))` 那种多头回收当场报）；
-   * `any` / `all` 没接 —— 它们回的是**带 NA 的标量逻辑**（`any(c(FALSE, NA))` 是 `NA`），
-     而那一格要下面第 2 条先立起来。
-2. **标量比较没有 `NA` 这一档。** 向量上 `NA > 2` 是 `NA`（逻辑向量装得下），
-   但一格标量比较回的是方言的 `bool`，装不下缺失 —— 于是 `cat(NaN > 2)` 我们印 `FALSE`
-   而 R 印 `NA`。补它要把标量逻辑也变成三态（double 的 1/0/NA），而 `if` 拿到 `NA` 时
-   R 是**报错**（"missing value where TRUE/FALSE needed"），所以还要一条错误通道。
+   * nmath 那一族只在**第一格**实参上逐元素（`round(xs, c(1,2))` 那种多头回收当场报）。
+2. **逻辑是三态的，标量那一格也立起来了**（`ext/r/adapter.js` 的 `RLGL1`，尺子是
+   `ext/r/examples/lgl.R`）：`cat(NaN > 2)` 印 `NA`、`NA & FALSE` 是 `FALSE`、
+   `zs[1]` 印 `TRUE`、`any` / `all` 回带 NA 的标量逻辑、`if (NA)` 走方言的 `(fail …)` 停下来。
+   剩下两处口径差别：
+   * **两边都是 int 的比较仍然回 `bool`**（`while (i <= n)` 那一格不绕）—— 这一档没有
+     `NA_integer_`（见第 10 条），所以那个状态到不了；
+   * `if (NA)` 停的方式不一样：R 印 `Error in …: missing value where TRUE/FALSE needed`
+     并退出 1（`if (NaN)` 那一格 R 另有一句 `argument is not interpretable as logical`），
+     我们两格都印 `omni: runtime error: missing value where TRUE/FALSE needed`
+     并退出 70（方言里 `(fail …)` 的口径）。错误**文本**与退出码要对上，得先有 R 那套
+     condition 系统（`tryCatch` / `warning`），这一版没有。
+   * `&&` / `||` 在**有三态参与**时不短路（落成 `r_and` / `r_or` 那两个函数，两边都求值）。
+     两边都是 `bool` 那一档照旧短路。为什么不短路：短路要临时量，而临时量在**条件位**上
+     没地方摆 —— `while` 的条件被降级到循环外头，摊开的 `let` 会变成"只算一次"。
 3. **不做懒求值**（promise / `missing()` / `substitute()`）—— 所以**形参默认值当场报**
    （`function(x, b = 2)`：R 里那个 `2` 是在函数体里才求值的一格 promise）。
 4. **不做属性**（`names` / `dim` / `class`）、**不做 S3 / S4 / R5 分派**、
    **不做环境**（`<<-` 当普通赋值）、**不做 `...`**。
-5. 逻辑向量**取下标**回的是那格 double（`zs[1]` 印 `1` 而不是 `TRUE`）—— 元素类型那一问
-   要跟着下标走一趟，与第 2 条同源。
+5. 用户函数的**返回类型**不跟踪（一律按 int 推），而形参也一律先按 int 推 —— 于是
+   `f <- function(x) x > 2` 之后 `cat(f(1))` 印的是方言自己那套文本（`false`），
+   不是 R 的 `FALSE`。量过：这一格从来就是这样（不是三态那一刀带进来的），
+   补它要一张"哪个函数回什么"的表，与第 4 条同源。
 6. 语法层两处：带 `-` 的原始串（`r"---(…)---"`，两侧个数要相同，这套词法项表达不了）、
    非 ASCII 字母的名字（`alpha` 只有 ASCII）。
 7. `c()` 不带实参（空向量）没接 —— 这一层的长度至少是 1，"零长向量"要另一格表示
