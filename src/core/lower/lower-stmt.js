@@ -241,7 +241,9 @@ function lowerAssign(s, ctx) {
     return sx.aset(ctx.lowerExpr(s.target.obj, ctx), ctx.lowerExpr(s.target.index, ctx), value);
   }
   if (s.target.kind === 'deref') {
-    return sx.exprStmt(sx.pstore(ctx.lowerExpr(s.target.expr, ctx), value));
+    /* `pstore` **本来就是语句**（方言里它不是表达式）—— 裹一层 `(expr …)` 的话那一层报
+       "不认识的表达式 'pstore'"。原来这儿裹了，而在 R 那一门用到指针之前没人走过这条路。 */
+    return sx.pstore(ctx.lowerExpr(s.target.expr, ctx), value);
   }
   throw new Error(`lower-stmt.js: 赋值的左边是 ${s.target.kind} —— 这一格要由 hooks.lowerAssign 答`);
 }

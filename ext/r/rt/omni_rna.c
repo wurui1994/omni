@@ -47,3 +47,9 @@ int omni_r_is_nan(double x)
 }
 
 int omni_r_is_infinite(double x) { return isinf(x) ? 1 : 0; }
+
+/* ---- 按指针进出（见头文件那段账） ---- */
+
+void omni_r_na_into(double *p) { *p = omni_r_na(); }
+int omni_r_is_na_p(const double *p) { return omni_r_is_na(*p); }
+int omni_r_is_nan_p(const double *p) { return omni_r_is_nan(*p); }

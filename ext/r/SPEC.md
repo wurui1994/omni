@@ -111,21 +111,25 @@ libm 那一族（`sqrt` `exp` `log` `log2` `log10` `floor` `ceiling` 与三角/�
 `is.finite` 用 R 自己的 `R_finite`。印法照 R 的三处特例（`NaN` / `Inf` / `-Inf`），
 布尔印 `TRUE` / `FALSE` —— 都在生成出来的那格 `r_num_str` 里，用到才发。
 
-### `NA` 落不下来 —— 量出来的，不是没接
+### `NA`：R 的 double **按指针过 FFI，不按值**
 
-R 的 `NA_real_` 是"一个带 1954 载荷的 NaN"（*R Internals* §1.3）。那个载荷：
+`NA_real_` 是"带 1954 载荷的 NaN"（*R Internals* §1.3）。那个载荷在哪儿丢的，量出来三档：
 
-- 在 C 里**好好的**：`rt/omni_rna.c` 编出来直接调，`is_na=1 is_nan=0`；
-- 在 JS 的 `number` 里也**好好的**：从 `Float64Array` 读出来再写回去，低 32 位还是 1954；
-- **过一趟 N-API 就没了**：`(ccall omni_r_na)` 拿回来的值再交回 C，`is_nan` 变成 1 ——
-  `napi_create_double` 要把 double 装成一格 JS 值，那一步 V8 把 NaN 规范化了
-  （ArrayBuffer 那条路没这一步，所以第二条成立）。
+- **C 里好好的** —— `rt/omni_rna.c` 编出来直接调：`is_na=1 is_nan=0`（对）
+- **按值过一趟 FFI 就没了** —— `(ccall omni_r_na)` 拿回来再交回 C：`1 1`（NA 变成普通 NaN）。
+  `napi_create_double` 要把 double 装成一格 JS 值，那一步 V8 把 NaN 规范化了。
+- **按指针走就留住了** —— `(pnew (ptr real) 1)` + `(ccall … (var p))`：`1 0`；而且
+  `pload` 出来那格 JS 数再 `pstore` 回另一段内存还是 `1 0`（JS 的 `number` 本身**不丢**载荷，
+  丢的只是装箱那一步）。
 
-于是 `NA` 与 `NaN` 在这条腿上**分不开**。硬接的后果是 `cat(NA)` 印 `NaN`、`is.nan(NA)` 答
-`TRUE` —— 两句都是静默的错答案，比报出来糟得多，所以 adapter 遇到 `NA` 当场报。
+所以这一族走 `(ptr real)`：值留在线性内存里，两边按位读写，绕开装箱。三格封在生成出来的
+`r_na` / `r_is_na` / `r_is_nan` 里，调用点照旧写 `NA` / `is.na(x)` —— 指针那套不往上冒。
+R 那两条区别由此立住：`is.na(NaN)` 真、`is.nan(NA)` 假。
 
-要它就得让 R 的值**不是一格裸 double**（tag 在 double 外面）。这一条正是"向量与值模型"
-那一版绕不过去的理由 —— 它不是一格函数能补的。
+`is.finite` / `is.infinite` 照旧**按值**过：`Inf` 没有载荷可丢。
+
+**`NA_integer_` / `NA_character_` 还没接** —— 它们在 R 那边是另外两种表示
+（`INT_MIN` 与一格特殊的 CHARSXP），要"带缺失的整数/串"那一层。
 
 **随机数那一族（`r*`）刻意没接**：它们要 `set.seed` 那套状态，而 R 的发生器在解释器里，
 standalone 这一份的流不一样 —— 接上去是"看着像对、每个数都不一样"。
@@ -184,4 +188,4 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、别的 `alen` —— `una
    `123456789`。那条挑法在 `src/main/format.c`（解释器那半边）。量过：要么整数、
    要么 ≥1e5 才碰得到。
 8. 随机数那一族（`r*` / `set.seed`）没接 —— 见第二节。
-9. **`NA`** 落不下来（不是"没接"）—— 根因与后果见第二节那一小节。
+9. `NA_integer_` / `NA_character_` 没接（实数的 `NA` 已经立住了）—— 见第二节那一小节。

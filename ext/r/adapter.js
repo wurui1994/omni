@@ -99,11 +99,7 @@ const cabiUsed = new Set();
  * `rt/omni_rna.c`（R 那边它们在解释器里）。
  */
 const PRED = new Map([
-  /* `NA` 落不下来（见 `NA_WHY`），于是手上不可能有 NA —— `is.na` 与 `is.nan` 在这条腿上
-     是同一件事，两个都答"这是不是 NaN"。R 那边它们不同（`is.na(NaN)` 真、`is.nan(NA)` 假），
-     而那处差别要等 NA 真能表示出来。 */
-  ['is.na', 'omni_r_is_na'],
-  ['is.nan', 'omni_r_is_nan'],
+  /* 这两格**没有**载荷问题（`Inf` 就是 `Inf`），所以照旧按值过。 */
   ['is.infinite', 'omni_r_is_infinite'],
   ['is.finite', 'R_finite'],
 ]);
@@ -158,24 +154,32 @@ const NONNUM = new Map([
 ]);
 
 /**
- * **`NA` 在 JS 这条腿上落不下来** —— 量出来的，不是没接。
+ * **R 的 double 按指针过 FFI，不按值。**
  *
- * R 的 `NA_real_` 是"一个带 1954 载荷的 NaN"（*R Internals* §1.3）。那个载荷：
- *   * 在 C 里好好的 —— `rt/omni_rna.c` 编出来之后直接调，`is_na=1 is_nan=0`；
- *   * 在 JS 的 `number` 里也好好的 —— 从 `Float64Array` 读出来再写回去，低 32 位还是 1954；
- *   * **过一趟 N-API 就没了** —— `(ccall omni_r_na)` 拿回来的值再交回 C，`is_nan` 变成 1。
- *     `napi_create_double` 要把 double 装成一格 JS 值，而那一步 V8 把 NaN 规范化了
- *     （ArrayBuffer 那条路没这一步，所以上面第二条成立）。
+ * `NA_real_` 是"带 1954 载荷的 NaN"（*R Internals* §1.3），而那个载荷**按值过 N-API 会被
+ * V8 规范化掉**（`napi_create_double` 那一步）。量出来的三格：
+ *   * C 里直接调：`is_na=1 is_nan=0`（对）
+ *   * 按值过一趟 `(ccall omni_r_na)`：`is_na=1 is_nan=1`（NA 变成了普通 NaN）
+ *   * **按指针**（`(pnew (ptr real) 1)` + `(ccall … (var p))`）：`1 0`，而且 `pload` 出来
+ *     的那格 JS 数再 `pstore` 回另一段内存，还是 `1 0` —— 载荷分毫不动
  *
- * 于是 `NA` 与 `NaN` 在这条腿上**分不开**。硬接的后果是 `cat(NA)` 印 `NaN`、
- * `is.nan(NA)` 答 `TRUE` —— 两句都是静默的错答案，比报出来糟得多。
- *
- * 要它就得让 R 的值**不是一格裸 double**（tag 在 double 外面）—— 那是"向量与值模型"
- * 那一版的事，而这一条正是它绕不过去的理由。
+ * 所以 `NA` 这一族走 `(ptr real)`：值留在线性内存里，两边按位读写，绕开装箱那一步。
+ * 三格封在下面那三个**生成出来的函数**里（`r_na` / `r_is_na` / `r_is_nan`），
+ * 调用点照旧写 `NA` / `is.na(x)` —— 指针那套不往上冒。
  */
-const NA_WHY = 'NA 在 JS 这条腿上落不下来：它是"带 1954 载荷的 NaN"，而那个载荷过 N-API'
-  + '（napi_create_double）会被 V8 规范化掉 —— 量过：C 里 is_nan=0、过一趟之后 is_nan=1。'
-  + '所以 NA 与 NaN 分不开，硬接就是静默答错。要它得先有"值不是裸 double"那一层。';
+const PTR_REAL = { kind: 'ptr', inner: REAL };
+const NA_FNS = new Map([
+  ['r_na', 'omni_r_na_into'],
+  ['r_is_na', 'omni_r_is_na_p'],
+  ['r_is_nan', 'omni_r_is_nan_p'],
+]);
+/** 这一趟要发哪几格生成出来的辅助函数。 */
+const needFn = new Set();
+const useFn = (name) => { needFn.add(name); return name; };
+
+/**
+ *
+ */
 
 /** 一格 NUM_CONST 的文本 → 标准 IR 的字面量。写法定类型，见文件头第 4 条。 */
 function numLit(text) {
@@ -188,7 +192,13 @@ function numLit(text) {
     rmathSig(sym);
     return { kind: 'ccall', sym, args: [] };
   }
-  if (t === 'NA' || t.startsWith('NA_')) throw new Error(`r->IR: ${t} —— ${NA_WHY}`);
+  if (t === 'NA' || t === 'NA_real_') {
+    return { kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] };
+  }
+  if (t.startsWith('NA_')) {
+    throw new Error(`r->IR: ${t} 还没接 —— 整数与串的 NA 在 R 那边是另外两种表示`
+      + '（`INT_MIN` 与一格特殊的 CHARSXP），而我们还没有"带缺失的整数/串"那一层');
+  }
   if (t.endsWith('i')) throw new Error(`r->IR: 复数还没接：${t}`);
   if (t.endsWith('L')) return { kind: 'int', value: Number(t.slice(0, -1)) };
   if (/^0[xX]/.test(t)) return { kind: 'int', value: Number(t) };
@@ -204,7 +214,7 @@ function numLit(text) {
  */
 const BUILTINS = new Set([
   'cat', 'paste', 'paste0', 'c', 'list', 'length', 'nchar', 'return', 'is.null',
-  'as.integer', 'as.numeric', 'as.character', 'abs', 'seq_len',
+  'as.integer', 'as.numeric', 'as.character', 'abs', 'seq_len', 'is.na', 'is.nan',
   /* libm 那一族：R 自己这几个也是直接调 libm（不在 nmath 里），所以落方言的 `rmath`。
      一格实参、回 double —— `log(x, base)` 那种两格的**当场报**（R 那一档是 `log(x)/log(b)`，
      而"替它算"与"照它算"是两件事）。 */
@@ -260,8 +270,8 @@ function typeOfExpr(x, types) {
     case 'num': {
       const v = numLit(leaf(kids(x)[0]));
       if (v.kind === 'bool') return BOOL;
-      /* `NA` / `NaN` / `Inf` 走 ccall，回的是 double */
-      return v.kind === 'real' || v.kind === 'ccall' ? REAL : INT;
+      /* `NA` 走生成出来的 `r_na()`、`NaN` / `Inf` 走 ccall —— 三格回的都是 double */
+      return v.kind === 'real' || v.kind === 'ccall' || v.kind === 'call' ? REAL : INT;
     }
     case 'str': return STR;
     case 'paren': return typeOfExpr(kids(x)[0], types);
@@ -310,6 +320,7 @@ function typeOfCall(x, types) {
   /* R 自己的 C 那一族回的都是 `double` —— 这是 nmath 的形状，不是我们的选择。 */
   if (fn !== null && RMATH.has(fn)) return REAL;
   if (fn !== null && PRED.has(fn)) return BOOL;
+  if (fn === 'is.na' || fn === 'is.nan') return BOOL;
   switch (fn) {
     case 'paste': case 'paste0': case 'as.character': return STR;
     case 'length': case 'nchar': case 'as.integer': return INT;
@@ -629,7 +640,15 @@ function callOf(x, types, extra, want) {
   const ev = (i) => (all[i] === null ? extra : exprOf(all[i], types));
   const n = all.length;
 
-  /* `is.na` 一族：C 回 int，包一格 `!= 0` 成布尔。 */
+  /* `is.na` / `is.nan`：走那两格按指针的生成函数（载荷不能按值过，见 `PTR_REAL` 那段）。 */
+  if (fn === 'is.na' || fn === 'is.nan') {
+    if (n !== 1) throw new Error(`r->IR: ${fn}() 要正好一格实参（给了 ${n}）`);
+    const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+    const name = useFn(fn === 'is.na' ? 'r_is_na' : 'r_is_nan');
+    return { kind: 'call', fn: { kind: 'name', name }, args: [asReal(ev(0), t)] };
+  }
+
+  /* `is.finite` / `is.infinite`：C 回 int，包一格 `!= 0` 成布尔。 */
   if (fn !== null && PRED.has(fn)) {
     if (n !== 1) throw new Error(`r->IR: ${fn}() 要正好一格实参（给了 ${n}）`);
     const sym = PRED.get(fn);
@@ -949,11 +968,11 @@ function zeroInit(t) {
  * 所以落成一个函数发一次，而不是在每个调用点摊开一串三元（那样 `.sx` 读不动）。
  */
 function numStrDecl() {
-  for (const sym of ['omni_r_is_na', 'omni_r_is_nan', 'omni_r_is_infinite']) {
-    cabiUsed.add(sym);
-    rmathSig(sym);
-  }
+  cabiUsed.add('omni_r_is_infinite');
+  rmathSig('omni_r_is_infinite');
   const x = { kind: 'name', name: 'x' };
+  /* NA / NaN 那两问走按指针的生成函数；无穷那一问没有载荷，按值就行。 */
+  const q = (name) => ({ kind: 'call', fn: { kind: 'name', name: useFn(name) }, args: [x] });
   const c = (sym) => b('!=', { kind: 'ccall', sym, args: [x] }, { kind: 'int', value: 0 });
   const ret = (v) => ({ kind: 'return', values: [{ kind: 'string', value: v }] });
   return {
@@ -965,8 +984,8 @@ function numStrDecl() {
       /* `is.na` 对 NA 与 NaN 都真 —— 先问 `is.nan` 才分得开这两格 */
       {
         kind: 'if',
-        cond: c('omni_r_is_na'),
-        then: [{ kind: 'if', cond: c('omni_r_is_nan'), then: [ret('NaN')], else_: null }, ret('NA')],
+        cond: q('r_is_na'),
+        then: [{ kind: 'if', cond: q('r_is_nan'), then: [ret('NaN')], else_: null }, ret('NA')],
         else_: null,
       },
       {
@@ -984,6 +1003,48 @@ function numStrDecl() {
         else_: null,
       },
       { kind: 'return', values: [call1('sgen', x, { kind: 'int', value: 7 })] },
+    ],
+  };
+}
+
+/**
+ * 那三格**按指针**走的辅助函数（`r_na` / `r_is_na` / `r_is_nan`），用到了才发。
+ *
+ * 形状都一样：开一格 `(ptr real)` 的一元缓冲，把值写进去（或者让 C 写进去），
+ * 再按位读回来。理由在 `PTR_REAL` 那段账上 —— `NA` 的载荷按值过 N-API 会丢。
+ */
+function naFnDecl(name) {
+  const sym = NA_FNS.get(name);
+  cabiUsed.add(sym);
+  rmathSig(sym);
+  const p = { kind: 'name', name: 'p' };
+  const alloc = {
+    kind: 'let', name: 'p', type: PTR_REAL,
+    init: { kind: 'builtin', name: 'pnew', args: [tyArg(PTR_REAL), { kind: 'int', value: 1 }] },
+  };
+  if (name === 'r_na') {
+    return {
+      kind: 'fn', name, params: [], ret: REAL,
+      body: [
+        alloc,
+        { kind: 'expr-stmt', expr: { kind: 'ccall', sym, args: [p] } },
+        { kind: 'return', values: [{ kind: 'deref', expr: p }] },
+      ],
+    };
+  }
+  return {
+    kind: 'fn',
+    name,
+    params: [{ name: 'x', type: REAL }],
+    ret: BOOL,
+    body: [
+      alloc,
+      /* 写进线性内存 —— 这一步之后那格值就不再经过装箱了 */
+      { kind: 'assign', target: { kind: 'deref', expr: p }, value: { kind: 'name', name: 'x' } },
+      {
+        kind: 'return',
+        values: [b('!=', { kind: 'ccall', sym, args: [p] }, { kind: 'int', value: 0 })],
+      },
     ],
   };
 }
@@ -1079,6 +1140,7 @@ export function rToIR(tree) {
   tmpN = 0;
   cabiUsed.clear();
   needNumStr = false;
+  needFn.clear();
   const items = kids(tree);
   const fns = [];
   const rest = [];
@@ -1100,8 +1162,10 @@ export function rToIR(tree) {
   const lets = [];
   for (const [n, t] of types) lets.push({ kind: 'let', name: n, type: t, init: zeroInit(t) });
   decls.push({ kind: 'main', body: [...lets, ...stmts] });
-  /* 那格印法的辅助函数：**在 cabi 之前定**（它自己也会往 `cabiUsed` 里加三格）。 */
+  /* 那格印法的辅助函数：**在 cabi 之前定**（它自己也会往 `cabiUsed` 与 `needFn` 里加）。 */
   if (needNumStr) decls.unshift(numStrDecl());
+  /* 按指针那三格摆在最前（`r_num_str` 会调它们）。次序照名字排 —— `.sx` 要能进快照。 */
+  for (const name of [...needFn].sort().reverse()) decls.unshift(naFnDecl(name));
 
   /* **自动 FFI 的那几行**（模块头上）。只发这一趟真用到的符号 —— 一份 271 条声明的头
      全发出来的话，`.sx` 会被 271 行 `(cabi …)` 淹掉，而没用到的那些还要求链接期真有它们。

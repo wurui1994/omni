@@ -34,3 +34,16 @@ int omni_r_is_nan(double x);
 int omni_r_is_infinite(double x);
 
 #endif /* OMNI_RNA_H */
+
+/* ---- 按**指针**进出的那一套 --------------------------------------------------
+ *
+ * 为什么要它：`NA` 是"带 1954 载荷的 NaN"，而那个载荷**按值过 N-API 会被 V8 规范化掉**
+ * （`napi_create_double` 那一步；量过：C 里 is_nan=0，过一趟 FFI 之后变 1）。
+ * 按指针走就不经过那一步 —— 值留在线性内存里，两边都按位读写，载荷分毫不动。
+ */
+
+/** 往 `p[0]` 写一格 `NA_real_`。 */
+void omni_r_na_into(double *p);
+/** `is.na(p[0])` / `is.nan(p[0])`：按位读，不经过装箱。 */
+int omni_r_is_na_p(const double *p);
+int omni_r_is_nan_p(const double *p);
