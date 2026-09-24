@@ -1232,3 +1232,46 @@ ES 300 都有这两个内建函数）—— 少一条宿主面、少一份"可�
   （不是"编不过就悄悄退"—— 那会把我们自己的 GLSL bug 藏起来；只认 `!!ARB` 这一个特征）。
 
 于是这 5 份从"跑不起来"变成"与参考画同一条内建管线"，像素才比得上。
+
+## 20. 第十刀的设计：**文件纹理**（`glsettex(槽,"earth.jpg")`，13 份脚本）
+
+### 20.1 账
+
+语料里 13 份 `.pss` 用 `glsettex(槽, "文件名")` 那一档（`GLSETTEX(,$)` /
+`GLSETTEX(,$,)`，`polydraw.c:2166`）：`earth.jpg` 9 次、`kensky.jpg`（立方体贴图）、
+`b2dr_sph.jpg`、两个 `.png`，另有两处指向这台机器上没有的路径。
+那三份 jpg 与两份 png **就在 `polydraw/` 底下**，所以这不是"没素材"，是我们没有解码器。
+
+原版的落法（`polydraw.c:1279` 的 `kglsettex2`）：
+读文件 -> `kpgetdim`/`kprender` 解码成 BGRA -> `glTexSubImage2D`；
+**`(colmode&0xf0) >= KGL_MIPMAP` 时还要 `gluBuild2DMipmaps`**；
+一个字符串那一档的默认 colmode 是 `KGL_MIPMAP + KGL_REPEAT`（`:1346`）。
+**文件读不到不报错**：它画一张 "IMAGE NOT FOUND :-(" 的占位图（`:1308`，里头有
+`rand()` 噪声 —— 所以那种例子天生不可逐像素对照）。
+立方体贴图那一档：一张竖排 6 面的图，按 `cubemapindex[]` 分别 `glTexSubImage2D`（`:1339`）。
+
+参考实现用的是 **stb_image**（`c_impl/src/render/pd_polyhost_tex.c:25`）。
+
+### 20.2 解码器放哪儿：**一份 C，两条腿共用**
+
+这一层是宿主面的事，而宿主面有三份实现（`host/gfx-cpu.js` / `runtime/omni_fmt.c` /
+`studio/gfx-gl.js`）。**不许写三份解码器**，所以：
+
+* 解码器写成**一份 C**（`src/runtime/omni_img.c`）—— 基线 JPEG + PNG（PNG 要 inflate）；
+* C 腿直接链它；
+* js / interp 两条腿走**已经有的那条外挂路**（`ffi_host.js` 的 `dlopenAddon`，
+  GL 那一档就是这么挂的）—— 于是"一份实现两条腿共用"，与 GL 那一刀同一个形状；
+* 浏览器那一档下一刀再说（那边有平台自己的解码，`createImageBitmap`）。
+
+方言那一侧不加新 op：文件名走**已有的串那一格**，落成
+`(gfxcall "settexfile" 槽 名字下标 colmode)` —— 与 `glgetuniformloc` 收串同一手。
+
+### 20.3 判据
+
+1. 单元一层：`tests/img/run.js` 解 `earth.jpg` / `kensky.jpg` / `tomland.png`，
+   与参考的 `pd-imgdecode` 出的 PPM 比 —— **平均差 ≤ 2**（两家 IDCT 不同，不追逐字节）；
+2. 出图一层：`texture` / `drawsph` / `mipmap` / `cubetex` / `orthoglobe` 那几份的 RMSE；
+3. 读不到文件那一档：占位图**不带随机噪声**（原版那儿是 `rand()`）——
+   我们画同一张 "IMAGE NOT FOUND" 字样、底色定死，判据里把那种例子记 `REF_WRONG`
+   （参考每趟都不一样，本来就没法对照）。
+

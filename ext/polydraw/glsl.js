@@ -37,7 +37,6 @@ export function glslAlign(kind, src) {
      报 `'!' : syntax error`（踩过）。设备收到 ARB 就退回内建那对，见 §19.2。 */
   if (/^\s*!!ARB/.test(src)) return src;
   let s = src;
-  const usesTex0 = /gl_TexCoord\s*\[\s*0\s*\]/.test(s);
   s = s.replace(/\bgl_TexCoord\s*\[\s*0\s*\]/g, 'v_tex0');
   s = s.replace(/\bgl_MultiTexCoord0\b/g, 'a_tex');
   s = s.replace(/\bftransform\s*\(\s*\)/g, '(u_mvp * a_pos)');
@@ -64,19 +63,22 @@ export function glslAlign(kind, src) {
     s = s.replace(/\bgl_FrontColor\b/g, 'v_col0');
     s = s.replace(/\bgl_Normal\b/g, 'a_nrm.xyz');
     s = s.replace(/\bvarying\b/g, 'out');
+    /* **那两格跨段量两边都无条件声明**（`v_col0` 颜色、`v_tex0` 0 号纹理坐标）：
+       一对着色器是**脚本随便配的**（`qglsetshader(0)` 拿的是"各类里第一份"，
+       `tigrou/balls2k.pss` 那种一份脚本好几对的就会配出"顶点写了、片元不读"），
+       而 Apple 的 GLSL 链接器把 "Output of vertex shader 'v_col0' not read by
+       fragment shader" 当**链接失败**（只印 WARNING，`GL_LINK_STATUS` 却是假的 —— 踩过）。
+       两边都声明就没有这一类错，而且与内建那对的形状一模一样。 */
     head.push('in vec4 a_pos;', 'in vec4 a_tex;', 'in vec4 a_col;', 'in vec4 a_nrm;',
-      'uniform mat4 u_mvp;', 'uniform mat4 u_mv;', 'out vec4 v_col0;');
-    if (usesTex0) head.push('out vec4 v_tex0;');
-    /* 顶点色要跨段传：`gl_Color` 在片元里是**插值过的**那一格，所以顶点这边总是把
-       `a_col` 抄进 `v_col0`（没人读也无害）。注入点是 main 的那个左花括号。 */
-    s = s.replace(/void\s+main\s*\(\s*\)\s*\{/, 'void main() { v_col0 = a_col;');
+      'uniform mat4 u_mvp;', 'uniform mat4 u_mv;', 'out vec4 v_col0;', 'out vec4 v_tex0;');
+    /* 顶点色与纹理坐标要跨段传：`gl_Color` / `gl_TexCoord[0]` 在片元里是**插值过的**那一格，
+       所以顶点这边总是把 `a_col`/`a_tex` 抄过去（没人读也无害）。注入点是 main 的左花括号。 */
+    s = s.replace(/void\s+main\s*\(\s*\)\s*\{/, 'void main() { v_col0 = a_col; v_tex0 = a_tex;');
   } else {
     s = s.replace(/\bgl_Color\b/g, 'v_col0');
     s = s.replace(/\bvarying\b/g, 'in');
     s = s.replace(/\bgl_FragColor\b/g, 'o_col');
-    head.push('out vec4 o_col;', 'uniform mat4 u_mvp;');
-    if (usesTex0) head.push('in vec4 v_tex0;');
-    if (/\bv_col0\b/.test(s)) head.push('in vec4 v_col0;');
+    head.push('out vec4 o_col;', 'uniform mat4 u_mvp;', 'in vec4 v_col0;', 'in vec4 v_tex0;');
   }
   return `${head.join('\n')}\n${s}`;
 }

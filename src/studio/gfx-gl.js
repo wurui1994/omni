@@ -509,7 +509,10 @@ function setShader(args) {
     return nthOf(kind, Math.trunc(Number(args[i]))) ?? firstOf(kind);
   };
   if (args.length === 1) {
-    useProgram(firstOf('vert'), shAt(0, 'frag'));
+    /* **一格实参那一档不查名字表**：原版那儿是个整数（`GLSETSHADER()`），而方言把串换成了
+       名字表下标 —— 两者的数字空间是重的，查名字表会撞上"第 0 个内部到的串"，
+       于是配出不相干的一对（本机那一档踩过，见 §17.5 那一格的补注）。 */
+    useProgram(firstOf('vert'), nthOf('frag', Math.trunc(Number(args[0]))) ?? firstOf('frag'));
     return 0;
   }
   const f = args.length >= 3 ? shAt(2, 'frag') : shAt(1, 'frag');

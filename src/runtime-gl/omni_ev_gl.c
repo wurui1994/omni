@@ -40,7 +40,7 @@
 
 /* 出错把话留在这儿，宿主用 `omni_ev_gl_error()` 取（插件不自己往 stderr 喷 ——
    那会把判据那一侧的 stdout/stderr 弄脏）。 */
-static char g_err[512];
+static char g_err[4096];
 static void ev_err(const char *fmt, const char *a) {
   if (a == NULL) snprintf(g_err, sizeof(g_err), "%s", fmt);
   else snprintf(g_err, sizeof(g_err), fmt, a);
@@ -323,7 +323,10 @@ static GLuint ev_use_program(int vi, int fi) {
   GLint ok = 0;
   glGetProgramiv(p, GL_LINK_STATUS, &ok);
   if (!ok) {
-    char log[512];
+    /* **日志要够长**：Apple 的链接器先吐一串 `WARNING: Output of vertex shader 'x' not read
+       by fragment shader`，真正的 `ERROR:` 在后头 —— 缓冲太小的话只看得见那句警告，
+       会把人引到"不许有没人读的 out"那条岔路上去（踩过）。 */
+    char log[4096];
     GLsizei n = 0;
     glGetProgramInfoLog(p, sizeof(log) - 1, &n, log);
     log[n] = 0;
@@ -391,8 +394,15 @@ int omni_ev_gl_shader(int argc, const double *args) {
   }
   if (argc == 1) {
     /* `qglsetshader(d)` = `setshader_int(0, -1, (int)d)`（`polydraw.c:1072`）：
-       **顶点固定取第 0 份**、片元取第 d 份。 */
-    return ev_use_program(ev_first_of(0), ev_sh_at(args[0], 1)) == 0 ? 1 : 0;
+       **顶点固定取第 0 份**、片元取**这一类里第 d 份**。
+       这一档**不许查名字表**：一格实参那一档在原版里就是个整数（`GLSETSHADER()`），
+       而方言把串换成了名字表下标 —— 两者的数字空间是重的。查名字表的话
+       `qglsetshader(0)` 会撞上"第 0 个内部到的串"（`tigrou/balls2k.pss` 里那格是
+       `"drawsph"`），于是配出 `@v:lines` + `@f:drawsph`，链接器报
+       `Input of fragment shader 'n' not written by vertex shader`（踩过）。 */
+    int fi = ev_nth_of(1, (int)args[0]);
+    if (fi < 0) fi = ev_first_of(1);
+    return ev_use_program(ev_first_of(0), fi) == 0 ? 1 : 0;
   }
   int vi = ev_sh_at(args[0], 0);
   int fi = ev_sh_at(argc >= 3 ? args[2] : args[1], 1);
