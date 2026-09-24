@@ -149,6 +149,8 @@ export const POLYDRAW_GL = new Map([
   ['glswapinterval/1', 'gl_nop1'],
   ['glblendfunc/2', 'gl_nop2'],
   ['glalphaenable/1', 'gl_nop1'],
+  ['glalphaenable/0', 'gl_nop0'],
+  ['glalphadisable/0', 'gl_nop0'],
   ['glalphadisable/1', 'gl_nop1'],
   /* `RGB(r,g,b)` 把三个分量打成一个 24 位的数 —— 设备里已经有那一格。 */
   ['rgb/3', 'gfx_rgb'],
@@ -160,6 +162,10 @@ export const POLYDRAW_GL = new Map([
  */
 export const GL_CONSTS = new Map([
   ['gl_points', 0], ['gl_lines', 1], ['gl_line_loop', 2], ['gl_line_strip', 3],
+  /* **`GL_COMPLEX` 是 EvalDraw 自己的 mode**（`glbegin(GL_COMPLEX)`，带自相交填充的
+     复杂多边形；标准 GL 里没有这个名字）—— 我们当 `GL_POLYGON`（9）拆成三角扇。
+     **明写偏差**：自相交那一档的填充规则与原版不同（原版是 tessellate）。 */
+  ['gl_complex', 9],
   ['gl_triangles', 4], ['gl_triangle_strip', 5], ['gl_triangle_fan', 6],
   ['gl_quads', 7], ['gl_quad_strip', 8], ['gl_polygon', 9],
   ['gl_color_buffer_bit', 0x4000], ['gl_depth_buffer_bit', 0x100],
@@ -429,6 +435,7 @@ function glSetupDecls() {
       ]),
       ret(num(0)),
     ]),
+    fn('gl_nop0', [], [ret(num(0))]),
     fn('gl_nop1', ['a'], [ret(num(0))]),
     /**
      * `glEnable(cap)` / `glDisable(cap)`：**深度测试那一格是设备状态**，要转给设备

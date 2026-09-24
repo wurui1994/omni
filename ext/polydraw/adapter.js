@@ -552,6 +552,11 @@ function callOf(x, C) {
   if (n === 'int' && args.length === 1) {
     return tern(bin('<', args[0], num(0)), rmath('ceil', [args[0]]), rmath('floor', [args[0]]));
   }
+  /* `NEAR(x)`：**就近取整**（语料里 `geeky/circtris.kc` / `games/traffic.kc` 那一族用它
+     把浮点量成格子）—— 与我们别处的 `dtol` 同一手：`floor(x+0.5)`。 */
+  if (n === 'near' && args.length === 1) {
+    return rmath('floor', [bin('+', args[0], num(0.5))]);
+  }
   /* `SGN`：负 -1、正 1、零 0。`UNIT`：负 0、正 1、零 .5（说明书那两行）。 */
   if (n === 'sgn' && args.length === 1) {
     return tern(bin('<', args[0], num(0)), num(-1),

@@ -730,7 +730,9 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
   if (!strcmp(nm, "glactivetexture") && argc == 1) { return 0.0; }
   if (!strcmp(nm, "glcapture") && argc == 0) { return 0.0; }
   if (!strcmp(nm, "glcapture") && argc == 4) { return 0.0; }
-  if (!strcmp(nm, "glcaptureend") && argc == 0) { return 0.0; }
+  if (!strcmp(nm, "glcaptureend") && argc <= 1) { return 0.0; }
+  if (!strcmp(nm, "mountzip") && argc >= 1 && argc <= 2) { return 0.0; }
+  if (!strcmp(nm, "glulookat") && argc == 9) { return 0.0; }
   if (!strcmp(nm, "drawspr") && argc == 4) { return 0.0; }
   if (!strcmp(nm, "drawspr") && argc == 5) { return 0.0; }
   if (!strcmp(nm, "drawspr") && argc == 6) { return 0.0; }

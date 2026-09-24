@@ -514,7 +514,8 @@ export function gfxCall(name, args) {
     case 'glsettex/5': case 'glsettex/6':
     case 'glgettex/4': case 'glgettex/5':
     case 'glbindtexture/1': case 'glactivetexture/1':
-    case 'glcapture/0': case 'glcapture/4': case 'glcaptureend/0':
+    case 'glcapture/0': case 'glcapture/4': case 'glcaptureend/0': case 'glcaptureend/1':
+    case 'mountzip/1': case 'mountzip/2': case 'glulookat/9':
     case 'drawspr/4': case 'drawspr/5': case 'drawspr/6':
     case 'drawkv6/4': case 'drawkv6/5': case 'drawkv6/7': case 'drawkv6/8':
     case 'drawvox/4': case 'drawvox/5':
