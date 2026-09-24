@@ -31,6 +31,7 @@ import { isList, tag, kids, leaf } from '../../src/core/lower/cst.js';
 import { cUnescape, fmtToStmts } from '../../src/core/lower/fmt.js';
 import { gfxGlobalDecls, gfxFnDecls, gfxPresentDecl } from './gfx-rt.js';
 import { POLYDRAW_GL, GL_CONSTS, glGlobalDecls, glFnDecls } from './gl-rt.js';
+import { NOISE_FNS, noiseGlobalDecls, noiseFnDecls } from './noise-rt.js';
 import { env } from '../../src/core/host/native.js';
 
 /**
@@ -502,6 +503,16 @@ function callOf(x, C) {
   if (C.gfxHost && HOST_FNS0.includes(n) && args.length <= 1) {
     C.needGfx = true;
     return gfxCallIR(n, args);
+  }
+
+  /* **噪声那一族**（`NOISE(x[,y[,z]])` / `NOISE3D(x,y,z)`）：纯函数，落成生成出来的 IR
+     （`noise-rt.js`，照 `polydraw.c:852` 那份算法）—— 不进设备，四条腿逐字节相同。
+     摆在设备那一支前头：它的名字以 `noise` 开头，会被那张前缀表捞走。 */
+  const noiseFn = NOISE_FNS.get(`${n}/${args.length}`);
+  if (noiseFn !== undefined) {
+    C.needNoise = true;
+    C.fns.set(noiseFn, { params: args.map(() => REAL), ret: REAL });
+    return { kind: 'call', fn: nameRef(noiseFn), args };
   }
 
   /* 画图那一族：**按这一门的宿主表判**（`C.host`）。两门语言共用这一份 adapter，
@@ -1766,6 +1777,7 @@ export function evalToIR(cst, host, src = '') {
     valParams: new Set(),               /* 当前函数**按值**收的形参（`&x` 碰上它要报） */
     gotoActive: [],                     /* 正在降哪几格标号前头那一段（`goto` 的旗子名） */
     needRnd: false,                     /* 用过 `RND`/`NRND`/`SRAND` 没有 */
+    needNoise: false,                   /* 用过 `NOISE`/`NOISE3D` 没有（`noise-rt.js`） */
     usedGL: false,                      /* 这份脚本用过 GL 那一族没有（每帧初态要不要发） */
     needFact: false,
     inMain: false,                      /* 正在降主函数体没有（`return` 那一格看它） */
@@ -1936,6 +1948,12 @@ export function evalToIR(cst, host, src = '') {
   if (C.needFact) decls.push(factDecl());
   /* `RND`/`NRND`/`SRAND` 那一摊（生成出来的 LCG + Box-Muller，三条腿逐字节相同）。 */
   if (C.needRnd) decls.push(...rndDecls());
+  /* **噪声那一族**（`NOISE(x[,y[,z]])` / `NOISE3D`）：照 `polydraw.c:852` 那份算法生成 ——
+     纯函数，所以在语言这一侧（见 `noise-rt.js` 的头注），不进设备。 */
+  if (C.needNoise) {
+    decls.unshift(...noiseGlobalDecls());
+    decls.push(...noiseFnDecls());
+  }
   /* `static x = 3;` 的初值：**在入口里做一次**（方言的 `(global 名 类型)` 不许带初值 ——
      `lower/lower.js` 那一段写着"要非零初值就让 adapter 在入口里摆一句 set"）。
      摆在帧循环**之前**，所以它一辈子只跑一趟 —— 那正是 static 的意思。 */
@@ -1963,6 +1981,10 @@ export function evalToIR(cst, host, src = '') {
     /* 随机数那台机器的种子：`kholdrand = 1`（`eval.c:490`）。 */
     ...(C.needRnd ? [{
       kind: 'assign', target: nameRef('pd_rndst'), value: { kind: 'int', value: '1' },
+    }] : []),
+    /* 噪声的置换表：`noiseinit()` 在 PolyDraw 里是开机时调一次（`polydraw.c:3538`）。 */
+    ...(C.needNoise ? [{
+      kind: 'expr-stmt', expr: { kind: 'call', fn: nameRef('pd_noiseinit'), args: [] },
     }] : []),
     ...C.staticInits.map((s) => ({
       kind: 'assign',

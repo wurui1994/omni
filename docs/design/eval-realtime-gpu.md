@@ -417,3 +417,36 @@ GL calls into a flat command buffer"）：立即模式的调用先记进一条�
 
 判完就把 `usesShaderGL` 那格开关删掉 —— 判据是 `tests/studio/run.js` 里着色器那两条
 （`@v`/`@f` + `glsetshader` + uniform + `glquad`、着色器 + 立即模式几何）不许变。
+
+## 10. 宿主面按**份数**补齐（`--gfx host` 那把尺子）
+
+`node tests/eval/scan.js --gfx host` 量的是"这份脚本**真出得来 PNG** 没有"。
+2026-09-24 那一趟：**44 / 228**，缺口按名字排（前几名）：
+
+    19  clz          清 z 缓冲（3D 那一族）          -> CPU 备选收下记着不用（没有 z）✓
+    16  glsettex     纹理那一族（任务 #26）
+    13  framebegin   每帧初态                        -> CPU 备选清画布 ✓
+    13  setfont      画布文字（任务 #28）
+     7  glcapture    把画布读回一格纹理
+     7  noise        噪声（见下）
+     7  glquad       满屏四边形（着色器那一档）
+     5  drawcone     三维那一档的元数（8 参）
+     5  playsound / playtext / playnote  声音
+
+### 10.1 `noise` / `noise3d`：**有正本，照抄成生成出来的 IR**
+
+`polydraw_src/polydraw.c:852-960` 是 Tom Dobrowolski 的噪声（`fgrad` 那张 16 格梯度表 +
+`noise1d/2d/3d` 的三线性插值 + `t = (3-2p)p²` 的平滑）。这一族是**纯函数**，所以落成
+**生成出来的 IR**（像 `pd_rnd`/`pd_fact` 那样）而不是设备的一格 —— 四条腿逐字节相同，
+也不必给每档设备各写一份。
+
+置换表 `noisep[512]` 是 `noiseinit()`（`polydraw.c:3538` 开机时调一次）用 **C 库的
+`rand()`** 洗出来的，与脚本能看见的 `SRAND` 无关。MSVC 的 `rand()` 正是我们 `pd_rnd`
+已经照抄的那台 LCG（`seed = seed*214013 + 2531011`、取 `(seed>>16)&0x7fff`，起始 1），
+所以这张表能**一位不差**地重算出来：入口里发一格 `pd_noiseinit()` 填它。
+
+两处**明写的偏差**（照不到的地方不装作照到）：
+* 原版中间量是 `float`，我们是 `double` —— 值差在 1e-7 量级，图上看不出来；
+* `dtol()` 在 MSVC 上是 `fistp`（就近偶数），我们用 `floor(x+0.5)`（就近、遇 .5 往上）。
+  非 Windows 上原版那一格本身是坏的（`a = (int)f;` 写到了指针变量上），所以没有"另一份
+  正确答案"可对。

@@ -1,0 +1,21 @@
+// ext/polydraw/examples/noise.pss —— **噪声那一族**（`NOISE` / `NOISE3D`）
+//
+// 正本是 `polydraw_src/polydraw.c:852-960`（Tom Dobrowolski 的噪声）。这一族是**纯函数**，
+// 所以落成生成出来的 IR（`ext/polydraw/noise-rt.js`）——四条腿逐字节相同，不进设备。
+//
+// 这一份的期望值是**照那份 C 源码编一趟得出来的**（把 `fgrad`/`noiseinit`/`noise1d/2d/3d`
+// 抄进一份独立的 .c、`rand()` 换成 MSVC 那台 LCG、`dtol` 用就近取整，再 `cc -O2` 跑）——
+// 18 个数一位不差。所以这一格判据钉住的是"我们与正本同一个答案"，不是"看上去像噪声"。
+//
+// 跑一趟：
+//   omni run ext/polydraw/examples/03-noise.pss
+
+()
+{
+  for(i=0;i<6;i++) printf("%.6f ", noise(i*0.37-1.1));
+  printf("\n");
+  for(i=0;i<6;i++) printf("%.6f ", noise(i*0.7-2.3, i*1.3+0.25));
+  printf("\n");
+  for(i=0;i<6;i++) printf("%.6f ", noise3d(i*0.31, -i*0.77, i*1.9-3.3));
+  printf("\n");
+}

@@ -27,7 +27,7 @@ import {
   BASICS, INTMATH, LOOPEXIT, DICT, UNARY, RECORD, INDEX, SLICE, CONV, VALUES, MUT,
   DEFER, BLOCKRET, METHOD, ASSERTOK, STRCAT, NUMSTR, NAMEDARG, CASEFOR, CASERANGE,
   CTIF, MEMBER, BLOCKSCOPE, BITS, CHARLIT, CTCONST, DECLS, ENUMVAL, FNVAL, FORIN,
-  HOIST, LITNONE, MATCH, METHOD2, OPTRES, POINTER, POSINIT, PUSH, INHERIT, OPOVER, TMPL, CTOR, VIRT, CTMPL, LAMBDA, FMT, FORMAT, POSTEST, CTOR2, METHOV, PUREVIRT, DTORCHAIN, MIXVIRT, OUTLINE, CTMPL2, FNOVL, METHOV2, CTOR3, REFPARAM, STATICMEM, BYVALUE, ARRFIELD, RANGEFOR, SWBREAK, NARROW, ENUMDO, DECLMIX, ARRMATH, GLOBALS, CHAIN, EVALARR,
+  HOIST, LITNONE, MATCH, METHOD2, OPTRES, POINTER, POSINIT, PUSH, INHERIT, OPOVER, TMPL, CTOR, VIRT, CTMPL, LAMBDA, FMT, FORMAT, POSTEST, CTOR2, METHOV, PUREVIRT, DTORCHAIN, MIXVIRT, OUTLINE, CTMPL2, FNOVL, METHOV2, CTOR3, REFPARAM, STATICMEM, BYVALUE, ARRFIELD, RANGEFOR, SWBREAK, NARROW, ENUMDO, DECLMIX, ARRMATH, GLOBALS, CHAIN, EVALARR, PDNOISE,
 } from '../lib/cases.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -59,6 +59,7 @@ const FAMILIES = {
   swbreak: SWBREAK, narrow: NARROW, enumdo: ENUMDO, declmix: DECLMIX, arrmath: ARRMATH, globals: GLOBALS,
   chain: CHAIN,
   evalarr: EVALARR,
+  noise: PDNOISE,
 };
 const MIGRATED = {
   awk: ['basics', 'intmath', 'loopexit', 'dict', 'unary'],
@@ -115,8 +116,11 @@ const MIGRATED = {
      画图那一族（glBegin / glVertex / 矩阵栈）在 adapter 里当场报，见任务 #19。 */
   /* polydraw（`.pss`，Ken Silverman 的 EVAL）：`basics` 是"只算不画"那一半，
      **`evalarr` 是这门语言自己的三样规矩**（`static` 数组 + 越界那两档 + RND/NRND，
-     口径在 `eval.txt` 的 "Variables & arrays"）。画图那一族的判据在第二节（判表面）。 */
-  polydraw: ['basics', 'evalarr'],
+     口径在 `eval.txt` 的 "Variables & arrays"）。画图那一族的判据在第二节（判表面）。
+     `noise` 是**噪声那一族**（`NOISE`/`NOISE3D`）：纯函数，落成生成出来的 IR
+     （`ext/polydraw/noise-rt.js`），期望值由 `polydraw_src/polydraw.c:852-960` 那份正本
+     单独编一趟给出，18 个数一位不差。 */
+  polydraw: ['basics', 'evalarr', 'noise'],
   /* evaldraw（`.kc`）**与 polydraw 是同一门语言**：同一份 `.grammar`、同一份 `evalToIR`，
      差别只有那张宿主表。这一格判据在的理由正是这个 —— 它证明"两门共用一份"没有走样。 */
   evaldraw: ['basics'],
