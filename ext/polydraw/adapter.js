@@ -1914,10 +1914,31 @@ function autoShape(C, s) {
  * 因为"每趟调用重来"正是它与 static 的差别。这儿只把它们从 `written` 里摘掉，
  * 不然同一个名字会声明两次。
  */
-function bodyOf(blk, params, C) {
+function bodyOf(blk, params, C, curFn) {
   const autos = autoDecls(blk).map((s) => autoShape(C, s));
   const autoNames = new Set(autos.map((a) => a.name));
   const written = writtenNames(blk);
+  /**
+   * **别人函数体里那格 `static` 不算这一份的全局。**
+   *
+   * 原版的名字表是一张平表（`eval.c:1802` 的 `newvarhash`，重名当场报"already
+   * defined"），但它是**边解析边建**的：一个名字只有在**它那句 `static` 之前已经登记过**
+   * 的时候才解析成那格 static，否则赋值就地造一格函数局部量。我们把所有 static 一次
+   * 收齐再降级，于是"后面某个函数里的 `static v[3]`"会盖住"前面某个函数里当标量用的 `v`"
+   * —— `ken/curvybuild.pss` 就是这个：第 48 行 `for(v=0,…)` 是主函数的局部标量，
+   * 第 256 行 `static v[3]` 在 `drawcone` 里，我们于是报 `'v' 是 arr<real>，赋的值是 real`，
+   * 整份跑不起来。
+   *
+   * 这一格只认**函数体里**声明的 static（`文件级` 那一档照旧是真全局 ——
+   * `ken/*.pss` 里的相机状态全靠它跨函数看得见）。
+   */
+  const foreign = new Set();
+  if (curFn !== undefined) {
+    for (const n of written) {
+      const owner = C.staticOwner.get(n);
+      if (owner !== undefined && owner !== '文件级' && owner !== curFn) foreign.add(n);
+    }
+  }
   /**
    * **这一份函数里哪些名字是"量"**（形参 / `static` / 被赋过值的）——
    * 它们**盖住同名的 `enum`**。
@@ -1948,7 +1969,7 @@ function bodyOf(blk, params, C) {
   }
   for (const n of written) {
     if (autoNames.has(n) || C.boxed.has(n)) continue;
-    if (params.includes(n) || C.globals.has(n)) continue;
+    if (params.includes(n) || (C.globals.has(n) && !foreign.has(n))) continue;
     /* 宿主那一侧的量（host 模式下的 `bstatus` 那一族）不是局部：补一格 `let` 会生出个
        没人读的死变量，而写它已经落成 `(gfxcall "set…" …)` 了。 */
     if (C.gfxHost && (HOST_VARS.includes(n) || HOST_ARRS.includes(n))) continue;
@@ -2239,7 +2260,11 @@ export function evalToIR(cst, host, src = '') {
   ));
   C.boxed = C.boxedAll;
   for (const d of preDecls) {
-    if (d.kind === 'global' && C.boxedAll.has(d.name)) {
+    /* **已经成块的不许再装箱**：`C.arrs` 里那些是真有长度的数组（`static v[3]`），
+       照 collectBoxed 的口径"直接把那一块传过去"。漏掉这一夹的时候
+       `ken/curvybuild.pss` 的 `static v[3]`（在函数体里、又拿 `getperpvec(v,a,b)`
+       传出去）会被改成长度 1 的箱子 ⇒ 跑起来 `array index out of range: 1 (length 1)`。 */
+    if (d.kind === 'global' && C.boxedAll.has(d.name) && !C.arrs.has(d.name)) {
       d.type = ARR;
       C.globals.set(d.name, ARR);
       C.arrInits.push({ name: d.name, total: 1, vals: [] });
@@ -2264,7 +2289,7 @@ export function evalToIR(cst, host, src = '') {
       name,
       params: ps,
       ret: REAL,
-      body: bodyOf(kids(x)[2], ps.map((p) => p.name), C),
+      body: bodyOf(kids(x)[2], ps.map((p) => p.name), C, idOf(kids(x)[0])),
     });
   }
 
@@ -2277,7 +2302,7 @@ export function evalToIR(cst, host, src = '') {
   C.offs = new Map();
   const mainBody = [
     ...mainPs.map((p) => ({ kind: 'let', name: p, type: REAL })),
-    ...bodyOf(kids(mainNode)[1], mainPs, C),
+    ...bodyOf(kids(mainNode)[1], mainPs, C, '主函数'),
   ];
   /**
    * **每帧的 GL 初态**：PolyDraw 的宿主在调脚本之前会把 GL 摆回去
