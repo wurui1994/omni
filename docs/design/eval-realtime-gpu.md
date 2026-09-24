@@ -618,7 +618,27 @@ program 与 uniform —— 全是"只有设备做得到"的东西。`glquad` 的
 `--gfx browser`（借 headless 浏览器出图）评估过：要外部 `playwright-cli`、每趟起浏览器
 几十秒、还得把产物塞进页面 —— 不划算，不做。
 
-### 13.2 形状：**一份 `.dylib`，dlopen 挂上去**
+### 13.2 **必须与 WebGL 对齐**（2026-09-24 用户定的，写在最前头）
+
+**不许用 legacy OpenGL。** 上下文一律 **core profile**（macOS 上
+`kCGLOGLPVersion_3_2_Core`，Apple Silicon 给到 4.1 core），内建那对着色器与
+`src/studio/gfx-gl.js` 里 WebGL2 那一档**逐句对应**（`in`/`out`、自己声明的 `o_col`、
+`u_mvp` 由设备喂），差的只有 `#version` 那一行。
+
+连带的一条口径（不然就成了两种模型）：脚本里那些**旧式 GLSL**
+（`attribute` / `varying` / `gl_FragColor` / `ftransform()`）**不在设备里翻** ——
+在**编译期**翻（adapter 那一侧、`(gfxdef …)` 把原文发出去之前），于是两档设备收到的是
+**同一份文本**。翻译那一份现在还在 `gfx-gl.js` 的 `toEs300` 里（浏览器那一档私有），
+第五刀的后半要把它挪到公共位置：
+
+    编译期翻好的主体        ->  两档设备共用
+    浏览器那一档补 #version 300 es + precision
+    本机那一档补 #version 410 core
+
+曾经试过 legacy 2.1（驱动直接吃旧式 GLSL、省掉翻译）—— **被否**：那等于本机这一档
+自己一套语义，正是"不允许存在两种模型"那条规矩要挡住的东西。
+
+### 13.3 形状：**一份 `.dylib`，dlopen 挂上去**
 
     src/runtime-gl/omni_evgl.c     ->  libomnigl_ev.dylib
     宿主面：omni_gfx_call / omni_gfx_batch / omni_gfx_tex 三格转发给它
@@ -628,7 +648,7 @@ program 与 uniform —— 全是"只有设备做得到"的东西。`glquad` 的
 * 画到 **FBO**（离屏）再 `glReadPixels` 回来 —— 命令行那一档要的是一帧 PNG，不是窗口；
 * `.dylib` 用 `dlopen` 挂：主二进制不链 OpenGL，**没有 GPU 的机器照旧跑 CPU 备选**。
 
-### 13.3 设备那一侧要实现的（**与 WebGL2 那一档同一套名字**）
+### 13.4 设备那一侧要实现的（**与 WebGL2 那一档同一套名字**）
 
     收批      (gfxbatch 类 数 顶点) -> VBO + 一次 glDrawArrays（core profile，不碰立即模式）
     批的状态  batchprog / batchmvp / batchblend / gldepth
@@ -642,7 +662,7 @@ program 与 uniform —— 全是"只有设备做得到"的东西。`glquad` 的
 
 **一个字都不许有的东西**：立即模式转发、第二份变换/合批、只有这一档才有的语义。
 
-### 13.4 判据（**跨渲染器不逐字节**）
+### 13.5 判据（**跨渲染器不逐字节**）
 
 1. `tests/build` 那一层：`.dylib` 编得出来、`dlopen` 挂得上（没有 GPU 的机器跳过）；
 2. `02-gl.pss` / `draw2d.kc` 用 `--gfx gl` 出的 PNG 与 CPU 备选那一档**结构一致**
@@ -650,3 +670,24 @@ program 与 uniform —— 全是"只有设备做得到"的东西。`glquad` 的
 3. **着色器那三份**（`04-shader.pss` / `05-shader-geom.pss` / `06-texture.pss`）在这一档
    真编真画：判的是"铺满 + 片元真在算 + uniform 真喂进去"那三条（与浏览器那条同一套探针）；
 4. 语料尺子：`node tests/eval/scan.js --gfx gl` 的份数 **要比 `--gfx host` 多 20 份以上**。
+
+### 13.6 已落地（2026-09-24）：**离屏 core profile 上下文 + 收批 + 读回**
+
+`src/runtime-gl/omni_ev_gl.c`（新）导出六格 C ABI：
+
+    omni_ev_gl_open(w,h) / _cls(rgb) / _depth(on) / _batch(类,数,顶点) / _read(rgba) / _error()
+
+里头是 CGL core profile + RGBA8/DEPTH24 的 FBO + 一格 VAO + 一格 VBO + 内建那对着色器
+（与 WebGL2 那一档逐句对应）。顶点契约与别的两档同一格：一格 12 个 double
+（位置 4 **裁剪空间** / 颜色 4 / 纹理坐标 4），类 0 线段 / 1 三角 / 2 点。
+
+判据 `tests/gl/run.js`：编插件 + `dlopen` + 画一个裁剪空间的红三角读回来 ——
+**红 9600 / 背景 67200**（320×240 里三角占 1/8，那两个数是算出来的，所以它同时钉住
+"顶点是裁剪空间"这条契约）。没有 `OpenGL.framework` 就整份跳过。
+
+**一个坑记在这儿**：core profile 里**没有默认 VAO** —— 不绑一格就 `INVALID_OPERATION`，
+画面全黑而且一行错都没有。
+
+下一步（第五刀的后半）：`cli.js` 的 `glPlugin()` 把这一份也编进 `libomnigl.dylib`、
+`omni_fmt.c` 在 `OMNI_GFX=gl` 时把 cls/gldepth/批/读回转过去、翻译挪到公共位置、
+program 与纹理接上（那时着色器那 22 份就出得来图了）。
