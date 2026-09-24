@@ -667,23 +667,19 @@ function exprOf(x, types, want) {
       /* `^` 交给 R 自己的 `R_pow`（`src/nmath/mlutils.c`）—— 它对整数指数走反复平方、
          对 `1^x` 与 `x^0` 有明文特例，而 `pow()` 在这几格上与 R 不一样。 */
       if (op === '^' || op === '**') {
-        cabiUsed.add('R_pow');
-        rmathSig('R_pow');
-        return {
-          kind: 'ccall',
-          sym: 'R_pow',
-          args: [asReal(exprOf(l, types), typeOfExpr(l, types)), asReal(exprOf(r, types), typeOfExpr(r, types))],
-        };
+        const vp = vecBin(op, l, r, types);
+        if (vp !== null) return vp;
+        return powOf(asReal(exprOf(l, types), typeOfExpr(l, types)), asReal(exprOf(r, types), typeOfExpr(r, types)));
       }
       /* `%%` 与 `%/%`：**照 R 文档的定义算**（`x - floor(x/y)*y` / `floor(x/y)`），
          于是结果随**除数**取号（`-7 %% 3` 是 2，C 的 `%` 给 -1）。
          这两格 nmath 里没有（R 的 `myfmod` 在解释器那半边 `src/main/arith.c` 里），
          所以是我们按它公开的口径写的 —— 不是抄过来的，也不是 C 的口径。 */
       if (op === '%%' || op === '%/%') {
-        const x = asReal(exprOf(l, types), typeOfExpr(l, types));
-        const y = asReal(exprOf(r, types), typeOfExpr(r, types));
-        const q = call1('rmath', { kind: 'strlit', value: 'floor' }, b('/', x, y));
-        return op === '%/%' ? q : b('-', x, b('*', q, y));
+        /* 一边是向量就逐元素 —— 这两格与 `^` 都走 `vecBin` 里的 `numBin`。 */
+        const vm = vecBin(op, l, r, types);
+        if (vm !== null) return vm;
+        return modOf(op, asReal(exprOf(l, types), typeOfExpr(l, types)), asReal(exprOf(r, types), typeOfExpr(r, types)));
       }
       if (op === ':') return vecSeq(exprOf(l, types), typeOfExpr(l, types), exprOf(r, types), typeOfExpr(r, types));
       if (op === '$' || op === '@' || op === '::' || op === ':::' || op === '~' || op === '?') {
@@ -717,7 +713,28 @@ function exprOf(x, types, want) {
  * 逐元素那一族算符。`^` / `%%` / `%/%` 不在里头 —— 它们各自走 `R_pow` 与那条 floor 的算法，
  * 向量化要另摆一层（明写：没做）。
  */
-const VEC_OPS = new Set(['+', '-', '*', '/', '<', '<=', '>', '>=', '==', '!=']);
+const VEC_OPS = new Set(['+', '-', '*', '/', '<', '<=', '>', '>=', '==', '!=', '^', '**', '%%', '%/%']);
+
+/**
+ * 一格算符在**两个已经是 double 的值**上怎么算。标量那条路与 `vecBin` 里逐元素那条路
+ * 共用这一处 —— 不然 `xs^2` 与 `x^2` 会算成两回事（`^` 必须是 R 的 `R_pow`）。
+ */
+const powOf = (x, y) => {
+  /* `^` 交给 R 自己的 `R_pow`（`src/nmath/mlutils.c`）—— 它对整数指数走反复平方、
+     对 `1^x` 与 `x^0` 有明文特例，而 `pow()` 在这几格上与 R 不一样。 */
+  cabiUsed.add('R_pow');
+  rmathSig('R_pow');
+  return { kind: 'ccall', sym: 'R_pow', args: [x, y] };
+};
+const modOf = (op, x, y) => {
+  const q = call1('rmath', { kind: 'strlit', value: 'floor' }, b('/', x, y));
+  return op === '%/%' ? q : b('-', x, b('*', q, y));
+};
+const numBin = (op, x, y) => {
+  if (op === '^' || op === '**') return powOf(x, y);
+  if (op === '%%' || op === '%/%') return modOf(op, x, y);
+  return b(op, x, y);
+};
 
 /**
  * **向量化**：一边是向量就逐元素算。回 `null` 表示"两边都是标量，不是我的活"。
@@ -831,7 +848,7 @@ function vecBin(op, l, r, types) {
           cond: b('||', naQ(at(a)), naQ(at(c))),
           then: [vecSet(vr(out), vr(i), { kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] })],
           else_: [vecSet(vr(out), vr(i), { kind: 'ternary', cond: b(op, at(a), at(c)), then: { kind: 'real', value: 1 }, else_: { kind: 'real', value: 0 } })],
-        } : vecSet(vr(out), vr(i), b(op, at(a), at(c)))],
+        } : vecSet(vr(out), vr(i), numBin(op, at(a), at(c)))],
       },
     ],
     value: vr(out),
