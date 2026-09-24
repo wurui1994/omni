@@ -24,3 +24,6 @@ package-lock.json
 
 # `playwright-cli` 自己往这儿写页面快照（tests/studio 第 4 节拿真浏览器跑那一趟）
 /.playwright-cli/
+
+# `omni ninja` 的构建日志（记"上一趟这条边的命令与用时"，脏判定要它）
+/.omni_log
