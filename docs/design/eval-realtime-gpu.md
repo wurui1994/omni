@@ -1707,7 +1707,24 @@ but functional."、`:101`："Use sin-based pseudo-noise for now." —— 也就�
 正事是在**语言那一侧**把宽线摊成三角带（与 asy 那条腿"线是管子"同一个道理）——
 一格设计活，不是一行。
 
-### 28.11 这一轮之后的账
+### 28.11 下一格：**面剔除整格没接**（`disco ball` 67.2 的来源）
+
+`glEnable(GL_CULL_FACE)` 在 `gl_enable` 里只认 `GL_DEPTH_TEST`、别的 cap "收下不管"，
+而 `glcullface/1` 在名字表里直接是 `gl_nop1`（`ext/polydraw/gl-rt.js:225`）——
+**剔除这一族一格都没接**。`tigrou/disco ball.pss` 第 7 行就是
+`glcullface(GL_FRONT); //helps a lot`（一颗由小面拼的球，剔掉正面才看得见里侧那些镜片），
+我们把两面都画上去 ⇒ RMSE 67.2。语料里还有三份用它：
+`ken/texture.pss`（两趟交替 `GL_BACK`/`GL_FRONT`）、`ken/curvybuild.pss`、`ken/heightmap.pss`
+—— 也就是说这一格同时压着现在还红的 `disco ball` / `curvybuild`（`texture`/`heightmap`
+已因噪声不计分）。
+
+接法照 `gldepth` 那一格的先例（状态一变先 `gl_flush` 再转给设备）：加一格
+`(gfxcall "glcull" 0|1|2)`（关 / 剔背面 / 剔正面），四处设备各补一小段
+（`runtime-gl/omni_ev_gl.c` 真 `glEnable(GL_CULL_FACE)`+`glCullFace`、
+`runtime/omni_fmt.c` 的转发表、`studio/gfx-gl.js` 的 WebGL、`host/gfx-cpu.js` 的 CPU 备选
+按定向面积判）。**还没做** —— 一格四处要同时对齐，留给下一轮。
+
+### 28.12 这一轮之后的账
 
 **40 过 / 13 红 / 9 不计**（**28 份逐像素相同**、11 份够近、1 份只差一小撮格子；
 跑不起来从 4 份降到 3 份、全黑从 3 份降到 2 份）。
