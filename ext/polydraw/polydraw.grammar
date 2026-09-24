@@ -82,6 +82,12 @@
   ;; 那些名字整份脚本共用。所以顶层不是"主函数 + 若干函数"，前面还有一段声明。
   (rule program
     (-> (pre main fns) (program $*1 $2 $*3) (prefer 2))
+    ;; **具名主函数**那一档（`examples/05_explicit_main_and_funcs.pss` 就是
+    ;; `main() { … }` 接着 `cube(a) { … }`）：说明书里"显式写出主函数"的写法。
+    ;; 照原版的语义 —— **第一个函数就是主函数**（名字随意，那份例子里叫 `main`）,
+    ;; 所以这一支把第一格 `fndecl` 的形参与函数体接到 `(main …)` 上、名字丢掉。
+    ;; 与第一支不打架：那一支的主函数以 `(` 开头，这一支以 NAME 开头。
+    (-> (pre NAME params block fns) (program $*1 (main $3 $4) $*5) (prefer 2))
     ;; **整份文件就是主函数体**那一档（说明书：单函数脚本外面那对 `{}` 可省，`()` 也可省）
     ;; —— `tigrou/cubes reflection.pss` 第一行就是一句调用。与上面那支的歧义由 `(prefer 2)`
     ;; 定胜负：有 `()` 开头就走上面那支。

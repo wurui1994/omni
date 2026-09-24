@@ -324,14 +324,36 @@ static GLuint ev_use_program(int vi, int fi) {
   return p;
 }
 
-/** `glsetshader(…)` 的实参是**名字表的下标**；旧式的数字那一档（`glsetshader(0)`）按序号取。
-    `kind` 是要哪一类（0 顶点 / 1 片元）—— 同名两份靠它分开（见 `ev_sh_by_name`）。 */
+/**
+ * **该类里的第 n 份**（照原版 `tsec[].cnt` 的口径 —— 那是分类计数，不是全表下标）。
+ * 没有那么多份回 -1，由调用方夹成第 0 份（`setshader_int` 就是这么夹的）。
+ */
+static int ev_nth_of(int kind, int n) {
+  int k = 0;
+  for (int i = 0; i < g_nsh; i++) {
+    if (g_sh[i].kind != kind) continue;
+    if (k == n) return i;
+    k++;
+  }
+  return -1;
+}
+
+/**
+ * `glsetshader(…)` 的一格实参落到哪一份着色器上。`kind` 是要哪一类（0 顶点 / 1 片元）。
+ *
+ * 两条路，都照 `polydraw.c`：
+ *   * 名字那一档（`kglsetshader3`）：在区段表里按**类别 + 名字**找（`ev_sh_by_name`）；
+ *   * 数字那一档（`qglsetshader`）：**该类里的第 idx 份**（`tsec[].cnt`）——
+ *     从前这儿用的是**全表下标**，于是 `glsetshader(0)` 把片元那一格指到了 `@v` 那份，
+ *     编出来是 `gl_Position 未声明`（`examples/03_custom_shader.pss` 就卡在这儿）。
+ * 越界夹成第 0 份（`setshader_int` 里 `sh0/sh2 >= shadn[] -> 0` 那两句）。
+ */
 static int ev_sh_at(double v, int kind) {
   int idx = (int)v;
-  const char *nm = ev_name(idx);
-  int i = ev_sh_by_name(nm, kind);
+  int i = ev_sh_by_name(ev_name(idx), kind);
   if (i >= 0) return i;
-  return (idx >= 0 && idx < g_nsh) ? idx : -1;
+  i = ev_nth_of(kind, idx);
+  return i >= 0 ? i : ev_first_of(kind);
 }
 
 /**
@@ -347,9 +369,9 @@ int omni_ev_gl_shader(int argc, const double *args) {
     return ev_use_program(ev_first_of(0), ev_first_of(1)) == 0 ? 1 : 0;
   }
   if (argc == 1) {
-    int fi = ev_sh_at(args[0], 1);
-    if (fi < 0) fi = ev_first_of(1);
-    return ev_use_program(ev_first_of(0), fi) == 0 ? 1 : 0;
+    /* `qglsetshader(d)` = `setshader_int(0, -1, (int)d)`（`polydraw.c:1072`）：
+       **顶点固定取第 0 份**、片元取第 d 份。 */
+    return ev_use_program(ev_first_of(0), ev_sh_at(args[0], 1)) == 0 ? 1 : 0;
   }
   int vi = ev_sh_at(args[0], 0);
   int fi = ev_sh_at(argc >= 3 ? args[2] : args[1], 1);

@@ -1050,26 +1050,40 @@ N-API 那一侧收 **普通 JS 数组**（`napi_get_array_length` + `napi_get_el
     06-texture.pss            RMSE 0.00   逐像素相同
     05-shader-geom.pss        RMSE 6.62   够近（每格差一点，最大 38）
 
-### 17.3 第一批账（320×320、第 0 帧）与裁定
+### 17.3 第一批账（320×320、第 0 帧）与两格已修
 
     RMSE   我们非黑  参考非黑  判定        例子
     0.00     3698     3698   逐像素相同   01_minimal_noshader.pss
+    0.00     4096     4096   逐像素相同   03_custom_shader.pss     ← 修好的
+    0.00     1406     1406   逐像素相同   04_required_shader.pss   ← 修好的
     0.00   102400   102400   逐像素相同   04-shader.pss
     0.00   102375   102375   逐像素相同   06-texture.pss
     6.62     9216     9216   够近        05-shader-geom.pss
    14.84     2320     1160   **参考错**   02_primitives_noshader.pss
    17.59    10223     9832   待查        02-gl.pss
-      —        —        —    跑不起来     03_custom_shader.pss / 04_required_shader.pss（着色器编不过）
-      —        —        —    跑不起来     05_explicit_main_and_funcs.pss（显式 main 的写法没接）
+   46.13     4753    10750   待查        05_explicit_main_and_funcs.pss ← 从"跑不起来"变成画出来了
 
-**`02_primitives_noshader` 这一格是参考错**（用连通块数出来的，不是看着像）：脚本
-`for (i = 0; i < 6; i++)` 明写画 **6** 个方块，我们画出 **6 个**、参考只有 **3 个** ——
-每隔一个丢掉。这正是"c_impl 只有 80% 正确"那句话的实例，所以判据里这种分歧要**裁定一次
-再记名单**，不能盲目按 RMSE 判我们红。裁定的依据只有一条：**`polydraw_src` 的语义**。
+**已修的两格（都照 `polydraw_src`）**：
+
+1. **`glsetshader` 的序号是"该类里的第几份"**，不是全表下标。原版
+   `qglsetshader(d) = setshader_int(0, -1, (int)d)`（`polydraw.c:1072`）—— 顶点固定第 0 份、
+   片元取第 d 份；名字那一档 `kglsetshader3` 在区段表里按**类别 + 名字**找、取的是
+   `tsec[].cnt`（分类计数）。我们从前拿全表下标，于是 `glsetshader(0)` 把片元指到了 `@v`
+   那份，报 `gl_Position 未声明`。越界照 `setshader_int` 夹成第 0 份。
+   **一格根因修好两份例子，而且都是逐像素相同。**
+2. **具名主函数**（`main() { … }` 接着 `cube(a) { … }`）：`.grammar` 的 `program` 加一支
+   `(pre NAME params block fns)` —— 照原版"第一个函数就是主函数"的语义（名字随意）。
+   与旧那支不打架：旧的主函数以 `(` 开头、这一支以 NAME 开头。
+
+**`02_primitives_noshader` 是参考错**（连通块数出来的）：脚本 `for (i = 0; i < 6; i++)`
+明写 6 个方块，我们画 6 个、参考只有 3 个。这类分歧要裁定一次再记名单，
+依据只有 `polydraw_src` 的语义。
 
 ### 17.4 待修（按"基本例子"优先）
 
-1. `03_custom_shader` / `04_required_shader`：`glsetshader` 那一族编不过（要看驱动给的话）；
-2. `05_explicit_main_and_funcs`：**显式 `main(){}` 与多函数**的写法解析不了（`{` 那一格）；
-3. `02-gl.pss` RMSE 17.59（非黑 10223 vs 9832）—— 差在边缘还是颜色要再分；
-4. `balls2k` 卡在 `gl_Normal`（顶点要加法向那 4 格，见 §15.6）。
+1. `05_explicit_main_and_funcs` RMSE 46.13：跑起来了但画少了一半（我们 4753 / 参考 10750）
+   —— 递归函数 + `GL_LINE_STRIP` 那一族，下一格查；
+2. `02-gl.pss` RMSE 17.59（非黑 10223 vs 9832）—— 差在边缘还是颜色要再分；
+3. `balls2k` 卡在 `gl_Normal`（顶点要加法向那 4 格，见 §15.6）；
+4. 浏览器那一档（`gfx-gl.js` 的 `SH.src`）有**同名覆盖**与**全表下标**两个同样的隐患 ——
+   那边还没改（studio 判据现在跑的例子里 @v/@f 不同名，所以还没红）。
