@@ -360,7 +360,14 @@ const ident = () => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
  * 口径：`docs/design/eval-realtime-gpu.md` 13.2（**必须与 WebGL 对齐，不许两种模型**）。
  */
 const SH = {
-  /** 名字 -> `{ kind: 'vert'|'frag'|'geom', text }`（`(gfxdef …)` 登记进来的）。 */
+  /**
+   * `"种类|名字"` -> `{ kind: 'vert'|'frag'|'geom', text }`（`(gfxdef …)` 登记进来的）。
+   *
+   * **键里必须带种类**：`.pss` 里 `@v:drawsph` 与 `@f:drawsph` **同名是常态**
+   * （`tigrou/balls2k.pss` 就是 `glsetshader("drawsph","drawsph")`）—— 只按名字存的话
+   * 后登记的那份把前一份覆盖掉，顶点与片元拿到同一份，编出来是
+   * `gl_Position 未声明` 那种错（本机那一档踩过，见 §17.5）。
+   */
   src: new Map(),
   /** 下标 -> 串（`glsetshader("vert",…)` 那种名字在方言里是下标 —— 见 `gfxdef` 的头注）。 */
   names: new Map(),
@@ -373,7 +380,7 @@ const SH = {
 function def(kind, name, text) {
   if (kind === 'name') { SH.names.set(String(name), text); return 0; }
   if (kind === 'vert' || kind === 'frag' || kind === 'geom') {
-    SH.src.set(String(name), { kind, text });
+    SH.src.set(`${kind}|${name}`, { kind, text });
     return 0;
   }
   throw new Error(`(gfxdef …) 不认识的种类 '${kind}'（要 vert/frag/geom/name）`);
@@ -381,9 +388,23 @@ function def(kind, name, text) {
 
 /** 第一份某一类的着色器（脚本没调 `glsetshader` 时的默认那一对）。 */
 function firstOf(kind) {
-  for (const [name, s] of SH.src) if (s.kind === kind) return name;
+  for (const s of SH.src.values()) if (s.kind === kind) return s;
   return null;
 }
+
+/** 某一类里**第 n 份**（旧式 `glsetshader(0)` 那一档的口径 —— 不是全表下标）。 */
+function nthOf(kind, n) {
+  let k = 0;
+  for (const s of SH.src.values()) {
+    if (s.kind !== kind) continue;
+    if (k === n) return s;
+    k++;
+  }
+  return null;
+}
+
+/** 这一类里叫这个名字的那份（没有回 null）。 */
+const shOf = (kind, name) => SH.src.get(`${kind}|${name}`) ?? null;
 
 /**
  * **只补那一两行头**（`#version 300 es` + precision）。
@@ -400,25 +421,52 @@ function toEs300(kind, src) {
   return `#version 300 es\nprecision highp float;\n${src}`;
 }
 
-/** 挑一对着色器、编好链好（编一次）。 */
-function useProgram(vName, fName) {
-  const key = `${vName}|${fName}`;
-  const had = SH.progs.get(key);
-  if (had !== undefined) { SH.cur = had; return had; }
+/** 这一段原文是**ARB 汇编**（`!!ARBvp1.0` / `!!ARBfp1.0`）不是 GLSL 吗？见 §19.2。 */
+const isArb = (s) => /^\s*!!ARB/.test(s);
+
+/**
+ * **ARB 汇编那一档退回的那一对**（固定管线那点事：`u_mvp * a_pos` + 顶点色）。
+ * 与本机那一档 `omni_ev_gl.c` 的 `VS_SRC`/`FS_SRC` 逐句对应（差 `#version` 那一行）——
+ * 不能拿这一层的 `VS`/`FS`：那一对收的是**屏幕坐标**，而挑过 program 的批是**物体坐标**。
+ */
+const ARB_FALLBACK = {
+  vert: {
+    kind: 'vert',
+    text: 'in vec4 a_pos;\nin vec4 a_col;\nin vec4 a_tex;\nuniform mat4 u_mvp;\n'
+      + 'out vec4 v_col0;\nout vec4 v_tex0;\n'
+      + 'void main() { v_col0 = a_col; v_tex0 = a_tex; gl_Position = u_mvp * a_pos; }',
+  },
+  frag: {
+    kind: 'frag',
+    text: 'in vec4 v_col0;\nin vec4 v_tex0;\nout vec4 o_col;\n'
+      + 'void main() { o_col = v_col0; }',
+  },
+};
+
+/**
+ * 挑一对着色器、编好链好（编一次）。两个实参是 `SH.src` 里那两份**记录**。
+ *
+ * **ARB 汇编那一档退回内建那对**（`ken/*_asm.pss` 那 5 份）：WebGL 没有 ARB 汇编，
+ * 参考实现（`c_impl/src/render/gl_renderer.c:1131`）编不过时也是留着内建那格 ——
+ * 只认 `!!ARB` 这一个特征，不做"编不过就悄悄退"（那会把我们自己的 GLSL bug 藏起来）。
+ */
+function useProgram(v, f) {
   const gl = D.gl;
-  const v = SH.src.get(vName);
-  const f = SH.src.get(fName);
-  if (v === undefined || f === undefined) {
-    throw new Error(`glsetshader：没有这一对着色器（顶点 '${vName}'、片元 '${fName}'）——`
+  if (v === null || f === null) {
+    throw new Error('glsetshader：没有这一对着色器 ——'
       + ` 登记进来的是 ${[...SH.src.keys()].map((k) => JSON.stringify(k)).join(' ')}`
       + '（`.pss` 里要有 @v / @f 区段）');
   }
+  if (isArb(v.text) || isArb(f.text)) return useProgram(ARB_FALLBACK.vert, ARB_FALLBACK.frag);
+  const key = `${v.kind}|${v.text.length}|${f.kind}|${f.text.length}|${v.text}|${f.text}`;
+  const had = SH.progs.get(key);
+  if (had !== undefined) { SH.cur = had; return had; }
   const p = gl.createProgram();
   gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, toEs300('vert', v.text)));
   gl.attachShader(p, compile(gl, gl.FRAGMENT_SHADER, toEs300('frag', f.text)));
   gl.linkProgram(p);
   if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
-    throw new Error(`glsetshader：program 链不上（${vName}/${fName}）：${gl.getProgramInfoLog(p)}`);
+    throw new Error(`glsetshader：program 链不上：${gl.getProgramInfoLog(p)}`);
   }
   SH.progs.set(key, p);
   SH.cur = p;
@@ -448,21 +496,24 @@ function setShader(args) {
     useProgram(v, f);
     return 0;
   }
-  const nameAt = (i) => {
+  /* 一格实参 -> 那一类里的哪一份：名字表里有就按名字找，没有就按**这一类里第几份**
+     （旧式 `glsetshader(0)` 的口径 —— **不是全表下标**：那样会把片元指到 `@v` 那份上去，
+     本机那一档踩过，见 §17.5）。越界夹成第 0 份。 */
+  const shAt = (i, kind) => {
     const k = String(Math.trunc(Number(args[i])));
-    const s = SH.names.get(k);
-    if (s !== undefined) return s;
-    /* 旧式那一档（`glsetshader(0)`）：数字是"第几份"，按登记次序取。 */
-    const all = [...SH.src.keys()];
-    return all[Math.trunc(Number(args[i]))] ?? null;
+    const nm = SH.names.get(k);
+    if (nm !== undefined) {
+      const byName = shOf(kind, nm);
+      if (byName !== null) return byName;
+    }
+    return nthOf(kind, Math.trunc(Number(args[i]))) ?? firstOf(kind);
   };
   if (args.length === 1) {
-    const f = nameAt(0) ?? firstOf('frag');
-    return useProgram(firstOf('vert'), f) === null ? 0 : 0;
+    useProgram(firstOf('vert'), shAt(0, 'frag'));
+    return 0;
   }
-  const v = nameAt(0);
-  const f = args.length >= 3 ? nameAt(2) : nameAt(1);
-  useProgram(v, f);
+  const f = args.length >= 3 ? shAt(2, 'frag') : shAt(1, 'frag');
+  useProgram(shAt(0, 'vert'), f);
   return 0;
 }
 

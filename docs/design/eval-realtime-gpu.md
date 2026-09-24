@@ -1198,3 +1198,37 @@ ES 300 都有这两个内建函数）—— 少一条宿主面、少一份"可�
 3. `node tests/eval/correct.js --only clock,balls2k,drawsph,ballsk,dominos` —— 这一族
    从"跑不起来"变成有 RMSE 的数；
 4. `npm run check:self`。
+
+## 19. 第九刀的设计：**带数组的宿主调用**（`gluniform*v` / `glgettex`）与 **ARB 汇编那 5 份**
+
+### 19.1 带数组的宿主调用：**一格新 op，不是九个新名字**
+
+`myext[]` 里带 `&`（一整块 double）的名字只有这几族（`polydraw.c:2070` 起那张表）：
+
+    GLUNIFORM{1,2,3,4}{F,I}V(,,&)     语料里 9 次
+    GLGETTEX(,&,,,)                   语料里 4 次（把纹理**读回来**）
+    GLSETTEX(,&,…)                    语料里 34 次 —— 已经有 `(gfxtex …)` 了
+    GLMULTMATRIX(&)                   语料里 0 次
+
+形状是同一个：**恰好一格数组 + 几格 double**。所以方言里再加**一格** op 就够：
+
+    (gfxarr "名字" 实参… (arr real))     ← 数组在**最后一格**（与 `(gfxtex …)` 同一条先例）
+
+`glgettex` 是**往里写**的那一档（out 参数）—— 同一格 op 够用：设备按名字知道方向，
+数组那一格两边都是"那一块内存"。这比"给每个名字开一格 op"少八份实现。
+
+### 19.2 ARB 汇编那 5 份：**与 c_impl 同口径 —— 认出来，退回内建那对**
+
+`ken/` 有 5 份把 `@v:`/`@f:` 段写成 **ARB 汇编**（段首是 `!!ARBvp1.0` / `!!ARBfp1.0`，
+不是 GLSL）：`drawsph_asm` / `interference_asm` / `multiarb_asm` / `drawcone2_asm` /
+`creepers_asm`。core profile 没有 ARB 汇编那条路，参考实现也没有 ——
+`c_impl/src/render/pd_polyhost_tex.c:547` 把 `glProgram*Param` 写成 no-op，
+`gl_renderer.c:1131` 那儿编不过就**留着上一格 program**（也就是内建那对）。
+
+所以这一刀按参考的口径做，两格：
+
+* `glprogramenvparam/5` —— 收下不管（ARB 汇编专用，`polydraw.c:2111`）；
+* 着色器段的原文以 `!!ARB` 开头 ⇒ **认出来是另一门语言**，这一档不支持，退回内建那对
+  （不是"编不过就悄悄退"—— 那会把我们自己的 GLSL bug 藏起来；只认 `!!ARB` 这一个特征）。
+
+于是这 5 份从"跑不起来"变成"与参考画同一条内建管线"，像素才比得上。
