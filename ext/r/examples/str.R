@@ -12,12 +12,12 @@
 # `asStr(…, dig)` 那一个参数。
 #
 # `sprintf` 的格式串**在编译期就拆开**：R 的格式串在真代码里几乎总是字面量，而方言里
-# 没有"运行期解析格式串"那一格。认的是 `%[-][宽][.精度]{d,i,s,f,e,g}` 与 `%%`；
+# 没有"运行期解析格式串"那一格。认的是 `%[-+0 ][宽][.精度]{d,i,s,f,e,E,g,G,x,X,o}` 与 `%%`；
 # 位数那几格落方言的 `(sfix …)` / `(ssci …)` / `(sgen …)`，也就是 C 的 `%.Nf` / `%.Ne` /
-# `%.Ng` —— "印出来什么"这件事仍然只有一份实现。
+# `%.Ng` —— "印出来什么"这件事仍然只有一份实现。进制那几格落 `(sbase …)`。
 #
-# `tolower` **没接**：方言里只有 `(supper …)`，没有反过来的那一格，补它要给核心方言加一格
-# 算子（五条腿都要动）—— 那不属于 R 这一刀。
+# `tolower` **只管 ASCII**：方言里只有 `(supper …)`，没有反过来的那一格 —— 所以它是拿两张
+# 26 个字母的表查出来的（`(sfind 大写表 这个字符)` 给位置）。表里查不到的字符原样留下。
 
 # 两套位数
 cat(1 / 3, "\n")
@@ -51,3 +51,20 @@ cat(sprintf("%g", 1234.5), "\n")
 cat(sprintf("%s%%", 50), "\n")
 cat(sprintf("%s", 1 / 3), "\n")
 cat(sprintf("%.0f / %.3f", 2.5, 2.5), "\n")
+
+# sprintf 的旗子：`0` 补零（符号留最前）、`+` 与空格只在非负时补、`x`/`X`/`o` 是进制
+cat(sprintf("%05.2f|%08.3f|%05d", 3.14159, -1.5, -42), "\n")
+cat(sprintf("%+d|% d|%+.2f", 42, 7, -2.5), "\n")
+cat(sprintf("%x|%X|%o", 255, 255, 8), "\n")
+cat(sprintf("%E", 12345.6789), "\n")
+
+# 串上再几格
+cat(tolower("MiXeD 123!"), "\n")
+cat("[", trimws("  hi there \t"), "]\n", sep = "")
+cat(substring("hello world", 7), "\n")
+cat(substring("hello", 2, 3), "\n")
+
+# "这是什么东西"那三问（类型是推出来的，所以答案是编译期常量）
+cat(is.character("a"), is.character(1), "\n")
+cat(is.numeric(1), is.numeric(1.5), is.numeric(TRUE), is.numeric("a"), "\n")
+cat(is.logical(TRUE), is.logical(1 > 0), is.logical(2), "\n")

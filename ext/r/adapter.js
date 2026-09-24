@@ -242,6 +242,8 @@ const FN_DEPS = new Map([
   ['r_ends', []],
   ['r_padl', []],
   ['r_padr', []],
+  ['r_pad0', []],
+  ['r_trim', []],
   ['r_lgl_str', ['r_is_na']],
   ['r_any', ['r_is_na', 'r_na']],
   ['r_all', ['r_is_na', 'r_na']],
@@ -581,7 +583,9 @@ const BUILTINS = new Set([
   'union', 'intersect', 'setdiff', 'order', 'cumprod',
   /* 串那一族。`tolower` 方言里没有算子（只有 `(supper …)`），由 `r_lower` 拿两张字母表
      查出来 —— **只管 ASCII**（见 SPEC 第四节第 12 条）。 */
-  'toupper', 'tolower', 'substr', 'sprintf', 'startsWith', 'endsWith',
+  'toupper', 'tolower', 'substr', 'substring', 'trimws', 'sprintf', 'startsWith', 'endsWith',
+  /* "这是什么东西"那三问 —— 类型在这一层是**推出来的**，所以答案是编译期常量。 */
+  'is.character', 'is.numeric', 'is.logical',
   /* 造一条"空的/零的"向量：`numeric(n)` 那一族与不带实参的 `c()`。`character(n)` 是字符向量。 */
   'numeric', 'double', 'integer', 'logical', 'character',
   /* 随机数那一族（发生器是 R 自己那一条，见 `RRAND`）。 */
@@ -772,6 +776,8 @@ function typeOfCall(x, types) {
     }
     case 'as.character': return STR;
     case 'substr': case 'sprintf': return STR;
+    case 'substring': case 'trimws': return STR;
+    case 'is.character': case 'is.numeric': case 'is.logical': return BOOL;
     case 'toupper': return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RSTRV : STR;
     case 'startsWith': case 'endsWith': return BOOL;
     case 'length': case 'as.integer': return INT;
@@ -803,7 +809,7 @@ function typeOfCall(x, types) {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
       return isStrVec(t) ? RSTRV : RVEC;
     }
-    case 'seq_along': case 'which': return RVEC;
+    case 'seq_along': case 'which': case 'seq_len': return RVEC;
     /* `sort` / `head` / `tail` / `rep` 出来的**元素类型跟着进去的那条走**
        （逻辑向量排完还是逻辑）；`cumsum` / `diff` / `range` / `seq` 一律数值。 */
     case 'sort': case 'head': case 'tail': case 'rep': {
@@ -1239,28 +1245,55 @@ function sprintfOf(x, types) {
   for (let i = 0; i < fmt.length; i++) {
     if (fmt[i] !== '%') { lit += fmt[i]; continue; }
     if (fmt[i + 1] === '%') { lit += '%'; i += 1; continue; }
-    const m = /^%(-?)(\d*)(?:\.(\d+))?([disfeg])/.exec(fmt.slice(i));
+    const m = /^%([-+0 ]*)(\d*)(?:\.(\d+))?([disfeEgGxXo])/.exec(fmt.slice(i));
     if (m === null) {
       throw new Error(`r->IR: sprintf 的 "${fmt.slice(i, i + 4)}" 这一格转换还没接`
-        + '（认的是 %[-][宽][.精度]{d,i,s,f,e,g} 与 %%）');
+        + '（认的是 %[-+0 ][宽][.精度]{d,i,s,f,e,E,g,G,x,X,o} 与 %%）');
     }
     if (lit !== '') { pieces.push(S(lit)); lit = ''; }
-    const [all, dash, wid, prec, conv] = m;
+    const [all, flags, wid, prec, conv] = m;
+    const dash = flags.includes('-');
+    const zero = flags.includes('0');
+    const plus = flags.includes('+');
+    const space = flags.includes(' ');
     const node = nextArg();
     const t = typeOfExpr(node, types);
-    if (isVecTy(t)) throw new Error('r->IR: sprintf() 的实参是向量 —— R 那一格会出一整条串向量，这一层没有');
+    if (isVecTy(t) || isStrVec(t)) {
+      throw new Error('r->IR: sprintf() 的实参是向量 —— R 那一格会出一整条串向量，这一层没有');
+    }
     let piece;
+    let signOf = null;   /* `+` / 空格那两个旗子要问"这个数是不是非负" */
     if (conv === 's') piece = asStr(node, types, 15);
-    else if (conv === 'd' || conv === 'i') piece = call1('tostr', asIntE(exprOf(node, types), t));
-    else {
+    else if (conv === 'd' || conv === 'i') {
+      const e = asIntE(exprOf(node, types), t);
+      piece = call1('tostr', e);
+      signOf = b('>=', e, { kind: 'int', value: 0 });
+    } else if (conv === 'x' || conv === 'X' || conv === 'o') {
+      /* `(sbase E 进制)` —— 那一条明写着"E 的位当**无符号 64 位**读"，与 C 的 `%x` 同解。 */
+      const base = conv === 'o' ? 8 : 16;
+      const h = call1('sbase', asIntE(exprOf(node, types), t), { kind: 'int', value: base });
+      piece = conv === 'X' ? call1('supper', h) : h;
+    } else {
       const p = prec === undefined ? 6 : Number(prec);
       const e = asReal(exprOf(node, types), t);
       piece = conv === 'f' ? call1('sfix', e, { kind: 'int', value: p })
-        : (conv === 'e' ? call1('ssci', e, { kind: 'int', value: p })
+        : (conv === 'e' || conv === 'E' ? call1('ssci', e, { kind: 'int', value: p })
           : call1('sgen', e, { kind: 'int', value: prec === undefined ? 6 : p }));
+      if (conv === 'E' || conv === 'G') piece = call1('supper', piece);
+      signOf = b('>=', e, { kind: 'real', value: 0 });
+    }
+    /* `+` 与空格：C 只在**非负**时补那一格（负数自己带 `-`）。 */
+    if ((plus || space) && signOf !== null) {
+      piece = b('+', {
+        kind: 'ternary', cond: signOf, then: S(plus ? '+' : ' '), else_: S(''),
+      }, piece);
     }
     if (wid !== '') {
-      piece = lglCall(dash === '-' ? 'r_padr' : 'r_padl', piece, { kind: 'int', value: Number(wid) });
+      const w = { kind: 'int', value: Number(wid) };
+      /* `0` 旗子：补零而不是补空格，而且**符号要留在最前**（`%05.1f` 的 -1.5 是 `-01.5`）。
+         `-`（左对齐）与 `0` 撞上时 C 里 `-` 赢。 */
+      const helper = dash ? 'r_padr' : (zero ? 'r_pad0' : 'r_padl');
+      piece = lglCall(helper, piece, w);
     }
     pieces.push(piece);
     i += all.length - 1;
@@ -2283,9 +2316,33 @@ function callOf(x, types, extra, want) {
       case 'substr': {
         /* R 的 `substr(s, start, stop)` 是**1 起、两端都含**，而且越界是**截断**
            （方言的 `(ssub S I N)` 是 0 起 + 长度，越界当场报）—— 所以走生成出来的那格函数。 */
-        if (n !== 3) throw new Error(`r->IR: substr() 要三格实参（给了 ${n}）—— \`substring\` 没接`);
+        if (n !== 3) throw new Error(`r->IR: substr() 要三格实参（给了 ${n}）`);
         return lglCall('r_substr', ev(0),
           asIntE(ev(1), typeOfExpr(all[1], types)), asIntE(ev(2), typeOfExpr(all[2], types)));
+      }
+      case 'substring': {
+        /* `substring(s, first, last = 1000000L)` —— 与 `substr` 同一格函数，只是 `last`
+           可以不给（R 的默认就是那个大数）。逐元素那一档（实参是向量）没接。 */
+        if (n < 2 || n > 3) throw new Error(`r->IR: substring() 接两格或三格实参（给了 ${n}）`);
+        const last = n === 3
+          ? asIntE(ev(2), typeOfExpr(all[2], types))
+          : { kind: 'int', value: 1000000 };
+        return lglCall('r_substr', ev(0), asIntE(ev(1), typeOfExpr(all[1], types)), last);
+      }
+      case 'trimws': {
+        if (n !== 1) throw new Error(`r->IR: trimws() 要一格实参（给了 ${n}）—— \`which=\` 没接`);
+        return lglCall('r_trim', ev(0));
+      }
+      case 'is.character': case 'is.numeric': case 'is.logical': {
+        /* 类型在这一层是**推出来的**（方言那侧没有运行期的类型标签），所以这三问的答案是
+           编译期常量。R 的口径：`is.numeric(TRUE)` 是 FALSE、`is.numeric(1L)` 是 TRUE。 */
+        if (n !== 1) throw new Error(`r->IR: ${fn}() 要一格实参（给了 ${n}）`);
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        const lgl = t.kind === 'bool' || isLgl1(t) || isLglTy(t);
+        const val = fn === 'is.character' ? (t.kind === 'string' || isStrVec(t))
+          : (fn === 'is.logical' ? lgl
+            : (!lgl && (t.kind === 'int' || t.kind === 'real' || isVecTy(t))));
+        return { kind: 'bool', value: val };
       }
       case 'startsWith': case 'endsWith': {
         if (n !== 2) throw new Error(`r->IR: ${fn}() 要两格实参（给了 ${n}）`);
@@ -2355,8 +2412,12 @@ function callOf(x, types, extra, want) {
         if (n !== 1) throw new Error(`r->IR: invisible() 要正好一格实参（给了 ${n}）`);
         return ev(0);
       }
-      case 'seq_len':
-        throw new Error('r->IR: seq_len() 只在 `for (v in seq_len(n))` 那一格接了');
+      case 'seq_len': {
+        /* `for (v in seq_len(n))` 那一档在 `forOf` 里落成计数循环（不造向量）；
+           当**值**用时造一条 `1 … n`（`r_iota`），`seq_len(0)` 是零长。 */
+        if (n !== 1) throw new Error(`r->IR: seq_len() 要一格实参（给了 ${n}）`);
+        return lglCall('r_iota', asIntE(ev(0), all[0] === null ? INT : typeOfExpr(all[0], types)));
+      }
       default:
         throw new Error(`r->IR: 内建 ${fn} 在表里却没有落法 —— BUILTINS 与这个 switch 走散了`);
     }
@@ -2440,7 +2501,7 @@ function printOf(x, types) {
  * （`f <- function(x) cat(x)` 在 R 里交的是 `cat` 的 `NULL`，也不印）。
  * 这一格从前是"一律不印"，那是因为那时还没有返回类型这张表。
  */
-const NO_AUTOPRINT = new Set(['cat', 'print', 'invisible', 'return', 'seq_len', 'set.seed']);
+const NO_AUTOPRINT = new Set(['cat', 'print', 'invisible', 'return', 'set.seed']);
 function isAutoPrint(k) {
   const t = tag(k);
   if (t === 'bin') return !isAssign(k);
@@ -2933,6 +2994,50 @@ function strFnDecl(name) {
           ],
         },
         ret(nm('o')),
+      ],
+    };
+  }
+  if (name === 'r_trim') {
+    /* `trimws(s)` —— 两头的空白去掉（R 默认 `which = "both"`，空白是 `[ \t\r\n]`）。 */
+    const ws = (e) => b('||', b('||', b('==', e, S(' ')), b('==', e, S('\t'))),
+      b('||', b('==', e, S('\r')), b('==', e, S('\n'))));
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 's', type: STR }],
+      ret: STR,
+      body: [
+        letI('n', call1('slen', s)),
+        letI('a', I(0)),
+        letI('z', nm('n')),
+        {
+          kind: 'while',
+          cond: b('&&', b('<', nm('a'), nm('z')), ws(call1('ssub', s, nm('a'), I(1)))),
+          body: [set('a', b('+', nm('a'), I(1)))],
+        },
+        {
+          kind: 'while',
+          cond: b('&&', b('>', nm('z'), nm('a')), ws(call1('ssub', s, b('-', nm('z'), I(1)), I(1)))),
+          body: [set('z', b('-', nm('z'), I(1)))],
+        },
+        ret(call1('ssub', s, nm('a'), b('-', nm('z'), nm('a')))),
+      ],
+    };
+  }
+  if (name === 'r_pad0') {
+    /* `%05.1f` 那一格：补**零**而不是空格，而且**符号留在最前**（-1.5 是 `-01.5`）。 */
+    const fill0 = call1('srep', S('0'), b('-', nm('w'), call1('slen', s)));
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 's', type: STR }, { name: 'w', type: INT }],
+      ret: STR,
+      body: [
+        iff(b('>=', call1('slen', s), nm('w')), [ret(s)]),
+        iff(b('==', call1('ssub', s, I(0), I(1)), S('-')),
+          [ret(b('+', b('+', S('-'), call1('srep', S('0'), b('-', nm('w'), call1('slen', s)))),
+            call1('ssub', s, I(1), b('-', call1('slen', s), I(1)))))]),
+        ret(b('+', fill0, s)),
       ],
     };
   }
@@ -4901,7 +5006,8 @@ function vecFnDecl(name) {
     };
   }
   if (name === 'r_substr' || name === 'r_starts' || name === 'r_ends'
-      || name === 'r_padl' || name === 'r_padr' || name === 'r_lower') {
+      || name === 'r_padl' || name === 'r_padr' || name === 'r_pad0' || name === 'r_lower'
+      || name === 'r_trim') {
     return strFnDecl(name);
   }
   if (STRV_FNS.has(name)) return strvFnDecl(name);

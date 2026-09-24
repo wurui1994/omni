@@ -84,6 +84,10 @@ print(sum(ys, na.rm = FALSE))
 print(any(c(TRUE, NA, FALSE), na.rm = TRUE))
 print(all(c(TRUE, NA, FALSE), na.rm = TRUE))
 
+# `seq_len(n)` 当**值**用（`for` 头上那一档在 `forOf` 里落成计数循环，不造向量）
+print(seq_len(4))
+cat(length(seq_len(0)), "\n")
+
 # 零长那一格（R 印类型名）
 print(diff(c(1)))
 print(head(xs, 0))
