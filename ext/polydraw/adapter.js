@@ -228,10 +228,10 @@ function exprOf(x, C, want = 'val') {
     const raw = String(leaf(kids(x)[0]));
     /* **十六进制**（语料里是键码那一族：`keystatus[0xc8]`、`0xffffff`）。方言的
        `(real …)` 只认十进制，原样递下去会当场报"(real 十进制小数)" —— 在这儿就折成那个数。 */
-    if (raw.length > 2 && raw[0] === '0' && (raw[1] === 'x' || raw[1] === 'X')) {
-      return num(Number(raw));
-    }
-    return num(raw);
+    const v = raw.length > 2 && raw[0] === '0' && (raw[1] === 'x' || raw[1] === 'X')
+      ? num(Number(raw)) : num(raw);
+    /* `while (1)` / `if (0)` —— 字面量也要按位置补 truthy（语料里 `while(1)` 很常见）。 */
+    return want === 'cond' ? truthy(v) : v;
   }
   if (t === 'str') {
     return { kind: 'string', value: cUnescape(unquote(leaf(kids(x)[0]))) };
@@ -667,7 +667,16 @@ function collectEnums(x, C) {
     for (const one of kids(x)) {
       const k = kids(one);
       const n = idOf(k[0]);
-      if (k.length > 1) next = Number(leaf(kids(k[1])[0] ?? k[1]));
+      /* 值可以是**常量表达式**，也可以引用前面那格 enum（`enum {NSAMP=MAXBLKSIZ}`,
+         `geeky/fft.kc:8`）—— 所以这儿走 `constOf`（它认数、enum 名与算式）。 */
+      if (k.length > 1) {
+        const v = constOf(k[1], C);
+        if (v === null || !Number.isFinite(v)) {
+          throw new Error(`eval->IR: \`enum ${n} = …\` 算不出一格编译期常量`
+            + '（认的是数、前面那些 enum 名，与它们的算式）');
+        }
+        next = v;
+      }
       const prev = C.enums.get(n);
       if (prev !== undefined && prev !== next) {
         throw new Error(`eval->IR: 两处 \`enum ${n}\` 的值不一样（${prev} 与 ${next}）——`
@@ -730,6 +739,27 @@ function constOf(e, C) {
   if (tag(e) === 'name') {
     const n = idOf(e);
     return C.enums.has(n) ? Number(C.enums.get(n)) : null;
+  }
+  /* **常量表达式**也算（`static bitrev[MAXBLKSIZ/2]`、`static a[NMAX+1]`）：
+     `eval.txt` 那句"常量或 enum 名"说的是"编译期算得出"，而语料里一半的长度是这种
+     算式（`geeky/fft.kc:3`）。两边都折得出来才算 —— 折不出的照旧回 null 让上头报。
+     **`^` 在这门语言里是幂**（不是异或，见 grammar 里 `powexp` 那段头注）。 */
+  if (tag(e) === 'bin') {
+    const op = unquote(leaf(kids(e)[0]));
+    const a = constOf(kids(e)[1], C);
+    const b = constOf(kids(e)[2], C);
+    if (a === null || b === null) return null;
+    if (op === '+') return a + b;
+    if (op === '-') return a - b;
+    if (op === '*') return a * b;
+    if (op === '/') return b === 0 ? null : a / b;
+    if (op === '%') return b === 0 ? null : a % b;
+    if (op === '^') return a ** b;
+    return null;
+  }
+  if (tag(e) === 'neg') {
+    const v = constOf(kids(e)[0], C);
+    return v === null ? null : -v;
   }
   return null;
 }

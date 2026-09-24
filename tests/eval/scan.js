@@ -42,6 +42,10 @@ const val = (n, d) => {
 };
 const CFG = {
   leg: val('--leg', 'js'),
+  /* 哪一档设备（`--gfx`）：默认 `null` = **只记账不画** —— 这一档量的是"语言这一半通没通"，
+     与设备缺哪几格 API 分开算（缺的名字会记在 `#perf calls` 那行里，不再当失败）。
+     要量设备那一半就 `--gfx host`。 */
+  gfx: val('--gfx', 'null'),
   frame: val('--frame', '0'),
   w: val('--w', '96'),
   h: val('--h', '72'),
@@ -111,7 +115,7 @@ for (const f of files) {
   if (Date.now() - t0 > CFG.budget) { over++; continue; }
   const png = join(OUT, `${basename(f)}.png`);
   const r = spawnSync('node', [CLI, 'run', ...legFlags, f,
-    '--frame', CFG.frame, '--w', CFG.w, '--h', CFG.h, '--perf', '-o', png], {
+    '--gfx', CFG.gfx, '--frame', CFG.frame, '--w', CFG.w, '--h', CFG.h, '--perf', '-o', png], {
     cwd: ROOT, encoding: 'utf8', timeout: CFG.timeout,
     env: { ...process.env, OMNI_TIMEOUT: '0' },
   });
@@ -140,7 +144,7 @@ for (const r of rows.filter((x) => !x.ok)) {
 }
 
 const P = (s) => process.stdout.write(s);
-P(`\nEVAL 语料扫描（腿=${CFG.leg} 帧=${CFG.frame} ${CFG.w}x${CFG.h}）`
+P(`\nEVAL 语料扫描（腿=${CFG.leg} 设备=${CFG.gfx} 帧=${CFG.frame} ${CFG.w}x${CFG.h}）`
   + `：${rows.length} 份跑过，${okRows.length} 份 ok，${rows.length - okRows.length} 份没过`
   + `${over > 0 ? `，${over} 份没来得及（预算 ${CFG.budget / 1000}s 到点）` : ''}\n\n`);
 

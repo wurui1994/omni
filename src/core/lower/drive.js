@@ -68,7 +68,10 @@ export function sxTextOf(path, argv = []) {
   const treeOf = (p) => {
     const text = readText(p);
     if (p === path) mainSrc = text;
-    const toks = lexText(g.lex, new SourceFile(p, text), diags);
+    /* **预处理那一格**（登记处那一行的 `pre`）：EVAL 两门有 `#define` / `#if` 那一族，
+       它得在词法之前跑。行数不变，所以诊断里的行号还是原文的行号。 */
+    const lexed = lang.pre === undefined ? text : lang.pre(text, p);
+    const toks = lexText(g.lex, new SourceFile(p, lexed), diags);
     if (toks === null || diags.hasErrors()) return null;
     const t = glrParse(tb, toks, diags);
     return t === null || diags.hasErrors() ? null : t;
