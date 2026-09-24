@@ -238,6 +238,13 @@ function exprOf(x, C, want = 'val') {
   if (t === 'str') {
     return { kind: 'string', value: cUnescape(unquote(leaf(kids(x)[0]))) };
   }
+  /* **字符字面量**（`'+'`、`'\n'`）：值是那个字符的编码（`RScript.htm` 算子表第二行
+     "substitutes a character for its integer value"）。空的 `''` 当 0、多字符取第一个。 */
+  if (t === 'chr') {
+    const s = cUnescape(unquote(leaf(kids(x)[0])));
+    const v = num(s.length === 0 ? 0 : s.charCodeAt(0));
+    return want === 'cond' ? truthy(v) : v;
+  }
   if (t === 'name') {
     const n = idOf(x);
     /* 内建常量。`PI` 在 `eval.txt` 里是内建；`RND`/`NRND` 是**无参函数**，
@@ -581,7 +588,17 @@ function stmtOf(s, C) {
   if (t === 'retexpr') return [{ kind: 'return', values: [exprOf(kids(s)[0], C)] }];
   if (t === 'return') {
     const k = kids(s);
-    return [{ kind: 'return', values: k.length === 0 ? [] : [exprOf(k[0], C)] }];
+    /* **`return;` 不给值就是回 0**（`RScript.htm` 的关键字表：return — "Ends a function
+       and returns to the caller, with an optional value. **Zero is used if no value is
+       supplied**"）。这门语言里函数一律回一个 double，所以不许发空的 `(ret)` ——
+       发了下游就报"这个函数要返回 real，(ret) 没给值"（语料里 7 份脚本红在这一格）。
+       **主函数反过来**：它是"每帧一次"那格函数（回 void），`return 0;` 里那个值没人要 ——
+       把它当一句表达式做掉再空返回（3 份脚本写了 `return 0;`）。 */
+    if (C.inMain) {
+      const pre = k.length === 0 ? [] : exprStmtOf(k[0], C);
+      return [...pre, { kind: 'return', values: [] }];
+    }
+    return [{ kind: 'return', values: [k.length === 0 ? num(0) : exprOf(k[0], C)] }];
   }
   if (t === 'break') return [{ kind: 'break' }];
   if (t === 'continue') return [{ kind: 'continue' }];
@@ -1240,6 +1257,7 @@ export function evalToIR(cst, host, src = '') {
     needRnd: false,                     /* 用过 `RND`/`NRND`/`SRAND` 没有 */
     usedGL: false,                      /* 这份脚本用过 GL 那一族没有（每帧初态要不要发） */
     needFact: false,
+    inMain: false,                      /* 正在降主函数体没有（`return` 那一格看它） */
     fresh: (() => { let i = 0; return (p) => `${p}_pd${i++}`; })(),
     tyCtx: () => ({
       /* 全是 double：`env.get` 一律回 real，`fns` 给格式串那台机器看返回类型。
@@ -1346,10 +1364,13 @@ export function evalToIR(cst, host, src = '') {
   /* 主函数：EVAL 里它的形参是宿主传进来的（PolyDraw 不传，`()` 是常态）——
      有形参就在入口里当零值的局部量。 */
   const mainPs = kids(kids(mainNode)[0]).map((p) => idOf(kids(p)[0]));
+  /* 主函数体里的 `return` 是"这一帧到此为止"（那格函数回 void）—— 见 `return` 那一段。 */
+  C.inMain = true;
   const mainBody = [
     ...mainPs.map((p) => ({ kind: 'let', name: p, type: REAL })),
     ...bodyOf(kids(mainNode)[1], mainPs, C),
   ];
+  C.inMain = false;
   /**
    * **每帧的 GL 初态**：PolyDraw 的宿主在调脚本之前会把 GL 摆回去
    * （`polydraw.c:3572-3579`：清 color/depth/stencil、开深度测试、

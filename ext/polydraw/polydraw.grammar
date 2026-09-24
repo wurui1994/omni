@@ -43,7 +43,7 @@
 ;; `$a` 串形参收了形状，但串本身在这门语言里只能直接写，所以它只在 `printf` 那一族上有意义。
 
 (grammar polydraw
-  (tokens NAME NUMBER STRING)
+  (tokens NAME NUMBER STRING CHAR)
 
   (start program)
 
@@ -59,6 +59,10 @@
     ;; （EvalDraw 的 `demos/beer.kc:35`；同一门语言，见文件头那句"两家共用"）。
     (token NUMBER "0" (or "x" "X") (+ hex))
     (string STRING "\"")
+    ;; **字符字面量**（`RScript.htm` 算子表第二行："' ' Literal; substitutes a character
+    ;; for its integer value"）—— `'+'`、`'\n'` 那种，值是那个字符的编码。
+    ;; 语料里 `games/kenken.kc` 用它存 ALU 运算符（`o == '+'`）。
+    (string CHAR "'")
     (token NAME (or alpha "_") (* (or alnum "_")))
 
     (keyword NAME fold-case
@@ -334,5 +338,6 @@
   (rule primary
     (-> (NUMBER) (num $1))
     (-> (STRING) (str $1))
+    (-> (CHAR) (chr $1))
     (-> (NAME) (name $1))
     (-> ("(" expr ")") $2)))
