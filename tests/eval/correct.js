@@ -46,6 +46,21 @@ const CFG = {
   budget: Number(val('--budget', '100')) * 1000,
 };
 
+/**
+ * **已裁定"参考错"的那几份**（依据只有 `polydraw_src` 的语义 + 最小复现）。
+ * c_impl 自己只有 ~80% 正确，所以这种分歧必须裁定一次再记进来 —— 不记的话判据会
+ * 永远红在别人的 bug 上；乱记又会把我们自己的 bug 藏起来。**每一条都要写清怎么定的。**
+ */
+const REF_WRONG = new Map([
+  ['02_primitives_noshader.pss',
+    '脚本 `for (i = 0; i < 6; i++)` 明写 6 个方块：我们画 6 个、参考只有 3 个'
+    + '（连通块数出来的，不是看着像）'],
+  ['02-gl.pss',
+    '参考**压根没画那个青方块**（按颜色数：我们 1976 格、参考 0 格），别的三样'
+    + '（渐变三角 / 黄线圈 / 白点列 40 格）两边逐格相同；'
+    + '最小复现 translate+glRotate(30,0,0,1)+GL_QUADS 两边一致 ⇒ 参考是在多段之后丢了图元'],
+]);
+
 /** 这一格分辨率下该用多大的 fovy（度）—— 照 `ksetfov`：`tan(fovy/2) = 高/宽`。 */
 const fovyOf = (w, h) => (Math.atan(h / w) * 360) / Math.PI;
 
@@ -156,6 +171,14 @@ for (const src of cases()) {
     continue;
   }
   const d = diffOf(o.px, r.px);
+  /* 已裁定"参考错"的那几份：印出来但**不计红**（理由跟着印，免得日子久了当成我们对）。 */
+  const verdict = REF_WRONG.get(name);
+  if (verdict !== undefined) {
+    skip++;
+    rows.push({ name, cls: '参考错', ...d });
+    P(`  --   ${name} 参考错，不计（RMSE ${d.rmse.toFixed(2)}）\n       ${verdict}\n`);
+    continue;
+  }
   /* 三档判定：**黑图**（参考有东西、我们几乎全黑）、**大差异**（RMSE 过线）、其余算过。 */
   if (d.nzb > CFG.w * CFG.h * 0.01 && d.nza < d.nzb * 0.1) {
     fail++;
