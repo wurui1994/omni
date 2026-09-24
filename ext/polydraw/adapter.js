@@ -316,7 +316,7 @@ function exprOf(x, C, want = 'val') {
        一块摊平的 double，偏移由 `fieldRef` 算（`.` 与 `[]` 混着来都认）。 */
     const fr = fieldRef(x, C);
     if (fr !== null) {
-      const v = { kind: 'index', obj: nameRef(fr.name), index: fr.index };
+      const v = { kind: 'index', obj: nameRef(fr.name), index: withOff(fr.name, fr.index, C) };
       return want === 'cond' ? truthy(v) : v;
     }
     if (t === 'field') {
@@ -344,7 +344,16 @@ function exprOf(x, C, want = 'val') {
       const v = {
         kind: 'builtin',
         name: 'aget',
-        args: [nameRef(idOf(ch.base)), arrIndex(ch.chain, dims, C)],
+        args: [nameRef(idOf(ch.base)), withOff(idOf(ch.base), arrIndex(ch.chain, dims, C), C)],
+      };
+      return want === 'cond' ? truthy(v) : v;
+    }
+    /* 收整块的形参（`&a` / `a[]`）那一族：下标是**相对视图的**，所以要加那格偏移。 */
+    if (isList(b) && tag(b) === 'name' && C.offs.has(idOf(b))) {
+      const v = {
+        kind: 'index',
+        obj: nameRef(idOf(b)),
+        index: withOff(idOf(b), toInt(exprOf(kids(x)[1], C)), C),
       };
       return want === 'cond' ? truthy(v) : v;
     }
@@ -384,6 +393,58 @@ function exprOf(x, C, want = 'val') {
 
 /* ─── 调用 ───────────────────────────────────────────────────────────── */
 
+/**
+ * **一格"整块"实参 -> `{ name, off }`**（那一格形参占两格：块本身 + 偏移）。
+ * 口径在 `docs/design/eval-realtime-gpu.md` 第 8.6 节。
+ *
+ * 认四种形状（`&` 写不写都一样 —— 被调用方要的是一整块）：
+ *   * `a`（名字）—— 装箱的标量、数组、结构体；自己也可能是视图，那就把它那格偏移带上；
+ *   * `a[i]` / `a[i][j]` —— 摊平下标就是偏移（"从这一格起的那一段"）；
+ *   * `p.x` / `vt[i].f` —— `fieldRef` 算出来的那个数就是偏移；
+ *   * 别的（表达式、调用回来的值）—— **当场报**：这一版没有"临时块"。
+ */
+function blockArg(raw, C, fname) {
+  /* 偏移形参是 real（这门语言只有 double），而摊平下标算出来是 int ⇒ 过一次 `toreal`。 */
+  const asReal2 = (e) => (e.kind === 'real' ? e : { kind: 'builtin', name: 'toreal', args: [e] });
+  const x = isList(raw) && tag(raw) === 'addr' ? kids(raw)[0] : raw;
+  if (isList(x) && tag(x) === 'name') {
+    const nm = idOf(x);
+    if (C.boxed.has(nm) || C.arrs.has(nm) || C.svars.has(nm) || C.offs.has(nm)) {
+      return { name: nm, off: asReal2(offOf(nm, C) ?? num(0)) };
+    }
+    if (C.valParams.has(nm)) {
+      throw new Error(`eval->IR: \`&${nm}\` 里的 \`${nm}\` 是**按值**收的形参 ——`
+        + ' 这一版不接（要么把这格形参写成 `&' + nm + '`，要么先抄进一格局部量）');
+    }
+    throw new Error(`eval->IR: \`${fname}\` 这一格形参要的是一整块，`
+      + `而 \`${nm}\` 既不是数组/结构体、也没被取过地址`);
+  }
+  if (isList(x) && (tag(x) === 'index' || tag(x) === 'field')) {
+    /* 结构体那条路（`&p.x`、`&vt[i].f`）：偏移就是 `fieldRef` 算出来的那个数。 */
+    const fr = fieldRef(x, C);
+    if (fr !== null) return { name: fr.name, off: asReal2(withOff(fr.name, fr.index, C)) };
+  }
+  if (isList(x) && tag(x) === 'index') {
+    const ch = indexChain(x);
+    if (isList(ch.base) && tag(ch.base) === 'name') {
+      const nm = idOf(ch.base);
+      if (C.arrs.has(nm)) {
+        const dims = C.arrs.get(nm);
+        if (ch.chain.length !== dims.length) {
+          throw new Error(`eval->IR: \`&${nm}[…]\` 给了 ${ch.chain.length} 格下标，`
+            + `而它是 ${dims.length} 维的（多维摊成一块，维数要对齐）`);
+        }
+        return { name: nm, off: asReal2(withOff(nm, arrIndex(ch.chain, dims, C), C)) };
+      }
+      if (C.offs.has(nm) && ch.chain.length === 1) {
+        return { name: nm, off: asReal2(withOff(nm, toInt(exprOf(ch.chain[0], C)), C)) };
+      }
+    }
+  }
+  throw new Error(`eval->IR: \`${fname}\` 这一格形参要的是一整块，这儿给的是`
+    + ` ${isList(x) ? tag(x) : '别的东西'} —— 只接名字 / \`a[i]\` / \`p.x\` 这三种`);
+}
+
 function callOf(x, C) {
   const head = kids(x)[0];
   if (tag(head) !== 'name') throw new Error('eval->IR: 调用的不是一个名字（函数指针还没接）');
@@ -418,6 +479,35 @@ function callOf(x, C) {
      那一段同一手 —— 那一段是"哪几格实参是串"的白名单，这一格是兜底的一般规矩）。
      只在宿主调用那条路上这么做：普通函数的串实参照旧原样递下去。 */
   const rawArgs = kids(x).slice(1);
+  /* **脚本自己定义的函数先看**（在算实参之前）：它的"整块"形参要按对配（块 + 偏移），
+     而 `&a[i]` 这种实参单独过 `exprOf` 会当场报 —— 所以不能先把实参都算出来。
+     同名时以脚本自己那一份为准（它写了同名函数，本意就是覆盖）。 */
+  if (C.fns.has(n)) {
+    /**
+     * **收整块的那几个形参各占两格**（块本身 + 那格偏移，见 `offName` 的头注）——
+     * 所以实参要按被调用方那张表**配对**着发：
+     *
+     *     f(&a)        -> (a, 0)
+     *     f(&a[i])     -> (a, 那一格的摊平下标)          ← "从第 i 格起的那一段"
+     *     f(&p.x)      -> (p, 字段偏移)
+     *     f(a)         -> (a, a$o)                      ← 整块往下传（自己也可能是视图）
+     *     f(x)（标量）  -> 照旧一格
+     */
+    const want = C.fns.get(n).params;
+    const out = [];
+    let wi = 0;
+    for (const raw of rawArgs) {
+      if (want[wi] === ARR) {
+        const bl = blockArg(raw, C, n);
+        out.push(nameRef(bl.name), bl.off);
+        wi += 2;
+      } else {
+        out.push(exprOf(raw, C));
+        wi += 1;
+      }
+    }
+    return { kind: 'call', fn: nameRef(n), args: out };
+  }
   const hostish = C.gfxHost
     && (C.host.draw?.has(`${n}/${rawArgs.length}`) === true
       || HOST_FNS0.includes(n)
@@ -470,17 +560,8 @@ function callOf(x, C) {
   }
 
   if (C.fns.has(n)) {
-    /* **形参要的是"那一格"时，装箱的实参直接把箱子递过去**（不是 `x[0]`）。
-       `demos/planpos.kc` 里 `getplanpos(&retx,…)` 收到的 `retx` 本身就是一格箱子，
-       它再往 `getmoonpos(…, retx, …)` 传下去时连 `&` 都不写 —— 一路都是同一块。 */
-    const want = C.fns.get(n).params;
-    const fixed = args.map((a, i) => {
-      if (want[i] !== ARR) return a;
-      const src = rawArgs[i];
-      if (isList(src) && tag(src) === 'name' && C.boxed.has(idOf(src))) return nameRef(idOf(src));
-      return a;
-    });
-    return { kind: 'call', fn: nameRef(n), args: fixed };
+    /* 已经在上头（算实参之前）接住了 —— 这儿不该再走到。 */
+    throw new Error(`eval->IR: \`${n}\` 这一格调用走漏了（内部错）`);
   }
 
   /* **画图那一族**：这一门的宿主表里有的，落成生成出来的设备函数（`gfx-rt.js`）。
@@ -571,7 +652,9 @@ function targetOf(x, C) {
   if (tag(x) === 'index' || tag(x) === 'field') {
     /* 结构体那条路先看（`vt[i].stuck = 1`）—— 与读那一侧同一格 `fieldRef`。 */
     const fr = fieldRef(x, C);
-    if (fr !== null) return { kind: 'index', obj: nameRef(fr.name), index: fr.index };
+    if (fr !== null) {
+      return { kind: 'index', obj: nameRef(fr.name), index: withOff(fr.name, fr.index, C) };
+    }
   }
   if (tag(x) === 'index') {
     /* `static a[n]` 那一族：与读那一侧同一条路（摊平 + 越界那一夹）。 */
@@ -585,7 +668,16 @@ function targetOf(x, C) {
       return {
         kind: 'index',
         obj: nameRef(idOf(ch.base)),
-        index: arrIndex(ch.chain, dims, C),
+        index: withOff(idOf(ch.base), arrIndex(ch.chain, dims, C), C),
+      };
+    }
+    /* 收整块的形参那一族：下标相对视图，要加那格偏移（与读那一侧同一手）。 */
+    const b0 = kids(x)[0];
+    if (isList(b0) && tag(b0) === 'name' && C.offs.has(idOf(b0))) {
+      return {
+        kind: 'index',
+        obj: nameRef(idOf(b0)),
+        index: withOff(idOf(b0), toInt(exprOf(kids(x)[1], C)), C),
       };
     }
     return { kind: 'index', obj: exprOf(kids(x)[0], C), index: exprOf(kids(x)[1], C) };
@@ -1146,6 +1238,17 @@ function arrIndex(chain, dims, C) {
 const toInt = (e) => ({ kind: 'builtin', name: 'toint', args: [e] });
 
 /**
+ * **这个名字身上那格偏移**（`名字$o` 形参，见 `offName` 的头注）：没有就回 `null`。
+ * 有的话所有下标都要加上它 —— 那正是"从第 i 格起的那一段"（`&a[i]`）的落法。
+ */
+const offOf = (n, C) => (C.offs.has(n) ? toInt(nameRef(C.offs.get(n))) : null);
+/** 摊平下标 + 那格偏移（没有偏移就原样回）。 */
+function withOff(n, idx, C) {
+  const o = offOf(n, C);
+  return o === null ? idx : bin('+', idx, o);
+}
+
+/**
  * 一串下标：`a[i][j]` 的树是 `(index (index a i) j)` —— 摊成 `{ base, chain }`。
  * `base` 是最里头那格（名字），`chain` 是从外到里数过来的下标（已经正过来）。
  */
@@ -1661,8 +1764,25 @@ function bodyOf(blk, params, C) {
  * 维度与类型记进 `C.arrs` / `C.svars`：下标算式（多维摊平）与 `.字段`（偏移）要靠它们。
  * 没写长度的（`a[]`）不登记 —— 一维那条路不需要，`aget` 直接走。
  */
+/**
+ * **收整块的形参后头跟一格偏移形参**（`名字$o`，real）—— `&a[i]` / `&p.x` 那一族的落法，
+ * 口径在 `docs/design/eval-realtime-gpu.md` 第 8.6 节。
+ *
+ * 标准 IR 里没有"带偏移的视图"，而 EVAL 里数组本来就是一段 double ⇒ 视图 = `(基, 起点)`
+ * 两个数。函数体里 `a[j]` 落成 `a[a$o + j]`，调用点按实参形状算那格偏移。
+ */
+const offName = (n) => `${n}$o`;
+
 function paramInfos(psNode, C, register = true) {
-  return kids(psNode).map((p) => {
+  return kids(psNode).flatMap((p) => {
+    const one = paramOne(p, C, register);
+    /* 收整块的那几个后头补一格偏移形参（见 `offName` 的头注）。 */
+    return one.type === ARR ? [one, { name: offName(one.name), type: REAL }] : [one];
+  });
+}
+
+function paramOne(p, C, register) {
+  {
     const t = tag(p);
     const k = kids(p);
     if (t === 'pty') {
@@ -1701,7 +1821,7 @@ function paramInfos(psNode, C, register = true) {
     /* `&a` 形参：拿到的是调用方那一格长度 1 的数组（`C.boxed` 里那一族）。 */
     if (t === 'pref') return { name: idOf(k[0]), type: ARR };
     return { name: idOf(k[0]), type: REAL };
-  });
+  }
 }
 
 /**
@@ -1786,6 +1906,9 @@ export function evalToIR(cst, host, src = '') {
     needNoise: false,                   /* 用过 `NOISE`/`NOISE3D` 没有（`noise-rt.js`） */
     usedGL: false,                      /* 这份脚本用过 GL 那一族没有（每帧初态要不要发） */
     needFact: false,
+    /* **收整块的形参 -> 它那格偏移形参的名字**（`名字$o`，见 `offName` 的头注）：
+       一函数一张，降那一份函数体之前摆好。 */
+    offs: new Map(),
     fresh: (() => { let i = 0; return (p) => `${p}_pd${i++}`; })(),
     tyCtx: () => ({
       /* 全是 double：`env.get` 一律回 real，`fns` 给格式串那台机器看返回类型。
@@ -1908,6 +2031,8 @@ export function evalToIR(cst, host, src = '') {
        （`demos/planpos.kc` 里 `year` 在一处是 `&year`、在 `getday(year,…)` 里是按值的形参）。 */
     C.valParams = new Set(ps.filter((p) => p.type === REAL).map((p) => p.name));
     C.boxed = new Set([...C.boxedAll].filter((nm) => !C.valParams.has(nm)));
+    /* 这一份函数体里"收整块的形参"各自那格偏移（`名字$o`）—— 下标都要加上它。 */
+    C.offs = new Map(ps.filter((p) => p.type === ARR).map((p) => [p.name, offName(p.name)]));
     decls.push({
       kind: 'fn',
       name,
@@ -1922,6 +2047,8 @@ export function evalToIR(cst, host, src = '') {
   const mainPs = paramInfos(kids(mainNode)[0], C).map((p) => p.name);
   C.valParams = new Set(mainPs);
   C.boxed = new Set([...C.boxedAll].filter((nm) => !C.valParams.has(nm)));
+  /* 主函数的形参都是按值的 real —— 上一份函数留下的偏移表不许串到这儿。 */
+  C.offs = new Map();
   const mainBody = [
     ...mainPs.map((p) => ({ kind: 'let', name: p, type: REAL })),
     ...bodyOf(kids(mainNode)[1], mainPs, C),

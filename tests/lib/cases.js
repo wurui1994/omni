@@ -715,6 +715,15 @@ export const EVDOWHILE = ['i=5 n=10', 'j=7 s=16'];
 export const EVTAIL = ['a=7'];
 
 /**
+ * **`&a[i]` / `&p.x`：一格伴随的偏移形参**（`ext/evaldraw/examples/arrview.kc`）。
+ *
+ * 标准 IR 里没有"带偏移的视图"⇒ 收整块的形参后头跟一格 `名字$o`（口径在
+ * `docs/design/eval-realtime-gpu.md` 第 8.6 节）。三行分别钉住：`&a[i]` 是"从第 i 格起
+ * 的那一段"、视图往下再传时偏移会叠、`&p.x` 写进去调用方看得见。
+ */
+export const EVARRVIEW = ['all=39 tail=13', 'view=12', 'p=1,102,3'];
+
+/**
  * **cpp 的类模板**（`ext/cpp/examples/ctmpl.cpp`）。`Box<int>` 落成一格叫 `Box__int` 的
  * 普通记录、方法叫 `Box__int_get`。第五、六行钉住"同一格实例只造一遍"（两个变量各自独立、
  * 互不串味），最后一行钉住类模板的记录当**返回值**交出去。期望输出由 `c++` 给。

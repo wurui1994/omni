@@ -303,6 +303,33 @@ omni run x.pss --mode view              有窗口地跑 —— **这条腿上还
 各 3 格）。四处一起改才算一刀：`sexpr/lower.js` 的闸、backend-c 补零、LLVM 的参数表、
 `omni_fmt.c` / `omni.h` 的签名。
 
+### 8.6 `&a[i]` / `&p.x`：**一格伴随的偏移形参**
+
+`--gfx null` 那把尺子上第二大的一格红是 `&` 的另外两种写法（9 份 `.kc`）：
+
+    quicksort(&a[0],j0); quicksort(&a[j1],n-j1);     geeky/sorttest.kc:145
+    bufcpy(&buf0[1],&buf1[0],BUFSIZ-2);              geeky/buf_speed_tests.kc:101
+    getlgs(&lgs.krnd);                               games/magpong.kc
+
+前两种**不是"一格标量的出参"**，是**从第 i 格起的那一段**（快排的递归、`bufcpy` 的两端）。
+标准 IR 里没有"带偏移的视图"，而 EVAL 里数组本来就是一段 double —— 视图就是 `(基, 起点)`
+两个数。所以落法是：**每个收整块的形参后头跟一格偏移形参**（`名字$o`，real）。
+
+    被调用方   f(&a) / f(&a[i]) / f(&p.x)  ->  (fn f ((a (arr real)) (a$o real) …))
+    函数体里   a[j]                        ->  a[a$o + j]
+    调用点     &a       -> (a, 0)
+               &a[i]    -> (a, 那一格的摊平下标)
+               &p.x     -> (p, 字段偏移)       ← `fieldRef` 算出来的正是这个数
+               a（整块往下传）-> (a, a$o)
+
+为什么不加一格方言的 op（`(aview A 起)`）：那要让**四条腿**的 `(arr real)` 都能"共享存储的
+视图"——C 那侧是 `{len-off, items+off}` 一行就行，JS 那侧的数组是普通 Array，做不到共享，
+只能整套换成 `Float64Array` + 两个字段。偏移形参这一手只动这一门语言的 adapter，
+**四条腿一个字都不用改**，而且语义是精确的（不拷贝、别名照旧共享）。
+
+代价写明白：形参个数翻倍（只对收整块的那几个）、`&a[i]` 之后**越界那一夹按基数组算**
+（EVAL 原版也是照整块夹的，见 `eval.txt` 的 "Variables & arrays"）。
+
 ### 8.5 串那一族（下一刀的设计，还没做）
 
 口径是 `RScript.htm` 的 "String support" 那五条：串变量**必须是 static**（没有局部串）、

@@ -1,0 +1,41 @@
+// ext/evaldraw/examples/arrview.kc —— **`&a[i]` / `&p.x`：一格伴随的偏移形参**
+//
+// 口径在 `docs/design/eval-realtime-gpu.md` 第 8.6 节：标准 IR 里没有"带偏移的视图"，
+// 而 EVAL 里数组本来就是一段 double ⇒ 视图 = `(基, 起点)` 两个数。所以**每个收整块的
+// 形参后头跟一格偏移形参**（`名字$o`），函数体里 `a[j]` 落成 `a[a$o + j]`。
+//
+// 这一份判三样（语料里那 9 份 `.kc` 靠的就是它们）：
+//   * `&a[i]` 是**从第 i 格起的那一段**（快排递归 —— `geeky/sorttest.kc:145` 的写法）；
+//   * 视图**往下再传**时偏移会叠（`vsum1(&a[2],4)` 里再 `vsum(&v[1],3)`）；
+//   * `&p.x` 是**结构体字段的地址**（`games/magpong.kc` 的 `&lgs.krnd` 那一族），
+//     写进去调用方看得见。
+//
+// 主函数在最前（这门语言的形状是"主函数 + 若干函数"）。
+
+struct { x, y, z; } pt_t;
+
+static a[8] = {5,3,8,1,9,2,7,4};
+static pt_t p;
+
+()
+{
+   printf("all=%g tail=%g\n", vsum(&a[0],8), vsum(&a[5],3));
+   printf("view=%g\n", vsum1(&a[2],4));
+   p.x = 1; p.y = 2; p.z = 3;
+   bump(&p.y);
+   printf("p=%g,%g,%g\n", p.x, p.y, p.z);
+}
+
+//从第 0 格起数 n 格的和 —— 形参是一整块，所以它收到的是"视图"
+vsum(&v, n)
+{
+   s = 0;
+   for(i=0;i<n;i++) s += v[i];
+   return(s);
+}
+
+//视图往下再传一层：从第 1 格起
+vsum1(&v, n) { return(vsum(&v[1], n-1)); }
+
+//写一格：调用方看得见（`&p.x` 那一族）
+bump(&q) { q[0] = q[0] + 100; return(0); }
