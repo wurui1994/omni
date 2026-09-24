@@ -131,6 +131,23 @@ base 的算术、stats 的 `sd`、LAPACK（`lm` 的系数 1.05）、methods 的 
   `<gen>/src/include` 里跑；参考树是 git 检出、没有那份文件，我们自己写一份。
 
 
+### 第五刀：quartz 的窗、Rcpp、以及"不要 R 的字节码编译器"的代价
+
+* **窗口不用另写**：`devQuartz.c` + `qdCocoa.m` 本来就在 grDevices 的 `SOURCES_C` /
+  `SOURCES_M` 里，`HAVE_AQUA=1` + `-framework AppKit` 一给就有。量出来：
+  `capabilities("aqua")` 真、`quartz(type="png")` 出 PNG、开屏那一档 `quartz()` 真开窗
+  （`dev.list()` 是 `quartz`，ggplot 直接印进去）。
+* **Rcpp**（1.1.2）装上，`cppFunction` 现场编 C++ 算对。卡过一次：`bin/SHLIB` 没装，
+  而 Rcpp 报的是"install Command Line Tools for XCode" —— 一句把人往 Xcode 引的错话。
+* **代价量出来了**（`bench/r/run.js` 第二列）：我们这个 R 比本机那个 R 慢 **2~10 倍**
+  （fib 312→2073ms、sieve 320→3285ms）。两处原因都是 ADR 这条决定的直接后果：
+  base 按源码装（每次起来要 parse 22 700 行、重建 S4 类缓存）、`R_ENABLE_JIT=0`。
+  这不是 bug，是**账**：R 级代码那一侧我们认这个慢，因为快的那一侧在我们自己的编译器上
+  （同一张表里原生腿比 Rscript 快 17~76 倍）。
+* 试过给 base 那几个包做 lazyload（`tools:::makeLazyLoading`，即 R 的 `Rlazy`）——
+  除 methods 之外都能转，但 methods 转完就加载不上了，**撤了**。要动这一格得先弄清
+  methods 的类缓存与 lazyload 的次序，不是加一条边的事。
+
 ## 后果
 
 * R 这条腿从此有**两档**：编译器那一档（`omni run x.R`，快 —— `bench/r/run.js` 上标量循环

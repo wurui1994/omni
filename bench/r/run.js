@@ -5,8 +5,12 @@
 // 是两件事，而后者只能量。参考是**本机装的 R**（同一台机器、同一份 `.R`）—— 它只当尺子，
 // 运行时一格都不借（我们那条路上没有 libR，见 ext/r/SPEC.md 第二节）。
 //
-// 四列：
-//   Rscript   R 自己（4.x 带字节码编译器，所以这不是"解释器裸跑"）
+// 五列：
+//   Rscript   本机装的 R（4.x：base 是**字节码编译过**的，JIT 默认也开着）
+//   我们的R   我们自己从 r-source 编出来的那个（ADR-0046）—— 同一份源码，但两处不同：
+//             base 那几个包按**源码**装、`R_ENABLE_JIT=0`（R 自己那个用 R 写的字节码
+//             编译器我们不要）。所以这一列量的正是**"不要它"的代价**：
+//             这台机器上是 2~10 倍。而"不要它"的理由就在右边三列 —— 我们自己编。
 //   JS        我们 `--backend js` 出来的独立 `.js`，用 node 跑（`ccall` 走 N-API 扩展）
 //   原生      我们 `build` 出来的二进制（自带后端，默认 -O0）
 //   clang     **同一份发出来的 C** 交给 `clang -O2`
@@ -25,7 +29,7 @@
 // 用法：node bench/r/run.js [次数]   —— 交错跑、各取最小（这台机器单次抖 ±40%）
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { readdirSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, mkdirSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -92,6 +96,13 @@ const say = (cmd, args, env) => {
   return { out: (r.stdout ?? '') + (r.stderr ?? ''), code: r.status ?? 1 };
 };
 
+/** 我们自己编出来的那个 R（ADR-0046）—— 建出来了就多量一列。
+    它与本机那个 R 是**同一份源码**，所以这一列量的不是"谁的实现快"，而是
+    "我们那份构建有没有把它编瘸"（比如 BLAS 挑错、优化档掉了）。 */
+const OUR_R = join(root, '.omni-cache/r-rt/libR/home/bin/exec/R');
+const OUR_HOME = join(root, '.omni-cache/r-rt/libR/home');
+const haveOurR = existsSync(OUR_R);
+
 const files = readdirSync(here).filter((f) => f.endsWith('.R')).sort();
 const rows = [];
 for (const f of files) {
@@ -131,14 +142,26 @@ for (const f of files) {
     { who: 'JS', cmd: process.execPath, args: [js], env },
     { who: '原生', cmd: bin, args: [], env: {} },
     { who: 'clang', cmd: cl, args: [], env: {} },
-  ].filter((l) => !(l.who === 'JS' && addon === null));
+    {
+      who: '我们的R',
+      cmd: OUR_R,
+      args: ['--vanilla', '--no-echo', '-f', src],
+      env: { R_HOME: OUR_HOME, R_ENABLE_JIT: '0', TZDIR: '/usr/share/zoneinfo' },
+    },
+  ].filter((l) => !(l.who === 'JS' && addon === null))
+    .filter((l) => !(l.who === '我们的R' && !haveOurR));
   /* **先比答案**：每一列的 stdout 都要与 Rscript 一模一样，不一样就报出来、这一行不算时间。
      一把不验答案的性能尺子会把"算错了所以快"报成进步。 */
+  /* 我们那个 R 起来时会多印一行 `initializing class and method definitions ... done`
+     —— methods 是按**源码**装的（ADR-0046：不字节码编译），所以每次起来都要重建一遍
+     S4 的类缓存。那是一格真实的启动开销、不是答案的一部分，所以比答案时把它去掉、
+     而不是假装没有（试过给 methods 也做 lazyload，结果它反而加载不上了，撤了）。 */
+  const clean = (t) => t.split('\n').filter((l) => !/^initializing class and method definitions/.test(l)).join('\n');
   let bad = null;
   for (const l of legs) {
     const r = say(l.cmd, l.args, l.env);
     if (r.code !== 0) bad = bad ?? `${l.who} 没跑过（退出码 ${r.code}）：${r.out.split('\n')[0]}`;
-    else if (r.out !== ref.out) bad = bad ?? `${l.who} 答的不一样：想要 ${JSON.stringify(ref.out.trim())}，得到 ${JSON.stringify(r.out.trim())}`;
+    else if (clean(r.out) !== clean(ref.out)) bad = bad ?? `${l.who} 答的不一样：想要 ${JSON.stringify(ref.out.trim())}，得到 ${JSON.stringify(r.out.trim())}`;
   }
   if (bad !== null) {
     process.stdout.write(`${f.padEnd(10)} ${bad}\n`);
@@ -154,17 +177,25 @@ for (const f of files) {
   const by = {};
   legs.forEach((l, i) => { by[l.who] = best[i]; });
   rows.push({
-    f, want: ref.out.trim(), rs: by.Rscript, js: by.JS ?? null, nat: by['原生'], cl: by.clang, cJs, cNat,
+    f,
+    want: ref.out.trim(),
+    rs: by.Rscript,
+    our: by['我们的R'] ?? null,
+    js: by.JS ?? null,
+    nat: by['原生'],
+    cl: by.clang,
+    cJs,
+    cNat,
   });
 }
 
 const pad = (s, n) => String(s).padStart(n);
 const fx = (x) => (x >= 10 ? x.toFixed(0) : x.toFixed(2));
 process.stdout.write('\n');
-process.stdout.write(`${'程序'.padEnd(11)}${pad('Rscript', 9)}${pad('JS', 9)}${pad('原生', 9)}${pad('clang', 9)}  `
+process.stdout.write(`${'程序'.padEnd(11)}${pad('Rscript', 9)}${pad('我们的R', 10)}${pad('JS', 9)}${pad('原生', 9)}${pad('clang', 9)}  `
   + `${pad('JS×', 7)}${pad('原生×', 8)}${pad('clang×', 9)}  答案\n`);
 for (const r of rows) {
-  process.stdout.write(`${r.f.padEnd(11)}${pad(fx(r.rs), 9)}${pad(r.js === null ? '—' : fx(r.js), 9)}`
+  process.stdout.write(`${r.f.padEnd(11)}${pad(fx(r.rs), 9)}${pad(r.our === null ? '—' : fx(r.our), 10)}${pad(r.js === null ? '—' : fx(r.js), 9)}`
     + `${pad(fx(r.nat), 9)}${pad(fx(r.cl), 9)}  `
     + `${pad(r.js === null ? '—' : `${(r.rs / r.js).toFixed(2)}x`, 7)}`
     + `${pad(`${(r.rs / r.nat).toFixed(2)}x`, 8)}${pad(`${(r.rs / r.cl).toFixed(2)}x`, 9)}  ${r.want}\n`);

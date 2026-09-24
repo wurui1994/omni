@@ -24,7 +24,7 @@
 //   * base 装成**源码**（`library/base/R/base` 就是 all.R）—— R 自己那个用 R 写的
 //     字节码编译器我们不要，所以跑的时候 `R_ENABLE_JIT=0`
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Build } from '../../src/core/build/api.js';
@@ -61,6 +61,20 @@ function mkVar(path, name, ext, opt = false) {
     throw new Error(`build-libR: ${path} 里读不到 ${name}`);
   }
   return m[1].replace(/\\\n/g, ' ').trim().split(/\s+/).filter((s) => s.endsWith(ext));
+}
+
+/** 目录里第一份真文件的相对路径（深度优先、名字排序）—— 给 `inst/` 那几条边当输出。 */
+function firstFile(dir, rel = '') {
+  for (const e of readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    if (e.isFile()) return rel === '' ? e.name : `${rel}/${e.name}`;
+  }
+  for (const e of readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    if (e.isDirectory()) {
+      const f = firstFile(join(dir, e.name), rel === '' ? e.name : `${rel}/${e.name}`);
+      if (f !== null) return f;
+    }
+  }
+  return null;
 }
 
 /* src/main：`SOURCES_C` 那 105 份。**四份只被 include 的不在里头**（`machar.c` /
@@ -333,9 +347,13 @@ for (const p of PKGS) {
     command: `cp -R ${join(S, 'inst')}/. ${join(HOME, 'library', p)}/ && touch $out`,
     description: `${p} 的 inst/ -> R_HOME`,
   });
-  const stamp = join(OBJ, `inst_${p}.ok`);
-  b.build(stamp, `cpinst_${p}`, []);
-  pkgStamps.push(stamp);
+  /* 输出要是**目标目录里的一份真文件**，不是 obj 下的印记 ——
+     印记那种写法在"把 `home/` 整个删掉重建"时会被当成已经做过（量出来的：
+     `enc/` 没抄过去，`pdf()` 又报 failed to load default encoding）。 */
+  const first = firstFile(join(S, 'inst'));
+  if (first === null) continue;
+  b.build(join(HOME, 'library', p, first), `cpinst_${p}`, []);
+  pkgStamps.push(join(HOME, 'library', p, first));
 }
 
 /* ─── `modules/lapack.so`：R 把 LAPACK 当**模块**动态加载 ────────────────── */
