@@ -190,6 +190,12 @@ const FN_DEPS = new Map([
   ['r_seq_by', []],
   ['r_sample_i', []],
   ['r_zeros', []],
+  /* 字符向量那一族（`(arr string)`，见 `RSTRV`）。各自都是自足的 —— 串这一侧没有 `NA`。 */
+  ['r_cat_str', []],
+  ['r_print_str', []],
+  ['r_join_str', []],
+  ['r_rev_str', []],
+  ['r_iota', []],
   /* 三态逻辑那一族（`RLGL1` 那段账）。比较那六格各发一个函数 —— 不摊在调用点上是
      因为"两边各读两遍"要临时量，而临时量在**条件位**上没地方摆（`while` 的条件被降级到
      循环外头，摊开的 `let` 会变成"只算一次"）。一次函数调用是纯表达式，哪儿都放得下。 */
@@ -335,6 +341,33 @@ const RLGL1 = { kind: 'real', lgl: true };
 const isVecTy = (t) => t !== undefined && t !== null && t.kind === 'ptr';
 const isLglTy = (t) => isVecTy(t) && t.lgl === true;
 const isLgl1 = (t) => t !== undefined && t !== null && t.kind === 'real' && t.lgl === true;
+/**
+ * **字符向量** —— 一条 `(arr string)`，0 起，长度问 `alen`。
+ *
+ * 为什么不跟数值向量一个存法（`(ptr real)` + 槽 0 装长度）：那条路是为了**NaN 的载荷**
+ * 才走的（`NA` 是一个特殊 NaN，只有线性内存留得住它的载荷，见上面那段账）。串这一侧
+ * 没有这个问题 —— 方言的 `(arr string)` 自带长度（`alen`）、`apush` 还能现长，
+ * 于是"攒一串名字"那种写法（`out <- c(out, s)`）不必先算总长。
+ *
+ * 代价是**两种向量两套代码**：`length` / `c` / `cat` / `print` / `for … in` 都要各写一档。
+ * 换来的是"串不必先编码成 double 再解码"，而那条路要一张字符串表，这一版没有。
+ * `NA_character_` 没有（见 SPEC §4 第 11 条）—— 空串就是空串，不是缺失。
+ */
+const RSTRV = { kind: 'arr', elem: STR };
+const isStrVec = (t) => t !== undefined && t !== null && t.kind === 'arr';
+/** 第 i 格（0 起）。方言的 `{kind:'index'}` 落成 `(aget …)`，赋值那侧落 `(aset …)`。 */
+const svGet = (v, i) => ({ kind: 'index', obj: v, index: i });
+const svLen = (v) => call1('alen', v);
+/**
+ * 字符向量上**还没接**的那些函数，报一句有名有姓的。
+ *
+ * 为什么 `sort` 不接：R 排串按**locale 的排序规则**（`Scollate`），不是按字节 ——
+ * `sort(c("pear","apple","Banana"))` 在 R 那边是 `"apple" "Banana" "pear"`，
+ * 按字节比的话 `"Banana"` 会跑到最前面。要对上得先有那套 collation，这一版没有，
+ * 所以**当场报**而不是给一个"看着像排好了"的答案（那是静默答错）。
+ */
+const strvGap = (fn) => `r->IR: ${fn}() 在字符向量上还没接`
+  + '（排序要 R 的 locale collation、其余几格要"按下标挑"那一层，见 ext/r/SPEC.md 第四节第 12 条）';
 /** 第 i 格元素的地址（`i` 从 0 数，所以要 +1 跳过长度那一格）。 */
 const vecAt = (v, i) => call1('padd', v, i.kind === 'int'
   ? { kind: 'int', value: i.value + 1 }
@@ -496,8 +529,8 @@ const BUILTINS = new Set([
   /* 串那一族。`tolower` **没接** —— 方言里只有 `(supper …)`，没有反过来的那一格，
      补它要给核心方言加一格算子（五条腿都要动），不在 R 这一刀里。 */
   'toupper', 'substr', 'sprintf', 'startsWith', 'endsWith',
-  /* 造一条"空的/零的"向量：`numeric(n)` 那一族与不带实参的 `c()`。 */
-  'numeric', 'double', 'integer', 'logical',
+  /* 造一条"空的/零的"向量：`numeric(n)` 那一族与不带实参的 `c()`。`character(n)` 是字符向量。 */
+  'numeric', 'double', 'integer', 'logical', 'character',
   /* 随机数那一族（发生器是 R 自己那一条，见 `RRAND`）。 */
   'set.seed', 'sample', ...RRAND.keys(),
   /* libm 那一族：R 自己这几个也是直接调 libm（不在 nmath 里），所以落方言的 `rmath`。
@@ -597,6 +630,8 @@ function typeOfExpr(x, types) {
       /* **被下标的那一格不一定是名字**：`sort(z)[250]` / `c(1,2)[1]` 都是常见写法，
          所以这儿问的是"那个表达式的类型"，不是"那个名字装什么"（`indexRead` 也是这么问的）。 */
       const a = typeOfExpr(kids(x)[0], types);
+      /* 字符向量：取一格出来是一格串。 */
+      if (isStrVec(a)) return STR;
       if (!isVecTy(a)) return INT;
       /* 下标是向量 → 挑出来的还是一格向量（逻辑/数值随被挑的那个走）。 */
       const ks = kids(x).slice(1).map((k) => kids(k)[0]).filter((k) => k !== undefined);
@@ -660,10 +695,14 @@ function typeOfCall(x, types) {
   if (fn !== null && PRED.has(fn)) return BOOL;
   if (fn === 'is.na' || fn === 'is.nan') return BOOL;
   switch (fn) {
+    /* `paste(v, collapse=s)` 把一条字符向量连成**一格串**；不给 `collapse` 的那种
+       （`paste0("#", 1:3)` 那样逐元素出一条字符向量）没接 —— 见 `callOf` 里那句报错。 */
     case 'paste': case 'paste0': case 'as.character': return STR;
     case 'toupper': case 'substr': case 'sprintf': return STR;
     case 'startsWith': case 'endsWith': return BOOL;
     case 'length': case 'nchar': case 'as.integer': return INT;
+    /* `character(n)` —— 一条 n 格空串的字符向量。 */
+    case 'character': return RSTRV;
     case 'as.numeric': return REAL;
     case 'is.null': return BOOL;
     case 'sum': case 'mean': case 'max': case 'min': return REAL;
@@ -681,12 +720,18 @@ function typeOfCall(x, types) {
       if (args.length > 0 && isVecTy(typeOfExpr(args[0], types))) return lgl ? RLGL : RVEC;
       return lgl ? RLGL1 : REAL;
     }
-    /* 这三格进出都是向量（`which` 回的是位置，所以是数值向量，不是逻辑向量）。 */
-    case 'rev': case 'seq_along': case 'which': return RVEC;
+    /* 这三格进出都是向量（`which` 回的是位置，所以是数值向量，不是逻辑向量）。
+       `rev` 的元素类型跟着进去的那条走（字符向量倒过来还是字符向量）。 */
+    case 'rev': {
+      const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
+      return isStrVec(t) ? RSTRV : RVEC;
+    }
+    case 'seq_along': case 'which': return RVEC;
     /* `sort` / `head` / `tail` / `rep` 出来的**元素类型跟着进去的那条走**
        （逻辑向量排完还是逻辑）；`cumsum` / `diff` / `range` / `seq` 一律数值。 */
     case 'sort': case 'head': case 'tail': case 'rep': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
+      if (isStrVec(t)) return RSTRV;
       return isVecTy(t) ? t : RVEC;
     }
     case 'cumsum': case 'diff': case 'range': case 'seq': return RVEC;
@@ -708,11 +753,18 @@ function typeOfCall(x, types) {
     case 'invisible': return args.length === 0 ? INT : typeOfExpr(args[0], types);
     case 'return': return args.length === 0 ? INT : typeOfExpr(args[0], types);
     /* `c(TRUE, FALSE)` 在 R 里是**逻辑**向量（印 `TRUE` / `FALSE`），`c(1, 2)` 是数值向量。
-       混着写（`c(TRUE, 1)`）R 会往数值那边收，所以"每一格都是逻辑"才算逻辑。 */
-    case 'c': return args.length > 0 && args.every((a) => {
-      const t = typeOfExpr(a, types);
-      return t.kind === 'bool' || isLgl1(t) || isLglTy(t);
-    }) ? RLGL : RVEC;
+       混着写（`c(TRUE, 1)`）R 会往数值那边收，所以"每一格都是逻辑"才算逻辑。
+       **有一格是串就整条是字符向量** —— R 的收拢次序是 logical < integer < double < character。 */
+    case 'c': {
+      if (args.some((a) => {
+        const t = typeOfExpr(a, types);
+        return t.kind === 'string' || isStrVec(t);
+      })) return RSTRV;
+      return args.length > 0 && args.every((a) => {
+        const t = typeOfExpr(a, types);
+        return t.kind === 'bool' || isLgl1(t) || isLglTy(t);
+      }) ? RLGL : RVEC;
+    }
     case 'list': return dictOf(INT);
     default: {
       /* 用户函数：`inferFns()` 扫调用点推出来的那张表（表外的名字才落 int）。
@@ -764,6 +816,11 @@ function inferTypes(body, params, seed) {
 function widenTy(a, c) {
   if (a === undefined) return c;
   if (c === undefined) return a;
+  /* 字符向量是自己一格（它不在 `int → real → 向量` 那条链上）：有一边是它就是它。
+     真跟数值向量撞上了（同一个形参一会儿装串一会儿装数）留先来的那个 —— 那要运行期
+     的类型标签，这一档没有（见 SPEC §4 第 5 条）。 */
+  if (isStrVec(a)) return a;
+  if (isStrVec(c)) return c;
   if (isVecTy(a)) return isLglTy(a) && !isLglTy(c) && isVecTy(c) ? c : a;
   if (isVecTy(c)) return c;
   if (a.kind === c.kind) return isLgl1(a) && !isLgl1(c) ? c : a;
@@ -905,11 +962,13 @@ function forNames(x, types) {
     /* `for (v in a:b)` 落成计数循环（见 `forOf`），循环量是 int —— 这一格要跟那边对齐，
        不能问 `typeOfExpr`（那边答的是"`a:b` 当值用时是一格向量"）。 */
     const st = isRangeHead(seq) ? INT : typeOfExpr(seq, types);
-    const want = isVecTy(st) ? REAL : st;   /* 向量上遍历，循环量是一格 double */
+    /* 向量上遍历，循环量是一格 double；字符向量上遍历，循环量是一格串。 */
+    const want = isStrVec(st) ? STR : (isVecTy(st) ? REAL : st);
     const had = types.get(v);
     /* **第二遍要能盖掉第一遍** —— 第一遍时那格序列可能还没定型（`for (x in xs)` 里的 `xs`
-       是后面一句赋值定的），于是 `x` 先按 int 记下。只往"装得下"的方向走，不往回。 */
-    if (had === undefined || (had.kind === 'int' && want.kind === 'real')) types.set(v, want);
+       是后面一句赋值定的），于是 `x` 先按 int 记下。只往"装得下"的方向走，不往回：
+       int 是那个"还不知道"的起点，所以它让位给别的（double、串）；反过来不行。 */
+    if (had === undefined || (had.kind === 'int' && want.kind !== 'int')) types.set(v, want);
   }
   for (const k of kids(x)) forNames(k, types);
 }
@@ -1280,6 +1339,12 @@ function indexRead(x, types) {
       return { kind: 'call', fn: { kind: 'name', name: useFn(helper) }, args: [o, exprOf(keys[0], types)] };
     }
     return vecGet(o, zeroBased(exprOf(keys[0], types), typeOfExpr(keys[0], types)));
+  }
+  /* 字符向量：一格标量下标（`labels[2]`）。向量下标那两档（挑/掩码）还没接。 */
+  if (isStrVec(ot)) {
+    const kt = typeOfExpr(keys[0], types);
+    if (isVecTy(kt)) throw new Error('r->IR: 字符向量上的"按向量挑"（labels[c(1,2)]）还没接');
+    return svGet(o, zeroBased(exprOf(keys[0], types), kt));
   }
   throw new Error(`r->IR: ${nameOf(obj)} 上的下标读不知道是数组还是表 —— 推出来是 ${ot.kind}`);
 }
@@ -1686,10 +1751,14 @@ function callOf(x, types, extra, want) {
         if (n !== 1) throw new Error('r->IR: length() 要一格实参');
         const t = all[0] === null ? INT : typeOfExpr(all[0], types);
         if (t.kind === 'map') return call1('dlen', ev(0));
+        if (isStrVec(t)) return svLen(ev(0));
         return vecLen(ev(0));
       }
       case 'nchar':
         if (n !== 1) throw new Error('r->IR: nchar() 要一格实参');
+        /* `nchar(字符向量)` 在 R 里逐元素出一条**数值**向量 —— 那要"造数值向量"那一层，
+           还没接（见 SPEC §4 第 12 条）；一格串那一档照旧。 */
+        if (all[0] !== null && isStrVec(typeOfExpr(all[0], types))) throw new Error(strvGap('nchar'));
         return call1('slen', ev(0));
       case 'paste0': case 'paste': {
         /* `paste` 的默认 `sep` 是一个空格，`paste0` 是空串（R 的文档）。
@@ -1701,6 +1770,26 @@ function callOf(x, types, extra, want) {
           sep = leaf(kids(sepNode)[0]);
         }
         if (n === 0) return { kind: 'string', value: '' };
+        /* `collapse=` 那一档：一条字符向量连成**一格串**（`paste(labels, collapse=", ")`）。
+           只接"一格字符向量 + collapse"这一种形状 —— 逐元素那种（`paste0("#", 1:3)` 出的是
+           一条字符向量）没接，因为那要"回收 + 造字符向量"，见 SPEC §4 第 12 条。 */
+        const colNode = namedArg(x, 'collapse');
+        if (colNode !== undefined) {
+          const ct = typeOfExpr(colNode, types);
+          if (ct.kind !== 'string') throw new Error('r->IR: paste() 的 collapse= 要是一格串');
+          if (n !== 1 || all[0] === null || !isStrVec(typeOfExpr(all[0], types))) {
+            throw new Error('r->IR: paste(…, collapse=…) 只接"一格字符向量"那种形状');
+          }
+          return {
+            kind: 'call',
+            fn: { kind: 'name', name: useFn('r_join_str') },
+            args: [ev(0), exprOf(colNode, types)],
+          };
+        }
+        if (all.some((a) => a !== null && isStrVec(typeOfExpr(a, types)))) {
+          throw new Error('r->IR: paste() 逐元素出一条字符向量那一档还没接'
+            + '（要 `collapse=` 把它连成一格串，见 ext/r/SPEC.md 第四节第 12 条）');
+        }
         /* `paste` 的数走的是 **15 位有效数字**那一档（`as.character` 的口径），
            不是 `cat` 的 7 位 —— `paste(1/3)` 在 R 里是 `0.333333333333333`。 */
         const parts = all.map((a, i) => (a === null ? call1('tostr', extra) : asStr(a, types, 15)));
@@ -1719,18 +1808,49 @@ function callOf(x, types, extra, want) {
            循环（`c(NULL, 1)` 与 `c(零长, 1)` 都是 `1`）。差别是 `is.null()`：
            R 对 `c()` 回 TRUE，我们这儿它是一条零长向量（明写在 SPEC）。 */
         if (n === 0) return lglCall('r_zeros', { kind: 'int', value: 0 });
+        /* **有一格是串 → 整条是字符向量**（R 的收拢次序，数那几格按 `as.character` 的
+           15 位有效数字转）。字符向量走 `(arr string)`，长度不必先算 —— `apush` 能现长。 */
+        if (all.some((a) => {
+          const t = a === null ? REAL : typeOfExpr(a, types);
+          return t.kind === 'string' || isStrVec(t);
+        })) {
+          const tmp = fresh('sv');
+          const outv = { kind: 'name', name: tmp };
+          const stmts = [{
+            kind: 'let', name: tmp, type: RSTRV, init: call1('anew', tyArg(RSTRV), { kind: 'int', value: 0 }),
+          }];
+          all.forEach((a, i) => {
+            const t = a === null ? REAL : typeOfExpr(a, types);
+            if (!isStrVec(t)) {
+              stmts.push({
+                kind: 'builtin-stmt',
+                name: 'apush',
+                args: [outv, a === null ? call1('tostr', extra) : asStr(a, types, 15)],
+              });
+              return;
+            }
+            /* 字符向量那一格要先存进临时量（长度与取值各读一次），再一格一格 push。 */
+            const sn = fresh('cs');
+            const sv = { kind: 'name', name: sn };
+            const j = fresh('cj');
+            const jv = { kind: 'name', name: j };
+            stmts.push({ kind: 'let', name: sn, type: RSTRV, init: ev(i) });
+            stmts.push({
+              kind: 'for',
+              init: { kind: 'let', name: j, type: INT, init: { kind: 'int', value: 0 } },
+              cond: b('<', jv, svLen(sv)),
+              post: { kind: 'assign', target: jv, value: b('+', jv, { kind: 'int', value: 1 }) },
+              body: [{ kind: 'builtin-stmt', name: 'apush', args: [outv, svGet(sv, jv)] }],
+            });
+          });
+          return { kind: 'block-expr', stmts, value: outv };
+        }
         /* **一律 double** —— R 的 `c(10, 20, 30)` 是 double 向量（要 integer 得写 `10L`）。
            这一格原来按实参推 int/real，于是 `c(1, 2) + 0.5` 会在元素类型上打架。 */
         const vr = (nm) => ({ kind: 'name', name: nm });
         const pre = [];
         const parts = all.map((a, i) => {
           const t = a === null ? REAL : typeOfExpr(a, types);
-          /* **字符向量没有**（见 SPEC §4 第 12 条）—— 报在这儿，不要让它掉到下面那句
-             `asReal` 上，那样出来的是方言的 `(toreal E) 的参数要是 int，这里是 string`，
-             读的人得自己猜是哪一格没接。 */
-          if (t.kind === 'string') {
-            throw new Error('R 的字符向量还没接：c("…", …)（见 ext/r/SPEC.md 第四节第 12 条）');
-          }
           if (!isVecTy(t)) return { vec: false, value: asReal(ev(i), t) };
           const nm = fresh('ci');
           pre.push({ kind: 'let', name: nm, type: RVEC, init: ev(i) });
@@ -1796,13 +1916,15 @@ function callOf(x, types, extra, want) {
         if (isVecTy(t)) return vecMap1(ev(0), (e) => call1('rmath', sym, e));
         return call1('rmath', sym, asReal(ev(0), t));
       }
-      case 'numeric': case 'double': case 'integer': case 'logical': {
+      case 'numeric': case 'double': case 'integer': case 'logical': case 'character': {
         /* `numeric(n)` —— 一条 n 格的零向量（`numeric()` 是零长）。R 那边也认
-           `numeric(length = n)`，所以那个名字也收。逻辑那一档零就是 FALSE，同一份内存。 */
+           `numeric(length = n)`，所以那个名字也收。逻辑那一档零就是 FALSE，同一份内存。
+           `character(n)` 是一条 n 格空串的字符向量（`(anew (arr string) n)` 出来就是空串）。 */
         const named = namedArg(x, 'length');
         let cnt = { kind: 'int', value: 0 };
         if (named !== undefined) cnt = asIntE(exprOf(named, types), typeOfExpr(named, types));
         else if (n >= 1) cnt = asIntE(ev(0), typeOfExpr(all[0], types));
+        if (fn === 'character') return call1('anew', tyArg(RSTRV), cnt);
         return lglCall('r_zeros', cnt);
       }
       case 'sort': case 'cumsum': case 'prod': case 'range': case 'diff':
@@ -1812,12 +1934,14 @@ function callOf(x, types, extra, want) {
             + ' `decreasing=` / `na.rm=` 那几个命名实参没接');
         }
         const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        if (isStrVec(t)) throw new Error(strvGap(fn));
         if (!isVecTy(t)) throw new Error(`r->IR: ${fn}() 的实参不是向量（是 ${t.kind}）`);
         return lglCall(`r_${fn}`, ev(0));
       }
       case 'head': case 'tail': {
         /* 第二格是"取几格"，缺省 6（R 的文档）；也认 `n=`。 */
         const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        if (isStrVec(t)) throw new Error(strvGap(fn));
         if (!isVecTy(t)) throw new Error(`r->IR: ${fn}() 的第一格实参不是向量（是 ${t.kind}）`);
         const named = namedArg(x, 'n');
         let cnt = { kind: 'int', value: 6 };
@@ -1829,6 +1953,7 @@ function callOf(x, types, extra, want) {
         /* `rep(x, times)`：标量与向量两条路（R 还有 `each=` / `length.out=`，没接）。 */
         const named = namedArg(x, 'times');
         const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        if (isStrVec(t)) throw new Error(strvGap('rep'));
         let cnt = null;
         if (named !== undefined) cnt = asIntE(exprOf(named, types), typeOfExpr(named, types));
         else if (n >= 2) cnt = asIntE(ev(1), typeOfExpr(all[1], types));
@@ -1923,6 +2048,7 @@ function callOf(x, types, extra, want) {
       }
       case 'toupper': {
         if (n !== 1) throw new Error(`r->IR: toupper() 要一格实参（给了 ${n}）`);
+        if (all[0] !== null && isStrVec(typeOfExpr(all[0], types))) throw new Error(strvGap('toupper'));
         return call1('supper', ev(0));
       }
       case 'substr': {
@@ -1947,6 +2073,16 @@ function callOf(x, types, extra, want) {
       case 'rev': case 'seq_along': case 'which': {
         if (n !== 1) throw new Error(`r->IR: ${fn}() 要一格实参（给了 ${n}）`);
         const t = all[0] === null ? INT : typeOfExpr(all[0], types);
+        /* 字符向量那两格：`rev` 倒着抄一遍，`seq_along` 出 `1 … alen` 一条数值向量。 */
+        if (isStrVec(t)) {
+          if (fn === 'rev') {
+            return { kind: 'call', fn: { kind: 'name', name: useFn('r_rev_str') }, args: [ev(0)] };
+          }
+          if (fn === 'seq_along') {
+            return { kind: 'call', fn: { kind: 'name', name: useFn('r_iota') }, args: [svLen(ev(0))] };
+          }
+          throw new Error('r->IR: which() 的实参要是逻辑向量（字符向量没有"真假"这一层）');
+        }
         if (!isVecTy(t)) throw new Error(`r->IR: ${fn}() 的实参不是向量（是 ${t.kind}）`);
         if (fn === 'which' && !isLglTy(t)) {
           throw new Error('r->IR: which() 的实参要是逻辑向量（R 里它就是"哪几格为真"）');
@@ -2040,6 +2176,13 @@ function printValStmt(node, types) {
       expr: lglCall(isLglTy(t) ? 'r_print_lgl' : 'r_print_num', exprOf(node, types)),
     };
   }
+  /* 字符向量：带引号、**左对齐**、共用一套宽（见 `strvFnDecl`）。 */
+  if (isStrVec(t)) {
+    return {
+      kind: 'expr-stmt',
+      expr: { kind: 'call', fn: { kind: 'name', name: useFn('r_print_str') }, args: [exprOf(node, types)] },
+    };
+  }
   if (t.kind === 'map') throw new Error('r->IR: print() 印一格 list 还没接（那要 `$名字` 那一层）');
   /* 串在 `print` 里是**带引号**的（`cat` 不带）。转义没做 —— 明写在 SPEC。 */
   const s = t.kind === 'string'
@@ -2122,6 +2265,18 @@ function catOf(x, types) {
       });
       return;
     }
+    /* 字符向量：元素**不带引号**按 `sep` 连起来（`print` 才带引号）。 */
+    if (isStrVec(typeOfExpr(a, types))) {
+      out.push({
+        kind: 'expr-stmt',
+        expr: {
+          kind: 'call',
+          fn: { kind: 'name', name: useFn('r_cat_str') },
+          args: [exprOf(a, types), { kind: 'string', value: sep }],
+        },
+      });
+      return;
+    }
     out.push({ kind: 'builtin-stmt', name: 'write', args: [asStr(a, types)] });
   });
   return { kind: 'block', stmts: out };
@@ -2155,6 +2310,19 @@ function assignOf(x, types) {
     if (isVecTy(ot)) {
       return vecSet(o, zeroBased(exprOf(keys[0], types), typeOfExpr(keys[0], types)),
         asReal(exprOf(value, types), typeOfExpr(value, types)));
+    }
+    /* 字符向量的元素写（`labels[2] <- "x"`）。**越界不会现长** —— R 那边
+       `labels[n+1] <- s` 会把向量接长，这儿是 `(aset …)`，越界当场报（明写在 SPEC）。 */
+    if (isStrVec(ot)) {
+      const vt2 = typeOfExpr(value, types);
+      if (vt2.kind !== 'string') {
+        throw new Error(`r->IR: 往字符向量里写的不是串（是 ${vt2.kind}）`);
+      }
+      return {
+        kind: 'assign',
+        target: svGet(o, zeroBased(exprOf(keys[0], types), typeOfExpr(keys[0], types))),
+        value: exprOf(value, types),
+      };
     }
     throw new Error(`r->IR: ${nameOf(obj)} 上的下标写不知道是数组还是表 —— 推出来是 ${ot.kind}`);
   }
@@ -2200,6 +2368,28 @@ function forOf(x, types) {
   }
   /* 向量上的遍历：一格计数循环，体的第一句把元素绑到循环量上。
      序列**先存进临时量** —— 不然 `for (x in c(…))` 每转一圈都会重造那格向量。 */
+  if (isStrVec(typeOfExpr(seq, types))) {
+    /* 字符向量上的遍历（`for (s in labels)`）—— 与下面那一档同形，只是长度问 `alen`。 */
+    const src = fresh('seq');
+    const idx = fresh('si');
+    const vr = (nm) => ({ kind: 'name', name: nm });
+    return {
+      kind: 'block',
+      stmts: [
+        { kind: 'let', name: src, type: RSTRV, init: exprOf(seq, types) },
+        {
+          kind: 'for',
+          init: { kind: 'let', name: idx, type: INT, init: { kind: 'int', value: 0 } },
+          cond: b('<', vr(idx), svLen(vr(src))),
+          post: { kind: 'assign', target: vr(idx), value: b('+', vr(idx), { kind: 'int', value: 1 }) },
+          body: [
+            { kind: 'assign', target: name, value: svGet(vr(src), vr(idx)) },
+            ...body,
+          ],
+        },
+      ],
+    };
+  }
   if (isVecTy(typeOfExpr(seq, types))) {
     const src = fresh('seq');
     const idx = fresh('si');
@@ -2222,8 +2412,7 @@ function forOf(x, types) {
     };
   }
   throw new Error('r->IR: `for (v in …)` 只接 `a:b` / `seq_len(n)` / 一格向量'
-    + '（数组上的遍历要先有向量那一层，见 adapter 文件头第 1 条）');
-}
+    + '（数组上的遍历要先有向量那一层，见 adapter 文件头第 1 条）');}
 
 /** 一格语句。`(block …)` 摊平成一格 block。 */
 function stmtOf(x, types) {
@@ -2365,6 +2554,8 @@ function zeroInit(t) {
   /* 向量的零值是**空向量**：开一格槽（就是那个长度），紧跟的 `zeroStmts` 往里写 0。
      `(ptr real)` 在公共层没有零值（`lower/ty.js` 会当场报）—— 这一格必须由这门语言答。 */
   if (isVecTy(t)) return call1('pnew', tyArg(RVEC), { kind: 'int', value: 1 });
+  /* 字符向量的零值是**零长的那条**（`(arr string)` 在公共层也没有零值）。 */
+  if (isStrVec(t)) return call1('anew', tyArg(RSTRV), { kind: 'int', value: 0 });
   if (t.kind === 'map') return call1('dnew', tyArg(t));
   return null;
 }
@@ -2492,6 +2683,145 @@ function strFnDecl(name) {
     params: [{ name: 's', type: STR }, { name: 'w', type: INT }],
     ret: STR,
     body: [ret(name === 'r_padl' ? b('+', fill, s) : b('+', s, fill))],
+  };
+}
+
+/** 这一批由 `strvFnDecl` 发（形状都是"一条 `(arr string)` 进"）。 */
+const STRV_FNS = new Set(['r_cat_str', 'r_print_str', 'r_join_str', 'r_rev_str']);
+
+/**
+ * 字符向量那几格生成出来的辅助函数（`RSTRV`）。
+ *
+ * `print` 与数值那一侧的差别有两处，都是 R 自己的规矩：
+ *   * 元素**带引号**，宽度按"最长那格 + 两个引号"取（`formatString` 的 `quote=TRUE`）；
+ *   * **左对齐**（数值是右对齐）—— 于是最后一格后面也补空格，R 印出来行尾真的有空格。
+ * 转义没做（R 印 `"a\"b"`，我们印 `"a"b"`）—— 与标量那一格同一条，明写在 SPEC。
+ */
+function strvFnDecl(name) {
+  const nm = (n2) => ({ kind: 'name', name: n2 });
+  const I = (v) => ({ kind: 'int', value: v });
+  const S = (v) => ({ kind: 'string', value: v });
+  const letI = (n2, init) => ({ kind: 'let', name: n2, type: INT, init });
+  const letS = (n2, init) => ({ kind: 'let', name: n2, type: STR, init });
+  const set = (n2, v) => ({ kind: 'assign', target: nm(n2), value: v });
+  const iff = (cond, then, else_ = null) => ({ kind: 'if', cond, then, else_ });
+  const wr = (s) => ({ kind: 'builtin-stmt', name: 'write', args: [s] });
+  const v = nm('v');
+  const i = nm('i');
+  const P = [{ name: 'v', type: RSTRV }];
+  const loop = (body, upto) => ({
+    kind: 'for',
+    init: letI('i', I(0)),
+    cond: b('<', i, upto),
+    post: set('i', b('+', i, I(1))),
+    body,
+  });
+  const pad = (s, w) => ({
+    kind: 'ternary',
+    cond: b('<', call1('slen', s), w),
+    then: call1('srep', S(' '), b('-', w, call1('slen', s))),
+    else_: S(''),
+  });
+
+  if (name === 'r_cat_str') {
+    /* `cat(labels, sep=…)` —— 元素**不带引号**（那是 `print` 的事），按 `sep` 连起来。 */
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RSTRV }, { name: 'sep', type: STR }],
+      ret: { kind: 'void' },
+      body: [
+        letI('n', svLen(v)),
+        loop([
+          iff(b('>', i, I(0)), [wr(nm('sep'))]),
+          wr(svGet(v, i)),
+        ], nm('n')),
+      ],
+    };
+  }
+  if (name === 'r_join_str') {
+    /* `paste(labels, collapse=s)` —— 连成一格串。 */
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RSTRV }, { name: 'sep', type: STR }],
+      ret: STR,
+      body: [
+        letI('n', svLen(v)),
+        letS('o', S('')),
+        loop([
+          iff(b('>', i, I(0)), [set('o', b('+', nm('o'), nm('sep')))]),
+          set('o', b('+', nm('o'), svGet(v, i))),
+        ], nm('n')),
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  if (name === 'r_rev_str') {
+    return {
+      kind: 'fn',
+      name,
+      params: P,
+      ret: RSTRV,
+      body: [
+        letI('n', svLen(v)),
+        { kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), nm('n')) },
+        loop([{
+          kind: 'assign',
+          target: svGet(nm('o'), i),
+          value: svGet(v, b('-', b('-', nm('n'), i), I(1))),
+        }], nm('n')),
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  /* `r_print_str` —— 共用一套宽 + `[k]` 标号 + 80 列折行（与 `printFnDecl` 的那一圈同形，
+     只是这儿**左对齐**、而且元素文本是"加一对引号"）。 */
+  const quoted = (k) => b('+', b('+', S('"'), svGet(v, k)), S('"'));
+  return {
+    kind: 'fn',
+    name,
+    params: P,
+    ret: { kind: 'void' },
+    body: [
+      letI('n', svLen(v)),
+      /* 零长向量 R 印类型名（`character(0)`）—— 与 `numeric(0)` / `logical(0)` 同一条。 */
+      iff(b('==', nm('n'), I(0)), [wr(S('character(0)\n')), { kind: 'return', values: [] }]),
+      letI('w', I(0)),
+      loop([
+        letI('q', b('+', call1('slen', svGet(v, i)), I(2))),
+        iff(b('>', nm('q'), nm('w')), [set('w', nm('q'))]),
+      ], nm('n')),
+      letS('lab', b('+', b('+', S('['), call1('tostr', nm('n'))), S(']'))),
+      letI('lw', call1('slen', nm('lab'))),
+      letI('per', call1('toint', call1('rmath', { kind: 'strlit', value: 'floor' }, b('/',
+        call1('toreal', b('-', I(80), nm('lw'))), call1('toreal', b('+', nm('w'), I(1))))))),
+      iff(b('<', nm('per'), I(1)), [set('per', I(1))]),
+      letI('i', I(0)),
+      {
+        kind: 'while',
+        cond: b('<', i, nm('n')),
+        body: [
+          letS('l2', b('+', b('+', S('['), call1('tostr', b('+', i, I(1)))), S(']'))),
+          wr(pad(nm('l2'), nm('lw'))),
+          wr(nm('l2')),
+          letI('j', i),
+          {
+            kind: 'while',
+            cond: b('&&', b('<', nm('j'), nm('n')), b('<', nm('j'), b('+', i, nm('per')))),
+            body: [
+              letS('s', quoted(nm('j'))),
+              wr(S(' ')),
+              wr(nm('s')),
+              wr(pad(nm('s'), nm('w'))),
+              set('j', b('+', nm('j'), I(1))),
+            ],
+          },
+          wr(S('\n')),
+          set('i', b('+', i, nm('per'))),
+        ],
+      },
+    ],
   };
 }
 
@@ -3767,6 +4097,28 @@ function vecFnDecl(name) {
       ],
     };
   }
+  if (name === 'r_iota') {
+    /* `seq_along(字符向量)` 要的那一格：`1 … k` 一条数值向量（长度从 `alen` 来）。 */
+    const out = { kind: 'name', name: 'o' };
+    const kk = { kind: 'name', name: 'k' };
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'k', type: INT }],
+      ret: RVEC,
+      body: [
+        ...vecNewAs('o', kk),
+        {
+          kind: 'for',
+          init: { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
+          cond: b('<', i, kk),
+          post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
+          body: [vecSet(out, i, call1('toreal', b('+', i, { kind: 'int', value: 1 })))],
+        },
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
   if (name === 'r_vec1') {
     /* 一格数 → 长度 1 的向量。`ifelse` 那一格要它：把标量实参先摆成向量，
        于是回收那一层只写一遍（R 的 `ifelse(t, 0, 1)` 与 `ifelse(t, xs, ys)` 同一条路）。 */
@@ -3822,6 +4174,7 @@ function vecFnDecl(name) {
       || name === 'r_padl' || name === 'r_padr') {
     return strFnDecl(name);
   }
+  if (STRV_FNS.has(name)) return strvFnDecl(name);
   if (name === 'r_sci') return sciFnDecl();
   if (name === 'r_num_fmt' || name === 'r_print_num' || name === 'r_print_lgl') return printFnDecl(name);
   if (name === NUM_STR) return numStrDecl();
@@ -3921,6 +4274,9 @@ function returnType(body, types) {
      还是 int：`fnDecl` 那边已经按 `hasValueReturn` 判过一遍，`inferFns` 要的是 void
      —— 顶层自动印靠它分"要不要印"（`f <- function(x) cat(x)` 印不出东西来）。 */
   if (seen.length === 0) return null;
+  /* 字符向量要摆在标量串**前面** —— 两者都"是串"，而混着写（一支回向量、一支回一格串）
+     在这一档合不起来，留向量那一个（调用点上它才是能接着用的那格）。 */
+  if (seen.some((t) => isStrVec(t))) return RSTRV;
   if (seen.some((t) => t.kind === 'string')) return STR;
   if (seen.some((t) => isVecTy(t) || t.kind === 'map')) return seen.find((t) => isVecTy(t) || t.kind === 'map');
   /* **三态逻辑要留住那个记号**：`f <- function(x) x > 2` 回的是逻辑，不是普通 double

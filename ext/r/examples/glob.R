@@ -46,7 +46,8 @@ for (i in 1:1000) {
 }
 cat(sprintf("longest collatz under 1000: n=%d len=%d\n", bestn, best))
 
-# 报表：左右对齐（字符向量还没有，所以名字用 sprintf 拼）
+# 报表：左右对齐（这一份写的时候字符向量还没有，所以名字用 sprintf 拼；
+# 现在有了，见 ext/r/examples/strvec.R —— 这儿照原样留着，它压的是另一格）
 items <- c(1.5, 22.25, 333)
 for (i in seq_along(items)) {
   cat(sprintf("%-5s %8.2f\n", sprintf("#%d", i), items[i]))

@@ -184,6 +184,26 @@ R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不�
 `sort` 把 `NA` **丢掉**（`na.last = NA` 是默认）、`max` / `min` / `range` **传下去**
 （`max(c(1, NA))` 是 `NA` —— 按 `>` 比是躲不过去的：`NaN > x` 恒假会把 NA 悄悄跳过，
 所以那一格每元素先问一句 `is.na`）、`cumsum` / `prod` / `var` / `sd` 按浮点自然传播。
+
+### 字符向量：**另一种存法**（`(arr string)`）
+
+`c("a", "bb")` 不走上面那条 `(ptr real)` —— 它是方言的 `(arr string)`（0 起、长度问
+`alen`、`apush` 能现长）。判据是 `ext/r/examples/strvec.R`，账在 `adapter.js` 的 `RSTRV`。
+
+为什么分成两种存法：`(ptr real)` 那条路是**为了 `NA` 的 NaN 载荷**才走的（见上一小节），
+串这一侧没有这个问题；反过来"把串编码成 double"要一张字符串表，这一版没有。代价是
+`length` / `c` / `cat` / `print` / `for … in` 都要各写一档（各自一段，不是一段带分支）。
+
+接了的：`c(…)`（摊平，含"有一格是串就整条收成字符向量"，数按 `as.character` 的 15 位转）、
+`character(n)`、`v[i]` 读与写、`length`、`cat`、`print`、`for (s in v)`、`seq_along`、
+`rev`、`paste(v, collapse = s)`。
+
+`print` 与数值那一侧差三处，都是 R 自己的规矩：元素**带引号**、宽度按"最长那格 + 两个
+引号"取、而且**左对齐**（数值右对齐）—— 所以 R 印出来的**行尾真的有空格**，逐字节对
+`Rscript` 时这一格躲不过去。零长印 `character(0)`。
+
+没接的几格明写在第四节第 12 条（`sort` 要 R 的 locale collation、`nchar` / `toupper`
+逐元素要造另一种向量、`v[c(1,3)]` 要"按下标挑"）—— 都**当场报**，不给一个看着像对的答案。
 `sort` 用的是 Shell 排序（Knuth 的 gap 序列）；R 自己用快排/基数排序，但**全排序的结果
 是唯一的**（double 上相等的元素分不出来），所以两边逐字节一致。
 
@@ -386,14 +406,21 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
     R 那一条，见第二节）。没接的是 `replace=` / `prob=`、`RNGkind()`、以及 `rgamma` /
     `rweibull` 那几个要先换算参数的。
 11. `NA_integer_` / `NA_character_` 没接（实数的 `NA` 已经立住了）—— 见第二节那一小节。
-12. **字符向量没有** —— `c("a", "bb")` 当场报。串本身（`paste` / `substr` / `nchar` /
-    `sprintf`，见第三节那一小节）与**数值/逻辑**向量都立住了，缺的是"一条装串的向量"：
-    `labels[2]`、`for (s in labels)`、`length(labels)`、`paste(labels, collapse=…)`、
-    `print` 一条串向量（带引号与 `[k]` 标号）。它要一种新的存法（数值向量那条
-    `(ptr real)` 装不下串），加上 `sort` / `rev` / `%in%` 那一族在串上的一套。
-    这是下一格最值钱的缺口：真代码里"攒一串名字再排版"的写法很常见（`ext/r/examples/glob.R`
-    的报表那一段就是因为这个才改用 `sprintf` 拼名字）。
-    连带没有的：`tolower` / `toupper` / `strsplit` / `gsub` / `grepl`（后三个还要正则）。
+12. **字符向量接了**（`(arr string)`，判据是 `ext/r/examples/strvec.R`，见第二节那一小节）：
+    `c(…)` / `character(n)` / `v[i]` 读写 / `length` / `cat` / `print` / `for (s in v)` /
+    `seq_along` / `rev` / `paste(v, collapse = s)`。**没接的是这几格**：
+    * `sort(v)` —— R 排串按 **locale 的排序规则**（`Scollate`），不是按字节：
+      `sort(c("pear","apple","Banana"))` 在 R 那边是 `"apple" "Banana" "pear"`，
+      按字节比 `"Banana"` 会跑到最前面。要对上得先有那套 collation。同理 `head` /
+      `tail` / `rep` / `which` 在字符向量上也都当场报。
+    * **逐元素出另一种向量**的那几格：`nchar(v)`（出数值向量）、`toupper(v)` /
+      `tolower(v)`、`paste0("#", 1:3)`（出字符向量）—— 要"回收 + 造向量"那一层在两种
+      存法之间搭一遍，这一刀没做。一格串那一档照旧（`nchar("abc")` / `toupper("a")`）。
+    * `v[c(1,3)]` / `v[m]`（按下标挑、按掩码挑）、`v[n+1] <- s` **接长**
+      （`(aset …)` 越界当场报，R 那边会把向量接长）。
+    * 引号与反斜杠在 `print` 里**不转义**（与标量那一格同一条，见第 6 条）；
+      `NA_character_` 没有（见第 11 条）—— 空串就是空串，不是缺失。
+    连带没有的：`strsplit` / `gsub` / `grepl`（后两个还要正则）。
 
 ## 五、另一档：libR（ADR-0046）
 
