@@ -669,6 +669,24 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
     for (int64_t i = 0; i < g_gw * g_gh; i++) g_gfb[i] = c;
     return 0.0;
   }
+  /* ── 收下但这一档做不到的那几格（与 `host/gfx-cpu.js` 逐句相同）──────────────
+     `framebegin` 每帧初态：GL 的状态机在语言那一侧，设备这侧只把画布清掉；
+     `clz`/`gldepth`：这一档没有 z 缓冲；剩下几格（点大小/剔除/alpha/垂直同步/线宽/sleep）
+     在这一档没有意思，收下记着不用。 */
+  if (!strcmp(nm, "framebegin") && argc == 0) {
+    gfx_need();
+    for (int64_t i = 0; i < g_gw * g_gh; i++) g_gfb[i] = 0;
+    g_gdirty = 1;
+    return 0.0;
+  }
+  if (!strcmp(nm, "clz") && argc == 1) { return 0.0; }
+  if (!strcmp(nm, "glpointsize") && argc == 1) { return 0.0; }
+  if (!strcmp(nm, "glcullface") && argc == 1) { return 0.0; }
+  if (!strcmp(nm, "gllinewidth") && argc == 1) { return 0.0; }
+  if (!strcmp(nm, "glswapinterval") && argc == 1) { return 0.0; }
+  if (!strcmp(nm, "glalphaenable") && argc == 1) { return 0.0; }
+  if (!strcmp(nm, "glalphadisable") && argc == 1) { return 0.0; }
+  if (!strcmp(nm, "sleep") && argc == 1) { return 0.0; }
   /* **深度测试**（语言那一侧的 `gl_enable(GL_DEPTH_TEST)` 转过来的）：这一档没有
      z 缓冲，收下记着不用 —— 与 `host/gfx-cpu.js` 那一份同一句话。 */
   if (!strcmp(nm, "gldepth") && argc == 1) { return 0.0; }

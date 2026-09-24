@@ -508,15 +508,16 @@ function callOf(x, C) {
      差别只在这张表 —— PolyDraw 是 GL 立即模式（`polydraw.c:2070` 的 myext[]）、
      EvalDraw 是 `cls/setcol/setpix/moveto/lineto/drawsph/drawcone/…`（`evaldraw_ref.md`）。 */
   if (C.host.gfx.some((p) => n === p || n.startsWith(p))) {
-    /* **录制那一档不拦名字**（`--gfx null`）：设备认所有名字（记一笔、回 0），
-       所以这儿把它原样落成 `(gfxcall …)` —— 于是一份脚本能一路跑到底，
-       账上那串名字就是"它到底要哪几格 API"。撞上第一个没接的名字就报那种查法，
-       一份脚本要查十几遍才知道还缺什么（语料上量过：那是最费时间的一段）。
-       **只在这一档**：默认那两档仍然当场报，不许静默回 0 把图画错。 */
-    if (C.recGfx) return gfxCallIR(n, args);
-    throw new Error(`${C.host.who}->IR: \`${n}\` 这一格宿主函数这条腿上没有落点`
+    /* **宿主调用那条路上一律交给设备**：一门语言的宿主面有几十格，而"这一格能不能做"
+       是**设备**的事（浏览器 WebGL2 有着色器与纹理、CPU 备选没有 z 缓冲、本机 OpenGL
+       什么都有）。所以 adapter 这一层不再替设备拒绝 —— 名字原样递过去，设备接不住时
+       它自己报（那条错里写着"这一档有的是哪几格"，比编译期的清单准）。
+       录制那一档（`--gfx null`）照旧：设备认所有名字、记一笔回 0。 */
+    if (C.gfxHost) return gfxCallIR(n, args);
+    throw new Error(`${C.host.who}->IR: \`${n}\` 这一格宿主函数生成出来的那一档没有落点`
       + '（固定管线那一档已经接了：glClear/glBegin/glEnd/glVertex/glColor/矩阵栈/gluPerspective；'
-      + `**着色器与纹理那两族没有** —— 这条腿上没有可编程管线。口径是 ${C.host.spec}）`);
+      + '**着色器与纹理那两族要走设备** —— 加 --gfx host。'
+      + `口径是 ${C.host.spec}）`);
   }
   /* **`fadd`/`fsub`/`fmul`/`fdiv`**（RScript.htm 的内建库那张表）："Forces addition without
      interference from the optimizer" —— 那是给量化小把戏留的（`fadd(x,3*2^51)-3*2^51`）。

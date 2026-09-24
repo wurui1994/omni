@@ -476,6 +476,25 @@ export function gfxCall(name, args) {
       if (k >= 0 && k < 256) D.keys[k] = a(1);
       return 0;
     }
+    /* ── 收下但这一档做不到的那几格（**不静默画错**：语义是"这一档没有这件事"）────
+       深度那一族（`clz` 清 z 缓冲、`gldepth` 开关）：这一档没有 z 缓冲 —— 3D 只对
+       "没有互相遮挡"的图成立，真 3D 要 GPU 那两档。
+       `framebegin`：每帧初态。GL 的状态机在语言那一侧（`gl-rt.js` 的 `gl_framebegin`），
+       设备这一侧要做的只有"把画布清掉" —— 着色器那一族的脚本走的是这一格。
+       剩下几格（点大小 / 剔除 / alpha 测试 / 垂直同步 / 线宽 / sleep）在这一档没有意思，
+       收下记着不用 —— 与 `gl-rt.js` 里那几格 `gl_nop*` 同一句话。 */
+    case 'framebegin/0': {
+      need(320, 240);
+      const n = D.w * D.h;
+      for (let i = 0; i < n; i++) D.fb[i] = 0;
+      D.dirty = true;
+      return 0;
+    }
+    case 'clz/1': return 0;
+    case 'glpointsize/1': case 'glcullface/1': case 'gllinewidth/1':
+    case 'glswapinterval/1': case 'glalphaenable/1': case 'glalphadisable/1':
+    case 'sleep/1':
+      return 0;
     default:
       throw new Error(`这格设备（CPU 备选）上没有 '${name}'（${args.length} 个实参）——`
         + ' 有的是 cls/setcol/setpix/moveto/lineto/drawsph/drawcone/rgb/refresh/'
