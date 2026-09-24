@@ -59,3 +59,14 @@ cat(2^(1:5), "\n")
 cat(1:6 %% 3, "\n")
 cat(1:6 %/% 3, "\n")
 cat(c(-7, 7) %% 3, "\n")
+
+# 下标也能是向量：逻辑向量按掩码挑（掩码短了从头再来，`NA` 挑出一格 `NA`）、
+# 数值向量按位置挑。`c(TRUE, FALSE)` 本身就是一格逻辑向量。
+cat(xs[xs > 2], "\n")
+cat(xs[c(1, 3)], "\n")
+cat(xs[c(TRUE, FALSE)], "\n")
+cat(ys[ys > 1], "\n")
+cat(length(xs[xs > 2]), "\n")
+cat(sum(xs[xs %% 2 == 1]), "\n")
+cat(c(TRUE, FALSE, TRUE), "\n")
+cat(sum(c(TRUE, TRUE, FALSE)), "\n")

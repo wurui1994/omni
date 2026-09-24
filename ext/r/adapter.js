@@ -128,6 +128,8 @@ const FN_DEPS = new Map([
   ['r_mean', ['r_sum']],
   ['r_max', []],
   ['r_min', []],
+  ['r_vec_pick', []],
+  ['r_vec_mask', ['r_is_na', 'r_na']],
 ]);
 
 /* ─── 类型（标准 IR 的类型描述，§1.2） ─────────────────────────────────── */
@@ -358,7 +360,11 @@ function typeOfExpr(x, types) {
     }
     case 'sub1': {
       const a = types.get(mangle(nameOf(kids(x)[0])));
-      return isVecTy(a) ? REAL : INT;
+      if (!isVecTy(a)) return INT;
+      /* 下标是向量 → 挑出来的还是一格向量（逻辑/数值随被挑的那个走）。 */
+      const ks = kids(x).slice(1).map((k) => kids(k)[0]).filter((k) => k !== undefined);
+      if (ks.length === 1 && isVecTy(typeOfExpr(ks[0], types))) return a;
+      return REAL;
     }
     case 'sub2': {
       const d = types.get(mangle(nameOf(kids(x)[0])));
@@ -408,7 +414,12 @@ function typeOfCall(x, types) {
     case 'sinh': case 'cosh': case 'tanh': return REAL;
     case 'abs': return args.length === 0 ? INT : typeOfExpr(args[0], types);
     case 'return': return args.length === 0 ? INT : typeOfExpr(args[0], types);
-    case 'c': return RVEC;
+    /* `c(TRUE, FALSE)` 在 R 里是**逻辑**向量（印 `TRUE` / `FALSE`），`c(1, 2)` 是数值向量。
+       混着写（`c(TRUE, 1)`）R 会往数值那边收，所以"每一格都是逻辑"才算逻辑。 */
+    case 'c': return args.length > 0 && args.every((a) => {
+      const t = typeOfExpr(a, types);
+      return t.kind === 'bool' || isLglTy(t);
+    }) ? RLGL : RVEC;
     case 'list': return dictOf(INT);
     default: return INT;
   }
@@ -531,6 +542,12 @@ const fresh = (p) => `r_${p}${tmpN++}`;
 const asReal = (e, ty) => {
   if (e.kind === 'real') return e;
   if (e.kind === 'int') return { kind: 'real', value: e.value };
+  /* `TRUE` / `FALSE` 在 R 里当数用就是 1 / 0（`sum(c(TRUE,TRUE))` 是 2）。
+     方言里 bool 与 real 之间没有转换，所以摊成一格三元。 */
+  if (e.kind === 'bool') return { kind: 'real', value: e.value ? 1 : 0 };
+  if (ty !== undefined && ty.kind === 'bool') {
+    return { kind: 'ternary', cond: e, then: { kind: 'real', value: 1 }, else_: { kind: 'real', value: 0 } };
+  }
   if (ty !== undefined && ty.kind === 'real') return e;
   return call1('toreal', e);
 };
@@ -622,7 +639,16 @@ function indexRead(x, types) {
   const ot = typeOfExpr(obj, types);
   const o = exprOf(obj, types);
   if (ot.kind === 'map') return call1('dget', o, exprOf(keys[0], types));
-  if (isVecTy(ot)) return vecGet(o, zeroBased(exprOf(keys[0], types)));
+  if (isVecTy(ot)) {
+    /* 下标本身是**向量**那两档（R 里 `xs[xs > 2]` 与 `xs[c(1,3)]` 都是天天写的形状）：
+       逻辑向量按掩码挑、数值向量按位置挑，各走一格生成出来的辅助函数。 */
+    const kt = typeOfExpr(keys[0], types);
+    if (isVecTy(kt)) {
+      const helper = isLglTy(kt) ? 'r_vec_mask' : 'r_vec_pick';
+      return { kind: 'call', fn: { kind: 'name', name: useFn(helper) }, args: [o, exprOf(keys[0], types)] };
+    }
+    return vecGet(o, zeroBased(exprOf(keys[0], types)));
+  }
   throw new Error(`r->IR: ${nameOf(obj)} 上的下标读不知道是数组还是表 —— 推出来是 ${ot.kind}`);
 }
 
@@ -1460,6 +1486,82 @@ function vecFnDecl(name) {
           args: [{ kind: 'call', fn: { kind: 'name', name: NUM_STR }, args: [elem] }],
         },
       ], 0)],
+    };
+  }
+  if (name === 'r_vec_pick') {
+    /* `xs[c(1,3)]` —— 按位置挑（下标从 1 起，所以减 1）。结果长度就是下标那个向量的长度。 */
+    const ix = { kind: 'name', name: 'ix' };
+    const out = { kind: 'name', name: 'o' };
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RVEC }, { name: 'ix', type: RVEC }],
+      ret: RVEC,
+      body: [
+        ...vecNewAs('o', vecLen(ix)),
+        {
+          kind: 'for',
+          init: { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
+          cond: b('<', i, vecLen(ix)),
+          post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
+          body: [vecSet(out, i, vecGet(v, b('-', call1('toint', vecGet(ix, i)), { kind: 'int', value: 1 })))],
+        },
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_vec_mask') {
+    /* `xs[xs > 2]` —— 按逻辑向量挑。掩码短了**从头再来**（R 的回收规则在这儿也管），
+       掩码里的 `NA` 在 R 里挑出**一格 NA**（不是"跳过"），所以数与填都把它算上。
+       两趟：先数出结果有几格（长度要在 `pnew` 之前知道），再填。 */
+    const m = { kind: 'name', name: 'm' };
+    const out = { kind: 'name', name: 'o' };
+    const k = { kind: 'name', name: 'k' };
+    const c = { kind: 'name', name: 'c' };
+    const mi = vecGet(m, b('%', i, vecLen(m)));
+    const loopV = (body, init) => ({
+      kind: 'for',
+      init,
+      cond: b('<', i, vecLen(v)),
+      post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
+      body,
+    });
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RVEC }, { name: 'm', type: RVEC }],
+      ret: RVEC,
+      body: [
+        /* `i` 在函数体上先声明一次 —— 两趟都用它，摆在 `for` 的 init 里的话第二趟就看不见了。 */
+        { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
+        { kind: 'let', name: 'c', type: INT, init: { kind: 'int', value: 0 } },
+        loopV([{
+          kind: 'if',
+          cond: b('||', naQ(mi), b('!=', mi, { kind: 'real', value: 0 })),
+          then: [{ kind: 'assign', target: c, value: b('+', c, { kind: 'int', value: 1 }) }],
+          else_: null,
+        }], { kind: 'assign', target: i, value: { kind: 'int', value: 0 } }),
+        ...vecNewAs('o', c),
+        { kind: 'let', name: 'k', type: INT, init: { kind: 'int', value: 0 } },
+        loopV([{
+          kind: 'if',
+          cond: naQ(mi),
+          then: [
+            vecSet(out, k, { kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] }),
+            { kind: 'assign', target: k, value: b('+', k, { kind: 'int', value: 1 }) },
+          ],
+          else_: [{
+            kind: 'if',
+            cond: b('!=', mi, { kind: 'real', value: 0 }),
+            then: [
+              vecSet(out, k, vecGet(v, i)),
+              { kind: 'assign', target: k, value: b('+', k, { kind: 'int', value: 1 }) },
+            ],
+            else_: null,
+          }],
+        }], { kind: 'assign', target: i, value: { kind: 'int', value: 0 } }),
+        { kind: 'return', values: [out] },
+      ],
     };
   }
   if (name === 'r_cat_lgl') {
