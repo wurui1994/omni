@@ -30,6 +30,22 @@ import { evalToIR } from '../polydraw/adapter.js';
 import { EVALDRAW_2D } from '../polydraw/gfx-rt.js';
 import { GL_CONSTS } from '../polydraw/gl-rt.js';
 
+/**
+ * **`drawcone` 的那几格旗子**（`evaldraw.txt:1586-1590` 那张名单）。
+ *
+ * 那份说明书**只给了名字、没给值**（evaldraw 没有源码，见文件头）。所以这几格的数
+ * 是**我们定的**：一格一位、`+` 起来正好是按位或。这么定是自洽的 —— 脚本读到的常量
+ * 与设备那一侧认的是同一张表；真要与原版逐位对齐，得先有一份能问出值的参照。
+ *
+ * 成对的那两格（`NOCAP` / `FLAT`）照说明书那句"select both ends"，是两端那两位之和。
+ */
+export const DRAWCONE_CONSTS = new Map([
+  ['drawcone_nocap0', 1], ['drawcone_nocap1', 2], ['drawcone_nocap', 3],
+  ['drawcone_flat0', 4], ['drawcone_flat1', 8], ['drawcone_flat', 12],
+  ['drawcone_cent', 16], ['drawcone_nophong', 32], ['drawcone_nocone', 64],
+  ['drawcone_cull_back', 128], ['drawcone_cull_front', 256], ['drawcone_cull_none', 512],
+]);
+
 /** EvalDraw 那张宿主表。名字照 `evaldraw_ref.md` 那几节抄，**不是前缀猜的**。 */
 export const EVALDRAW_HOST = {
   who: 'evaldraw',
@@ -37,8 +53,9 @@ export const EVALDRAW_HOST = {
   /** **已经接上设备的那几格**（`gfx-rt.js` 的 `EVALDRAW_2D`）：名字/元数 -> 生成出来的函数。 */
   draw: EVALDRAW_2D,
   /** GL 那几格常量（`GL_QUADS` / `GL_TEXTURE0` …）—— EvalDraw 的脚本里也有 GL 子集，
-      所以这张表两门语言共用（语料里 `demos/sprite2d.kc` 就写 `glbegin(GL_QUADS)`）。 */
-  consts: GL_CONSTS,
+      所以这张表两门语言共用（语料里 `demos/sprite2d.kc` 就写 `glbegin(GL_QUADS)`）；
+      再加上 `drawcone` 那几格旗子（上头那张表）。 */
+  consts: new Map([...GL_CONSTS, ...DRAWCONE_CONSTS]),
   gfx: [
     /* 2D */
     'cls', 'setcol', 'setpix', 'moveto', 'lineto', 'drawsph', 'drawcone', 'drawspr',

@@ -2476,12 +2476,13 @@ class CoreLowerer {
         }
         as.push(v);
       }
-      /* **最多九个实参**：EVAL 宿主面里元数最大的是 `GLULOOKAT(,,,,,,,,)`（9 格）。
-         定上限的理由是 ABI —— 各条腿上这一格是**平签名**（`omni_gfx_call(名字, 个数,
-         a0..a8)`），不走变参：变参在 LLVM 那条腿与我们自己那台 C 前端上都是另一笔账。 */
-      if (as.length > 9) {
-        return this.err(n, `(gfxcall "名字" 实参…) 最多九个实参（这里 ${as.length} 个）——`
-          + ' 宿主面里元数最大的是 gluLookAt 的 9 格');
+      /* **最多十二个实参**：EVAL 宿主面里元数最大的是 `SETCAM`（位置 3 格 + 三个方向各
+         3 格 = 12，`evaldraw.txt` 三维那一族；`GLULOOKAT` 是 9）。定上限的理由是 ABI ——
+         各条腿上这一格是**平签名**（`omni_gfx_call(名字, 个数, a0..a11)`），不走变参：
+         变参在 LLVM 那条腿与我们自己那台 C 前端上都是另一笔账。 */
+      if (as.length > 12) {
+        return this.err(n, `(gfxcall "名字" 实参…) 最多十二个实参（这里 ${as.length} 个）——`
+          + ' 宿主面里元数最大的是 setcam 的 12 格');
       }
       return { kind: 'Builtin', name: 'gfx_call', args: [nm2, ...as], argType: STRING, type: REAL };
     }

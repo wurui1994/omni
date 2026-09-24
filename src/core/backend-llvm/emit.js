@@ -127,13 +127,13 @@ const RT_OPS = new Map([
   // 帧缓冲是 `(arr real)` —— 这条腿上数组就是 `ptr`，与上面那一条同一个拼法。
   ['gfx_frame.string', { sym: 'omni_gfx_frame', ret: 'i64', params: ['[2 x i64]', 'i64', 'i64', 'ptr'] }],
   ['gfx_framep.string', { sym: 'omni_gfx_framep', ret: 'i64', params: ['[2 x i64]', 'i64', 'i64', 'ptr'] }],
-  /* `(gfxcall "名字" 实参…)`：图形设备的宿主面。**平签名**（名字 + 个数 + 九格 double，
+  /* `(gfxcall "名字" 实参…)`：图形设备的宿主面。**平签名**（名字 + 个数 + 十二格 double，
      不足的补 0）—— 变参在这条腿上要另算一笔，而这一格值不着。 */
   ['gfx_call.string', {
     sym: 'omni_gfx_call',
     ret: 'double',
     params: ['[2 x i64]', 'i64', 'double', 'double', 'double', 'double', 'double',
-      'double', 'double', 'double', 'double'],
+      'double', 'double', 'double', 'double', 'double', 'double', 'double'],
   }],
   /* `(gfxframefn …)`：把每帧那一格函数交给设备（一格函数指针 = `ptr`）。 */
   ['gfx_frame_fn.int', { sym: 'omni_gfx_frame_fn', ret: 'double', params: ['ptr'] }],

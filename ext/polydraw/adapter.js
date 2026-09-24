@@ -171,6 +171,15 @@ const INT = { kind: 'int' };
 const num = (v) => ({ kind: 'real', value: String(v) });
 const nameRef = (n) => ({ kind: 'name', name: n });
 
+/**
+ * **装在一格数组里的量**（`&a` 那一族）：读写都走 `x[0]`。
+ *
+ * 这门语言的 `&a` 形参是"改得到调用方"（`eval.txt` 那张形参表的第二态）。标准 IR 里
+ * 没有指针，所以凡是**被取过地址**的量都落成一格长度 1 的数组：实参传那一格数组本身，
+ * 被调用的函数改的就是同一块。名单在 `C.boxed`（见 `collectBoxed`）。
+ */
+const boxRef = (n) => ({ kind: 'index', obj: nameRef(n), index: { kind: 'int', value: '0' } });
+
 /** 这门语言的名字一律折小写（大小写不敏感）。 */
 const low = (s) => String(s).toLowerCase();
 const idOf = (x) => low(tag(x) === 'name' ? leaf(kids(x)[0]) : leaf(x));
@@ -270,7 +279,7 @@ function exprOf(x, C, want = 'val') {
       const v = gfxCallIR(n);
       return want === 'cond' ? truthy(v) : v;
     }
-    const v = nameRef(n);
+    const v = C.boxed.has(n) ? boxRef(n) : nameRef(n);
     return want === 'cond' ? truthy(v) : v;
   }
   if (t === 'neg') return { kind: 'unop', op: '-', operand: exprOf(kids(x)[0], C) };
@@ -346,9 +355,24 @@ function exprOf(x, C, want = 'val') {
     return want === 'cond' ? truthy(v) : v;
   }
   if (t === 'addr') {
-    /* `&x` 只在实参位置出现（配 `&a` 形参）。这一版把它当普通的读 —— 真的"改得到调用方"
-       要一格指针，记在头注的边界里。 */
-    return exprOf(kids(x)[0], C);
+    /* `&x` 只在实参位置出现（配 `&a` 形参）。三种落法：
+       * 被取过地址的**标量**（`C.boxed`）—— 它本来就是一格长度 1 的数组，直接把那格数组
+         传过去，被调用的函数改的就是同一块（这就是"改得到调用方"）；
+       * 本来就是**一块**的（数组 / 结构体，`&vec`）—— 也直接传那一块；
+       * 别的形状（`&a[i]`、`&p.x`）当场报 —— 那要一格"带偏移的视图"，这一版没有。 */
+    const a = kids(x)[0];
+    if (isList(a) && tag(a) === 'name') {
+      const n = idOf(a);
+      if (C.boxed.has(n) || C.arrs.has(n) || C.svars.has(n)) return nameRef(n);
+      /* **按值收的形参取地址**：那要给这一格形参也开个箱子（入口里拷一份进去），
+         而调用方那一侧看不到这一趟改动 —— 两种落法差着语义，所以当场报，不猜。 */
+      if (C.valParams.has(n)) {
+        throw new Error(`eval->IR: \`&${n}\` 里的 \`${n}\` 是**按值**收的形参 ——`
+          + ' 这一版不接（要么把这格形参写成 `&' + n + '`，要么先抄进一格局部量）');
+      }
+    }
+    throw new Error('eval->IR: `&` 只接名字（`&x` / `&一整块`）—— '
+      + `这儿是 ${isList(a) ? tag(a) : '别的东西'}，那要一格带偏移的视图，这一版没有`);
   }
   if (t === 'postinc' || t === 'postdec' || t === 'preinc' || t === 'predec') {
     throw new Error(`eval->IR: \`${t}\` 只在语句位置接了（EVAL 一句只许一个赋值）`);
@@ -437,7 +461,19 @@ function callOf(x, C) {
     return { kind: 'call', fn: nameRef('pd_fact'), args };
   }
 
-  if (C.fns.has(n)) return { kind: 'call', fn: nameRef(n), args };
+  if (C.fns.has(n)) {
+    /* **形参要的是"那一格"时，装箱的实参直接把箱子递过去**（不是 `x[0]`）。
+       `demos/planpos.kc` 里 `getplanpos(&retx,…)` 收到的 `retx` 本身就是一格箱子，
+       它再往 `getmoonpos(…, retx, …)` 传下去时连 `&` 都不写 —— 一路都是同一块。 */
+    const want = C.fns.get(n).params;
+    const fixed = args.map((a, i) => {
+      if (want[i] !== ARR) return a;
+      const src = rawArgs[i];
+      if (isList(src) && tag(src) === 'name' && C.boxed.has(idOf(src))) return nameRef(idOf(src));
+      return a;
+    });
+    return { kind: 'call', fn: nameRef(n), args: fixed };
+  }
 
   /* **画图那一族**：这一门的宿主表里有的，落成生成出来的设备函数（`gfx-rt.js`）。
      设备就是一块帧缓冲 —— 清单/像素都在进程里，跨出去的只有一帧表面。 */
@@ -501,7 +537,10 @@ function callOf(x, C) {
 
 /** 赋值的目标：名字、下标，或结构体的字段。 */
 function targetOf(x, C) {
-  if (tag(x) === 'name') return nameRef(idOf(x));
+  if (tag(x) === 'name') {
+    const n = idOf(x);
+    return C.boxed.has(n) ? boxRef(n) : nameRef(n);
+  }
   if (tag(x) === 'index' || tag(x) === 'field') {
     /* 结构体那条路先看（`vt[i].stuck = 1`）—— 与读那一侧同一格 `fieldRef`。 */
     const fr = fieldRef(x, C);
@@ -692,6 +731,23 @@ function stmtOf(s, C) {
 /** 一条"表达式语句"：赋值、自增、调用（含 `printf`）。 */
 function exprStmtOf(e, C) {
   const t = tag(e);
+  /* **`readmouse(&x,&y,&b)`**（`evaldraw.txt` 的输入那一族）：它是"一次读一整组"——
+     三格都是**出参**。设备那一侧本来就有 `mousx`/`mousy`/`bstatus` 三格量，所以这儿
+     摊成三句赋值，不往宿主面上加"能写实参"的调用（那是指针，方言里没有）。
+     给几格实参就读几格（语料里 2 格与 3 格都有）。 */
+  if (t === 'call' && C.gfxHost && isList(kids(e)[0]) && tag(kids(e)[0]) === 'name'
+    && idOf(kids(e)[0]) === 'readmouse' && kids(e).length >= 2) {
+    const qs = ['mousx', 'mousy', 'bstatus'];
+    const as = kids(e).slice(1);
+    if (as.length > qs.length) {
+      throw new Error(`eval->IR: \`readmouse\` 最多三格出参（x / y / 键），这儿给了 ${as.length}`);
+    }
+    C.needGfx = true;
+    return as.map((a, i) => {
+      const lv = isList(a) && tag(a) === 'addr' ? kids(a)[0] : a;
+      return { kind: 'assign', target: targetOf(lv, C), value: gfxCallIR(qs[i]) };
+    });
+  }
   /* **`bufset(dst,val,n)` / `bufcpy(dst,src,n)`**：口径是 `evaldraw.txt:1513` 那一行 ——
      "Optimized version of: for(i=0;i<n;i++) dst[i] = val"。所以这儿就摊成那个循环
      （`n` 是**元素个数**，见 `sizeof` 那一段）。它们只在语句位置有意义（回的是 0）。 */
@@ -1291,6 +1347,33 @@ function renameStatics(x, ren) {
  * `tags` 那一格让同一台机器读两族声明：`static`/`sty` 是模块级那一档，
  * `auto`/`aty` 是**栈上**那一档（形状完全一样，只是落法不同 —— 见 `autoStmts`）。
  */
+/**
+ * **谁要装进一格数组里**（`C.boxed`）—— 整棵树走一遍，两处来源：
+ *
+ * * `&a` 形参（`pref`）—— 它拿到的就是调用方那一格数组；
+ * * 实参位置的 `&x`（`addr`），且 `x` 不是本来就成块的东西（数组 / 结构体）。
+ *
+ * 名单是**整份程序一张**（与 `C.arrs` 同一手的平名字空间）：同一个名字在别的函数里
+ * 也会跟着装箱 —— 多开一格长度 1 的数组，语义不变。
+ */
+function collectBoxed(x, C, out = new Set(), blocks = new Set()) {
+  if (!isList(x)) return out;
+  const t = tag(x);
+  if (t === 'pref') { out.add(idOf(kids(x)[0])); return out; }
+  if (t === 'addr') {
+    const a = kids(x)[0];
+    if (isList(a) && tag(a) === 'name') {
+      const n = idOf(a);
+      if (!C.arrs.has(n) && !C.svars.has(n) && !blocks.has(n)) out.add(n);
+    }
+    return out;
+  }
+  for (const k of kids(x)) collectBoxed(k, C, out, blocks);
+  return out;
+}
+
+/** 这一份函数体里用到的（装箱的）名字 —— 用上头那格 `usedNames`（读也算）。 */
+
 function staticDecls(x, out = [], tags = { plain: 'static', typed: 'sty' }) {
   if (!isList(x)) return out;
   /* **带类型的 static**（`static cel_t cel[12][12];`）—— 一格 `{ ty, one }`，
@@ -1379,8 +1462,24 @@ function bodyOf(blk, params, C) {
   const autoNames = new Set(autos.map((a) => a.name));
   const written = writtenNames(blk);
   const lets = [];
+  /* **装箱的局部量**（`&x` 传出去过的那些）：一格长度 1 的数组。形参与全局不算 ——
+     形参拿到的就是调用方那一格，全局在模块级已经开好了。 */
+  for (const n of usedNames(blk)) {
+    if (!C.boxed.has(n) || autoNames.has(n)) continue;
+    if (params.includes(n) || C.globals.has(n) || C.enums.has(n)) continue;
+    lets.push({
+      kind: 'let',
+      name: n,
+      type: ARR,
+      init: {
+        kind: 'builtin',
+        name: 'anew',
+        args: [{ kind: 'type', type: ARR }, { kind: 'int', value: '1' }],
+      },
+    });
+  }
   for (const n of written) {
-    if (autoNames.has(n)) continue;
+    if (autoNames.has(n) || C.boxed.has(n)) continue;
     if (params.includes(n) || C.globals.has(n) || C.enums.has(n)) continue;
     /* 宿主那一侧的量（host 模式下的 `bstatus` 那一族）不是局部：补一格 `let` 会生出个
        没人读的死变量，而写它已经落成 `(gfxcall "set…" …)` 了。 */
@@ -1437,6 +1536,8 @@ function paramInfos(psNode, C, register = true) {
       }
       return { name, type: ARR };
     }
+    /* `&a` 形参：拿到的是调用方那一格长度 1 的数组（`C.boxed` 里那一族）。 */
+    if (t === 'pref') return { name: idOf(k[0]), type: ARR };
     return { name: idOf(k[0]), type: REAL };
   });
 }
@@ -1492,6 +1593,9 @@ export function evalToIR(cst, host, src = '') {
     shaders: [],                        /* `@v` / `@f` / `@g` 区段（原文原样） */
     arrs: new Map(),                    /* `static a[n]` 的名字 -> 各维长度（编译期就知道） */
     arrInits: [],                       /* 那几格数组的 `a = (anew …)`：入口里做一次 */
+    boxed: new Set(),                   /* 被取过地址的量（`&x`）：落成一格长度 1 的数组 */
+    boxedAll: new Set(),                /* 整份程序那一张（`C.boxed` 是**当前这个函数**那一张） */
+    valParams: new Set(),               /* 当前函数**按值**收的形参（`&x` 碰上它要报） */
     needRnd: false,                     /* 用过 `RND`/`NRND`/`SRAND` 没有 */
     usedGL: false,                      /* 这份脚本用过 GL 那一族没有（每帧初态要不要发） */
     needFact: false,
@@ -1501,7 +1605,7 @@ export function evalToIR(cst, host, src = '') {
       /* 全是 double：`env.get` 一律回 real，`fns` 给格式串那台机器看返回类型。
          **例外是 `static` 数组**（`(arr real)`）—— 不回 arr 的话 `aget` 会被当 int，
          于是格式串那台机器在已经是 real 的东西上再发一格 `(toreal …)`，方言当场报。 */
-      env: { get: (n) => (C.arrs.has(n) ? ARR : REAL) },
+      env: { get: (n) => (C.arrs.has(n) || C.boxed.has(n) ? ARR : REAL) },
       fns: C.fns,
       fields: new Map(),
     }),
@@ -1593,12 +1697,31 @@ export function evalToIR(cst, host, src = '') {
     }
   }
 
+  /* **谁要装箱**（`&x`）—— 摆在这儿是因为它要先知道哪些名字**本来就成块**
+     （文件级与函数里的数组/结构体都登记过了），那些不装箱，直接把那一块传过去。
+     装箱的**全局**要从 `real` 改成一格长度 1 的 `(arr real)`：初值也跟着改成写 `x[0]`。 */
+  C.boxedAll = collectBoxed(cst, C, new Set(), new Set(
+    autoDecls(cst).filter((s) => s.ty !== undefined || s.arr !== undefined).map((s) => s.name),
+  ));
+  C.boxed = C.boxedAll;
+  for (const d of preDecls) {
+    if (d.kind === 'global' && C.boxedAll.has(d.name)) {
+      d.type = ARR;
+      C.globals.set(d.name, ARR);
+      C.arrInits.push({ name: d.name, total: 1, vals: [] });
+    }
+  }
+
   const decls = [...preDecls];
   for (const x of top) {
     if (tag(x) !== 'fn') continue;
     const name = idOf(kids(x)[0]);
     renameParams(kids(x)[1], kids(x)[2], name, C);
     const ps = paramInfos(kids(x)[1], C);
+    /* **装箱是按函数算的**：整份程序那张名单里，凡是本函数**按值**收的形参都不算箱子
+       （`demos/planpos.kc` 里 `year` 在一处是 `&year`、在 `getday(year,…)` 里是按值的形参）。 */
+    C.valParams = new Set(ps.filter((p) => p.type === REAL).map((p) => p.name));
+    C.boxed = new Set([...C.boxedAll].filter((nm) => !C.valParams.has(nm)));
     decls.push({
       kind: 'fn',
       name,
@@ -1611,6 +1734,8 @@ export function evalToIR(cst, host, src = '') {
   /* 主函数：EVAL 里它的形参是宿主传进来的（PolyDraw 不传，`()` 是常态）——
      有形参就在入口里当零值的局部量。 */
   const mainPs = paramInfos(kids(mainNode)[0], C).map((p) => p.name);
+  C.valParams = new Set(mainPs);
+  C.boxed = new Set([...C.boxedAll].filter((nm) => !C.valParams.has(nm)));
   /* 主函数体里的 `return` 是"这一帧到此为止"（那格函数回 void）—— 见 `return` 那一段。 */
   C.inMain = true;
   const mainBody = [
@@ -1666,7 +1791,9 @@ export function evalToIR(cst, host, src = '') {
       kind: 'assign', target: nameRef('pd_rndst'), value: { kind: 'int', value: '1' },
     }] : []),
     ...C.staticInits.map((s) => ({
-      kind: 'assign', target: nameRef(s.name), value: exprOf(s.init, C),
+      kind: 'assign',
+      target: C.boxed.has(s.name) ? boxRef(s.name) : nameRef(s.name),
+      value: exprOf(s.init, C),
     })),
   ];
   /* **用过画图那一族就把设备带上**（`gfx-rt.js` 生成的那十几格函数 + 一块帧缓冲），

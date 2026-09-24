@@ -555,9 +555,10 @@ static void gfx_perf_report(void) {
 }
 
 double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a2,
-                     double a3, double a4, double a5, double a6, double a7, double a8) {
+                     double a3, double a4, double a5, double a6, double a7, double a8,
+                     double a9, double a10, double a11) {
   char *nm = omni_cstr(name);
-  (void)a6; (void)a7; (void)a8;
+  (void)a6; (void)a7; (void)a8; (void)a9; (void)a10; (void)a11;
   /* 录制那一档：记一笔，画图那一族到此为止（查询与帧循环照旧往下走）。 */
   if (gfx_rec()) {
     g_greccnt += 1;

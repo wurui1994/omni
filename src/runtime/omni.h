@@ -357,10 +357,12 @@ int64_t omni_gfx_framep(omni_str path, int64_t w, int64_t h, int64_t *fb);
 
 /* `(gfxcall "名字" 实参…)`（omni_gfx.c）：**图形设备的宿主面** —— EVAL 两门语言
    （`.pss` / `.kc`）的宿主调用全从这一格过去。签名是**平的**（名字 + 实参个数 +
-   九格 double，不足的调用方补 0）：变参在 run-llvm 那条腿与我们自己那台 C 前端上
-   都是另一笔账，而这一格不值得。口径与刀法见 docs/design/eval-realtime-gpu.md。 */
+   十二格 double，不足的调用方补 0；元数最大的是 SETCAM 的 12 格）：变参在 run-llvm
+   那条腿与我们自己那台 C 前端上都是另一笔账，而这一格不值得。
+   口径与刀法见 docs/design/eval-realtime-gpu.md。 */
 double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a2,
-                     double a3, double a4, double a5, double a6, double a7, double a8);
+                     double a3, double a4, double a5, double a6, double a7, double a8,
+                     double a9, double a10, double a11);
 /* `(gfxframefn …)`：把每帧那一格函数交给设备（平签名：一格 `void *`）。
    这条腿上**记下不用** —— CPU 备选与本机 OpenGL 那两档自己有帧循环；要"页面驱动"的
    只有浏览器那一档。 */

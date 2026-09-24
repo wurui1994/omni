@@ -2835,11 +2835,11 @@ class CEmitter {
          没有长度，长度由调用方的 W×H 负责（与 `(unsafe …)` 那一档同一条口径）。 */
       case 'gfx_framep':
         return `omni_gfx_framep(${a[0]}, ${a[1]}, ${a[2]}, (int64_t *)${this.ptrChk(e.args[3], 8)})`;
-      /* `(gfxcall "名字" 实参…)`：图形设备的宿主面。**平签名**（名字 + 个数 + 九格 double，
-         不足的补 0）—— 变参在这条腿与 LLVM 那条腿上都是另一笔账，而这一格值不着。 */
+      /* `(gfxcall "名字" 实参…)`：图形设备的宿主面。**平签名**（名字 + 个数 + 十二格
+         double，不足的补 0）—— 变参在这条腿与 LLVM 那条腿上都是另一笔账，而这一格值不着。 */
       case 'gfx_call': {
         const vs = a.slice(1);
-        while (vs.length < 9) vs.push('0.0');
+        while (vs.length < 12) vs.push('0.0');
         return `omni_gfx_call(${a[0]}, ${a.length - 1}, ${vs.join(', ')})`;
       }
       /* `(gfxframefn …)`：把每帧那一格函数交给设备（平签名：一格 `void *`）。
