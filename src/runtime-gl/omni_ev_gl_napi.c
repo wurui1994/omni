@@ -37,6 +37,7 @@ void omni_ev_gl_def(const char *kind, const char *name, const char *text);
 int omni_ev_gl_shader(int argc, const double *args);
 double omni_ev_gl_uniloc(double idx);
 int omni_ev_gl_uni(double h, int n, const double *v);
+int omni_ev_gl_uni1i(double h, double v);
 double omni_ev_gl_attrloc(double idx);
 int omni_ev_gl_attr(double loc, const double *v);
 void omni_ev_gl_prog(int on);
@@ -180,6 +181,11 @@ static napi_value jsUni(napi_env env, napi_callback_info info) {
   return mknum(env, r);
 }
 
+static napi_value jsUni1i(napi_env env, napi_callback_info info) {
+  ARGS(2);
+  return mknum(env, omni_ev_gl_uni1i(num(env, a[0]), num(env, a[1])));
+}
+
 static napi_value jsAttrloc(napi_env env, napi_callback_info info) {
   ARGS(1);
   return mknum(env, omni_ev_gl_attrloc(num(env, a[0])));
@@ -267,6 +273,7 @@ napi_value napi_register_module_v1(napi_env env, napi_value exports) {
   PUT("shader", jsShader);
   PUT("uniloc", jsUniloc);
   PUT("uni", jsUni);
+  PUT("uni1i", jsUni1i);
   PUT("attrloc", jsAttrloc);
   PUT("attr", jsAttr);
   PUT("prog", jsProg);

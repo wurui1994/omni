@@ -123,8 +123,7 @@ static GLuint ev_compile(GLenum kind, const char *src) {
     GLsizei n = 0;
     glGetShaderInfoLog(s, sizeof(log) - 1, &n, log);
     log[n] = 0;
-    ev_err("内建着色器编不过：%s", log);
-    return 0;
+    ev_err("内建着色器编不过：%s", log);    return 0;
   }
   return s;
 }
@@ -247,10 +246,18 @@ static const char *ev_name(int idx) {
   return NULL;
 }
 
-/** 按名字找登记过的那份着色器（回下标，没有回 -1）。 */
-static int ev_sh_by_name(const char *name) {
+/**
+ * 按**种类 + 名字**找登记过的那份着色器（回下标，没有回 -1）。
+ *
+ * **种类必须参与匹配**：`.pss` 里 `@v:drawsph` 与 `@f:drawsph` **同名是常态**
+ * （`tigrou/balls2k.pss` 就是 `glsetshader("drawsph","drawsph")`）—— 只按名字找的话
+ * 顶点与片元会拿到同一份，编出来是 `gl_Position 未声明` 那种错（踩过）。
+ */
+static int ev_sh_by_name(const char *name, int kind) {
   if (name == NULL) return -1;
-  for (int i = 0; i < g_nsh; i++) if (strcmp(g_sh[i].name, name) == 0) return i;
+  for (int i = 0; i < g_nsh; i++) {
+    if (g_sh[i].kind == kind && strcmp(g_sh[i].name, name) == 0) return i;
+  }
   return -1;
 }
 
@@ -317,11 +324,12 @@ static GLuint ev_use_program(int vi, int fi) {
   return p;
 }
 
-/** `glsetshader(…)` 的实参是**名字表的下标**；旧式的数字那一档（`glsetshader(0)`）按序号取。 */
-static int ev_sh_at(double v) {
+/** `glsetshader(…)` 的实参是**名字表的下标**；旧式的数字那一档（`glsetshader(0)`）按序号取。
+    `kind` 是要哪一类（0 顶点 / 1 片元）—— 同名两份靠它分开（见 `ev_sh_by_name`）。 */
+static int ev_sh_at(double v, int kind) {
   int idx = (int)v;
   const char *nm = ev_name(idx);
-  int i = ev_sh_by_name(nm);
+  int i = ev_sh_by_name(nm, kind);
   if (i >= 0) return i;
   return (idx >= 0 && idx < g_nsh) ? idx : -1;
 }
@@ -339,12 +347,12 @@ int omni_ev_gl_shader(int argc, const double *args) {
     return ev_use_program(ev_first_of(0), ev_first_of(1)) == 0 ? 1 : 0;
   }
   if (argc == 1) {
-    int fi = ev_sh_at(args[0]);
+    int fi = ev_sh_at(args[0], 1);
     if (fi < 0) fi = ev_first_of(1);
     return ev_use_program(ev_first_of(0), fi) == 0 ? 1 : 0;
   }
-  int vi = ev_sh_at(args[0]);
-  int fi = ev_sh_at(argc >= 3 ? args[2] : args[1]);
+  int vi = ev_sh_at(args[0], 0);
+  int fi = ev_sh_at(argc >= 3 ? args[2] : args[1], 1);
   return ev_use_program(vi, fi) == 0 ? 1 : 0;
 }
 
@@ -385,8 +393,19 @@ int omni_ev_gl_uni(double h, int n, const double *v) {
   return 0;
 }
 
-/** `glgetattribloc(名字下标)` -> 属性在当前 program 里的位置（就是 GL 那个号）。 */
-double omni_ev_gl_attrloc(double idx) {
+/** `gluniform1i(句柄, 整数)`：整数那一档（采样器与开关位都走它 —— `ken/drawsph.pss`）。 */
+int omni_ev_gl_uni1i(double h, double v) {
+  if (!g_on) return 1;
+  int i = (int)h;
+  if (i < 0 || i >= g_nuni) return 1;
+  if (g_uni[i].loc < 0) return 0;
+  CGLSetCurrentContext(g_ctx);
+  glUseProgram(g_uni[i].prog);
+  glUniform1i(g_uni[i].loc, (GLint)v);
+  return 0;
+}
+
+/** `glgetattribloc(名字下标)` -> 属性在当前 program 里的位置（就是 GL 那个号）。 */double omni_ev_gl_attrloc(double idx) {
   if (!g_on) return -1.0;
   CGLSetCurrentContext(g_ctx);
   const char *nm = ev_name((int)idx);

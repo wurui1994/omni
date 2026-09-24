@@ -461,6 +461,7 @@ typedef void (*gfx_gl_def_fn)(const char *, const char *, const char *);
 typedef int (*gfx_gl_shader_fn)(int, const double *);
 typedef double (*gfx_gl_loc_fn)(double);
 typedef int (*gfx_gl_uni_fn)(double, int, const double *);
+typedef int (*gfx_gl_uni1i_fn)(double, double);
 typedef int (*gfx_gl_attr_fn)(double, const double *);
 typedef void (*gfx_gl_int_fn)(int);
 typedef void (*gfx_gl_mvp_fn)(int, double, double, double, double);
@@ -478,6 +479,7 @@ static struct {
   gfx_gl_shader_fn shader;
   gfx_gl_loc_fn uniloc, attrloc;
   gfx_gl_uni_fn uni;
+  gfx_gl_uni1i_fn uni1i;
   gfx_gl_attr_fn attr;
   gfx_gl_int_fn prog, blend, bindtex, activetex;
   gfx_gl_mvp_fn mvp;
@@ -529,6 +531,7 @@ static int gfx_gl_need(void) {
     g_gl.uniloc = (gfx_gl_loc_fn)dlsym(h, "omni_ev_gl_uniloc");
     g_gl.attrloc = (gfx_gl_loc_fn)dlsym(h, "omni_ev_gl_attrloc");
     g_gl.uni = (gfx_gl_uni_fn)dlsym(h, "omni_ev_gl_uni");
+    g_gl.uni1i = (gfx_gl_uni1i_fn)dlsym(h, "omni_ev_gl_uni1i");
     g_gl.attr = (gfx_gl_attr_fn)dlsym(h, "omni_ev_gl_attr");
     g_gl.prog = (gfx_gl_int_fn)dlsym(h, "omni_ev_gl_prog");
     g_gl.blend = (gfx_gl_int_fn)dlsym(h, "omni_ev_gl_blend");
@@ -895,6 +898,10 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
       double v[4] = { a1, argc >= 3 ? a2 : 0.0, argc >= 4 ? a3 : 0.0, argc >= 5 ? a4 : 1.0 };
       return (double)g_gl.attr(a0, v);
     }
+    /* `gluniform1i(句柄, 整数)`：整数那一档（采样器与开关位走它）。 */
+    if (!strcmp(nm, "gluniform1i") && argc == 2 && g_gl.uni1i != NULL) {
+      return (double)g_gl.uni1i(a0, a1);
+    }
     if (!strcmp(nm, "batchmvp") && argc == 5 && g_gl.mvp != NULL) {
       g_gl.mvp((int)a0, a1, a2, a3, a4);
       return 0.0;
@@ -974,6 +981,11 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
   if (!strcmp(nm, "glswapinterval") && argc == 1) { return 0.0; }
   if (!strcmp(nm, "glalphaenable") && argc == 1) { return 0.0; }
   if (!strcmp(nm, "glalphadisable") && argc == 1) { return 0.0; }
+  /* `glklockstart` / `glklockelaps`：GPU 那一侧的计时（polydraw.c 的 GLKLOCK*）——
+     收下：时间那一格由 klock 那一族统一给（与 host/gfx-cpu.js 同一句话）。 */
+  if (!strcmp(nm, "glklockstart") && argc == 0) { return 0.0; }
+  if (!strcmp(nm, "glklockelapsed") && argc == 0) { return 0.0; }
+  if (!strcmp(nm, "gltextdisable") && argc == 0) { return 0.0; }
   if (!strcmp(nm, "sleep") && argc == 1) { return 0.0; }
   /* **深度测试**（语言那一侧的 `gl_enable(GL_DEPTH_TEST)` 转过来的）：这一档没有
      z 缓冲，收下记着不用 —— 与 `host/gfx-cpu.js` 那一份同一句话。 */

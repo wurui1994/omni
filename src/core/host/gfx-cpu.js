@@ -608,6 +608,11 @@ export function gfxCall(name, args) {
       while (v.length < 4) v.push(0);
       return G.m.uni(a(0), args.length - 1, v);
     }
+    /* `gluniform1i(句柄, 整数)`：整数那一档（采样器与开关位走它 —— `ken/drawsph.pss`）。 */
+    case 'gluniform1i/2':
+      need(320, 240);
+      if (!G.on) break;
+      return G.m.uni1i(a(0), a(1));
     case 'glvertexattrib1f/2': case 'glvertexattrib2f/3':
     case 'glvertexattrib3f/4': case 'glvertexattrib4f/5': {
       need(320, 240);
@@ -675,6 +680,12 @@ export function gfxCall(name, args) {
       return 0;
     case 'glpointsize/1': case 'glcullface/1': case 'gllinewidth/1':
     case 'glswapinterval/1': case 'glalphaenable/1': case 'glalphadisable/1':
+    /* `glklockstart` / `glklockelaps`：GPU 那一侧的计时（`polydraw.c` 的 GLKLOCK*）——
+       脚本拿它印自己的帧耗时。这一层收下：时间那一格由 `klock` 那一族统一给
+       （render 模式是确定性时钟，见 `klockParts` 的头注）。 */
+    case 'glklockstart/0': case 'glklockelapsed/0':
+    /* `gltextdisable`：关掉画布文字那一层（`polydraw.c` 的 myext[]）—— 我们没有那一层。 */
+    case 'gltextdisable/0':
     case 'sleep/1':
       return 0;
     default:

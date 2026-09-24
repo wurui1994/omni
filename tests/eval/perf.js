@@ -43,7 +43,9 @@ const val = (n, d) => {
 const CFG = {
   reps: Number(val('--reps', '3')),
   w: val('--w', '320'),
-  h: val('--h', '240'),
+  /* **320×320**：与参考那侧的 `framebench` 同一个分辨率（它固定 320×320）——
+     分辨率不同的话那一栏的比值就是假的（踩过：我们 320×240 对它 320×320）。 */
+  h: val('--h', '320'),
   cap: Number(val('--cap', '5')) * 1000,   /* 出图那一趟的硬上限（秒） */
   frames: val('--frames', '2000'),         /* 主脚本那一栏跑多少帧（要跑到 ≥100ms 才量得准） */
   fast: Number(val('--fast', '3')),        /* 主脚本那一栏至少要快几倍 */
@@ -255,11 +257,36 @@ P(`\n${pass} passed, ${fail} failed（出图 ≤ ${CFG.cap / 1000}s 且不慢于
 
 /* ── **实时性那一栏**（主判据，见文件头）─────────────────────────────────────────
  *
+ * 例子挑的是语料里**最吃力**的那几份 —— 参考实现自己的性能计划
+ * （`/Users/wurui/Documents/polydraw/Plan/10_Performance.md`）把它们列成"远低于 60fps"：
+ *   disco ball（19970 个 draw call）/ snake tube（GL 几何）/ ken/drawsph（GL 几何）/
+ *   balls2k（EVAL+draw，interp 37.7fps）。轻的那几份（metaballs 605fps）**量了没意义**。
+ *
+ * 参考那一侧用它自己的 `framebench`（EVAL 录制 + FBO replay + `glReadPixels`，与我们
+ * `--gfx gl` 同一件事），取它 interp / llvm 两档里**最好**的那个当分母。
+ *
  * 每种模式跑两趟：一趟 1 帧（量"改完到看见画面"的延迟，编译算在里头）、
  * 一趟 N 帧（量每帧时间，读运行时自己印的 `#perf gfx` 行）。
- * 门槛：每帧 avg ≤ 16.7ms（60fps）；启动延迟 ≤ 1s（`c` 那条只记账 —— 它是出成品用的）。
  */
-const RT_CASES = CASES.filter((f) => /02-gl|04-shader/.test(f));
+const HEAVY = [
+  `${PSS}/ken/drawsph.pss`,
+  `${PSS}/tigrou/balls2k.pss`,
+  `${PSS}/tigrou/snake tube.pss`,
+  `${PSS}/tigrou/disco ball.pss`,
+];
+const RT_CASES = HEAVY.filter((f) => (CFG.only === '' || f.includes(CFG.only)) && existsSync(f));
+const REF_FRAME = '/Users/wurui/Documents/polydraw/c_impl/build/framebench';
+
+/** 参考那一侧一份脚本的每帧毫秒（interp / llvm 取最好的）。没有那份工具回 null。 */
+function refFrameMs(src) {
+  if (!existsSync(REF_FRAME)) return null;
+  const r = spawnSync(REF_FRAME, [src, '--frames', CFG.rtFrames],
+    { encoding: 'utf8', timeout: 180000 });
+  const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+  const ms = [...out.matchAll(/(interp|llvm)\s*:\s*([\d.]+)\s*ms\/frame/g)].map((m) => Number(m[2]));
+  return ms.length === 0 ? null : Math.min(...ms);
+}
+
 
 /** 跑一趟 `omni run`，回 `{ real, avg, max, why }`（都是毫秒）。 */
 function runMode(src, mode, frames) {
@@ -290,10 +317,12 @@ P('\n实时性那一栏（每帧 ≤ 16.7ms = 60fps；启动 = 改完到看见�
 const rt = [];
 for (const src of RT_CASES) {
   const name = basename(src);
+  const ref = refFrameMs(src);
+  if (ref !== null) P(`  --   ${name} 参考（framebench 最好那档）${ref.toFixed(1)}ms/帧\n`);
   for (const mode of MODES) {
     const one = runMode(src, mode, 1);
     const many = one.why === null ? runMode(src, mode, CFG.rtFrames) : one;
-    rt.push({ name, mode: mode.id, ...many, start: one.real });
+    rt.push({ name, mode: mode.id, ...many, start: one.real, ref });
     if (many.why !== null) {
       fail++;
       P(`  FAIL ${name} [${mode.id}] 跑得起来\n       ${many.why}\n`);
@@ -326,13 +355,16 @@ for (const src of RT_CASES) {
   }
 }
 
-P('\n  启动(ms)  每帧avg(ms)  每帧max(ms)   fps   模式    例子\n');
+P('\n  启动(ms)  每帧avg(ms)  每帧max(ms)   fps  参考(ms)   比参考   模式    例子\n');
 for (const r of rt) {
   const fps = r.avg ? (1000 / r.avg).toFixed(0) : '—';
+  const vs = r.avg && r.ref ? `${(r.avg / r.ref).toFixed(2)}x` : '—';
   P(`  ${(r.start === undefined ? '—' : r.start.toFixed(0)).padStart(8)}  `
     + `${(r.avg === null || r.avg === undefined ? '—' : r.avg.toFixed(1)).padStart(11)}  `
     + `${(r.max === null || r.max === undefined ? '—' : r.max.toFixed(1)).padStart(11)}  `
-    + `${fps.padStart(4)}   ${r.mode.padEnd(6)}  ${r.name}${r.why ? `  （${r.why.slice(0, 40)}）` : ''}\n`);
+    + `${fps.padStart(4)}  ${(r.ref === null || r.ref === undefined ? '—' : r.ref.toFixed(1)).padStart(8)}`
+    + `   ${vs.padStart(6)}   ${r.mode.padEnd(6)}  ${r.name}`
+    + `${r.why ? `  （${r.why.slice(0, 40)}）` : ''}\n`);
 }
 
 P(`\n${pass} passed, ${fail} failed（实时性 + 与 c_impl 的两栏对照）\n`);

@@ -908,8 +908,55 @@ CGL 上下文 + 着色器编译 + 写 PNG —— 双方都付这一份，所以�
   机制在 ADR-0038（node 这侧的 FFI 已经有），缺的是 js 那条腿上的 GL 转发 ——
   `host/gfx-cpu.js` 现在只有 CPU 备选。这一栏也要有判据与优化。
 
-## 16. 第六刀：**js 腿 + FFI 接本机 GL**（实时那三条路的第一条）
 
+### 15.5 **最吃力的那几份**才是判据（2026-09-24 用户纠正）
+
+> 比较简单的例子意义不大。要比那些最吃力的例子。
+
+参考实现自己的性能计划里就有这张清单（`polydraw/Plan/10_Performance.md`）：
+`disco ball`（19970 个 draw call）/ `snake tube` / `ken/drawsph` / `balls2k` 被标成
+"远低于 60fps"，而 `metaballs`（605fps）、`heightmap`（343fps）那种**量了没意义**。
+参考那一侧的工具是 **`c_impl/build/framebench`**（EVAL 录制 + FBO replay + `glReadPixels`，
+与我们 `--gfx gl` 同一件事），固定 **320×320**、60 帧 —— 判据的分辨率跟着它，
+不然比值是假的（踩过：我们 320×240 对它 320×320）。
+
+这台机器上参考的数（`framebench --frames 60`）：
+
+    脚本              interp      llvm       最好
+    disco ball        65.34ms    79.37ms    65.34ms   （15.3fps）
+    snake tube        82.61ms    35.27ms    35.27ms   （28.4fps）
+    ken/drawsph       39.82ms    54.12ms    39.82ms   （25.1fps）
+    balls2k           25.46ms     7.01ms     7.01ms   （142.7fps）
+
+我们在 `ken/drawsph.pss` 上量到的（320×320、60 帧）：
+
+    我们 c 腿   --gfx gl     18.4ms/帧（54.4fps）   <- 比参考最好那档快 2.2 倍
+    我们 js 腿  --gfx gl     36.0ms/帧（27.8fps）
+    我们 js 腿  --gfx null   22.1ms/帧            <- **语言那一半就占了 61%**
+    参考最好档                39.82ms
+
+两条结论（都是这一份例子逼出来的）：
+* **合批那一格是对的**：一帧只发 3 格 `(gfxbatch …)`（180/60）—— 参考那边是每球一个
+  `glBegin/glEnd`（它那 19970 个 draw call 之所以成瓶颈就是这个）。所以我们不是
+  draw-call 密集，是**语言侧算术**密集；
+* 于是 **js 腿要优化的是"编到 JS 的执行速度"**（22.1ms 那一格），c 腿要优化的是原生码
+  那一半 —— 与用户定的口径一致（编到 C 的**整趟**时间不重要，**每帧**重要）。
+
+### 15.6 这几份例子逼出来的四个真缺口
+
+1. **`@v:名字` 与 `@f:名字` 同名是常态**（`balls2k` 就是 `glsetshader("drawsph","drawsph")`）
+   —— 按名字找着色器会把顶点与片元拿成同一份，编出来是 `gl_Position 未声明`。
+   修：`ev_sh_by_name(名字, 种类)`，**种类参与匹配**（浏览器那一档 `SH.src` 有同样的隐患，
+   下一刀一起改）；
+2. **`gluniform1i`**（采样器与开关位走它）：补了 `omni_ev_gl_uni1i` + 两条腿的转发；
+3. **`glklockstart` / `glklockelapsed` / `gltextdisable`**：`polydraw.c` 的 `myext[]` 里有、
+   我们没有的那几格（名字照那张表抄 —— 第一版把 `glklockelapsed` 写成了 `glklockelaps`）；
+4. **还欠的两格**（下一刀）：
+   * `gl_Normal`（旧式内建属性）—— 要给顶点加**法向**那 4 格（12 -> 16），
+     三档设备 + `gl-rt.js` 一起改；`balls2k` 卡在这儿；
+   * `gluniform{1,2,3,4}{i,fv,iv}` 那一族（`myext[]` 里全有）。
+
+## 16. 第六刀：**js 腿 + FFI 接本机 GL**（实时那三条路的第一条）
 ### 16.1 为什么它排第一
 
 `--backend js` / `--backend interp` 这两条是**改完立刻能跑**的路（没有 cc、没有链接），
