@@ -1722,7 +1722,18 @@ but functional."、`:101`："Use sin-based pseudo-noise for now." —— 也就�
 `(gfxcall "glcull" 0|1|2)`（关 / 剔背面 / 剔正面），四处设备各补一小段
 （`runtime-gl/omni_ev_gl.c` 真 `glEnable(GL_CULL_FACE)`+`glCullFace`、
 `runtime/omni_fmt.c` 的转发表、`studio/gfx-gl.js` 的 WebGL、`host/gfx-cpu.js` 的 CPU 备选
-按定向面积判）。**还没做** —— 一格四处要同时对齐，留给下一轮。
+按定向面积判）。**试着接过一趟又退回来了（2026-09-25）**，量出来的结论值得记：六处都接上
+（`gl_cullface` -> `(gfxcall "glcull" 模式)`、本机 GL 的 `glEnable(GL_CULL_FACE)+glCullFace`、
+C 腿转发表、napi、WebGL、CPU 备选收下不管）之后
+
+* 默认的 `glFrontFace(GL_CCW)`：`disco ball` 67.2 → **118.4**（我们非黑 9583 对参考 23309 ——
+  **剔掉的正是该留的那一半**）、`curvybuild` 85.6 → **188（几乎全黑）**；
+* 改成 `glFrontFace(GL_CW)`：`disco ball` 67.05、`curvybuild` 85.55 ——
+  **与压根不剔几乎一样**（也就是说这一档下几乎没有面被剔掉）。
+
+两头都不对 ⇒ **我们这一侧三角的绕向与 GL 的正面约定不是一件事**（很可能出在 mode 展开那一步：
+四边形拆两个三角、strip/fan 的奇偶次序）。绕向没理清之前接剔除只会把账做坏，所以这一趟
+`git checkout` 退回去了。**正事的次序是：先把展开后的绕向对齐真 GL，再接剔除。**
 
 ### 28.12 这一轮之后的账
 
