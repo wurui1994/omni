@@ -63,11 +63,13 @@
 
     (keyword NAME fold-case
       "if" "else" "while" "do" "for" "return" "break" "continue"
-      "goto" "static" "enum")
+      "goto" "static" "enum" "struct")
 
     ;; 运算符与标点。**长的在前**（`(op …)` 按这一串的次序试，`+=` 要比 `+` 先）。
+    ;; `.` 是**结构体取字段**（`vt[i].stuck`，RScript.htm 那张算子表的第五行）——
+    ;; 它不会与 `.5` 那种数打架：NUMBER 那两条规则在前，词法按最长匹配吃掉 `.5`。
     (op "+=" "-=" "*=" "/=" "%=" "==" "!=" "<=" ">=" "&&" "||" "++" "--"
-        "=" "<" ">" "!" ";" "," ":" "&" "$"
+        "=" "<" ">" "!" ";" "," ":" "&" "$" "."
         "{" "}" "(" ")" "[" "]" "+" "-" "*" "/" "%" "^"))
 
   ;; ── 顶层 ──────────────────────────────────────────────────────────────
@@ -90,7 +92,42 @@
     (-> ("static" staticlist ";") (static $*2))
     (-> ("static" staticlist) (static $*2))
     (-> ("enum" "{" enumlist "}" ";") (enum $*3))
-    (-> ("enum" "{" enumlist "}") (enum $*3)))
+    (-> ("enum" "{" enumlist "}") (enum $*3))
+    (-> (structdecl) $1)
+    ;; **带类型的 static**（`static cel_t cel[CELMAX][CELMAX];`、`static point3d p;`）——
+    ;; 只有这一支读得下"static 名字 名字"，所以与上面那支不打架。
+    (-> ("static" NAME staticlist ";") (sty $2 $*3))
+    (-> ("static" NAME staticlist) (sty $2 $*3)))
+
+  ;; ── 结构体（RScript 的特性，`RScript.htm` 的关键字表里那一行）─────────────
+  ;;
+  ;;   struct { x, y, z; } point3d;          一组，末尾分号
+  ;;   struct { o, v, r, d } cel_t;          **末尾分号可省**（`games/kenken.kc:1`）
+  ;;   struct { a, b; c, d; } play_t;        **多组**（`games/traffic.kc:8`）
+  ;;   struct { play_t play[8]; double n; }  字段带**类型**（嵌套结构体 / 显式 double）
+  ;;
+  ;; 落法在 adapter：结构体就是**一块摊平的 double**（`a[i].f` = `a[i*格数 + 字段下标]`）
+  ;; —— 与多维数组摊平同一手，运行期一格新东西都不加。
+  (rule structdecl
+    (-> ("struct" "{" fields "}" NAME ";") (struct $5 $*3))
+    (-> ("struct" "{" fields "}" NAME) (struct $5 $*3)))
+
+  (rule fields
+    (-> (fieldgrps) ($*1))
+    (-> (fieldgrps fieldlist) ($*1 $*2)))
+
+  (rule fieldgrps
+    (-> () ())
+    (-> (fieldgrps fieldlist ";") ($*1 $*2))
+    (-> (fieldgrps NAME fieldlist ";") ($*1 (tgrp $2 $*3))))
+
+  (rule fieldlist
+    (-> (fieldone) ($1))
+    (-> (fieldlist "," fieldone) ($*1 $3)))
+
+  (rule fieldone
+    (-> (NAME) (fld $1))
+    (-> (NAME dims) (fld $1 (dims $*2))))
 
   (rule fns
     (-> () ())
@@ -152,6 +189,10 @@
     (-> ("goto" NAME ";") (goto $2))
     (-> (NAME ":") (label $1))
     (-> ("static" staticlist ";") (static $*2))
+    ;; 块里也有带类型的 static 与结构体声明（局部结构体，evaldraw.txt 2010-02-10 那条
+    ;; 改动日志里提过"local structure"）。
+    (-> ("static" NAME staticlist ";") (sty $2 $*3))
+    (-> (structdecl) $1)
     ;; 块里的 `enum` **不带分号**（`games/breakout.kc:6` 是 `enum {BULNUM=16}` 接一行
     ;; `static bulx[BULNUM]…` —— 少这一支的话报的是"unexpected static"，看着像 static 的错）。
     ;; **只留这一支**：分号那一格由上面 `(";") (empty)` 那一支收 ——
@@ -273,6 +314,8 @@
   (rule postfix
     (-> (primary) $1)
     (-> (postfix "[" expr "]") (index $1 $3))
+    ;; 结构体取字段（`vt[i].stuck`、`cam.x`、嵌套 `g.play[i].x`）—— 偏移在 adapter 里算。
+    (-> (postfix "." NAME) (field $1 $3))
     (-> (postfix "(" ")") (call $1))
     (-> (postfix "(" arglist ")") (call $1 $*3))
     (-> (postfix "++") (postinc $1))

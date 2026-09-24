@@ -49,8 +49,10 @@ export const EVALDRAW_HOST = {
     'clz', 'setcam', 'setview', 'setzrange',
     /* 体素那一族（KV6） */
     'drawkv6', 'drawvox',
-    /* 输入那一族里"一次读一整组"的那格（`readmouse(&x,&y,&b)`） */
-    'readmouse',
+    /* 输入那一族里"一次读一整组"的那格（`readmouse(&x,&y,&b)`）与磁力计那格 */
+    'readmouse', 'readmag6d',
+    /* 时间与杂项（`sleep(ms)`；网络那一族在这条腿上没有落点，撞上会说清楚） */
+    'sleep', 'net_', 'pic',
     /* GL 子集 */
     'gl',
     /* 声音 */

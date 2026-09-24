@@ -206,7 +206,7 @@ export const POLYDRAW_HOST = {
   frameReset: true,
   gfx: ['gl', 'glu', 'kgl', 'setfov', 'printg', 'playnote', 'mountzip',
     /* `myext[]` 里还有这几族（`polydraw.c:2070`）：噪声、体素、画布文字、一次读一组输入。 */
-    'noise', 'drawkv6', 'drawspr', 'drawvox', 'printchar', 'readmouse', 'setfont'],
+    'noise', 'drawkv6', 'drawspr', 'drawvox', 'printchar', 'readmouse', 'setfont', 'sleep'],
 };
 
 const rmath = (fn, args) => ({ kind: 'rmath', fn, args });
@@ -294,6 +294,19 @@ function exprOf(x, C, want = 'val') {
     const v = bin(op, exprOf(a, C), exprOf(b, C));
     return want === 'cond' ? truthy(v) : v;
   }
+  if (t === 'index' || t === 'field') {
+    /* **结构体那条路先看**（`vt[i].stuck`、`cam.x`、`cel[i][j].o`）：带类型的变量落成
+       一块摊平的 double，偏移由 `fieldRef` 算（`.` 与 `[]` 混着来都认）。 */
+    const fr = fieldRef(x, C);
+    if (fr !== null) {
+      const v = { kind: 'index', obj: nameRef(fr.name), index: fr.index };
+      return want === 'cond' ? truthy(v) : v;
+    }
+    if (t === 'field') {
+      throw new Error(`eval->IR: \`.${idOf(kids(x)[1])}\` 取字段的左边不是带类型的变量`
+        + '（结构体要先 `struct { … } 类型名;` 再 `static 类型名 变量;`）');
+    }
+  }
   if (t === 'index') {
     const b = kids(x)[0];
     /* `keystatus[k]` 不是脚本自己的数组，是**问设备一句**（宿主那张表里它是一块 256 格的
@@ -333,7 +346,8 @@ function exprOf(x, C, want = 'val') {
   if (t === 'postinc' || t === 'postdec' || t === 'preinc' || t === 'predec') {
     throw new Error(`eval->IR: \`${t}\` 只在语句位置接了（EVAL 一句只许一个赋值）`);
   }
-  throw new Error(`eval->IR: 这一格表达式还没接：${t}`);
+  throw new Error(`eval->IR: 这一格表达式还没接：${t}`
+    + `（形状：${JSON.stringify(x).slice(0, 160)}）`);
 }
 
 /* ─── 调用 ───────────────────────────────────────────────────────────── */
@@ -453,14 +467,39 @@ function callOf(x, C) {
       + '（固定管线那一档已经接了：glClear/glBegin/glEnd/glVertex/glColor/矩阵栈/gluPerspective；'
       + `**着色器与纹理那两族没有** —— 这条腿上没有可编程管线。口径是 ${C.host.spec}）`);
   }
+  /* **`fadd`/`fsub`/`fmul`/`fdiv`**（RScript.htm 的内建库那张表）："Forces addition without
+     interference from the optimizer" —— 那是给量化小把戏留的（`fadd(x,3*2^51)-3*2^51`）。
+     我们这儿落成**普通算术**：语义是同一个，只是不保证优化器不合并它 ——
+     **已知偏差**，写在这儿免得日子久了当成"接好了"。 */
+  const FARITH = { fadd: '+', fsub: '-', fmul: '*', fdiv: '/' };
+  if (FARITH[n] !== undefined && args.length === 2) return bin(FARITH[n], args[0], args[1]);
+  /* **`sizeof(名字)`**：编译期的**槽数**（不是字节）。口径是 `evaldraw.txt:1513`
+     那一行 —— `bufset(dst,val,n)` 等于 `for(i=0;i<n;i++) dst[i]=val`，而语料里就写
+     `bufset(trilistn,-1,sizeof(trilistn))`（`demos/minsurf.kc:338`）⇒ n 是元素个数。
+     认三种：`static` 数组（各维之积）、带类型的变量（总槽数）、结构体类型名（它的槽数）。 */
+  if (n === 'sizeof' && rawArgs.length === 1) {
+    const a0 = rawArgs[0];
+    if (isList(a0) && tag(a0) === 'name') {
+      const nm = idOf(a0);
+      if (C.arrs.has(nm)) return num(C.arrs.get(nm).reduce((p, q) => p * q, 1));
+      if (C.structs.has(nm)) return num(C.structs.get(nm).size);
+      return num(1);                       /* 一格普通量就是一个 double */
+    }
+    throw new Error('eval->IR: `sizeof` 只收一个名字（数组、带类型的变量或结构体类型名）');
+  }
   throw new Error(`${C.host.who}->IR: 不认识的函数 \`${n}\``);
 }
 
 /* ─── 语句 ───────────────────────────────────────────────────────────── */
 
-/** 赋值的目标：名字或下标。 */
+/** 赋值的目标：名字、下标，或结构体的字段。 */
 function targetOf(x, C) {
   if (tag(x) === 'name') return nameRef(idOf(x));
+  if (tag(x) === 'index' || tag(x) === 'field') {
+    /* 结构体那条路先看（`vt[i].stuck = 1`）—— 与读那一侧同一格 `fieldRef`。 */
+    const fr = fieldRef(x, C);
+    if (fr !== null) return { kind: 'index', obj: nameRef(fr.name), index: fr.index };
+  }
   if (tag(x) === 'index') {
     /* `static a[n]` 那一族：与读那一侧同一条路（摊平 + 越界那一夹）。 */
     const ch = indexChain(x);
@@ -569,8 +608,10 @@ function stmtOf(s, C) {
   }
   if (t === 'for') {
     const [init, cond, post, body] = kids(s);
-    /* `optexpr` / `optlist` 空着的时候 action 是 `()` —— 一格空表，`tag` 回 undefined。 */
-    const some = (n) => isList(n) && tag(n) !== undefined;
+    /* `optexpr` / `optlist` 空着的时候 action 是 `()` —— 一格**空表**，`tag` 回的是
+       `null`（不是 undefined）。少判一格 null 的话 `for(;j>=0;j=nj)`（`demos/minsurf.kc:196`）
+       会把那格空表当表达式递下去，报"这一格表达式还没接：null"。 */
+    const some = (n) => isList(n) && tag(n) !== undefined && tag(n) !== null;
     /* for 头里的**逗号表达式**（`for(v=0,i=1/256; …)`）在语法里是 `(comma e…)`：摊成一格 block。 */
     const headOf = (n) => {
       if (!some(n)) return null;
@@ -587,7 +628,7 @@ function stmtOf(s, C) {
     }];
   }
   if (t === 'expr') return exprStmtOf(kids(s)[0], C);
-  if (t === 'static' || t === 'enum') return [];        /* 顶上已经收过（见 collect） */
+  if (t === 'static' || t === 'enum' || t === 'sty' || t === 'struct') return [];
   if (t === 'label' || t === 'goto') {
     throw new Error('eval->IR: `goto` / `label:` 还没接（标准 IR 里没有无条件跳转）');
   }
@@ -599,6 +640,41 @@ function stmtOf(s, C) {
 /** 一条"表达式语句"：赋值、自增、调用（含 `printf`）。 */
 function exprStmtOf(e, C) {
   const t = tag(e);
+  /* **`bufset(dst,val,n)` / `bufcpy(dst,src,n)`**：口径是 `evaldraw.txt:1513` 那一行 ——
+     "Optimized version of: for(i=0;i<n;i++) dst[i] = val"。所以这儿就摊成那个循环
+     （`n` 是**元素个数**，见 `sizeof` 那一段）。它们只在语句位置有意义（回的是 0）。 */
+  if (t === 'call' && isList(kids(e)[0]) && tag(kids(e)[0]) === 'name'
+    && ['bufset', 'bufcpy'].includes(idOf(kids(e)[0])) && kids(e).length === 4) {
+    const fn = idOf(kids(e)[0]);
+    const dst = kids(e)[1];
+    if (!isList(dst) || tag(dst) !== 'name' || !C.arrs.has(idOf(dst))) {
+      throw new Error(`eval->IR: \`${fn}\` 的第一个实参要是一格 static 数组的名字`);
+    }
+    const i = C.fresh('bi');
+    const cnt = toInt(exprOf(kids(e)[3], C));
+    const src = fn === 'bufset' ? exprOf(kids(e)[2], C) : null;
+    const from = fn === 'bufcpy' ? kids(e)[2] : null;
+    if (from !== null && (!isList(from) || tag(from) !== 'name' || !C.arrs.has(idOf(from)))) {
+      throw new Error('eval->IR: `bufcpy` 的第二个实参要是一格 static 数组的名字');
+    }
+    const idx = { kind: 'builtin', name: 'toint', args: [nameRef(i)] };
+    return [
+      { kind: 'let', name: i, type: REAL, init: num(0) },
+      {
+        kind: 'while',
+        cond: bin('<', toInt(nameRef(i)), cnt),
+        body: [
+          {
+            kind: 'assign',
+            target: { kind: 'index', obj: nameRef(idOf(dst)), index: idx },
+            value: fn === 'bufset' ? src
+              : { kind: 'index', obj: nameRef(idOf(from)), index: idx },
+          },
+          { kind: 'assign', target: nameRef(i), value: bin('+', nameRef(i), num(1)) },
+        ],
+      },
+    ];
+  }
   if (t === 'assign') {
     const op = unquote(leaf(kids(e)[0]));
     /* 宿主那一侧的量先看 —— 它不是一格左值，写它是**再问设备一句**。 */
@@ -829,6 +905,164 @@ function declArr(C, preDecls, name, one, where) {
   C.arrInits.push({ name, total });
 }
 
+/* ─── 结构体（RScript 的特性）───────────────────────────────────────────
+ *
+ * 口径：`RScript.htm` 的关键字表那一行（"struct — Used to define a structure, which can
+ * be used as a type prefix for variables"）。**不是 Ken 的 EVAL**：`polydraw_src/eval.c`
+ * 里一格都没有，是 Robert Rodgers 那个第二编译器加的（`evaldraw.txt` 2010-01-28 那条：
+ * "structures, #if..#endif, #define, stack arrays"）。所以细节以**语料**为准。
+ *
+ * 落法：**一格结构体就是一块摊平的 double**，`a[i].f` = `a[i*格数 + 字段偏移]` ——
+ * 与多维数组摊平同一手（`arrIndex`），运行期一格新东西都不加。
+ * 字段本身可以是数组（`struct { v[2], leng; } edge_t;`）也可以是别的结构体
+ * （`games/traffic.kc:32` 的 `play_t play[MAXPLAYS];`）—— 两样都只是"偏移 + 长度"。
+ */
+
+/** 一格类型的槽数（`double` 与没登记的名字都是 1 —— 那是"一个 double"）。 */
+function structSize(ty, C) {
+  const s = C.structs.get(ty);
+  return s === undefined ? 1 : s.size;
+}
+
+/** 一格字段项（`fld 名字 [dims]`）-> `{ name, dims }`。 */
+function fieldItem(one, C) {
+  const k = kids(one);
+  const name = idOf(k[0]);
+  const dims = k.length > 1 ? kids(k[1]).map((e) => {
+    const v = constOf(e, C);
+    if (v === null || !Number.isFinite(v) || v <= 0 || v !== Math.trunc(v)) {
+      throw new Error(`eval->IR: 结构体字段 \`${name}[…]\` 的长度算不出一格正整数`);
+    }
+    return v;
+  }) : [];
+  return { name, dims };
+}
+
+/**
+ * **整棵树里的 `struct` 都登记上**（与 enum 同一手：文件级与函数体里的都算）。
+ *
+ * 一格类型记成 `{ size, fields: Map(字段名 -> { off, dims, ty }) }`：
+ * `off` 是槽偏移、`dims` 是这个字段自己的维度、`ty` 是它的类型（别的结构体或 null）。
+ */
+function collectStructs(x, C) {
+  if (!isList(x)) return;
+  if (tag(x) === 'struct') {
+    const ks = kids(x);
+    const name = idOf(ks[0]);
+    const fields = new Map();
+    let off = 0;
+    /* 一组带类型的字段（`tgrp 类型 项…`）与光字段项（`fld …`）混着来。 */
+    const addOne = (one, ty) => {
+      const { name: fn, dims } = fieldItem(one, C);
+      const n = dims.reduce((a, b) => a * b, 1) * structSize(ty ?? 'double', C);
+      if (fields.has(fn)) throw new Error(`eval->IR: 结构体 \`${name}\` 里有两个 \`${fn}\``);
+      fields.set(fn, { off, dims, ty: ty === undefined || ty === 'double' ? null : ty });
+      off += n;
+    };
+    for (const g of ks.slice(1)) {
+      if (tag(g) === 'tgrp') {
+        const gk = kids(g);
+        const ty = idOf(gk[0]);
+        for (const one of gk.slice(1)) addOne(one, ty);
+      } else addOne(g, undefined);
+    }
+    if (C.structs.has(name)) throw new Error(`eval->IR: 两处 \`struct … ${name}\``);
+    C.structs.set(name, { size: off, fields });
+    return;
+  }
+  for (const k of kids(x)) collectStructs(k, C);
+}
+
+/**
+ * 一格**带类型的 static**（`static cel_t cel[12][12];` / `static cam_t cam;`）。
+ *
+ * 落成一块 `(arr real)`：长度 = 各维之积 × 类型的槽数。变量的类型与维度记在
+ * `C.svars` 上 —— `a[i].f` 要靠它算偏移（见 `fieldRef`）。
+ */
+function declTyped(C, preDecls, tyName, one, where) {
+  const k = kids(one);
+  const name = idOf(k[0]);
+  const ty = tyName.toLowerCase();
+  if (ty !== 'double' && !C.structs.has(ty)) {
+    throw new Error(`eval->IR: \`static ${tyName} ${name}\` 里的 \`${tyName}\` 不是登记过的`
+      + ' 结构体（`struct { … } 名字;` 要在用它之前）');
+  }
+  const dims = tag(one) === 'sarr' ? dimsOf(one, C, name) : [];
+  const size = structSize(ty, C);
+  const total = dims.reduce((a, b) => a * b, 1) * size;
+  C.arrs.set(name, [total]);
+  C.svars.set(name, { ty: ty === 'double' ? null : ty, dims });
+  C.globals.set(name, ARR);
+  C.staticOwner.set(name, where);
+  preDecls.push({ kind: 'global', name, type: ARR });
+  C.arrInits.push({ name, total });
+}
+
+/**
+ * `vt[i].stuck` / `cam.x` / `g.play[i].x` -> `{ name, off, total }`（`off` 是**槽下标**的 IR）。
+ *
+ * 不是结构体那条路上的东西回 `null`（调用方照旧走普通数组/名字那一支）。
+ * 走法：从最里头那个名字出发，一格一格往外吃 `[]` 与 `.`，每一步只做两件事 ——
+ * 累加偏移、把"现在是什么类型、还剩几维"更新掉。
+ */
+function fieldRef(x, C) {
+  const walk = (e) => {
+    if (!isList(e)) return null;
+    const t = tag(e);
+    if (t === 'name') {
+      const n = idOf(e);
+      const sv = C.svars.get(n);
+      if (sv === undefined) return null;
+      return { name: n, off: iNum(0), ty: sv.ty, dims: sv.dims.slice() };
+    }
+    if (t === 'index') {
+      const b = walk(kids(e)[0]);
+      if (b === null) return null;
+      if (b.dims.length === 0) {
+        throw new Error(`eval->IR: \`${b.name}\` 上的下标比声明的维数多`);
+      }
+      const stride = b.dims.slice(1).reduce((a, c) => a * c, 1) * structSize(b.ty ?? 'double', C);
+      const i = toInt(exprOf(kids(e)[1], C));
+      return {
+        name: b.name,
+        off: bin('+', b.off, stride === 1 ? i : bin('*', i, iNum(stride))),
+        ty: b.ty,
+        dims: b.dims.slice(1),
+      };
+    }
+    if (t === 'field') {
+      const b = walk(kids(e)[0]);
+      if (b === null) return null;
+      if (b.dims.length > 0) {
+        throw new Error(`eval->IR: \`${b.name}\` 是数组，取字段之前要先给下标`);
+      }
+      if (b.ty === null) throw new Error(`eval->IR: \`${b.name}\` 不是结构体，没有字段`);
+      const st = C.structs.get(b.ty);
+      const fn = idOf(kids(e)[1]);
+      const f = st.fields.get(fn);
+      if (f === undefined) {
+        throw new Error(`eval->IR: 结构体 \`${b.ty}\` 里没有字段 \`${fn}\`（有的是 `
+          + `${[...st.fields.keys()].join('/')}）`);
+      }
+      return {
+        name: b.name,
+        off: f.off === 0 ? b.off : bin('+', b.off, iNum(f.off)),
+        ty: f.ty,
+        dims: f.dims.slice(),
+      };
+    }
+    return null;
+  };
+  const r = walk(x);
+  if (r === null) return null;
+  if (r.dims.length > 0 || r.ty !== null) {
+    throw new Error(`eval->IR: \`${r.name}\` 这一处取到的是一整块（结构体或数组），`
+      + '不是一个数 —— 这门语言里结构体不能整块赋值/传值');
+  }
+  const total = (C.arrs.get(r.name) ?? [1])[0];
+  return { name: r.name, index: clampIdx(r.off, total) };
+}
+
 /**
  * **`RND` / `NRND`**（`eval.txt`：RND 是 [0,1) 均匀、NRND 是 (0,1) 正态）。
  *
@@ -931,6 +1165,14 @@ function rndDecls() {
 
 function staticDecls(x, out = []) {
   if (!isList(x)) return out;
+  /* **带类型的 static**（`static cel_t cel[12][12];`）—— 一格 `{ ty, one }`，
+     由 `declTyped` 落（长度 = 各维之积 × 类型的槽数）。 */
+  if (tag(x) === 'sty') {
+    const ks = kids(x);
+    const ty = idOf(ks[0]);
+    for (const one of ks.slice(1)) out.push({ name: idOf(kids(one)[0]), ty, one });
+    return out;
+  }
   if (tag(x) === 'static') {
     for (const one of kids(x)) {
       const k = kids(one);
@@ -989,6 +1231,8 @@ export function evalToIR(cst, host, src = '') {
     staticInits: [],                    /* `static x = 3;` 的初值：入口里做**一次** */
     staticOwner: new Map(),             /* static 的名字 -> 哪儿声明的（重名时报得清楚） */
     enums: new Map(),                   /* 名字 -> 常量值（`enum`） */
+    structs: new Map(),                 /* 结构体类型名 -> { size, fields }（见 collectStructs） */
+    svars: new Map(),                   /* 带类型的变量名 -> { ty, dims }（见 declTyped） */
     strs: new Map(),                    /* 内部到的串 -> 下标（着色器名 / uniform 名） */
     shaders: [],                        /* `@v` / `@f` / `@g` 区段（原文原样） */
     arrs: new Map(),                    /* `static a[n]` 的名字 -> 各维长度（编译期就知道） */
@@ -1018,11 +1262,24 @@ export function evalToIR(cst, host, src = '') {
   /* **enum 先收一遍**（整棵树：文件级的与函数体里的都算）—— `static a[NMAX]` 的长度
      要用它，而语料里 enum 多半就写在用它那句的上一行。 */
   collectEnums(cst, C);
+  /* **结构体也先收一遍**（同一个理由：`static cel_t cel[N]` 要知道 `cel_t` 有几格）。 */
+  collectStructs(cst, C);
 
   /* 第一遍：登记文件级的 `static`，以及每个用户函数的签名。 */
   const preDecls = [];
   for (const x of top) {
-    if (tag(x) === 'enum') continue;              /* 上面那一趟已经收过 */
+    if (tag(x) === 'enum' || tag(x) === 'struct') continue;   /* 上面两趟已经收过 */
+    /* 带类型的 static（`static point3d p[N];`）—— 与下面那一支的差别只在"多一个类型"。 */
+    if (tag(x) === 'sty') {
+      const ks = kids(x);
+      const ty = idOf(ks[0]);
+      for (const one of ks.slice(1)) {
+        const n = idOf(kids(one)[0]);
+        C.staticOwner.set(n, '文件级');
+        declTyped(C, preDecls, ty, one, '文件级');
+      }
+      continue;
+    }
     if (tag(x) === 'static') {
       for (const one of kids(x)) {
         const k = kids(one);
@@ -1061,6 +1318,8 @@ export function evalToIR(cst, host, src = '') {
           + '（要接就按函数名加前缀）');
       }
       C.staticOwner.set(s.name, where);
+      /* 带类型的那一档（`static cel_t cel[12][12]` 写在函数体里）。 */
+      if (s.ty !== undefined) { declTyped(C, preDecls, s.ty, s.one, where); continue; }
       if (s.arr !== undefined) { declArr(C, preDecls, s.name, s.arr, where); continue; }
       if (!C.globals.has(s.name)) {
         C.globals.set(s.name, REAL);
