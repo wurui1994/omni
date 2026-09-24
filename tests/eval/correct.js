@@ -59,6 +59,13 @@ const REF_WRONG = new Map([
     '参考**压根没画那个青方块**（按颜色数：我们 1976 格、参考 0 格），别的三样'
     + '（渐变三角 / 黄线圈 / 白点列 40 格）两边逐格相同；'
     + '最小复现 translate+glRotate(30,0,0,1)+GL_QUADS 两边一致 ⇒ 参考是在多段之后丢了图元'],
+  ['multiarb_asm.pss',
+    '这一份**一句脚本都没有**（整份就是 `@v:0` / `@f:default` 两段 ARB 汇编）——'
+    + '所以应该是一张**清过的图**。原版每帧的清屏色是 `glClearColor(0,0,0,0)`'
+    + '（`polydraw.c:3572`），参考自己的默认也是 opaque black'
+    + '（`c_impl/src/render/gl_renderer.c:944-945`），可参考出来的是**全白** ——'
+    + '与两边的源码都不符（它那趟还先往 stderr 吐了 ARB 的 `syntax error`），'
+    + '像是没画过任何东西时读回了未清的那块。我们给黑，照 polydraw.c:3572'],
 ]);
 
 /** 这一格分辨率下该用多大的 fovy（度）—— 照 `ksetfov`：`tan(fovy/2) = 高/宽`。 */

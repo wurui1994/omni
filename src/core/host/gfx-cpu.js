@@ -199,7 +199,7 @@ function need(w, h) {
   /* **普通数组**（不是 Int32Array）：这一份要能被我们自己那台 JS 前端降级，
      子集里还没有 TypedArray（`feedback_check_self_gate.md` 那条纪律：撞上就扩，
      但这一格用普通数组没有代价 —— 它不在热路径的最内层）。 */
-  const n = w * h;
+  const n = D.w * D.h;
   const fb = [];
   for (let i = 0; i < n; i++) fb.push(0);
   D.fb = fb;
@@ -406,7 +406,16 @@ function frameEnd() {
   D.tn += 1;
   if (D.tn === 1 || dt < D.tMin) D.tMin = dt;
   if (dt > D.tMax) D.tMax = dt;
-  if (D.dirty && (D.only < 0 || D.fno - 1 === D.only)) present();
+  /* **点着名要的那一帧一定交**（`--frame N`）：PolyDraw 的窗口每帧都在，
+     一个像素都没画的脚本给出的是**一张清过的图**，不是"没有图"。
+     `ken/multiarb_asm.pss` 整份只有 `@v`/`@f` 两段、一句脚本都没有 ——
+     从前我们什么都不写、判据记成"跑不起来"，参考给的是一张 64×64 的清屏图。 */
+  if (D.only >= 0 && D.fno - 1 === D.only) {
+    need(320, 240);
+    present();
+    return;
+  }
+  if (D.dirty && D.only < 0) present();
 }
 
 /** 一位小数（`toFixed` 不在我们那套 JS 子集里 —— 而且这一格三条腿都要有同一份）。 */
@@ -690,6 +699,11 @@ export function gfxCall(name, args) {
     case 'glklockstart/0': case 'glklockelapsed/0':
     /* `gltextdisable`：关掉画布文字那一层（`polydraw.c` 的 myext[]）—— 我们没有那一层。 */
     case 'gltextdisable/0':
+    /* `glprogramenvparam(目标, 序号, x,y,z,w)`：**ARB 汇编专用**（`polydraw.c:2111`
+       那一行就写着 "for arb asm"）。core profile / WebGL 都没有 ARB 汇编那条路，
+       参考实现也把它写成 no-op（`c_impl/.../pd_polyhost_tex.c:547`）—— 收下不管。
+       ARB 汇编那几段着色器由设备认出来退回内建那对，见 §19.2。 */
+    case 'glprogramenvparam/5':
     case 'sleep/1':
       return 0;
     default:

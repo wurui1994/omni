@@ -285,6 +285,20 @@ static GLuint ev_compile_user(GLenum stage, const char *src) {
 }
 
 /**
+ * 这一段原文是 **ARB 汇编**（`!!ARBvp1.0` / `!!ARBfp1.0`）不是 GLSL 吗？
+ *
+ * `ken/` 有 5 份把 `@v:`/`@f:` 段写成 ARB 汇编。core profile 没有那条路，参考实现也没有
+ * （`c_impl/src/render/gl_renderer.c:1131` 编不过就留着上一格 program = 内建那对）。
+ * 所以**认出来就退回内建那对** —— 只认 `!!ARB` 这一个特征，不做"编不过就悄悄退"
+ * （那会把我们自己的 GLSL bug 藏起来）。口径：§19.2。
+ */
+static int ev_is_arb(const char *s) {
+  if (s == NULL) return 0;
+  while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+  return strncmp(s, "!!ARB", 5) == 0;
+}
+
+/**
  * 挑一对着色器、编好链好（一对只编一次）。回 0 = 不成（话在 `g_err` 里）。
  *
  * **采样器按名字约定接单元**（与 WebGL2 那一档同一句话）：`tex0..tex7` 那几个 uniform
@@ -293,6 +307,8 @@ static GLuint ev_compile_user(GLenum stage, const char *src) {
  */
 static GLuint ev_use_program(int vi, int fi) {
   if (vi < 0 || fi < 0) { ev_err("glsetshader：没有这一对着色器（缺 @v 或 @f 区段）", NULL); return 0; }
+  /* ARB 汇编那一档：退回内建那对（它收的也是"物体坐标 + `u_mvp`"，正好对得上）。 */
+  if (ev_is_arb(g_sh[vi].text) || ev_is_arb(g_sh[fi].text)) { g_cur = g_prog; return g_prog; }
   for (int i = 0; i < g_nprogs; i++) {
     if (g_progs[i].vi == vi && g_progs[i].fi == fi) { g_cur = g_progs[i].prog; return g_cur; }
   }

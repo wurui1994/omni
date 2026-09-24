@@ -31,6 +31,11 @@
  */
 export function glslAlign(kind, src) {
   if (src.includes('#version')) return src;
+  /* **ARB 汇编原样留着**（`!!ARBvp1.0` / `!!ARBfp1.0`，`ken/` 有 5 份）：它不是 GLSL，
+     翻译这一层一个字都不该动它 —— 而且**不能在前头补声明**：补了之后设备那一侧就认不出
+     "这是 ARB" 了（它认的是段首那个 `!!ARB`），于是把汇编喂给 GLSL 编译器，
+     报 `'!' : syntax error`（踩过）。设备收到 ARB 就退回内建那对，见 §19.2。 */
+  if (/^\s*!!ARB/.test(src)) return src;
   let s = src;
   const usesTex0 = /gl_TexCoord\s*\[\s*0\s*\]/.test(s);
   s = s.replace(/\bgl_TexCoord\s*\[\s*0\s*\]/g, 'v_tex0');

@@ -827,7 +827,10 @@ static void gfx_frame_end(void) {
   g_gtn += 1;
   if (g_gtn == 1 || dt < g_gtmin) g_gtmin = dt;
   if (dt > g_gtmax) g_gtmax = dt;
-  if (g_gdirty && (g_gonly < 0 || g_gfno - 1 == g_gonly)) gfx_present();
+  /* **点着名要的那一帧一定交**（`--frame N`）—— 与 `host/gfx-cpu.js` 的 `frameEnd`
+     逐句相同：一个像素都没画的脚本给出的是一张清过的图，不是"没有图"。 */
+  if (g_gonly >= 0 && g_gfno - 1 == g_gonly) { gfx_need(); gfx_present(); return; }
+  if (g_gdirty && g_gonly < 0) gfx_present();
 }
 
 /* 这一趟的性能账（--perf / OMNI_GFX_PERF=1 才印，落 stderr）——
@@ -991,6 +994,9 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
   if (!strcmp(nm, "glklockstart") && argc == 0) { return 0.0; }
   if (!strcmp(nm, "glklockelapsed") && argc == 0) { return 0.0; }
   if (!strcmp(nm, "gltextdisable") && argc == 0) { return 0.0; }
+  /* `glprogramenvparam`：**ARB 汇编专用**（`polydraw.c:2111` 那一行写着 "for arb asm"）。
+     core profile / WebGL 都没有 ARB 汇编，参考实现也是 no-op —— 收下不管（§19.2）。 */
+  if (!strcmp(nm, "glprogramenvparam") && argc == 5) { return 0.0; }
   if (!strcmp(nm, "sleep") && argc == 1) { return 0.0; }
   /* **深度测试**（语言那一侧的 `gl_enable(GL_DEPTH_TEST)` 转过来的）：这一档没有
      z 缓冲，收下记着不用 —— 与 `host/gfx-cpu.js` 那一份同一句话。 */

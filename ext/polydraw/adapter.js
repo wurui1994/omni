@@ -2240,6 +2240,10 @@ export function evalToIR(cst, host, src = '') {
   /* **用过画图那一族就把设备带上**（`gfx-rt.js` 生成的那十几格函数 + 一块帧缓冲），
      并在入口末尾补一句 `gfx_present()` —— EvalDraw 的脚本多半不自己调 `refresh()`
      （宿主每帧替它交一次），所以"一帧画完就交出去"是这条腿上的默认。 */
+  /* **只有 `@v`/`@f` 两段、一句脚本都没有**那一档（`ken/multiarb_asm.pss` 整份就是两段
+     ARB 汇编）：那也是一份画图程序 —— 原版每帧照样清屏 + 交图，给出的是一张清过的图。
+     不带上设备的话我们连帧循环都不生成，一张图都不出（判据记成"跑不起来"）。 */
+  if (C.shaders.length > 0) C.needGfx = true;
   if (C.needGfx) {
     /* **宿主调用那条路**：设备在宿主那边，这儿什么都不用带 —— 入口变成一格**帧循环**。
        EVAL 的执行模型是"宿主每帧调脚本一次"（`evaldraw.txt` 那句 "your function is called
