@@ -594,6 +594,41 @@ double omni_gfx_batch(int64_t kind, int64_t n, struct omni_arr_f64_s *verts) {
   return 0.0;
 }
 
+/* ── 纹理（`(gfxtex 槽 宽 高 层 格 数组)`）：**CPU 备选**那一档的落点 ────────────
+ *
+ * 这一档没有可编程管线（采样在 `batchprog` 那格就当场报了），所以这儿**只记下这一槽
+ * 的形状**（宽/高/层/格 + 给了多少个数）——像素一个都不抄：抄下来也没人采样，那是白花
+ * 一份内存。GPU 那两档才真上传（`docs/design/eval-realtime-gpu.md` 第 11 节）。
+ * **与 `host/gfx-cpu.js` 的 `gfxTex` 逐句相同** —— 三条腿逐字节相同是判据。
+ */
+#define GFX_TEXMAX 64
+static struct { int64_t w, h, d, fmt, n; } g_gtex[GFX_TEXMAX];
+
+double omni_gfx_tex(int64_t slot, int64_t w, int64_t h, int64_t d, int64_t fmt,
+                    struct omni_arr_f64_s *px) {
+  if (gfx_rec()) { g_greccnt += 1; return 0.0; }
+  if (slot < 0 || slot >= GFX_TEXMAX) {
+    omni_errorf("gfxtex: 槽 %lld 出界（0..%d）", (long long)slot, GFX_TEXMAX - 1);
+  }
+  if (w <= 0 || h <= 0 || d <= 0) {
+    omni_errorf("gfxtex: 尺寸要是正数（%lld×%lld×%lld）", (long long)w, (long long)h,
+                (long long)d);
+  }
+  /* 一格像素占几个 double 照原版 `evalvalperpix`：KGL_VEC4（5）是 4 个、别的都是 1 个。 */
+  int64_t per = (fmt & 15) == 5 ? 4 : 1;
+  int64_t want = w * h * d * per;
+  int64_t have = px == NULL ? 0 : px->len;
+  if (have < want) {
+    omni_errorf("gfxtex: 像素不够（%lld 格，要 %lld）", (long long)have, (long long)want);
+  }
+  g_gtex[slot].w = w;
+  g_gtex[slot].h = h;
+  g_gtex[slot].d = d;
+  g_gtex[slot].fmt = fmt;
+  g_gtex[slot].n = want;
+  return 0.0;
+}
+
 static void gfx_cone(double x0, double y0, double r0, double x1, double y1, double r1, int64_t c) {  double dx = x1 - x0, dy = y1 - y0;
   int64_t n = (int64_t)floor(sqrt(dx * dx + dy * dy) + 1.0);
   for (int64_t i = 0; i <= n; i++) {

@@ -58,6 +58,12 @@ export const SX_ARITY = {
      一格顶点 **12 个 float**（位置 4 / 颜色 4 / 纹理坐标 4），所以数组长度 = 12 × 数。
      为什么要数组：`gfxcall` 那一格只收 double —— 与 `gfxframe` 同一条先例。 */
   gfxbatch: 3,
+  /* **一张纹理交给设备**（`(gfxtex 槽 宽 高 层 格 (arr real))` -> real）。
+     与 `gfxbatch` 同一条先例：宿主面只收 double，所以数组走自己这一格 op
+     （口径在 `docs/design/eval-realtime-gpu.md` 第 11 节）。
+     `格` 是 `KGL_*` 那个打包好的数（低 4 位像素格式 / `0xf0` 过滤 / `0xf00` 环绕，
+     照 `polydraw.c:190-193` 的位定义）；一格像素占几个 double 也照它（`VEC4` 四个、别的一个）。 */
+  gfxtex: 6,
   /* **把"每帧那一格函数"交给设备**（`(gfxframefn (str "名字"))`）：名字是**编译期的串**，
      发射那一侧直接把函数引用交出去（不走函数值/闭包那一层）。
      谁用它：浏览器那一档 —— 页面拿到帧函数之后用 `requestAnimationFrame` 反复调它

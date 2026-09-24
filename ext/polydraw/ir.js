@@ -41,5 +41,14 @@ export const anew = (n) => bi('anew', [{ kind: 'type', type: ARR }, ix(n)]);
 export const fn = (name, params, body) => ({
   kind: 'fn', name, params: params.map((p) => ({ name: p, type: REAL })), ret: REAL, body,
 });
+/**
+ * 一格**形参里有数组**的函数（`[名字, 类型]` 一对一格）。
+ *
+ * 谁要它：纹理那一族（`glsettex(槽, buf, 宽, 高, 格)` —— `buf` 是一整块），
+ * 与 adapter 里用户函数的数组形参同一条路（`(arr real)` 递的是那一块本身）。
+ */
+export const fnT = (name, params, body) => ({
+  kind: 'fn', name, params: params.map(([n, t]) => ({ name: n, type: t ?? REAL })), ret: REAL, body,
+});
 /** 一格模块级的量。 */
 export const glob = (name, type = REAL) => ({ kind: 'global', name, type });

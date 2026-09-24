@@ -633,4 +633,31 @@ function batch(kind, n, verts) {
   throw new Error(`gfxbatch: 不认识的类 ${kind}（0 = 线段、1 = 三角、2 = 点）`);
 }
 
-export const GFX_CPU = { call: gfxCall, batch, present, kind: 'cpu' };
+/* ── 纹理（`(gfxtex 槽 宽 高 层 格 数组)`）：这一档的落点 ─────────────────────────
+ *
+ * 这一档没有可编程管线（采样在 `batchprog` 那格就当场报了），所以这儿**只记下这一槽
+ * 的形状**（宽/高/层/格 + 给了多少个数）—— 像素一个都不抄：抄下来也没人采样，
+ * 那是白花一份内存。GPU 那两档才真上传（`docs/design/eval-realtime-gpu.md` 第 11 节）。
+ * **与 `runtime/omni_fmt.c` 的 `omni_gfx_tex` 逐句相同** —— 三条腿逐字节相同是判据。
+ */
+const TEXMAX = 64;
+const TEX = new Map();
+
+function gfxTex(slot, w, h, d, fmt, pxs) {
+  if (recOn()) { REC.set('gfxtex', (REC.get('gfxtex') ?? 0) + 1); return 0; }
+  if (slot < 0 || slot >= TEXMAX) {
+    throw new Error(`gfxtex: 槽 ${slot} 出界（0..${TEXMAX - 1}）`);
+  }
+  if (w <= 0 || h <= 0 || d <= 0) {
+    throw new Error(`gfxtex: 尺寸要是正数（${w}×${h}×${d}）`);
+  }
+  /* 一格像素占几个 double 照原版 `evalvalperpix`：KGL_VEC4（5）是 4 个、别的都是 1 个。 */
+  const per = (fmt & 15) === 5 ? 4 : 1;
+  const want = w * h * d * per;
+  const have = pxs === undefined || pxs === null ? 0 : pxs.length;
+  if (have < want) throw new Error(`gfxtex: 像素不够（${have} 格，要 ${want}）`);
+  TEX.set(slot, { w, h, d, fmt, n: want });
+  return 0;
+}
+
+export const GFX_CPU = { call: gfxCall, batch, tex: gfxTex, present, kind: 'cpu' };

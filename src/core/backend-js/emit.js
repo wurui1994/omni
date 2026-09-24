@@ -1050,6 +1050,8 @@ class JsEmitter {
       case 'gfx_call': return `$gfx_call(${a[0]}, [${a.slice(1).join(', ')}])`;
       /* `(gfxbatch 类 数 顶点)`：一段顶点批交给设备（只有一个模型 —— 合批在语言那一侧）。 */
       case 'gfx_batch': return `$gfx_batch(${a[0]}, ${a[1]}, ${a[2]})`;
+      /* `(gfxtex 槽 宽 高 层 格 数组)`：一张纹理交给设备（第 11 节）。 */
+      case 'gfx_tex': return `$gfx_tex(${a.join(', ')})`;
       /* `(gfxframefn …)`：把每帧那一格函数交给设备（`e.func` 已经是最终的 JS 标识符）。
          浏览器那一档用它做 rAF 循环；别的设备记下不用。 */
       case 'gfx_frame_fn': return `$gfx_frame_fn(${e.func})`;

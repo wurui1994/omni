@@ -443,6 +443,15 @@ function useProgram(vName, fName) {
   }
   SH.progs.set(key, p);
   SH.cur = p;
+  /* **采样器按名字约定接单元**：`tex0..tex7` 那几个 uniform 设成 0..7 号纹理单元。
+     PolyDraw 的脚本就是 `glactivetexture(GL_TEXTURE0+i); glbindtexture(i)` 加片元里
+     `uniform sampler2D tex0, tex1, tex2` —— 除了这个名字约定没有别的绑定办法
+     （`docs/design/eval-realtime-gpu.md` 第 11.2 节）。 */
+  gl.useProgram(p);
+  for (let i = 0; i < 8; i++) {
+    const loc = gl.getUniformLocation(p, `tex${i}`);
+    if (loc !== null) gl.uniform1i(loc, i);
+  }
   return p;
 }
 
@@ -481,6 +490,100 @@ function setShader(args) {
 /* `glquad(mode)` 那一格**不在这一层**：满屏四边形的六个顶点在语言那一侧造
    （`ext/polydraw/gl-rt.js` 的 `gl_quad` —— 位置就是 NDC、`u_mvp` 是单位矩阵、
    混合由 `batchblend` 说）。设备自己再造一份满屏几何就是第二个模型了。 */
+
+/* ---------------------------------------------------------------- 纹理那一族
+ *
+ * `(gfxtex 槽 宽 高 层 格 数组)` -> `texImage2D`（`docs/design/eval-realtime-gpu.md`
+ * 第 11 节）。**槽是脚本自己编号的**（`glbindtexture(槽)` 用的就是它）。
+ *
+ * `格` 是 `KGL_*` 那个打包好的数：低 4 位像素格式、`0xf0` 过滤、`0xf00` 环绕
+ * （`polydraw.c:190-193`）。三格与真 GL 的差别写在下面各自那一句里 —— 最大的一格是
+ * **BGRA 在 WebGL 里没有**，所以 `KGL_BGRA32` 在上传前换成 RGBA（格式转换是设备的事）。
+ */
+const TX = {
+  /** 槽 -> `{ id: WebGLTexture, w, h, fmt }`。 */
+  slots: new Map(),
+  /** 现在的纹理单元（`glactivetexture(GL_TEXTURE0+i)`）。 */
+  unit: 0,
+};
+
+/** 这一槽的那格 GL 纹理（没有就造一格）。 */
+function texOf(slot) {
+  let t = TX.slots.get(slot);
+  if (t === undefined) {
+    t = { id: D.gl.createTexture(), w: 0, h: 0, fmt: 0 };
+    TX.slots.set(slot, t);
+  }
+  return t;
+}
+
+/** 过滤与环绕那两段位（`0xf0` / `0xf00`）-> GL 的参数。 */
+function texParams(fmt) {
+  const gl = D.gl;
+  const filt = fmt & 0xf0;
+  const wrap = fmt & 0xf00;
+  const mip = filt >= 0x20;
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER,
+    filt === 0x10 ? gl.NEAREST : gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER,
+    mip ? gl.LINEAR_MIPMAP_LINEAR : (filt === 0x10 ? gl.NEAREST : gl.LINEAR));
+  const w = wrap === 0x100 ? gl.MIRRORED_REPEAT
+    : (wrap === 0 ? gl.REPEAT : gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, w);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, w);
+  return mip;
+}
+
+function texIn(slot, w, h, d, fmt, px) {
+  const gl = D.gl;
+  if (gl === null) return 0;
+  if (d !== 1) {
+    throw new Error(`gfxtex：这一档只接 2D 纹理（层 = ${d}）—— 3D 纹理（GLSETTEX 六实参`
+      + '那一档）在 WebGL2 上要 TEXTURE_3D，还没接');
+  }
+  /* 纹理是**按 draw call 的状态**：攒着的批要先画掉，不然它们会拿到新图。 */
+  flush();
+  const kind = fmt & 15;
+  const t = texOf(slot);
+  gl.activeTexture(gl.TEXTURE0 + TX.unit);
+  gl.bindTexture(gl.TEXTURE_2D, t.id);
+  const n = w * h;
+  if (kind === 0) {
+    /* `KGL_BGRA32`：一格 double 是一格打包好的像素（与 `rgb()` 回的那种数同一形）。
+       WebGL 没有 BGRA，所以这儿摊成 RGBA。高 8 位有值就当 alpha，没有就是不透明
+       （脚本里最常见的是 `0xRRGGBB` 那种三分量的数）。 */
+    const b = new Uint8Array(n * 4);
+    for (let i = 0; i < n; i++) {
+      const v = Math.trunc(px[i]) >>> 0;
+      b[i * 4] = (v >> 16) & 255;
+      b[i * 4 + 1] = (v >> 8) & 255;
+      b[i * 4 + 2] = v & 255;
+      const al = (v >>> 24) & 255;
+      b[i * 4 + 3] = al === 0 ? 255 : al;
+    }
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, b);
+  } else if (kind === 1) {
+    const b = new Uint8Array(n);
+    for (let i = 0; i < n; i++) b[i] = Math.max(0, Math.min(255, Math.trunc(px[i])));
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, w, h, 0, gl.RED, gl.UNSIGNED_BYTE, b);
+  } else if (kind === 4) {
+    const f = new Float32Array(n);
+    for (let i = 0; i < n; i++) f[i] = px[i];
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, w, h, 0, gl.RED, gl.FLOAT, f);
+  } else if (kind === 5) {
+    const f = new Float32Array(n * 4);
+    for (let i = 0; i < n * 4; i++) f[i] = px[i];
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, w, h, 0, gl.RGBA, gl.FLOAT, f);
+  } else {
+    throw new Error(`gfxtex：这一档没接 KGL 格式 ${kind}（KGL_SHORT/KGL_INT）——`
+      + ' 有的是 BGRA32(0) / CHAR(1) / FLOAT(4) / VEC4(5)');
+  }
+  if (texParams(fmt)) gl.generateMipmap(gl.TEXTURE_2D);
+  t.w = w;
+  t.h = h;
+  t.fmt = fmt;
+  return 0;
+}
 
 /** `glgetuniformloc(名字下标)` -> 一格句柄。句柄就是"第几个"（我们自己的编号）。 */
 const UNI = { list: [], byProg: new Map() };
@@ -635,6 +738,23 @@ function call(name, args) {
       return 0;
     }
     case 'batchblend/1': B.blend = Math.trunc(a(0)); return 0;
+    /* ── 纹理那一族（见 `TX` 的头注）。挑单元 / 挑槽都是**按 draw call 的状态** ——
+       语言那一侧已经先 `gl_flush()` 了（`gl_bindtex`/`gl_activetex`）。 */
+    case 'glactivetexture/1': {
+      /* 实参是 `GL_TEXTURE0+i`（0x84c0 起）；脚本偶尔直接写小整数，两种都收。 */
+      const v = Math.trunc(a(0));
+      TX.unit = v >= 0x84c0 ? v - 0x84c0 : v;
+      if (TX.unit < 0 || TX.unit > 7) throw new Error(`glactivetexture：单元 ${TX.unit} 出界（0..7）`);
+      return 0;
+    }
+    case 'glbindtexture/1': {
+      const slot = Math.trunc(a(0));
+      const t = TX.slots.get(slot);
+      gl.activeTexture(gl.TEXTURE0 + TX.unit);
+      /* 还没设过内容的槽：绑一格空的（与 PolyDraw 一样不报 —— 画出来是黑的）。 */
+      gl.bindTexture(gl.TEXTURE_2D, t === undefined ? texOf(slot).id : t.id);
+      return 0;
+    }
     /* 收下但不管的那几格（光照/混合/剔除/线宽）。 */
     case 'glnormal/3':
     case 'glcullface/1':
@@ -670,9 +790,10 @@ function call(name, args) {
         + ' 2D 那一族是 cls/setcol/setpix/moveto/lineto/drawsph/drawcone/rgb/refresh，'
         + ' 宿主量是 nextframe/numframes/klock/xres/yres/mousx/mousy/bstatus/keystatus，'
         + ' 批与它的状态是 (gfxbatch …)/batchprog/batchmvp/batchblend/gldepth，'
-        + ' 可编程管线是 glsetshader/glgetuniformloc/gluniform*/glgetattribloc/glvertexattrib*；'
+        + ' 可编程管线是 glsetshader/glgetuniformloc/gluniform*/glgetattribloc/glvertexattrib*，'
+        + ' 纹理是 (gfxtex …)/glbindtexture/glactivetexture（文件那一档还没接：glsettex("x.png")）；'
         + ' **GL 立即模式与矩阵栈不在设备这一层**（在语言那一侧的 ext/polydraw/gl-rt.js，'
-        + '只有一个模型）；纹理那一族还没接（docs/design/eval-realtime-gpu.md 第 6 刀）');
+        + '只有一个模型）');
   }
 }
 
@@ -786,6 +907,10 @@ function reset() {
   SH.cur = null;
   UNI.list.length = 0;
   UNI.byProg.clear();
+  /* 纹理那一摊也清：GL 的纹理对象要真删（不删就一趟一趟攒着 —— 上下文有上限）。 */
+  if (D.gl !== null) for (const t of TX.slots.values()) D.gl.deleteTexture(t.id);
+  TX.slots.clear();
+  TX.unit = 0;
   const gl = D.gl;
   if (gl !== null) {
     gl.clearColor(0, 0, 0, 1);
@@ -868,6 +993,7 @@ export function installGlDevice(canvas, w = 320, h = 240) {
     kind: 'webgl2',
     call,
     batch: batchIn,
+    tex: texIn,
     present: flush,
     snapshot,
     setFrame,

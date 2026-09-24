@@ -495,14 +495,15 @@ program 与 uniform —— 全是"只有设备做得到"的东西。`glquad` 的
 * 一格像素占几个 double 照原版 `evalvalperpix`：`VEC4` 是 4 个、别的都是 1 个
   （`BGRA32` 那一格是打包好的 `0xRRGGBB`，与 `rgb()` 回的那种数同一形）。
 
-宿主表那一侧（`myext[]:2166-2171`）六种写法各自落在哪儿：
+宿主表那一侧（`myext[]:2166-2171`）六种写法各自落在哪儿。**最后一格总是 coltype** ——
+4 个实参那一档是**一维**纹理（`kglsettexarray1`：ysiz=zsiz=1），不是 (宽,高)：
 
-    GLSETTEX(,$)      (槽, "文件")            -> 文件那一档：**这一版明着拒**（见 11.3）
-    GLSETTEX(,$,)     (槽, "文件", 格)         -> 同上
-    GLSETTEX(,&,,)    (槽, 数组, 宽, 高)       -> (gfxtex 槽 宽 高 1 KGL_BGRA32+默认 数组)
-    GLSETTEX(,&,,,)   (槽, 数组, 宽, 高, 格)    -> (gfxtex 槽 宽 高 1 格 数组)
-    GLSETTEX(,&,,,,)  (槽, 数组, 宽, 高, 层, 格) -> (gfxtex 槽 宽 高 层 格 数组)
-    GLGETTEX(,&,,,)   读回                    -> 第六刀的后半（要"设备写回数组"那条路）
+    GLSETTEX(,$)      (槽, "文件")                -> 文件那一档：**这一版明着拒**（见 11.3）
+    GLSETTEX(,$,)     (槽, "文件", 格)             -> 同上
+    GLSETTEX(,&,,)    (槽, 数组, 宽, 格)            -> (gfxtex 槽 宽 1 1 格 数组)
+    GLSETTEX(,&,,,)   (槽, 数组, 宽, 高, 格)         -> (gfxtex 槽 宽 高 1 格 数组)
+    GLSETTEX(,&,,,,)  (槽, 数组, 宽, 高, 层, 格)      -> (gfxtex 槽 宽 高 层 格 数组)
+    GLGETTEX(,&,,,)   读回                        -> 第六刀的后半（要"设备写回数组"那条路）
 
 `glbindtexture(槽)` / `glactivetexture(GL_TEXTURE0+i)` 是**设备状态**：语言那一侧先
 `gl_flush()`（状态一变就断批）再原样转给设备，与 `glsetshader` 那一格同一手。

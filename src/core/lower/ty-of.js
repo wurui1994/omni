@@ -124,6 +124,8 @@ function builtinType(e, ctx) {
     case 'gfxcall': return REAL;
     /* `(gfxbatch 类 数 顶点)`：一段顶点批交给设备 —— 回画了几个顶点（real，与上一格同）。 */
     case 'gfxbatch': return REAL;
+    /* `(gfxtex 槽 宽 高 层 格 数组)`：一张纹理交给设备 —— 回 0（real，与上一格同）。 */
+    case 'gfxtex': return REAL;
     case 'anew': return e.args[0].type ?? arrOf(INT);
     case 'dnew': return e.args[0].type ?? dictOf(INT);
     case 'cnew': case 'new': return e.args[0].type ?? INT;

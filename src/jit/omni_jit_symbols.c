@@ -113,6 +113,7 @@ const omni_jit_sym OMNI_JIT_SYMS[] = {
   { "omni_gfx_framep", (void *)omni_gfx_framep },
   { "omni_gfx_call", (void *)omni_gfx_call },
   { "omni_gfx_batch", (void *)omni_gfx_batch },
+  { "omni_gfx_tex", (void *)omni_gfx_tex },
   { "omni_gfx_frame_fn", (void *)omni_gfx_frame_fn },
   { "omni_gfx_def", (void *)omni_gfx_def },
 

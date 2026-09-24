@@ -2473,6 +2473,29 @@ class CoreLowerer {
       }
       return { kind: 'Builtin', name: 'gfx_batch', args: [kd, cnt, vs], argType: INT, type: REAL };
     }
+    // `(gfxtex 槽 宽 高 层 格 数组)`：**一张纹理交给设备**（回 real = 0）。
+    //
+    // 与 `gfxbatch` 同一条先例（宿主面只收 double，数组要走自己这一格 op）——
+    // 口径在 `docs/design/eval-realtime-gpu.md` 第 11 节：`格` 是 `KGL_*` 那个打包好的数
+    // （低 4 位像素格式 / `0xf0` 过滤 / `0xf00` 环绕），一格像素占几个 double 也照它。
+    if (h === 'gfxtex') {
+      if (n.items.length !== 7) return this.err(n, '(gfxtex 槽 宽 高 层 格 数组)');
+      const as = n.items.slice(1).map((it) => this.expr(it));
+      if (as.some((x) => x === null)) return null;
+      const names = ['槽', '宽', '高', '层', '格'];
+      for (let i = 0; i < 5; i++) {
+        if (as[i].type.k !== 'int') {
+          return this.err(n.items[i + 1], `(gfxtex 槽 宽 高 层 格 数组) 的${names[i]}要是 int，`
+            + `这里是 ${coreTypeText(as[i].type)}`);
+        }
+      }
+      const px = as[5];
+      if (px.type.k !== 'arr' || px.type.elem.k !== 'real') {
+        return this.err(n.items[6], '(gfxtex 槽 宽 高 层 格 数组) 的数组要是 (arr real)，'
+          + `这里是 ${coreTypeText(px.type)}`);
+      }
+      return { kind: 'Builtin', name: 'gfx_tex', args: as, argType: INT, type: REAL };
+    }
     // `(gfxcall "名字" 实参…)`：**图形设备的宿主面**（回 real）。EVAL 两门语言
     // （`.pss` / `.kc`）的宿主调用全从这一格过去 —— 画图、矩阵、着色器、纹理、输入。
     //

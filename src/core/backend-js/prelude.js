@@ -1010,6 +1010,18 @@ function $gfx_batch(kind, n, verts) {
   }
   return d.batch(Number(kind), Number(n), verts);
 }
+// (gfxtex 槽 宽 高 层 格 数组)：**一张纹理**交给设备（docs/design/eval-realtime-gpu.md
+// 第 11 节）。格是 KGL_* 那个打包好的数（低 4 位像素格式 / 0xf0 过滤 / 0xf00 环绕）。
+function $gfx_tex(slot, w, h, d3, fmt, px) {
+  const d = globalThis.__OMNI_GFX;
+  if (d === undefined || d === null) {
+    $rt_error("这份产物里没有图形设备（宿主要装上 globalThis.__OMNI_GFX）：gfxtex");
+  }
+  if (typeof d.tex !== "function") {
+    $rt_error("这格设备没有纹理那一格（gfxtex）");
+  }
+  return d.tex(Number(slot), Number(w), Number(h), Number(d3), Number(fmt), px);
+}
 // (gfxframefn …)：把每帧那一格函数交给设备。**浏览器那一档用它做 rAF 循环** ——
 // 那边产物是在主线程同步跑的，while 会把页面卡死；别的设备（CPU 备选 / 本机 OpenGL）
 // 自己有循环，这一格在它们那儿就是记下不用（没有 setFrame 就当没这回事）。

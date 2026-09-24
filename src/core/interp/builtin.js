@@ -1210,6 +1210,17 @@ export function applyBuiltin(I, e, a) {
       }
       return dev.batch(Number(a[0]), Number(a[1]), a[2]);
     }
+    /* `(gfxtex 槽 宽 高 层 格 数组)`：**一张纹理**交给同一格设备（第 11 节）。 */
+    case 'gfx_tex': {
+      const dev = globalThis.__OMNI_GFX;
+      if (dev === undefined || dev === null) {
+        rtError('这一趟里没有图形设备（宿主要装上 globalThis.__OMNI_GFX）：gfxtex');
+      }
+      if (typeof dev.tex !== 'function') {
+        rtError(`这格设备（${dev.kind ?? '?'}）没有纹理那一格（gfxtex）`);
+      }
+      return dev.tex(Number(a[0]), Number(a[1]), Number(a[2]), Number(a[3]), Number(a[4]), a[5]);
+    }
     /* `(gfxframefn …)`：把每帧那一格函数交给设备。**这条腿上是记下不用** ——
        解释器这边帧循环靠 `(gfxcall "nextframe")` 自己驱动（那一格设备说画几帧）；
        要 rAF 那种"页面驱动"的只有浏览器那一档，而那一档跑的是 backend-js 的产物。 */

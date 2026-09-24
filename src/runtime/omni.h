@@ -367,6 +367,11 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
    那一侧（生成出来的 IR），这一格是"上传 + 一次 draw"的入口；CPU 备选那一档软件光栅化
    同一段。一格顶点 12 个 double（位置 4 裁剪空间 / 颜色 4 / 纹理坐标 4）。 */
 double omni_gfx_batch(int64_t kind, int64_t n, struct omni_arr_f64_s *verts);
+/* `(gfxtex 槽 宽 高 层 格 数组)`：**一张纹理**交给设备（docs/design/eval-realtime-gpu.md
+   第 11 节）。格是 KGL_* 那个打包好的数（低 4 位像素格式 / 0xf0 过滤 / 0xf00 环绕）；
+   CPU 备选那一档**收下存着**（没有着色器，采样那一半在 batchprog 那格就报了）。 */
+double omni_gfx_tex(int64_t slot, int64_t w, int64_t h, int64_t d, int64_t fmt,
+                    struct omni_arr_f64_s *px);
 /* `(gfxframefn …)`：把每帧那一格函数交给设备（平签名：一格 `void *`）。
    这条腿上**记下不用** —— CPU 备选与本机 OpenGL 那两档自己有帧循环；要"页面驱动"的
    只有浏览器那一档。 */

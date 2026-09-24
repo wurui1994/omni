@@ -1,0 +1,57 @@
+// ext/polydraw/examples/06-texture.pss —— **纹理那一族**（`glsettex` 的数组那一档）
+//
+// 这一份判的是"CPU 上算一张图 -> 上传成纹理 -> 着色器采样它"这一整条路
+// （`docs/design/eval-realtime-gpu.md` 第 11 节）：
+//   * `glsettex(0, buf, SIZ, SIZ, KGL_BGRA32+KGL_NEAREST+KGL_CLAMP_TO_EDGE)`
+//     —— 一整块像素走 `(gfxtex 槽 宽 高 层 格 数组)`，宿主面只收 double，数组有自己那格 op；
+//   * `glactivetexture(GL_TEXTURE0)` + `glbindtexture(0)` —— 挑单元、挑槽（设备状态）；
+//   * 片元里 `uniform sampler2D tex0` —— 采样器**按名字约定**接在 0 号单元上。
+//
+// 那张图是**棋盘 + 横向渐变**：左上那一格暗、右上那一格亮红 —— 判据（tests/studio/run.js）
+// 判的正是"四个角的颜色不一样、而且换了 `t` 之后中间那一块变了"。
+//
+// 跑一趟（浏览器那一档才有可编程管线）：Studio 里打开它按「跑」。
+
+static buf[64*64], done;
+
+()
+{
+   SIZ = 64;
+   if (!done)
+   {
+      done = 1;
+      for(y=0;y<SIZ;y++)
+         for(x=0;x<SIZ;x++)
+         {
+               //棋盘（8 格一块）+ 横向渐变：红随 x 涨、绿随 y 涨、蓝是棋盘
+            k = int(x/8)+int(y/8);
+            c = (k-int(k/2)*2)*255;
+            buf[y*SIZ+x] = int(x*4)*65536 + int(y*4)*256 + c;
+         }
+      glsettex(0, buf, SIZ, SIZ, KGL_BGRA32+KGL_NEAREST+KGL_CLAMP_TO_EDGE);
+   }
+
+   glsetshader("vert","frag");
+   gluniform1f(glgetuniformloc("t"), numframes/60);
+   glactivetexture(GL_TEXTURE0); glbindtexture(0);
+
+   glclear(GL_COLOR_BUFFER_BIT);
+   glquad(1);
+}
+@v:vert
+varying vec4 uv;
+void main()
+{
+   uv = gl_MultiTexCoord0;
+   gl_Position = ftransform();
+}
+@f:frag
+uniform sampler2D tex0;
+uniform float t;
+varying vec4 uv;
+void main()
+{
+      //中间那一块随 t 缩放采样坐标 —— 判据靠它看出"uniform 真喂进去了"
+   vec2 c = (uv.xy-0.5)*(1.0+0.5*sin(t*3.0))+0.5;
+   gl_FragColor = vec4(texture2D(tex0,c).rgb, 1.0);
+}

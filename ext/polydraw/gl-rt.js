@@ -37,8 +37,8 @@
 // 只在"设备状态变了 / 攒满了 / 一帧完了"这三种时候交出去。
 // 详见 `docs/design/eval-realtime-gpu.md` 第 9 节。
 import {
-  ARR, num, str, nm, bin, bi, call, rm, set, letR, ret, iff, whil, ex, aset, aget, ix, fn, glob,
-  anew,
+  ARR, num, str, nm, bin, bi, call, rm, set, letR, ret, iff, whil, ex, aset, aget, ix, fn, fnT,
+  glob, anew,
 } from './ir.js';
 
 /** 设备那一面：一格宿主调用 / 一段顶点批。 */
@@ -132,6 +132,14 @@ export const POLYDRAW_GL = new Map([
   ['glvertexattrib2f/3', 'gl_attr2'],
   ['glvertexattrib3f/4', 'gl_attr3'],
   ['glvertexattrib4f/5', 'gl_attr4'],
+  /* **纹理那一族**（第六刀，`docs/design/eval-realtime-gpu.md` 第 11 节）：数组那三档走
+     `(gfxtex 槽 宽 高 层 格 数组)`。元数照 `myext[]:2168-2170` —— **最后一格总是 coltype**，
+     4 个实参那一档是**一维**纹理（`kglsettexarray1`：ysiz=zsiz=1），不是 (宽,高)。 */
+  ['glsettex/4', 'gl_settex4'],
+  ['glsettex/5', 'gl_settex5'],
+  ['glsettex/6', 'gl_settex6'],
+  ['glbindtexture/1', 'gl_bindtex'],
+  ['glactivetexture/1', 'gl_activetex'],
   /* 收下但不管的那几格（这条腿上没有光照/混合/剔除）。 */
   ['glnormal/3', 'gl_nop3'],
   ['glenable/1', 'gl_enable'],
@@ -173,6 +181,17 @@ export const GL_CONSTS = new Map([
   ['gl_lighting', 0x0b50], ['gl_fog', 0x0b60],
   ['gl_modelview', 0x1700], ['gl_projection', 0x1701],
   ['gl_cw', 0x0900], ['gl_ccw', 0x0901],
+  /* **纹理那一族的 `KGL_*`**（`polydraw.c:190-193` 那三段 enum，照抄不自己编号）：
+     低 4 位是像素格式、`0xf0` 是过滤、`0xf00` 是环绕。脚本里写的是
+     `KGL_BGRA32+KGL_NEAREST+KGL_CLAMP_TO_EDGE` 这种和，所以三段必须与原版同一个值。 */
+  ['kgl_bgra32', 0], ['kgl_char', 1], ['kgl_short', 2], ['kgl_int', 3],
+  ['kgl_float', 4], ['kgl_vec4', 5],
+  ['kgl_linear', 0x00], ['kgl_nearest', 0x10],
+  /* `KGL_MIPMAP` 与 `KGL_MIPMAP3` 是**同一格**（原版那行 enum 里两个名字一个值）。 */
+  ['kgl_mipmap', 0x20], ['kgl_mipmap3', 0x20], ['kgl_mipmap2', 0x30],
+  ['kgl_mipmap1', 0x40], ['kgl_mipmap0', 0x50],
+  ['kgl_repeat', 0x000], ['kgl_mirrored_repeat', 0x100],
+  ['kgl_clamp', 0x200], ['kgl_clamp_to_edge', 0x300],
 ]);
 
 /* ─── 生成出来的那一摊函数 ──────────────────────────────────────────── */
@@ -301,6 +320,27 @@ function glShaderDecls() {
     stateFn('gl_attr2', 'glvertexattrib2f', ['h', 'x', 'y']),
     stateFn('gl_attr3', 'glvertexattrib3f', ['h', 'x', 'y', 'z']),
     stateFn('gl_attr4', 'glvertexattrib4f', ['h', 'x', 'y', 'z', 'w']),
+    /* **纹理那一族**（第 11 节）：一整块像素走 `(gfxtex 槽 宽 高 层 格 数组)` ——
+       宿主面只收 double，所以数组有自己那一格 op（与 `(gfxbatch …)` 同一条先例）。
+       元数照 `myext[]:2168-2170`：**最后一格总是 coltype**，4 个实参那一档是一维纹理。
+       挑槽/挑单元是设备状态，所以两格都先 `gl_flush()`。 */
+    fnT('gl_settex6', [['t'], ['px', ARR], ['xs'], ['ys'], ['zs'], ['ct']], [
+      ex(call('gl_need', [])),
+      ex(call('gl_flush', [])),
+      ex(bi('gfxtex', [ix(nm('t')), ix(nm('xs')), ix(nm('ys')), ix(nm('zs')), ix(nm('ct')),
+        nm('px')])),
+      ret(num(0)),
+    ]),
+    fnT('gl_settex5', [['t'], ['px', ARR], ['xs'], ['ys'], ['ct']], [
+      ex(call('gl_settex6', [nm('t'), nm('px'), nm('xs'), nm('ys'), num(1), nm('ct')])),
+      ret(num(0)),
+    ]),
+    fnT('gl_settex4', [['t'], ['px', ARR], ['xs'], ['ct']], [
+      ex(call('gl_settex6', [nm('t'), nm('px'), nm('xs'), num(1), num(1), nm('ct')])),
+      ret(num(0)),
+    ]),
+    stateFn('gl_bindtex', 'glbindtexture', ['t']),
+    stateFn('gl_activetex', 'glactivetexture', ['u']),
     /**
      * `glquad(mode)`：满屏四边形。`0` 走 alpha 混合、`1` 不透明（说明书那一行）。
      * 六个顶点在这儿造（**一个模型**），设备只收那一段批 —— 它那一趟的 `u_mvp`

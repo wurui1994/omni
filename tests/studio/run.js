@@ -605,6 +605,47 @@ for (const c of CASES) {
         && gr3.lb[0] > gr3.lb[1] + 60 && gr3.rb[1] > gr3.rb[0] + 60
         && lum(gr3.lb2) !== lum(gr3.lb),
         JSON.stringify(gr3).slice(0, 260));
+      /**
+       * **纹理那一族**（`06-texture.pss`）：CPU 上算一张 64×64 的棋盘 + 渐变、
+       * `glsettex(0, buf, …, KGL_BGRA32+KGL_NEAREST+KGL_CLAMP_TO_EDGE)` 上传成纹理、
+       * `glactivetexture`+`glbindtexture` 挑好、片元里 `uniform sampler2D tex0` 采样它。
+       * 判的是三件事（都是"这条路真通了"才成立的）：
+       *   * 采到的是**那张图**：左上角的红分量小、右上角大（红随 x 涨）；
+       *   * 棋盘真在（**扫一行**看蓝分量的最大最小 —— 蓝就是那格棋盘，0 或 255；
+       *     取两个定点会碰上"正好同一格"，第一版就是这么假红的）；
+       *   * uniform 真喂进去了（`t` 变了之后**偏离中心**那一格的颜色变过 —— 采样坐标
+       *     是绕中心缩放的，所以中心那一点是它的不动点，取中心永远看不出变化）。
+       */
+      const tp = 'async () => {'
+        + ' const c = document.createElement("canvas");'
+        + ' c.style.position = "fixed"; c.style.left = "-9999px";'
+        + ' document.body.appendChild(c);'
+        + ' const dev = window.__OMNI_INSTALL_GL(c, 320, 240);'
+        + ' dev.reset();'
+        + ' globalThis.process.env.OMNI_GFX = "host";'
+        + ' const r = await window.__OMNI_LOCAL("/api/run",'
+        + '   { body: JSON.stringify({ argv: ["run", "ext/polydraw/examples/06-texture.pss"] }) });'
+        + ' if (r.code !== 0) return { err: (r.stderr || "").slice(0, 300) };'
+        + ' dev.stop();'
+        + ' dev.step();'
+        + ' const s1 = dev.snapshot();'
+        + ' for (let i = 0; i < 20; i++) dev.step();'
+        + ' const s2 = dev.snapshot();'
+        + ' const px = (s, x, y) => { const o = (y * 320 + x) * 4;'
+        + '   return [s.bytes[o], s.bytes[o+1], s.bytes[o+2]]; };'
+        + ' let bmin = 999, bmax = -1;'
+        + ' for (let x = 0; x < 320; x++) { const b = px(s1, x, 120)[2];'
+        + '   if (b < bmin) bmin = b; if (b > bmax) bmax = b; }'
+        + ' return { lt: px(s1, 10, 10), rt: px(s1, 310, 10), bmin, bmax,'
+        + '   off1: px(s1, 210, 150), off2: px(s2, 210, 150) }; }';
+      const tr = JSON.parse(await pw([S, '--raw', 'eval', tp]));
+      const lum2 = (p) => p[0] + p[1] + p[2];
+      ok('真浏览器里纹理那一族（数组 -> (gfxtex …) -> sampler2D tex0）',
+        tr.err === undefined && tr.rt !== undefined
+        && tr.rt[0] > tr.lt[0] + 100
+        && tr.bmax - tr.bmin > 200
+        && lum2(tr.off1) !== lum2(tr.off2),
+        JSON.stringify(tr).slice(0, 260));
     } finally {
       try { await pw([S, 'close']); } catch { /* 关不掉不该把判据判红 */ }
       srv.close();
