@@ -24,7 +24,7 @@
 //   * base 装成**源码**（`library/base/R/base` 就是 all.R）—— R 自己那个用 R 写的
 //     字节码编译器我们不要，所以跑的时候 `R_ENABLE_JIT=0`
 
-import { mkdirSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Build } from '../../src/core/build/api.js';
@@ -322,6 +322,22 @@ for (const p of PKGS) {
   }
 }
 
+/* 每个包的 `inst/` 要照搬进去 —— grDevices 的 `enc/` 与 `afm/` 就在那儿，
+   少了它 `pdf()` 一开就报 "failed to load encoding file 'ISOLatin1.enc'"。 */
+for (const p of PKGS) {
+  const S = join(RSRC, 'src/library', p);
+  if (!existsSync(join(S, 'inst'))) continue;
+  /* 一个包一条规则：路径直接烤进命令里。走 `vars` 那条路在这儿会踩坑 ——
+     `$out_dir` 被模板当成 `$out` 后面跟着字面量 `_dir`。 */
+  b.rule(`cpinst_${p}`, {
+    command: `cp -R ${join(S, 'inst')}/. ${join(HOME, 'library', p)}/ && touch $out`,
+    description: `${p} 的 inst/ -> R_HOME`,
+  });
+  const stamp = join(OBJ, `inst_${p}.ok`);
+  b.build(stamp, `cpinst_${p}`, []);
+  pkgStamps.push(stamp);
+}
+
 /* ─── `modules/lapack.so`：R 把 LAPACK 当**模块**动态加载 ────────────────── */
 
 /* `solve()` / `lm()` 走的是 `R_HOME/modules/lapack.so`（`src/modules/lapack/`），
@@ -346,6 +362,60 @@ b.build(LAPACK_SO, 'so', lapackObjs, { vars: { libs: '-framework Accelerate' } }
 const REPOS = join(HOME, 'etc/repositories');
 b.build(REPOS, 'cp', join(RSRC, 'etc/repositories'));
 
+/* ─── 装包那一套：`bin/R` / `include/` / `lib/libR` / `etc/Makeconf` ────── */
+
+/* `bin/R`：R 自己那份是 287 行的模板（`src/scripts/R.sh.in`），我们只要两条路 ——
+   `R CMD <cmd>` 与"直接起"。`bin/INSTALL` 用 R 自己那份（它只是把参数拼成
+   `nextArg` 串再喂给 `tools:::.install_packages()`）。 */
+const BIN_R = join(HOME, 'bin/R');
+mkdirSync(join(HOME, 'bin/exec'), { recursive: true });
+writeFileSync(BIN_R, `#!/bin/sh\n# ext/r/build-libR.js 生成 —— 别手改\n`
+  + `R_HOME="${HOME}"; export R_HOME\n`
+  + 'R_ENABLE_JIT=0; export R_ENABLE_JIT\n'
+  + 'TZDIR=${TZDIR:-/usr/share/zoneinfo}; export TZDIR\n'
+  + 'R_SHARE_DIR="${R_HOME}/share"; export R_SHARE_DIR\n'
+  + 'R_INCLUDE_DIR="${R_HOME}/include"; export R_INCLUDE_DIR\n'
+  + 'R_DOC_DIR="${R_HOME}/doc"; export R_DOC_DIR\n'
+  + 'if [ "$1" = CMD ]; then\n'
+  + '  shift; cmd="$1"; shift\n'
+  + '  if [ -x "${R_HOME}/bin/${cmd}" ]; then exec "${R_HOME}/bin/${cmd}" "$@"; fi\n'
+  + '  echo "R CMD ${cmd}：这一版没接" >&2; exit 1\n'
+  + 'fi\n'
+  + 'exec "${R_HOME}/bin/exec/R" "$@"\n');
+chmodSync(BIN_R, 0o755);
+
+b.rule('cpx', { command: 'cp $in $out && chmod +x $out', description: 'CP+x $out' });
+const EXEC_R = join(HOME, 'bin/exec/R');
+b.build(EXEC_R, 'cpx', RBIN);
+const BIN_INSTALL = join(HOME, 'bin/INSTALL');
+b.build(BIN_INSTALL, 'cpx', join(RSRC, 'src/scripts/INSTALL'));
+/* libR 得摆在 `R_HOME/lib` 下 —— 包里的 C 是按 `-L$(R_HOME)/lib -lR` 链的。 */
+const LIB_LIBR = join(HOME, 'lib/libR.dylib');
+b.build(LIB_LIBR, 'cp', LIBR);
+/* 包里的 C 要 `R.h` / `Rinternals.h` / `R_ext/*.h`，还有我们生成的那三份。 */
+const INC_STAMP = join(HOME, 'include/Rinternals.h');
+b.rule('cpinc', {
+  command: `mkdir -p ${join(HOME, 'include/R_ext')} `
+    + `&& cp ${join(RSRC, 'src/include')}/R.h ${join(RSRC, 'src/include')}/Rdefines.h `
+    + `${join(RSRC, 'src/include')}/Rinternals.h ${join(RSRC, 'src/include')}/Rembedded.h `
+    + `${join(RSRC, 'src/include')}/Rinterface.h ${join(HOME, 'include')}/ `
+    + `&& cp ${RCONFIG_H} ${RMATH_H} ${RVERSION_H} ${join(HOME, 'include')}/ `
+    + `&& cp ${join(RSRC, 'src/include/R_ext')}/*.h ${join(HOME, 'include/R_ext')}/`,
+  description: 'include/ -> R_HOME',
+});
+b.build(INC_STAMP, 'cpinc', [], { implicit: [RCONFIG_H, RMATH_H, RVERSION_H] });
+/* `etc/Makeconf`：装包时 `CC` / `CFLAGS` / `SHLIB_LDFLAGS` 那一套都从它来。 */
+const MAKECONF = join(HOME, 'etc/Makeconf');
+b.rule('genmakeconf', {
+  command: `node ${join(HERE, 'rt/gen-makeconf.js')} --src ${RSRC} --home ${HOME} --out $out --cc ${CC} --fc ${FC}`,
+  description: 'etc/Makeconf',
+  restat: 'true',
+});
+b.build(MAKECONF, 'genmakeconf', [], {
+  implicit: [join(HERE, 'rt/gen-makeconf.js'), join(RSRC, 'etc/Makeconf.in')],
+});
+const INSTALL_BITS = [EXEC_R, BIN_INSTALL, LIB_LIBR, INC_STAMP, MAKECONF];
+
 /* `Meta/package.rds` / `features.rds` / `nsInfo.rds`：**第一轮我们自己写**
    （`rt/bootstrap-meta.R`，只用 base 的 `read.dcf` / `saveRDS` / `parseNamespaceFile`）。
    为什么不直接跑 R 自己的 `tools:::.vinstall_*_as_RDS`：那两个函数在 tools 包里，
@@ -365,7 +435,8 @@ b.rule('mkmeta', {
     + `--args ${join(HOME, 'library')} ${PKGS.join(' ')} base > ${join(OUT, 'meta.txt')} 2>&1 && date > $out`,
   description: '自举 Meta/*.rds（只用 base）',
 });
-b.build(META, 'mkmeta', [RBIN, BASE_R, BASE_PROFILE, BASE_DESC, RENVIRON, SHARE, LAPACK_SO, REPOS, ...pkgStamps],
+b.build(META, 'mkmeta', [RBIN, BASE_R, BASE_PROFILE, BASE_DESC, RENVIRON, SHARE, LAPACK_SO, REPOS,
+  ...INSTALL_BITS, ...pkgStamps],
   { implicit: [join(HERE, 'rt/bootstrap-meta.R')] });
 
 
@@ -373,6 +444,20 @@ b.build(META, 'mkmeta', [RBIN, BASE_R, BASE_PROFILE, BASE_DESC, RENVIRON, SHARE,
    `R_ENABLE_JIT=0` 是 ADR-0046 那一条（R 自己那个用 R 写的字节码编译器我们不要）。
    量的是四件事：base 的算术、stats 的 `sd`、**LAPACK**（`lm` 的系数，走 Accelerate）、
    以及 methods 的 S4 起不起来（`library(grid)` 会把它拉起来）。 */
+/* `R/sysdata.rda`（包的内部数据）要转成 lazyload 库 —— tools 与 utils 各有一份，
+   而 utils 那份里有 `MARC_relator_db`，装任何 CRAN 包都要用（`.install_packages` 读
+   DESCRIPTION 的 Authors@R 时会查它）。用的是 R 自己的 `tools:::sysdata2LazyLoadDB`
+   （`share/make/basepkg.mk` 第 149..151 行那条 `sysdata` 规则）。 */
+const SYSDATA = join(OUT, 'sysdata.ok');
+const sysPkgs = PKGS.filter((p) => existsSync(join(RSRC, 'src/library', p, 'R/sysdata.rda')));
+b.rule('sysdata', {
+  command: sysPkgs.map((p) => `TZDIR=/usr/share/zoneinfo R_ENABLE_JIT=0 R_HOME=${HOME} ${RBIN} `
+    + `--vanilla --no-echo -e "tools:::sysdata2LazyLoadDB('${join(RSRC, 'src/library', p, 'R/sysdata.rda')}','${join(HOME, 'library', p, 'R')}')" > /dev/null`).join(' && ')
+    + ' && date > $out',
+  description: 'sysdata.rda -> lazyload 库',
+});
+b.build(SYSDATA, 'sysdata', [META]);
+
 const STAMP = join(OUT, 'smoke.ok');
 const SMOKE_LOG = join(OUT, 'smoke.txt');
 b.rule('smoke', {
@@ -383,7 +468,7 @@ b.rule('smoke', {
     + `> ${SMOKE_LOG} 2>&1 && grep -qx "55 1.290994 1.05 3 " ${SMOKE_LOG} && date > $out`,
   description: '起一趟我们自己的 R（stats / grid / methods / LAPACK），对答案',
 });
-b.build(STAMP, 'smoke', [META]);
+b.build(STAMP, 'smoke', [SYSDATA]);
 
 b.default(STAMP);
 b.run(process.argv.slice(2));

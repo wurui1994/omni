@@ -70,7 +70,19 @@ S7 / cpp11 / farver / isoband / …）一共 **135 523 行 R + 102 848 行 C/C++
    `NAMESPACE` 与 `DESCRIPTION` 就位、`src/` 的 146 份 C/Fortran/Objective-C 编出了八份
    `<pkg>.so`，名单都从**那个包自己的 `src/Makefile.in`** 里读）。
    **卡在一格上**：见下面"第三刀卡住的地方"。
-4. `install.packages` 装那 17 个包 → `library(ggplot2)` → `ggsave` 出一张图。
+4. ~~`install.packages` 装那 17 个包 → `library(ggplot2)` → `ggsave` 出一张图~~
+   —— **已落**：`ext/r/install-cran.js` 从 CRAN 下 tarball、按写死的拓扑序调 R 自己的
+   `bin/INSTALL`（那条路就是 `tools:::.install_packages()`）。**17 个全过**，其中
+   glue / rlang / cli / vctrs / cpp11 / farver / isoband 都带 C / C++。
+   然后 `library(ggplot2)` + `geom_smooth(method="lm")` + `ggsave` 出了一份 6 634 字节的
+   PDF（`lm` 那一步走 stats → LAPACK → Accelerate）。
+   这一刀要补的四格：`bin/R`（我们自己写的 20 行，R 那份是 287 行模板）、
+   `etc/Makeconf`（`rt/gen-makeconf.js`，**模板是 `etc/Makeconf.in` 不是顶层那份** ——
+   拿错了会报 `if (nzchar(SHLIB_LIBADD))`）、`include/` + `lib/libR.dylib`（包里的 C 按
+   `-L$(R_HOME)/lib -lR` 链）、每个包的 `inst/`（grDevices 的 `enc/` 在那儿，少了它
+   `pdf()` 报 "failed to load encoding file 'ISOLatin1.enc'"）、以及
+   `tools:::sysdata2LazyLoadDB`（utils 的 `sysdata.rda` 里有 `MARC_relator_db`，
+   装**任何** CRAN 包都要用它读 Authors@R）。
 5. quartz 那一格：`devQuartz.c` + `qdCocoa.m` 编进来，`plot()` 开一个真窗口。
    它自己建 `NSWindow`、不跑 `[NSApp run]`（靠 `ptr_R_ProcessEvents` 协作抽事件），
    所以要在主线程上调 —— 这一条与我们 host 那侧的线程安排得对齐。
