@@ -146,6 +146,11 @@ export const POLYDRAW_GL = new Map([
      `(gfxtex 槽 宽 高 层 格 数组)`。元数照 `myext[]:2168-2170` —— **最后一格总是 coltype**，
      4 个实参那一档是**一维**纹理（`kglsettexarray1`：ysiz=zsiz=1），不是 (宽,高)。 */
   ['glsettex/4', 'gl_settex4'],
+  /* **文件纹理**（`glsettex(槽,"earth.jpg"[,colmode])`，§20）：串在这一步已经是名字表下标，
+     设备按那个下标取文件名。一格串那一档的默认 colmode 是 `KGL_MIPMAP+KGL_REPEAT`
+     = `(2<<4)+0` = 32（`polydraw.c:1346`）。 */
+  ['glsettex/2', 'gl_settexf2'],
+  ['glsettex/3', 'gl_settexf3'],
   ['glsettex/5', 'gl_settex5'],
   ['glsettex/6', 'gl_settex6'],
   ['glbindtexture/1', 'gl_bindtex'],
@@ -377,6 +382,16 @@ function glShaderDecls() {
       ret(num(0)),
     ]),
     stateFn('gl_bindtex', 'glbindtexture', ['t']),
+    /* 文件纹理那两档（§20）：`(gfxcall "glsettexfile" 槽 名字下标 colmode)`。 */
+    fn('gl_settexf3', ['t', 'nm', 'cm'], [
+      ex(call('gl_need', [])),
+      ex(call('gl_flush', [])),
+      ret(dev('glsettexfile', [nm('t'), nm('nm'), nm('cm')])),
+    ]),
+    fn('gl_settexf2', ['t', 'nm'], [
+      ex(call('gl_settexf3', [nm('t'), nm('nm'), num(32)])),
+      ret(num(0)),
+    ]),
     stateFn('gl_activetex', 'glactivetexture', ['u']),
     /**
      * `glquad(mode)`：满屏四边形。`0` 走 alpha 混合、`1` 不透明（说明书那一行）。

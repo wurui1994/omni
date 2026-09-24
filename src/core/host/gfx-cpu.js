@@ -236,6 +236,9 @@ const G = {
   tried: false, on: false, m: null,
   /* 设备还没开起来之前登记的那几份串（着色器原文与名字表）—— 开起来之后一趟补过去。 */
   defs: [],
+  /* **名字表**（下标 -> 串）：文件纹理那一档要在这一层把下标还原成文件名、再按脚本所在的
+     目录拼成路径（目录只有宿主知道，见 `texPath`）。 */
+  names: [],
   /* 读回那一格（一格一个 0xRRGGBB，与 `D.fb` 同形）：一帧只读一次，数组复用。 */
   gpu: null,
 };
@@ -636,6 +639,18 @@ export function gfxCall(name, args) {
       if (!G.on) break;
       G.m.bindtex(Math.trunc(a(0)));
       return 0;
+    /* **文件纹理**（`glsettexfile 槽 名字下标 colmode`，§20）：路径在这一层拼
+       （目录只有宿主知道），解码与上传在设备。 */
+    case 'glsettexfile/3': {
+      need(320, 240);
+      if (!G.on) break;
+      const p = texPath(Math.trunc(a(1)));
+      if (p === null) return 1;
+      const rc = G.m.texfile(Math.trunc(a(0)), p, Math.trunc(a(2)));
+      /* **读不到就要说话**：静默失败等于"图不对但没人知道"（那正是这一层最贵的错）。 */
+      if (rc !== 0) stderr(`#gfx 文件纹理没上去：${p}（${G.m.error()}）\n`);
+      return rc;
+    }
     case 'glactivetexture/1': {
       need(320, 240);
       if (!G.on) break;
@@ -888,9 +903,29 @@ function gfxTex(slot, w, h, d, fmt, pxs) {
  * 登记语句），所以先存下来，`glNeed` 挂上之后一趟补过去（与 `omni_fmt.c` 里那一格同一手）。
  */
 function gfxDef(kind, name, text) {
+  /* 名字表那一族在这一层也留一份（文件纹理要用，见 `texPath`）。 */
+  if (String(kind) === 'name') G.names[Number(name)] = String(text);
   if (G.on) { G.m.def(String(kind), String(name), String(text)); return 0; }
   G.defs.push([String(kind), String(name), String(text)]);
   return 0;
+}
+
+/**
+ * 文件纹理那一格的路径：**名字表下标 -> 脚本那一格目录底下的那个文件**。
+ *
+ * `glsettex(0,"earth.jpg")` 里写的是相对路径，而原版是在脚本旁边跑的（`kzopen` 按 cwd）——
+ * 判据从仓库根跑，所以这儿按 `OMNI_GFX_DIR`（cli 在 `--gfx` 那一摊里摆上的脚本目录）拼。
+ * 绝对路径原样用；反斜杠（语料里有 `..\hei\brick_green.png` 这种）换成正斜杠。
+ */
+function texPath(idx) {
+  const nm = G.names[idx];
+  if (nm === undefined || nm === null) return null;
+  let s = String(nm);
+  let out = '';
+  for (let i = 0; i < s.length; i++) out += s[i] === '\\' ? '/' : s[i];
+  if (out.startsWith('/')) return out;
+  const d = env('OMNI_GFX_DIR');
+  return d === undefined || d === null || d === '' ? out : `${d}/${out}`;
 }
 
 export const GFX_CPU = {

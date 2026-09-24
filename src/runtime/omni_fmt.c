@@ -466,6 +466,7 @@ typedef int (*gfx_gl_attr_fn)(double, const double *);
 typedef void (*gfx_gl_int_fn)(int);
 typedef void (*gfx_gl_mvp_fn)(int, double, double, double, double);
 typedef int (*gfx_gl_tex_fn)(int, int, int, int, int, const double *);
+typedef int (*gfx_gl_texfile_fn)(int, const char *, int);
 
 static struct {
   int tried, on;
@@ -484,6 +485,7 @@ static struct {
   gfx_gl_int_fn prog, blend, bindtex, activetex;
   gfx_gl_mvp_fn mvp, mv;
   gfx_gl_tex_fn tex;
+  gfx_gl_texfile_fn texfile;
 } g_gl;
 
 /* `(gfxdef …)` 登记进来的那几份串（着色器原文与名字表）。它们**在设备开起来之前**就来了
@@ -491,6 +493,24 @@ static struct {
 #define GFX_MAXDEF 128
 static struct { char *kind, *name, *text; } g_gdefs[GFX_MAXDEF];
 static int g_ngdefs;
+
+/* **名字表**（下标 -> 串）：文件纹理那一档要按下标还原成文件名，再按脚本所在的目录
+   （`OMNI_GFX_DIR`）拼成路径 —— 与 `host/gfx-cpu.js` 的 `texPath` 逐句相同。 */
+#define GFX_MAXNAME 256
+static char *g_gnames[GFX_MAXNAME];
+
+/* 文件纹理那一格的路径（回一格静态缓冲；下标不认识回 NULL）。 */
+static const char *gfx_tex_path(int idx) {
+  static char out[1024];
+  if (idx < 0 || idx >= GFX_MAXNAME || g_gnames[idx] == NULL) return NULL;
+  const char *nm = g_gnames[idx];
+  const char *dir = getenv("OMNI_GFX_DIR");
+  if (nm[0] == '/' || dir == NULL || dir[0] == 0) snprintf(out, sizeof(out), "%s", nm);
+  else snprintf(out, sizeof(out), "%s/%s", dir, nm);
+  /* 反斜杠（语料里有 `..\hei\brick_green.png` 这种）换成正斜杠。 */
+  for (char *p = out; *p; p++) if (*p == '\\') *p = '/';
+  return out;
+}
 
 
 static unsigned char *g_glpx = NULL;  /* 读回那一格（w*h*4，RGBA） */
@@ -540,6 +560,7 @@ static int gfx_gl_need(void) {
     g_gl.mvp = (gfx_gl_mvp_fn)dlsym(h, "omni_ev_gl_mvp");
     g_gl.mv = (gfx_gl_mvp_fn)dlsym(h, "omni_ev_gl_mv");
     g_gl.tex = (gfx_gl_tex_fn)dlsym(h, "omni_ev_gl_tex");
+    g_gl.texfile = (gfx_gl_texfile_fn)dlsym(h, "omni_ev_gl_texfile");
     if (g_gl.open == NULL || g_gl.batch == NULL || g_gl.read == NULL) continue;
     if (g_gl.open((int)g_gw, (int)g_gh) != 0) {
       fprintf(stderr, "#gfx gl 开不出来（%s）—— 这一趟走 CPU 备选\n",
@@ -922,6 +943,13 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
       g_gl.bindtex((int)a0);
       return 0.0;
     }
+    /* **文件纹理**（`glsettexfile 槽 名字下标 colmode`，§20）：路径在这一层拼
+       （目录只有宿主知道），解码与上传在设备 —— 与 `host/gfx-cpu.js` 那一格同一手。 */
+    if (!strcmp(nm, "glsettexfile") && argc == 3 && g_gl.texfile != NULL) {
+      const char *p = gfx_tex_path((int)a1);
+      if (p == NULL) return 1.0;
+      return (double)g_gl.texfile((int)a0, p, (int)a2);
+    }
     if (!strcmp(nm, "glactivetexture") && argc == 1 && g_gl.activetex != NULL) {
       /* 实参是 `GL_TEXTURE0 + i`（0x84c0）或者直接是 i —— 两种写法都有。 */
       int u = (int)a0;
@@ -953,6 +981,8 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
   if (!strcmp(nm, "glgettex") && argc == 4) { return 0.0; }
   if (!strcmp(nm, "glgettex") && argc == 5) { return 0.0; }
   if (!strcmp(nm, "glbindtexture") && argc == 1) { return 0.0; }
+  /* GL 挂不上那一趟（CPU 备选）：文件纹理收下不管 —— 与别的纹理那一族同一句话。 */
+  if (!strcmp(nm, "glsettexfile") && argc == 3) { return 0.0; }
   if (!strcmp(nm, "glactivetexture") && argc == 1) { return 0.0; }
   if (!strcmp(nm, "glcapture") && argc == 0) { return 0.0; }
   if (!strcmp(nm, "glcapture") && argc == 4) { return 0.0; }
@@ -1152,6 +1182,14 @@ double omni_gfx_frame_fn(void *f) {
    而这几句在设备开起来之前就到了，所以先存下来，`gfx_gl_need` 挂上之后一趟补过去。
    存的是自己的一份拷贝：`omni_str` 那几格的寿命不由我们说。 */
 double omni_gfx_def(omni_str kind, omni_str name, omni_str text) {
+  /* 名字表在这一层也留一份（文件纹理要按下标还原成文件名，见 `gfx_tex_path`）。 */
+  if (strcmp(omni_cstr(kind), "name") == 0) {
+    int i = atoi(omni_cstr(name));
+    if (i >= 0 && i < GFX_MAXNAME) {
+      free(g_gnames[i]);
+      g_gnames[i] = strdup(omni_cstr(text));
+    }
+  }
   if (g_gl.on && g_gl.def != NULL) {
     g_gl.def(omni_cstr(kind), omni_cstr(name), omni_cstr(text));
     return 0.0;

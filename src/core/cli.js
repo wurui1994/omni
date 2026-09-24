@@ -3197,7 +3197,10 @@ function glPlugin() {
   const stage = workDirFor('gl-stage', key);
   const staged = join(stage, 'libomnigl.dylib');
   const r = spawn(cc, ['-O2', '-w', '-dynamiclib', '-o', staged, ...srcs,
-    '-I', GL_DIR, '-framework', 'OpenGL'], 'c');
+    '-I', GL_DIR, '-framework', 'OpenGL',
+    /* 文件纹理的解码走 ImageIO（§20.2）。 */
+    '-framework', 'ImageIO', '-framework', 'CoreGraphics',
+    '-framework', 'CoreFoundation'], 'c');
 
   if (r[0] !== 0) {
     vStep(`gl plugin  ${cc} 编不过，这一趟走 CPU 光栅器`);
@@ -3238,7 +3241,10 @@ function evGlAddon() {
   const shared = ['-fPIC', '-shared']
     .concat(hostIsDarwin() ? ['-undefined', 'dynamic_lookup'] : []);
   const r = spawn(cc, ['-O2', '-w', ...shared, '-o', staged, ...srcs,
-    '-I', RUNTIME_DIR, '-framework', 'OpenGL'], 'c');
+    '-I', RUNTIME_DIR, '-framework', 'OpenGL',
+    /* 文件纹理的解码走 ImageIO（§20.2）。 */
+    '-framework', 'ImageIO', '-framework', 'CoreGraphics',
+    '-framework', 'CoreFoundation'], 'c');
   if (r[0] !== 0) {
     vStep(`gl addon  ${cc} 编不过，js 腿那一趟走 CPU 备选`);
     return null;
@@ -4748,6 +4754,11 @@ function timeoutBudgetS(name, dflt) {
 function applyGfxFlags(verb, path, rest) {
   if (verb !== 'run' || path === undefined || path === null) return;
   if (!(path.endsWith('.pss') || path.endsWith('.kc'))) return;
+  /* **素材（文件纹理）按脚本所在的目录找**：`glsettex(0,"earth.jpg")` 里那是个相对路径，
+     而原版是在脚本旁边跑的（`kzopen` 按 cwd）。判据从仓库根跑，所以这儿把脚本那一格目录
+     交给设备（`OMNI_GFX_DIR`）—— 环境变量对两条腿都管用（js 腿同进程、原生腿继承）。 */
+  const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  setEnv('OMNI_GFX_DIR', cut > 0 ? path.slice(0, cut) : '.');
   const val = (n) => {
     const i = rest.indexOf(n);
     return i >= 0 && rest[i + 1] !== undefined ? rest[i + 1] : undefined;

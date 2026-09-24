@@ -39,7 +39,9 @@ const probe = join(out, 'probe');
 const cc = (args) => spawnSync('clang', args, { encoding: 'utf8', cwd: ROOT });
 
 const r1 = cc(['-O2', '-w', '-dynamiclib', '-o', lib,
-  join(ROOT, 'src/runtime-gl/omni_ev_gl.c'), '-framework', 'OpenGL']);
+  join(ROOT, 'src/runtime-gl/omni_ev_gl.c'), '-framework', 'OpenGL',
+  /* 文件纹理的解码走 ImageIO（§20.2）—— 与 cli 那两处编插件的旗子一致。 */
+  '-framework', 'ImageIO', '-framework', 'CoreGraphics', '-framework', 'CoreFoundation']);
 if (r1.status !== 0) {
   no('插件编得出来', (r1.stderr ?? '').trim().slice(0, 300));
 } else {

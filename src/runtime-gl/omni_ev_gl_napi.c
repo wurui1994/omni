@@ -45,6 +45,7 @@ void omni_ev_gl_mvp(int col, double m0, double m1, double m2, double m3);
 void omni_ev_gl_mv(int col, double m0, double m1, double m2, double m3);
 void omni_ev_gl_blend(int mode);
 int omni_ev_gl_tex(int slot, int w, int h, int d, int fmt, const double *px);
+int omni_ev_gl_texfile(int slot, const char *path, int colmode);
 void omni_ev_gl_bindtex(int slot);
 void omni_ev_gl_activetex(int unit);
 
@@ -164,6 +165,16 @@ static napi_value jsShader(napi_env env, napi_callback_info info) {
   if (v == NULL) return mknum(env, 1);
   int r = omni_ev_gl_shader((int)n, v);
   free(v);
+  return mknum(env, r);
+}
+
+/** `texfile(槽, "路径", colmode)` —— 文件纹理（§20）。 */
+static napi_value jsTexfile(napi_env env, napi_callback_info info) {
+  ARGS(3);
+  char *p = str(env, a[1]);
+  if (p == NULL) return mknum(env, 1);
+  int r = omni_ev_gl_texfile((int)num(env, a[0]), p, (int)num(env, a[2]));
+  free(p);
   return mknum(env, r);
 }
 
@@ -289,6 +300,7 @@ napi_value napi_register_module_v1(napi_env env, napi_value exports) {
   PUT("mv", jsMv);
   PUT("blend", jsBlend);
   PUT("tex", jsTex);
+  PUT("texfile", jsTexfile);
   PUT("bindtex", jsBindtex);
   PUT("activetex", jsActivetex);
   PUT("error", jsError);

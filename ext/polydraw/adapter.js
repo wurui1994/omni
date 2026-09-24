@@ -122,6 +122,9 @@ const SHADER_FNS = new Map([
   ['gltexcoord/3', []],
   ['gltexcoord/4', []],
   ['glnormal/3', []],
+  /* **文件纹理**（`glsettex(槽,"earth.jpg"[,colmode])`）：第 1 格是串（§20）。 */
+  ['glsettex/2', [1]],
+  ['glsettex/3', [1]],
   ['glgetattribloc/1', [0]],
   ['glvertexattrib1f/2', []],
   ['glvertexattrib2f/3', []],

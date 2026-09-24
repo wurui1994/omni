@@ -37,6 +37,9 @@
 #include <OpenGL/OpenGL.h>
 /* core profile ⇒ `gl3.h`（3.2+ 的那套符号，没有被弃用的那一半）。 */
 #include <OpenGL/gl3.h>
+/* 文件纹理的解码走这台机器的 ImageIO（§20.2）—— 与上下文用 CGL 同一条道理。 */
+#include <CoreGraphics/CoreGraphics.h>
+#include <ImageIO/ImageIO.h>
 
 /* 出错把话留在这儿，宿主用 `omni_ev_gl_error()` 取（插件不自己往 stderr 喷 ——
    那会把判据那一侧的 stdout/stderr 弄脏）。 */
@@ -81,7 +84,7 @@ static struct { GLuint prog; GLint loc; } g_uni[EV_MAXUNI];
 static int g_nuni;
 static struct { GLint loc; float v[4]; } g_attr[EV_MAXATTR];
 static int g_nattr;
-static struct { GLuint id; int w, h, fmt; int slot; } g_tex[EV_MAXTEX];
+static struct { GLuint id; int w, h, fmt; int slot; GLenum tar; } g_tex[EV_MAXTEX];
 static int g_ntex;
 
 static GLuint g_cur;             /* 现在挑着的那格 program（0 = 还没挑） */
@@ -519,22 +522,74 @@ static int ev_tex_slot(int slot) {
   for (int i = 0; i < g_ntex; i++) if (g_tex[i].slot == slot) return i;
   if (g_ntex >= EV_MAXTEX) return -1;
   g_tex[g_ntex].slot = slot;
+  g_tex[g_ntex].tar = GL_TEXTURE_2D;
   glGenTextures(1, &g_tex[g_ntex].id);
   return g_ntex++;
 }
 
 /** 过滤与环绕那两段位（`0xf0` / `0xf00`）-> GL 的参数。回 1 = 要 mipmap。 */
-static int ev_tex_params(int fmt) {
+static int ev_tex_params_t(GLenum tar, int fmt) {
   int filt = fmt & 0xf0;
   int wrap = fmt & 0xf00;
   int mip = filt >= 0x20;
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filt == 0x10 ? GL_NEAREST : GL_LINEAR);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+  glTexParameteri(tar, GL_TEXTURE_MAG_FILTER, filt == 0x10 ? GL_NEAREST : GL_LINEAR);
+  glTexParameteri(tar, GL_TEXTURE_MIN_FILTER,
                   mip ? GL_LINEAR_MIPMAP_LINEAR : (filt == 0x10 ? GL_NEAREST : GL_LINEAR));
   GLint w = wrap == 0x100 ? GL_MIRRORED_REPEAT : (wrap == 0 ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, w);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, w);
+  glTexParameteri(tar, GL_TEXTURE_WRAP_S, w);
+  glTexParameteri(tar, GL_TEXTURE_WRAP_T, w);
+  if (tar == GL_TEXTURE_CUBE_MAP) glTexParameteri(tar, GL_TEXTURE_WRAP_R, w);
   return mip;
+}
+
+static int ev_tex_params(int fmt) { return ev_tex_params_t(GL_TEXTURE_2D, fmt); }
+
+/**
+ * **一张图 -> 一块 RGBA8**（宽高写回 `*w`/`*h`，回 NULL = 读不到/解不开；调用方 `free`）。
+ *
+ * 用这台机器的 ImageIO（`CGImageSource`）—— 与上下文用 CGL 同一条道理：平台给的直接用。
+ * 画进 `CGBitmapContext` 那一步顺手把方向摆正：CG 的原点在左下、GL 的纹理坐标原点也在
+ * 左下，但 `CGContextDrawImage` 出来的行序与我们要的相反，所以**按行倒着抄一趟**
+ * （与 `omni_ev_gl_read` 里翻正那一手同一个理）。
+ */
+static unsigned char *ev_img_load(const char *path, int *w, int *h) {
+  CFStringRef sp = CFStringCreateWithCString(NULL, path, kCFStringEncodingUTF8);
+  if (sp == NULL) return NULL;
+  CFURLRef url = CFURLCreateWithFileSystemPath(NULL, sp, kCFURLPOSIXPathStyle, false);
+  CFRelease(sp);
+  if (url == NULL) return NULL;
+  CGImageSourceRef src = CGImageSourceCreateWithURL(url, NULL);
+  CFRelease(url);
+  if (src == NULL) return NULL;
+  CGImageRef img = CGImageSourceCreateImageAtIndex(src, 0, NULL);
+  CFRelease(src);
+  if (img == NULL) return NULL;
+  int iw = (int)CGImageGetWidth(img);
+  int ih = (int)CGImageGetHeight(img);
+  if (iw <= 0 || ih <= 0) { CGImageRelease(img); return NULL; }
+  unsigned char *buf = (unsigned char *)malloc((size_t)4 * (size_t)iw * (size_t)ih);
+  unsigned char *out = (unsigned char *)malloc((size_t)4 * (size_t)iw * (size_t)ih);
+  if (buf == NULL || out == NULL) {
+    free(buf); free(out); CGImageRelease(img); return NULL;
+  }
+  CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+  CGContextRef ctx = CGBitmapContextCreate(buf, (size_t)iw, (size_t)ih, 8, (size_t)4 * (size_t)iw,
+                                           cs, kCGImageAlphaPremultipliedLast);
+  CGColorSpaceRelease(cs);
+  if (ctx == NULL) { free(buf); free(out); CGImageRelease(img); return NULL; }
+  CGRect r;
+  r.origin.x = 0; r.origin.y = 0; r.size.width = iw; r.size.height = ih;
+  CGContextDrawImage(ctx, r, img);
+  CGContextRelease(ctx);
+  CGImageRelease(img);
+  for (int y = 0; y < ih; y++) {
+    memcpy(out + (size_t)4 * (size_t)iw * (size_t)y,
+           buf + (size_t)4 * (size_t)iw * (size_t)(ih - 1 - y), (size_t)4 * (size_t)iw);
+  }
+  free(buf);
+  *w = iw;
+  *h = ih;
+  return out;
 }
 
 int omni_ev_gl_tex(int slot, int w, int h, int d, int fmt, const double *px) {
@@ -588,6 +643,57 @@ int omni_ev_gl_tex(int slot, int w, int h, int d, int fmt, const double *px) {
   return 0;
 }
 
+/**
+ * **文件纹理**（`glsettex(槽,"earth.jpg")`，`polydraw.c:1279` 的 `kglsettex2`）。
+ *
+ * 解码用的是**这台机器上的 ImageIO**（`CGImageSource`）—— 与 CGL 那一格同一条道理：
+ * 平台给的东西直接用，不自己再写一份 JPEG/PNG 解码器（参考实现那边用的是 stb_image）。
+ * 于是这一刀只有**一份实现**：C 腿直接链它、js/interp 两条腿走 N-API 那个外挂。
+ *
+ * 立方体贴图的判据照参考：**竖排 6 面**（`宽*6 == 高`），面序 +X,-X,+Y,-Y,+Z,-Z
+ * （`c_impl/src/render/gl_renderer.c:1504-1563`；原版是 `CreateEmptyTexture` 里定的，
+ * 那一格不在 `polydraw_src` 里）。
+ *
+ * `colmode` 就是 `KGL_*` 那个打包好的数；一格串那一档的默认是 `KGL_MIPMAP+KGL_REPEAT`
+ * （`polydraw.c:1346`）—— 默认值由语言那一侧给，这儿只照办。
+ * 回 0 = 成了；读不到/解不开回非 0（**不画占位图** —— 原版那张里有 `rand()` 噪声，
+ * 逐像素对照本来就不成立，见 §20.3）。
+ */
+int omni_ev_gl_texfile(int slot, const char *path, int colmode) {
+  if (!g_on || path == NULL) return 1;
+  CGLSetCurrentContext(g_ctx);
+  int w = 0, h = 0;
+  unsigned char *px = ev_img_load(path, &w, &h);
+  if (px == NULL) { ev_err("glsettex：读不到/解不开 '%s'", path); return 1; }
+  int i = ev_tex_slot(slot);
+  if (i < 0) { free(px); return 1; }
+  int cube = (w > 0) && (w * 6 == h);
+  GLenum tar = cube ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
+  g_tex[i].tar = tar;
+  glActiveTexture(GL_TEXTURE0 + g_texunit);
+  glBindTexture(tar, g_tex[i].id);
+  if (cube) {
+    static const GLenum faces[6] = {
+      GL_TEXTURE_CUBE_MAP_POSITIVE_X, GL_TEXTURE_CUBE_MAP_NEGATIVE_X,
+      GL_TEXTURE_CUBE_MAP_POSITIVE_Y, GL_TEXTURE_CUBE_MAP_NEGATIVE_Y,
+      GL_TEXTURE_CUBE_MAP_POSITIVE_Z, GL_TEXTURE_CUBE_MAP_NEGATIVE_Z,
+    };
+    int fh = h / 6;
+    for (int f = 0; f < 6; f++) {
+      glTexImage2D(faces[f], 0, GL_RGBA8, w, fh, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                   px + (size_t)4 * (size_t)w * (size_t)fh * (size_t)f);
+    }
+  } else {
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+  }
+  if (ev_tex_params_t(tar, colmode)) glGenerateMipmap(tar);
+  g_tex[i].w = w;
+  g_tex[i].h = h;
+  g_tex[i].fmt = colmode;
+  free(px);
+  return 0;
+}
+
 /** `glbindtexture(槽)` / `glactivetexture(单元)`：把那一槽挂到现在这格单元上。 */
 void omni_ev_gl_bindtex(int slot) {
   if (!g_on) return;
@@ -595,7 +701,7 @@ void omni_ev_gl_bindtex(int slot) {
   int i = ev_tex_slot(slot);
   if (i < 0) return;
   glActiveTexture(GL_TEXTURE0 + g_texunit);
-  glBindTexture(GL_TEXTURE_2D, g_tex[i].id);
+  glBindTexture(g_tex[i].tar, g_tex[i].id);
 }
 
 void omni_ev_gl_activetex(int unit) {
