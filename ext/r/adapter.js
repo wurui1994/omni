@@ -202,6 +202,7 @@ const FN_DEPS = new Map([
   ['r_lower', []],
   ['r_pick_str', []],
   ['r_mask_str', ['r_is_na']],
+  ['r_drop_na', ['r_is_na']],
   /* 三态逻辑那一族（`RLGL1` 那段账）。比较那六格各发一个函数 —— 不摊在调用点上是
      因为"两边各读两遍"要临时量，而临时量在**条件位**上没地方摆（`while` 的条件被降级到
      循环外头，摊开的 `let` 会变成"只算一次"）。一次函数调用是纯表达式，哪儿都放得下。 */
@@ -518,6 +519,30 @@ function numLit(text) {
   if (t.includes('.') || /[eE]/.test(t)) return { kind: 'real', value: Number(t) };
   return { kind: 'int', value: Number(t) };
 }
+
+/**
+ * **每个内建认得哪些命名实参**。表外的名字当场报 —— 从前是静默丢掉，而
+ * `sum(x, na.rm = TRUE)` 被丢掉之后答的是 `NA`（R 答 4），那是静默答错。
+ *
+ * 只登记"真的接住了"的那些。R 那边还有一大把（`decreasing=` / `each=` / `length.out=` /
+ * `na.last=` / `digits=` / `quote=`…）—— 它们**不在这张表里**，于是当场报，不猜。
+ */
+const NA_RM = new Set(['na.rm']);
+const NAMED_OK = new Map([
+  ['cat', new Set(['sep'])],
+  ['paste', new Set(['sep', 'collapse'])],
+  ['paste0', new Set(['sep', 'collapse'])],
+  ['sum', NA_RM], ['prod', NA_RM], ['mean', NA_RM], ['max', NA_RM], ['min', NA_RM],
+  ['range', NA_RM], ['var', NA_RM], ['sd', NA_RM], ['any', NA_RM], ['all', NA_RM],
+  /* `sort` 上**没有** `na.rm=` —— R 自己都报"参数没有用(na.rm = TRUE)"（它的默认
+     `na.last = NA` 已经是"丢掉缺失"了）。量出来的：我们本来跟着收了，比 R 宽。 */
+  ['head', new Set(['n'])], ['tail', new Set(['n'])],
+  ['rep', new Set(['times'])],
+  ['seq', new Set(['by'])],
+  ['numeric', new Set(['length'])], ['double', new Set(['length'])],
+  ['integer', new Set(['length'])], ['logical', new Set(['length'])],
+  ['character', new Set(['length'])],
+]);
 
 /* ─── 内建（表外的名字当用户函数调） ──────────────────────────────────────
  *
@@ -1726,6 +1751,22 @@ function callOf(x, types, extra, want) {
   const all = extra === undefined ? args : [null, ...args];
   const ev = (i) => (all[i] === null ? extra : exprOf(all[i], types));
   const n = all.length;
+  /**
+   * `na.rm = TRUE / FALSE` —— **只认字面量**（运行期的旗子要两条路都发，那是另一件事）。
+   * 回 true 时把那格向量先过一遍 `r_drop_na`（见那个函数上的账）。
+   */
+  const naRmOn = () => {
+    const node = namedArg(x, 'na.rm');
+    if (node === undefined) return false;
+    const txt = tag(node) === 'num' ? String(leaf(kids(node)[0])) : null;
+    if (txt === 'TRUE' || txt === 'T') return true;
+    if (txt === 'FALSE' || txt === 'F') return false;
+    throw new Error(`r->IR: ${fn}() 的 na.rm= 只认字面量 TRUE / FALSE（给的是一格要算的值）`);
+  };
+  /** 那格向量实参按 `na.rm` 收一遍（不开就原样过）。 */
+  const dropNa = (e) => (naRmOn()
+    ? { kind: 'call', fn: { kind: 'name', name: useFn('r_drop_na') }, args: [e] }
+    : e);
 
   /* `is.na` / `is.nan`：走那两格按指针的生成函数（载荷不能按值过，见 `PTR_REAL` 那段）。 */
   if (fn === 'is.na' || fn === 'is.nan') {
@@ -1769,6 +1810,17 @@ function callOf(x, types, extra, want) {
   }
 
   if (fn !== null && BUILTINS.has(fn)) {
+    /* **命名实参先过一遍白名单**。为什么要这一格：认不出来的命名实参从前是被**静默丢掉**的
+       —— `sum(x, na.rm = TRUE)` 里那个 `na.rm` 直接没了，于是答的是 `NA` 而 R 答 4。
+       那是静默答错，比当场报难查得多（量出来的）。 */
+    for (const a of argsOf(x)) {
+      if (a.name === null) continue;
+      const ok = NAMED_OK.get(fn);
+      if (ok === undefined || !ok.has(a.name)) {
+        throw new Error(`r->IR: ${fn}() 的命名实参 \`${a.name}=\` 还没接`
+          + `（这一格接的是：${ok === undefined || ok.size === 0 ? '一个都没有' : [...ok].join(' / ')}）`);
+      }
+    }
     switch (fn) {
       case 'return':
         throw new Error('r->IR: `return()` 只能摆在语句位上（这儿在表达式里）');
@@ -2025,7 +2077,7 @@ function callOf(x, types, extra, want) {
         const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
         if (isStrVec(t)) throw new Error(strvGap(fn));
         if (!isVecTy(t)) throw new Error(`r->IR: ${fn}() 的实参不是向量（是 ${t.kind}）`);
-        return lglCall(`r_${fn}`, ev(0));
+        return lglCall(`r_${fn}`, dropNa(ev(0)));
       }
       case 'head': case 'tail': {
         /* 第二格是"取几格"，缺省 6（R 的文档）；也认 `n=`。 */
@@ -2111,7 +2163,7 @@ function callOf(x, types, extra, want) {
         }
         const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
         if (!isVecTy(t)) return asLgl(ev(0), t);
-        return lglCall(fn === 'any' ? 'r_any' : 'r_all', ev(0));
+        return lglCall(fn === 'any' ? 'r_any' : 'r_all', dropNa(ev(0)));
       }
       case 'sum': case 'mean': case 'max': case 'min': {
         /* 向量那一档走生成出来的函数；标量那一档（`max(a, b)`）归 `pmax`/`pmin` 那张表。 */
@@ -2124,7 +2176,7 @@ function callOf(x, types, extra, want) {
         const name = useFn({
           sum: 'r_sum', mean: 'r_mean', max: 'r_max', min: 'r_min',
         }[fn]);
-        return { kind: 'call', fn: { kind: 'name', name }, args: [ev(0)] };
+        return { kind: 'call', fn: { kind: 'name', name }, args: [dropNa(ev(0))] };
       }
       case 'as.integer': return call1('toint', ev(0));
       case 'as.numeric': return call1('toreal', ev(0));
@@ -3921,6 +3973,41 @@ function vecFnDecl(name) {
   /* ── base 里那一族"向量进向量出"的（`sort` / `cumsum` / `diff` / …）───────
      缺失那一格各有各的口径，照 R 的文档办：`sort` **把 NA 丢掉**（`na.last = NA`），
      `cumsum` / `prod` / `var` / `sd` 按浮点自然传播，`range` 有一格 NA 就整个 `NA NA`。 */
+  if (name === 'r_drop_na') {
+    /* `na.rm = TRUE` 那一格：先抄出一条"没有缺失的"，再照常算。
+       为什么是"先滤再算"而不是给每个聚合函数加一个开关：`sum` / `mean` / `max` / `min` /
+       `prod` / `var` / `sd` / `range` / `any` / `all` 在 R 里 `na.rm` 的意思**就是**
+       "把 NA 当不存在"，滤一遍与逐个函数里跳过同解（`mean` 的分母也跟着变小）。
+       一处写法、九个函数都对，而且不用改那几个函数的签名。 */
+    const out = { kind: 'name', name: 'o' };
+    const kk = { kind: 'name', name: 'k' };
+    const keep = { kind: 'unop', op: '!', operand: naQ(elem) };   /* `r_is_na` 回的是 bool */
+    return {
+      kind: 'fn',
+      name,
+      params: P,
+      ret: RVEC,
+      body: [
+        declLen(),
+        { kind: 'let', name: 'k', type: INT, init: { kind: 'int', value: 0 } },
+        loop([{
+          kind: 'if', cond: keep, then: [{ kind: 'assign', target: kk, value: b('+', kk, { kind: 'int', value: 1 }) }], else_: null,
+        }], 0),
+        ...vecNewAs('o', kk),
+        { kind: 'assign', target: kk, value: { kind: 'int', value: 0 } },
+        loop([{
+          kind: 'if',
+          cond: keep,
+          then: [
+            vecSet(out, kk, elem),
+            { kind: 'assign', target: kk, value: b('+', kk, { kind: 'int', value: 1 }) },
+          ],
+          else_: null,
+        }], 0),
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
   if (name === 'r_sort') {
     /* Shell 排序（Knuth 的 gap 序列 1, 4, 13, 40…）。R 自己用的是快排/基数排序
        （`src/main/sort.c`，那半边在解释器里、不在 nmath），而"全排序"的结果是唯一的
@@ -4326,8 +4413,7 @@ function vecFnDecl(name) {
       ],
     };
   }
-  if (name === 'r_iota') {
-    /* `seq_along(字符向量)` 要的那一格：`1 … k` 一条数值向量（长度从 `alen` 来）。 */
+  if (name === 'r_iota') {    /* `seq_along(字符向量)` 要的那一格：`1 … k` 一条数值向量（长度从 `alen` 来）。 */
     const out = { kind: 'name', name: 'o' };
     const kk = { kind: 'name', name: 'k' };
     return {

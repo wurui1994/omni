@@ -185,6 +185,9 @@ R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不�
 （`max(c(1, NA))` 是 `NA` —— 按 `>` 比是躲不过去的：`NaN > x` 恒假会把 NA 悄悄跳过，
 所以那一格每元素先问一句 `is.na`）、`cumsum` / `prod` / `var` / `sd` 按浮点自然传播。
 
+`na.rm = TRUE` 那一格**先滤再算**（`r_drop_na` 抄出一条没有缺失的）：这与"每个函数里各自
+跳过"同解，而且 `mean` 的分母跟着变小、一处写法九个函数都对。只认字面量 `TRUE` / `FALSE`。
+
 ### 字符向量：**另一种存法**（`(arr string)`）
 
 `c("a", "bb")` 不走上面那条 `(ptr real)` —— 它是方言的 `(arr string)`（0 起、长度问
@@ -386,9 +389,16 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
 6. `print` 那一层只接**一格实参**（`digits=` / `quote=` 那几个命名实参没接），
    串里的引号与反斜杠**不转义**（R 印 `"a\"b"`，我们印 `"a"b"`），
    `list` 的 `print` 没接（那要 `$名字` 那一层）。
-   base 那一族向量函数的命名实参也只认要紧的那几个（`head`/`tail` 的 `n=`、`rep` 的
-   `times=`、`seq` 的 `by=`）—— `na.rm=` / `decreasing=` / `each=` / `length.out=` /
-   `seq(n)` 那几种写法**当场报**，不猜。
+   **命名实参过一张白名单**（`adapter.js` 的 `NAMED_OK`）：认得的是 `cat` 的 `sep=`、
+   `paste` 的 `sep=` / `collapse=`、聚合那一族的 `na.rm=`（`sum` / `prod` / `mean` /
+   `max` / `min` / `range` / `var` / `sd` / `any` / `all`）、`head`/`tail` 的 `n=`、
+   `rep` 的 `times=`、`seq` 的 `by=`、`numeric(n)` 那一族的 `length=`。
+   **表外的一律当场报** —— `decreasing=` / `each=` / `length.out=` / `na.last=` /
+   `digits=` / `quote=` 都在表外。这张表是为了躲一种静默答错：从前认不出来的命名实参
+   被**直接丢掉**，于是 `sum(x, na.rm = TRUE)` 答 `NA` 而 R 答 4（量出来的）。
+   `na.rm = TRUE` 的落法是**先滤一遍再算**（`r_drop_na`），与"每个函数里各自跳过"同解；
+   只认字面量 `TRUE` / `FALSE`（运行期的旗子要两条路都发，那是另一件事）。
+   `sort` 上**没有** `na.rm=`（R 自己都报"参数没有用"）—— 它默认就丢掉缺失。
 7. 语法层两处：带 `-` 的原始串（`r"---(…)---"`，两侧个数要相同，这套词法项表达不了）、
    非 ASCII 字母的名字（`alpha` 只有 ASCII）。
 8. `c()` 不带实参在 R 里是 `NULL`，这一档落成**零长向量** —— 最常用的那个写法上同解
