@@ -95,6 +95,7 @@ const SHADER_FNS = new Map([
   ['glsetshader/1', [0]],
   ['glsetshader/2', [0, 1]],
   ['glsetshader/3', [0, 1, 2]],
+  ['glquad/0', []],
   ['glquad/1', []],
   ['glgetuniformloc/1', [0]],
   ['gluniform/2', []],

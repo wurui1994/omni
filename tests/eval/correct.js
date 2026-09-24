@@ -20,7 +20,7 @@
 // 我们出 `.rgba`（裸表面，没有编码那一层）；参考出 PNG，用它自带的 `pd-imgdecode`
 // 转成 PPM（P6）再读 —— 都不经过第三方解码器，省掉"解码器差一位"那类假差。
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -64,18 +64,26 @@ const REF_WRONG = new Map([
 /** 这一格分辨率下该用多大的 fovy（度）—— 照 `ksetfov`：`tan(fovy/2) = 高/宽`。 */
 const fovyOf = (w, h) => (Math.atan(h / w) * 360) / Math.PI;
 
-/** 那一批**基本例子**（语料的 `examples/`）+ 我们自己那几份。 */
+/**
+ * 例子集：**`polydraw/` 底下全部 `.pss`**（`examples/` + `ken/` + `tigrou/`）+ 我们自己那几份。
+ * `--dir` 只跑某一棵（`--dir ken`），`--only` 按名字过滤（**逗号分隔、取并集** ——
+ * 按根因分组修的时候一趟就能把那一族都量上：`--only fractal,cubes,tree`）。
+ */
 function cases() {
   const out = [];
-  try {
-    for (const f of readdirSync(`${PSS}/examples`).sort()) {
-      if (f.endsWith('.pss')) out.push(`${PSS}/examples/${f}`);
-    }
-  } catch { /* 没有那棵树就只跑我们自己的 */ }
-  for (const f of ['02-gl.pss', '04-shader.pss', '05-shader-geom.pss', '06-texture.pss']) {
-    out.push(join(ROOT, 'ext/polydraw/examples', f));
+  const dirs = (val('--dir', 'examples,ken,tigrou')).split(',').filter((d) => d !== '');
+  for (const d of dirs) {
+    let names = [];
+    try { names = readdirSync(`${PSS}/${d}`).sort(); } catch { continue; }
+    for (const f of names) if (f.endsWith('.pss')) out.push(`${PSS}/${d}/${f}`);
   }
-  return out.filter((f) => (CFG.only === '' || f.includes(CFG.only)) && existsSync(f));
+  if (val('--dir', '') === '') {
+    for (const f of ['02-gl.pss', '04-shader.pss', '05-shader-geom.pss', '06-texture.pss']) {
+      out.push(join(ROOT, 'ext/polydraw/examples', f));
+    }
+  }
+  const pats = CFG.only.split(',').filter((s) => s !== '');
+  return out.filter((f) => (pats.length === 0 || pats.some((p) => f.includes(p))) && existsSync(f));
 }
 
 /** 我们那一趟：`--gfx gl` 出一张裸表面。回像素（RGBA）或 null + 原因。 */
@@ -205,6 +213,9 @@ for (const r of rows.sort((a, b) => (b.rmse ?? 1e9) - (a.rmse ?? 1e9))) {
     + `  ${(r.mx === undefined ? '—' : String(r.mx)).padStart(6)}`
     + `  ${r.cls.padEnd(10)}  ${r.name}${r.why ? `  （${r.why.slice(0, 60)}）` : ''}\n`);
 }
+writeFileSync(join(OUT, 'account.json'),
+  `${JSON.stringify({ cfg: CFG, rows }, null, 2)}\n`);
+P(`\n账落在 ${join(OUT, 'account.json')}\n`);
 P(`\n${pass} passed, ${fail} failed${skip > 0 ? `, ${skip} 跳过` : ''}（出图正确性：`
   + `与 c_impl 逐像素对照）\n`);
 process.exit(fail === 0 ? 0 : 1);

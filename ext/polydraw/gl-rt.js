@@ -117,6 +117,9 @@ export const POLYDRAW_GL = new Map([
   ['glsetshader/1', 'gl_setshader1'],
   ['glsetshader/2', 'gl_setshader2'],
   ['glsetshader/3', 'gl_setshader3'],
+  /* `glquad()` **0 实参那一档**（`myext[]` 里登记的就是 `GLQUAD()`，语料里九份这么写）：
+     照原版 `qglQuad(alpha)` —— alpha 没给就是 0，也就是**开 alpha 混合**那一档。 */
+  ['glquad/0', 'gl_quad0'],
   ['glquad/1', 'gl_quad'],
   ['gltexcoord/2', 'gl_texcoord2'],
   ['gltexcoord/3', 'gl_texcoord3'],
@@ -369,6 +372,9 @@ function glShaderDecls() {
       ex(dev('batchblend', [num(1)])),
       ret(num(0)),
     ]),
+    /* `glquad()`（0 实参）—— `myext[]` 里 `GLQUAD()` 就是这一档，语料里九份这么写。
+       照原版 `qglQuad(alpha)`：alpha 没给就是 0，也就是**开 alpha 混合**那一档。 */
+    fn('gl_quad0', [], [ex(call('gl_quad', [num(0)])), ret(num(0))]),
   ];
 }
 
