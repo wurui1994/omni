@@ -184,7 +184,8 @@ const clamp01 = (v) => (v < 0 ? 0 : (v > 255 ? 1 : v / 255));
  *
  * `mvpVer` 是 `u_mvp` 的版本号：变了就把顶点断成另一段（uniform 是**按 draw call** 摆的）。
  */
-const B = { prog: 0, mvp: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], mvpVer: 0, blend: 1 };
+const B = { prog: 0, mvp: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+  mv: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], mvpVer: 0, blend: 1 };
 
 /**
  * 现在该往哪一段里攒。**几样都一致才接着上一段**：图元类、深度测试、用哪格 program、
@@ -282,7 +283,7 @@ function cone(x0, y0, r0, x1, y1, r1) {
 function flush() {
   const gl = D.gl;
   if (gl === null) return;
-  const ST = 48;                    /* 一格顶点 12 个 float */
+  const ST = 64;                    /* 一格顶点 16 个 float（位置/颜色/纹理坐标/法向） */
   for (const b of D.batches) {
     if (b.v.length === 0) continue;
     const prog = b.prog === null ? D.prog : b.prog;
@@ -292,10 +293,14 @@ function flush() {
     } else {
       const mvp = gl.getUniformLocation(prog, 'u_mvp');
       if (mvp !== null) gl.uniformMatrix4fv(mvp, false, new Float32Array(b.mvp));
+      /* `u_mv` 是模型视图那一格（`gl_ModelViewMatrix` / `gl_NormalMatrix` 用它）。 */
+      const mvloc = gl.getUniformLocation(prog, 'u_mv');
+      if (mvloc !== null) gl.uniformMatrix4fv(mvloc, false, new Float32Array(b.mv));
     }
     gl.bindBuffer(gl.ARRAY_BUFFER, D.buf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(b.v), gl.STREAM_DRAW);
-    for (const [nm2, size, off] of [['a_pos', 4, 0], ['a_col', 4, 16], ['a_tex', 4, 32]]) {
+    for (const [nm2, size, off] of [['a_pos', 4, 0], ['a_col', 4, 16], ['a_tex', 4, 32],
+      ['a_nrm', 4, 48]]) {
       const loc = gl.getAttribLocation(prog, nm2);
       if (loc < 0) continue;
       gl.enableVertexAttribArray(loc);
@@ -315,7 +320,7 @@ function flush() {
     } else {
       gl.disable(gl.BLEND);
     }
-    gl.drawArrays(b.kind === 'tri' ? gl.TRIANGLES : gl.LINES, 0, b.v.length / 12);
+    gl.drawArrays(b.kind === 'tri' ? gl.TRIANGLES : gl.LINES, 0, b.v.length / 16);
   }
   gl.disable(gl.BLEND);
   D.batches.length = 0;
@@ -715,6 +720,13 @@ function call(name, args) {
       B.mvpVer += 1;
       return 0;
     }
+    /* 模型视图那一格（`u_mv`）—— 与上一格逐字同形，见 §18.4。 */
+    case 'batchmv/5': {
+      const c = Math.trunc(a(0)) & 3;
+      for (let k = 0; k < 4; k++) B.mv[c * 4 + k] = a(1 + k);
+      B.mvpVer += 1;
+      return 0;
+    }
     case 'batchblend/1': B.blend = Math.trunc(a(0)); return 0;
     /* ── 纹理那一族（见 `TX` 的头注）。挑单元 / 挑槽都是**按 draw call 的状态** ——
        语言那一侧已经先 `gl_flush()` 了（`gl_bindtex`/`gl_activetex`）。 */
@@ -875,6 +887,7 @@ function reset() {
      program 不许跟到下一份头上。 */
   B.prog = 0;
   B.mvp = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  B.mv = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
   B.mvpVer = 0;
   B.blend = 1;
   /* 着色器那一摊也要清：`SH.progs` 是**按名字**缓存的，改过 `@f` 区段之后名字没变、
@@ -931,9 +944,10 @@ function batchIn(kind, n, verts) {
   const prog = B.prog === 0 ? null : SH.cur;
   if (prog !== null) {
     const b = batch(kind === 0 ? 'line' : 'tri', prog, B.mvp.slice());
+    b.mv = B.mv.slice();
     for (let i = 0; i < n; i++) {
-      const o = i * 12;
-      for (let k = 0; k < 12; k++) b.v.push(verts[o + k]);
+      const o = i * 16;
+      for (let k = 0; k < 16; k++) b.v.push(verts[o + k]);
     }
     return n;
   }
@@ -946,21 +960,24 @@ function batchIn(kind, n, verts) {
   if (kind === 2) {
     const b = batch('tri');
     for (let i = 0; i < n; i++) {
-      const o = i * 12;
+      const o = i * 16;
       const [x, y, z] = sx(o);
       const c = [verts[o + 4], verts[o + 5], verts[o + 6], verts[o + 7]];
       const quad = [[x, y], [x + 1, y], [x + 1, y + 1], [x, y], [x + 1, y + 1], [x, y + 1]];
-      for (const [qx, qy] of quad) b.v.push(qx, qy, z, 1, c[0], c[1], c[2], c[3], 0, 0, 0, 1);
+      for (const [qx, qy] of quad) {
+        b.v.push(qx, qy, z, 1, c[0], c[1], c[2], c[3], 0, 0, 0, 1, 0, 0, 1, 0);
+      }
     }
     return n;
   }
   const b = batch(kind === 0 ? 'line' : 'tri');
   for (let i = 0; i < n; i++) {
-    const o = i * 12;
+    const o = i * 16;
     const [x, y, z] = sx(o);
     b.v.push(x, y, z, 1,
       verts[o + 4], verts[o + 5], verts[o + 6], verts[o + 7],
-      verts[o + 8], verts[o + 9], verts[o + 10], verts[o + 11]);
+      verts[o + 8], verts[o + 9], verts[o + 10], verts[o + 11],
+      verts[o + 12], verts[o + 13], verts[o + 14], verts[o + 15]);
   }
   return n;
 }

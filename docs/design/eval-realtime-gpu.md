@@ -1129,3 +1129,72 @@ OpenGL 规范里相反。填成规范原样就等于每次旋转都反着转，�
    那边还没改（studio 判据现在跑的例子里 @v/@f 不同名，所以还没红）；
 3. `05-shader-geom` 那 6.62：每一格都差一点点（最大 38），是几何着色器那一档的插值口径；
 4. 语料里更大的那一批（`ken/` `tigrou/`）还没进这份判据 —— 基本例子清完之后再铺。
+
+## 18. 第八刀的设计：**法向那一格**（`glnormal` / `gl_Normal`，语料里 20 份）
+
+### 18.1 为什么是它
+
+全量扫（58 份判了）之后按根因分组，`glquad()` 那一族（9 份）修完就剩这一格最大：
+`gl_Normal` 18 次、`gl_FrontColor` 5 次、`gl_NormalMatrix` / `gl_ModelViewMatrix` 各 1 次，
+一共 **20 份 `.pss`**（`ken/` 12 份 + `tigrou/` 8 份，含 `balls2k` / `clock` / `drawsph`
+那几份"最吃力"的）。现在它们全都**跑不起来**：内建顶点着色器编不过，
+`Use of undeclared identifier 'gl_Normal'`。
+
+### 18.2 原版的事实（照 `polydraw_src` 抄）
+
+    polydraw.c:620   double qglNormal3d(x,y,z) { glNormal3d(x,y,z); return 0; }
+    polydraw.c:2108  {"GLNORMAL(,,)", qglNormal3d}
+
+就是固定管线那格**当前法向**（与 `glColor` 同一个味道：设一次，之后每个 `glVertex`
+都带着它走），默认值照 GL 规范是 `(0,0,1)`。所以落法与颜色**一模一样**，
+不是新机制：语言那一侧存三格状态，`gl_vertex4` 那一趟抄进顶点。
+
+`clock.pss` 把它当**数据通道**用（`glnormal(shakeshift, shakecolor, xres/yres)`）——
+这更说明不能"归一化一下"或"自己算面法向"：原样送过去，一个字都不动。
+
+### 18.3 顶点从 12 格扩到 16 格
+
+一格顶点（`(gfxbatch 类 数 (arr real))` 的契约，**三档设备 + 两门语言共用**）：
+
+    0..3    位置      x y z w
+    4..7    颜色      r g b a     (0..1)
+    8..11   纹理坐标  s t p q
+    12..15  法向      nx ny nz 0  ← 新增（第四格留 0，凑齐 4 的倍数好摆 attribute）
+
+要一起改的地方（**一个模型**那条规矩：顶点在语言侧、设备只收批）：
+
+* `ext/polydraw/gl-rt.js` —— `VS` 12→16、三格状态 `gl_nx/gl_ny/gl_nz`（初值 0,0,1）、
+  `glnormal/3` -> `gl_normal3`、`gl_vertex4` 多写 4 格、`glquad` 那六个顶点多补 4 格；
+* `src/core/host/gfx-cpu.js` —— `VSTRIDE` 12→16（CPU 备选不读法向，只是别错位）；
+* `src/runtime-gl/omni_ev_gl.c` —— stride 16、attribute 表加 `a_nrm`；
+* `src/studio/gfx-gl.js` —— `ST` 48→64、attribute 表同上；
+* `src/runtime/omni_fmt.c` —— 只是转发，不认格数（不用改）。
+
+### 18.4 `gl_NormalMatrix` / `gl_ModelViewMatrix`：**多发一个矩阵，不新造概念**
+
+现在设备只收 `u_mvp`（语言侧算好的 `gl_pj · gl_mv`，四句 `batchmvp` 一句一列）。
+这两个内建要的是**模型视图**那一格，所以照同一个形状再加一族：
+
+    (gfxcall "batchmv" 列 m0 m1 m2 m3)      ← 与 batchmvp 逐字同形
+
+法向矩阵**不另发**：在 GLSL 里算 `mat3(transpose(inverse(u_mv)))`（410 core 与
+ES 300 都有这两个内建函数）—— 少一条宿主面、少一份"可能与 `u_mv` 不一致"的状态。
+
+### 18.5 翻译表补的几格（`ext/polydraw/glsl.js`，两档设备共用一份）
+
+    gl_Normal                 -> a_nrm.xyz        （in vec4 a_nrm;）
+    gl_ModelViewMatrix        -> u_mv             （uniform mat4 u_mv;）
+    gl_NormalMatrix           -> mat3(transpose(inverse(u_mv)))
+    gl_FrontColor             -> v_col0           （顶点段那格输出 = 片元段的 gl_Color）
+
+`gl_FrontColor` 那一格要注意次序：我们已经在 `main` 的左花括号后注入了
+`v_col0 = a_col;`，脚本自己那句 `gl_FrontColor = …` 在它**后面**执行，所以覆盖得掉 ——
+与真固定管线的语义一致（不写就是顶点色）。
+
+### 18.6 判据
+
+1. `node tests/lower/run.js polydraw evaldraw`（改顶点契约必须过）；
+2. `node tests/gl/run.js`（11/11，那三节都量了顶点批与 uniform）；
+3. `node tests/eval/correct.js --only clock,balls2k,drawsph,ballsk,dominos` —— 这一族
+   从"跑不起来"变成有 RMSE 的数；
+4. `npm run check:self`。

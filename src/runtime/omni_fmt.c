@@ -482,7 +482,7 @@ static struct {
   gfx_gl_uni1i_fn uni1i;
   gfx_gl_attr_fn attr;
   gfx_gl_int_fn prog, blend, bindtex, activetex;
-  gfx_gl_mvp_fn mvp;
+  gfx_gl_mvp_fn mvp, mv;
   gfx_gl_tex_fn tex;
 } g_gl;
 
@@ -538,6 +538,7 @@ static int gfx_gl_need(void) {
     g_gl.bindtex = (gfx_gl_int_fn)dlsym(h, "omni_ev_gl_bindtex");
     g_gl.activetex = (gfx_gl_int_fn)dlsym(h, "omni_ev_gl_activetex");
     g_gl.mvp = (gfx_gl_mvp_fn)dlsym(h, "omni_ev_gl_mvp");
+    g_gl.mv = (gfx_gl_mvp_fn)dlsym(h, "omni_ev_gl_mv");
     g_gl.tex = (gfx_gl_tex_fn)dlsym(h, "omni_ev_gl_tex");
     if (g_gl.open == NULL || g_gl.batch == NULL || g_gl.read == NULL) continue;
     if (g_gl.open((int)g_gw, (int)g_gh) != 0) {
@@ -644,10 +645,10 @@ static void gfx_circ(double cx, double cy, double r, int64_t c) {
  * "上传 + 一次 draw"，这一档是软件光栅化同一段。
  *
  * 一格顶点 12 个 double：位置 x,y,z,w（**裁剪空间**）、颜色 r,g,b,a（0..1）、
- * 纹理坐标 s,t,p,q（这一档还没有纹理，收下不用）。
+ * 纹理坐标 s,t,p,q（这一档还没有纹理，收下不用）、法向 nx,ny,nz,0（同样收下不用）。
  * 类：0 = 线段（两个一组）、1 = 三角（三个一组）。
  */
-#define GFX_VSTRIDE 12
+#define GFX_VSTRIDE 16
 
 static void gfx_vxy(const double *v, double *sx, double *sy) {
   double w = v[3] == 0.0 ? 1.0 : v[3];
@@ -906,6 +907,10 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
       g_gl.mvp((int)a0, a1, a2, a3, a4);
       return 0.0;
     }
+    if (!strcmp(nm, "batchmv") && argc == 5 && g_gl.mv != NULL) {
+      g_gl.mv((int)a0, a1, a2, a3, a4);
+      return 0.0;
+    }
     if (!strcmp(nm, "batchblend") && argc == 1 && g_gl.blend != NULL) {
       g_gl.blend((int)a0);
       return 0.0;
@@ -1010,6 +1015,7 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
     return 0.0;
   }
   if (!strcmp(nm, "batchmvp") && argc == 5) { return 0.0; }
+  if (!strcmp(nm, "batchmv") && argc == 5) { return 0.0; }
   if (!strcmp(nm, "batchblend") && argc == 1) { return 0.0; }
   if (!strcmp(nm, "setcol") && argc == 3) { gfx_need(); g_gcol = gfx_rgb(a0, a1, a2); return 0.0; }  if (!strcmp(nm, "setcol") && argc == 1) { gfx_need(); g_gcol = ((int64_t)a0) & 0xffffff; return 0.0; }
   if (!strcmp(nm, "setpix") && argc == 2) { gfx_need(); gfx_px(a0, a1, g_gcol); return 0.0; }

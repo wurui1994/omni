@@ -107,6 +107,7 @@ const SHADER_FNS = new Map([
   ['gltexcoord/2', []],
   ['gltexcoord/3', []],
   ['gltexcoord/4', []],
+  ['glnormal/3', []],
   ['glgetattribloc/1', [0]],
   ['glvertexattrib1f/2', []],
   ['glvertexattrib2f/3', []],

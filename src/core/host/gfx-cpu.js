@@ -675,6 +675,10 @@ export function gfxCall(name, args) {
     case 'batchmvp/5':
       if (G.on) G.m.mvp(Math.trunc(a(0)), a(1), a(2), a(3), a(4));
       return 0;
+    /* 模型视图那一格（`u_mv`）—— 与 `batchmvp` 逐字同形，见 §18.4。 */
+    case 'batchmv/5':
+      if (G.on) G.m.mv(Math.trunc(a(0)), a(1), a(2), a(3), a(4));
+      return 0;
     case 'batchblend/1':
       if (G.on) G.m.blend(Math.trunc(a(0)));
       return 0;
@@ -747,11 +751,12 @@ function present() {
  * 变顶点 / 合批全在**语言那一侧**，交到设备手里的就是一段顶点。GPU 那两档是"上传 +
  * 一次 draw"，这一档软件光栅化同一段。
  *
- * 一格顶点 12 个数：位置 x,y,z,w（**裁剪空间**）、颜色 r,g,b,a（0..1）、纹理坐标 s,t,p,q
- * （这一档还没有纹理，收下不用）。类：0 = 线段（两个一组）、1 = 三角（三个一组）。
+ * 一格顶点 16 个数：位置 x,y,z,w（**裁剪空间**）、颜色 r,g,b,a（0..1）、纹理坐标 s,t,p,q、
+ * 法向 nx,ny,nz,0（这一档还没有纹理与光照，那两摊收下不用）。
+ * 类：0 = 线段（两个一组）、1 = 三角（三个一组）。
  * **与 `runtime/omni_fmt.c` 的 `omni_gfx_batch` 逐句相同** —— 三条腿逐字节相同是判据。
  */
-const VSTRIDE = 12;
+const VSTRIDE = 16;
 
 const vxy = (v, i) => {
   const w = v[i + 3] === 0 ? 1 : v[i + 3];

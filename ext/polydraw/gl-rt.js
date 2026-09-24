@@ -45,8 +45,8 @@ import {
 const dev = (name, args = []) => bi('gfxcall', [str(name), ...args]);
 const devBatch = (kind, cnt, arr) => bi('gfxbatch', [ix(num(kind)), ix(cnt), nm(arr)]);
 
-/** 一格顶点占 12 个数（位置 4 / 颜色 4 / 纹理坐标 4）—— 与 `(gfxbatch …)` 的契约同一格。 */
-const VS = 12;
+/** 一格顶点占 16 个数（位置 4 / 颜色 4 / 纹理坐标 4 / 法向 4）—— 与 `(gfxbatch …)` 同契约。 */
+const VS = 16;
 const VMAX = 1024;
 /** 一条批最多攒几个顶点（攒满就交出去）。 */
 const OMAX = 3072;
@@ -55,7 +55,7 @@ const OMAX = 3072;
 const vb = (i, k) => aget('gl_vb', bin('+', bin('*', i, num(VS)), num(k)));
 const vbset = (i, k, v) => aset('gl_vb', bin('+', bin('*', i, num(VS)), num(k)), v);
 
-/** 一格顶点从 `gl_vb[i]` 抄到某条批的第 `c` 格（12 个数一格一格抄）。 */
+/** 一格顶点从 `gl_vb[i]` 抄到某条批的第 `c` 格（16 个数一格一格抄）。 */
 const copyV = (dst, cnt, i) => {
   const out = [];
   for (let k = 0; k < VS; k++) {
@@ -72,7 +72,12 @@ export const GL_GLOBALS = ['gl_on', 'gl_mode', 'gl_n', 'gl_r', 'gl_g', 'gl_b',
   /* 可编程管线那一档（第四刀）：`gl_prog` 是"脚本自己那格 program 在用着没有"
      （0 = 内建那对着色器），`gl_ts…gl_tq` 是现在的纹理坐标（`glTexCoord`），
      `gl_qid` 是"这一趟交批用单位矩阵"（满屏四边形那一格，见 `gl_quad`）。 */
-  'gl_prog', 'gl_ts', 'gl_tt', 'gl_tp', 'gl_tq', 'gl_qid'];
+  'gl_prog', 'gl_ts', 'gl_tt', 'gl_tp', 'gl_tq', 'gl_qid',
+  /* **当前法向**（`glnormal(x,y,z)` -> `polydraw.c:620` 的 `qglNormal3d`）——与
+     `glColor` 同一个味道：设一次，之后每个 `glVertex` 都带着它走。默认 (0,0,1)。
+     `clock.pss` 把它当**数据通道**用（`glnormal(shakeshift, shakecolor, xres/yres)`），
+     所以原样送，不归一化。 */
+  'gl_nx', 'gl_ny', 'gl_nz'];
 
 export function glGlobalDecls() {
   return [
@@ -124,6 +129,8 @@ export const POLYDRAW_GL = new Map([
   ['gltexcoord/2', 'gl_texcoord2'],
   ['gltexcoord/3', 'gl_texcoord3'],
   ['gltexcoord/4', 'gl_texcoord4'],
+  /* 当前法向（`GLNORMAL(,,)`，`polydraw.c:2108`）。 */
+  ['glnormal/3', 'gl_normal3'],
   ['glgetuniformloc/1', 'gl_uniloc'],
   ['gluniform/2', 'gl_uni1'],
   ['gluniform1f/2', 'gl_uni1'],
@@ -268,6 +275,18 @@ function glShaderDecls() {
     sendIdent.push(ex(dev('batchmvp', [num(c), num(c === 0 ? 1 : 0), num(c === 1 ? 1 : 0),
       num(c === 2 ? 1 : 0), num(c === 3 ? 1 : 0)])));
   }
+  /* **模型视图那一格也要发**（`gl_ModelViewMatrix` / `gl_NormalMatrix` 用它，见 §18.4）：
+     与 `batchmvp` 逐字同形的四句，只是名字不同 —— 法向矩阵在 GLSL 里由它算出来，
+     不另发一份状态。 */
+  const sendMv = [];
+  const sendMvIdent = [];
+  for (let c = 0; c < 4; c++) {
+    sendMv.push(ex(dev('batchmv', [num(c), aget('gl_mv', num(c * 4)),
+      aget('gl_mv', num(c * 4 + 1)), aget('gl_mv', num(c * 4 + 2)),
+      aget('gl_mv', num(c * 4 + 3))])));
+    sendMvIdent.push(ex(dev('batchmv', [num(c), num(c === 0 ? 1 : 0), num(c === 1 ? 1 : 0),
+      num(c === 2 ? 1 : 0), num(c === 3 ? 1 : 0)])));
+  }
 
   /* 满屏四边形那六个顶点（位置就是 NDC、纹理坐标 0..1，颜色是现在这一格）。 */
   const quadV = [[-1, -1, 0, 0], [1, -1, 1, 0], [-1, 1, 0, 1],
@@ -276,7 +295,8 @@ function glShaderDecls() {
   for (const [x, y, s, t] of quadV) {
     const vals = [num(x), num(y), num(0), num(1),
       nm('gl_r'), nm('gl_g'), nm('gl_b'), num(1),
-      num(s), num(t), num(0), num(1)];
+      num(s), num(t), num(0), num(1),
+      num(0), num(0), num(1), num(0)];
     vals.forEach((v, k) => {
       quad.push(aset('gl_ob', bin('+', bin('*', nm('gl_no'), num(VS)), num(k)), v));
     });
@@ -301,9 +321,10 @@ function glShaderDecls() {
 
   return [
     fn('gl_mvpsend', [], [
-      iff(bin('!=', nm('gl_qid'), num(0)), [...sendIdent, ret(num(0))]),
+      iff(bin('!=', nm('gl_qid'), num(0)), [...sendIdent, ...sendMvIdent, ret(num(0))]),
       ...mul,
       ...send,
+      ...sendMv,
       ret(num(0)),
     ]),
     fn('gl_setshader1', ['a'], setShader(['a'])),
@@ -319,6 +340,13 @@ function glShaderDecls() {
       ex(call('gl_texcoord4', [nm('s'), nm('t'), num(0), num(1)])), ret(num(0))]),
     fn('gl_texcoord3', ['s', 't', 'p'], [
       ex(call('gl_texcoord4', [nm('s'), nm('t'), nm('p'), num(1)])), ret(num(0))]),
+    /* `glnormal(x,y,z)` —— 照 `polydraw.c:620` 的 `qglNormal3d`：就是固定管线那格
+       **当前法向**，与 `glColor` 同一个味道（不断批、不归一化）。 */
+    fn('gl_normal3', ['x', 'y', 'z'], [
+      ex(call('gl_need', [])),
+      set('gl_nx', nm('x')), set('gl_ny', nm('y')), set('gl_nz', nm('z')),
+      ret(num(0)),
+    ]),
     stateFn('gl_uniloc', 'glgetuniformloc', ['a']),
     stateFn('gl_uni1', 'gluniform1f', ['h', 'x']),
     stateFn('gl_uni2', 'gluniform2f', ['h', 'x', 'y']),
@@ -394,6 +422,8 @@ function glSetupDecls() {
       set('gl_prog', num(0)),
       set('gl_qid', num(0)),
       set('gl_ts', num(0)), set('gl_tt', num(0)), set('gl_tp', num(0)), set('gl_tq', num(1)),
+      /* 当前法向的初值照 GL 规范是 (0,0,1)。 */
+      set('gl_nx', num(0)), set('gl_ny', num(0)), set('gl_nz', num(1)),
       set('gl_ob', anew(num(OMAX * VS))),
       set('gl_lb', anew(num(OMAX * VS))),
       set('gl_pb', anew(num(OMAX * VS))),
@@ -713,6 +743,10 @@ function glDrawDecls() {
       vbset(nm('gl_n'), 9, nm('gl_tt')),
       vbset(nm('gl_n'), 10, nm('gl_tp')),
       vbset(nm('gl_n'), 11, nm('gl_tq')),
+      vbset(nm('gl_n'), 12, nm('gl_nx')),
+      vbset(nm('gl_n'), 13, nm('gl_ny')),
+      vbset(nm('gl_n'), 14, nm('gl_nz')),
+      vbset(nm('gl_n'), 15, num(0)),
       set('gl_n', bin('+', nm('gl_n'), num(1))),
       ret(num(0)),
     ]),

@@ -42,6 +42,7 @@ double omni_ev_gl_attrloc(double idx);
 int omni_ev_gl_attr(double loc, const double *v);
 void omni_ev_gl_prog(int on);
 void omni_ev_gl_mvp(int col, double m0, double m1, double m2, double m3);
+void omni_ev_gl_mv(int col, double m0, double m1, double m2, double m3);
 void omni_ev_gl_blend(int mode);
 int omni_ev_gl_tex(int slot, int w, int h, int d, int fmt, const double *px);
 void omni_ev_gl_bindtex(int slot);
@@ -214,6 +215,13 @@ static napi_value jsMvp(napi_env env, napi_callback_info info) {
   return mknum(env, 0);
 }
 
+static napi_value jsMv(napi_env env, napi_callback_info info) {
+  ARGS(5);
+  omni_ev_gl_mv((int)num(env, a[0]), num(env, a[1]), num(env, a[2]), num(env, a[3]),
+                num(env, a[4]));
+  return mknum(env, 0);
+}
+
 static napi_value jsBlend(napi_env env, napi_callback_info info) {
   ARGS(1);
   omni_ev_gl_blend((int)num(env, a[0]));
@@ -278,6 +286,7 @@ napi_value napi_register_module_v1(napi_env env, napi_value exports) {
   PUT("attr", jsAttr);
   PUT("prog", jsProg);
   PUT("mvp", jsMvp);
+  PUT("mv", jsMv);
   PUT("blend", jsBlend);
   PUT("tex", jsTex);
   PUT("bindtex", jsBindtex);

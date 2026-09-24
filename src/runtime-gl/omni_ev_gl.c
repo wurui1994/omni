@@ -23,8 +23,8 @@
  *    曾经试过 legacy（驱动直接认旧式、省掉翻译）—— **被否**：那等于本机这一档自己一套语义。
  * 2. **离屏 FBO + `glReadPixels`**：命令行那一档要的是一帧 PNG，不是窗口。
  *    所以不碰 NSApp、不要主线程（`omni_r3_gl.c` 的头注里记着 GLFW 在大栈线程上 SIGTRAP 那一课）。
- * 3. **顶点契约与别的两档设备同一格**：一格顶点 12 个 double（位置 4 裁剪空间 /
- *    颜色 4 是 0..1 / 纹理坐标 4），批的类 0 线段 / 1 三角 / 2 点。
+ * 3. **顶点契约与别的两档设备同一格**：一格顶点 16 个 double（位置 4 裁剪空间 /
+ *    颜色 4 是 0..1 / 纹理坐标 4 / 法向 4），批的类 0 线段 / 1 三角 / 2 点。
  *    变换、拆 mode、合批全在**语言那一侧**（`ext/polydraw/gl-rt.js`）——
  *    这一层只管"上传 + 一次 draw"。**不许**在这儿出现立即模式或第二份变换。
  */
@@ -88,7 +88,12 @@ static GLuint g_cur;             /* 现在挑着的那格 program（0 = 还没�
 static int g_useprog;           /* `batchprog`：0 内建那对、≠0 脚本那格 */
 static int g_blend = 1;         /* `batchblend`：0 = alpha 混合 */
 static float g_mvp[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+/** `batchmv` 那一格：模型视图（`u_mv`，`gl_ModelViewMatrix` / `gl_NormalMatrix` 用）。 */
+static float g_mv[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
 static int g_texunit;           /* `glactivetexture` 挑的那格单元 */
+
+/** 一格顶点几个数（位置 4 / 颜色 4 / 纹理坐标 4 / 法向 4）—— 三档设备同一个契约。 */
+#define EV_VS 16
 
 
 /**
@@ -453,7 +458,7 @@ int omni_ev_gl_attr(double loc, const double *v) {
   return 0;
 }
 
-/** `batchprog` / `batchmvp 列 m0..m3` / `batchblend`（批上带的那点状态）。 */
+/** `batchprog` / `batchmvp 列 m0..m3` / `batchmv 列 m0..m3` / `batchblend`。 */
 void omni_ev_gl_prog(int on) { g_useprog = on ? 1 : 0; }
 
 void omni_ev_gl_mvp(int col, double m0, double m1, double m2, double m3) {
@@ -462,6 +467,15 @@ void omni_ev_gl_mvp(int col, double m0, double m1, double m2, double m3) {
   g_mvp[col * 4 + 1] = (float)m1;
   g_mvp[col * 4 + 2] = (float)m2;
   g_mvp[col * 4 + 3] = (float)m3;
+}
+
+/** 模型视图那一格（`u_mv`）—— `gl_ModelViewMatrix` 与 `gl_NormalMatrix` 都从它来。 */
+void omni_ev_gl_mv(int col, double m0, double m1, double m2, double m3) {
+  if (col < 0 || col > 3) return;
+  g_mv[col * 4 + 0] = (float)m0;
+  g_mv[col * 4 + 1] = (float)m1;
+  g_mv[col * 4 + 2] = (float)m2;
+  g_mv[col * 4 + 3] = (float)m3;
 }
 
 void omni_ev_gl_blend(int mode) { g_blend = mode; }
@@ -570,8 +584,8 @@ void omni_ev_gl_activetex(int unit) {
 
 
 /**
- * **收一段顶点批**：一格顶点 12 个 double（位置 4 裁剪空间 / 颜色 4 / 纹理坐标 4），
- * 类 0 线段 / 1 三角 / 2 点。这一层只做"转 float + 上传 + 一次 draw"。
+ * **收一段顶点批**：一格顶点 16 个 double（位置 4 裁剪空间 / 颜色 4 / 纹理坐标 4 /
+ * 法向 4），类 0 线段 / 1 三角 / 2 点。这一层只做"转 float + 上传 + 一次 draw"。
  *
  * 点那一档用 `GL_POINTS` + `glPointSize(1)`（legacy 上下文里它是可靠的 ——
  * WebGL 那一档不可靠，所以那边把点摊成 1×1 四边形；两档设备的"一个点多大"都是 1 像素）。
@@ -579,9 +593,9 @@ void omni_ev_gl_activetex(int unit) {
 void omni_ev_gl_batch(int kind, long n, const double *verts) {
   if (!g_on || n <= 0 || verts == NULL) return;
   CGLSetCurrentContext(g_ctx);
-  float *buf = (float *)malloc(sizeof(float) * 12 * (size_t)n);
+  float *buf = (float *)malloc(sizeof(float) * EV_VS * (size_t)n);
   if (buf == NULL) return;
-  for (long i = 0; i < n * 12; i++) buf[i] = (float)verts[i];
+  for (long i = 0; i < n * EV_VS; i++) buf[i] = (float)verts[i];
 
   glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
   glBindVertexArray(g_vao);
@@ -594,10 +608,15 @@ void omni_ev_gl_batch(int kind, long n, const double *verts) {
   static const float I4[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
   GLuint prog = g_prog;
   const float *m = I4;
-  if (g_useprog && (g_cur != 0 || ev_need_prog())) { prog = g_cur; m = g_mvp; }
+  const float *mv = I4;
+  if (g_useprog && (g_cur != 0 || ev_need_prog())) { prog = g_cur; m = g_mvp; mv = g_mv; }
   glUseProgram(prog);
   GLint mvp = glGetUniformLocation(prog, "u_mvp");
   if (mvp >= 0) glUniformMatrix4fv(mvp, 1, GL_FALSE, m);
+  /* `u_mv` 是模型视图那一格（`gl_ModelViewMatrix` / `gl_NormalMatrix` 用它）——
+     只有脚本那格着色器引用了它才有位置，内建那对没有。 */
+  GLint mvloc = glGetUniformLocation(prog, "u_mv");
+  if (mvloc >= 0) glUniformMatrix4fv(mvloc, 1, GL_FALSE, mv);
   /* 混合：`glquad(0)` 那一档要 alpha 混合（语言那一侧发的 `batchblend`）。 */
   if (g_blend == 0) {
     glEnable(GL_BLEND);
@@ -607,16 +626,16 @@ void omni_ev_gl_batch(int kind, long n, const double *verts) {
   }
 
   glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
-  glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(sizeof(float) * 12 * (size_t)n), buf,
+  glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(sizeof(float) * EV_VS * (size_t)n), buf,
                GL_STREAM_DRAW);
-  const char *names[3] = { "a_pos", "a_col", "a_tex" };
-  GLint locs[3];
-  for (int k = 0; k < 3; k++) {
+  const char *names[4] = { "a_pos", "a_col", "a_tex", "a_nrm" };
+  GLint locs[4];
+  for (int k = 0; k < 4; k++) {
     locs[k] = glGetAttribLocation(prog, names[k]);
     if (locs[k] < 0) continue;
     glEnableVertexAttribArray((GLuint)locs[k]);
     glVertexAttribPointer((GLuint)locs[k], 4, GL_FLOAT, GL_FALSE,
-                          (GLsizei)(sizeof(float) * 12),
+                          (GLsizei)(sizeof(float) * EV_VS),
                           (const void *)(size_t)(sizeof(float) * 4 * (size_t)k));
   }
   /* `glVertexAttrib*` 设的那几格是**常量属性**（数组关着时 GL 用的就是当前值）。 */
@@ -626,7 +645,7 @@ void omni_ev_gl_batch(int kind, long n, const double *verts) {
   }
   GLenum mode = kind == 0 ? GL_LINES : (kind == 2 ? GL_POINTS : GL_TRIANGLES);
   glDrawArrays(mode, 0, (GLsizei)n);
-  for (int k = 0; k < 3; k++) if (locs[k] >= 0) glDisableVertexAttribArray((GLuint)locs[k]);
+  for (int k = 0; k < 4; k++) if (locs[k] >= 0) glDisableVertexAttribArray((GLuint)locs[k]);
   glDisable(GL_BLEND);
   free(buf);
 }

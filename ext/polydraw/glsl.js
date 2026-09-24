@@ -37,15 +37,25 @@ export function glslAlign(kind, src) {
   s = s.replace(/\bgl_MultiTexCoord0\b/g, 'a_tex');
   s = s.replace(/\bftransform\s*\(\s*\)/g, '(u_mvp * a_pos)');
   s = s.replace(/\bgl_ModelViewProjectionMatrix\b/g, 'u_mvp');
+  /* **法向那一格**（§18.5）：法向矩阵**不另发一份 uniform**，照定义由 `u_mv` 算
+     （410 core 与 ES 300 都有 `inverse` / `transpose`）—— 少一条宿主面，
+     也就不会有"与 `u_mv` 不一致"那种错。 */
+  s = s.replace(/\bgl_NormalMatrix\b/g, 'mat3(transpose(inverse(u_mv)))');
+  s = s.replace(/\bgl_ModelViewMatrix\b/g, 'u_mv');
   s = s.replace(/\bgl_Vertex\b/g, 'a_pos');
   s = s.replace(/\btexture2D\s*\(/g, 'texture(');
   s = s.replace(/\battribute\b/g, 'in');
   const head = [];
   if (kind === 'vert') {
     s = s.replace(/\bgl_Color\b/g, 'a_col');
+    /* `gl_FrontColor` 是顶点段那格**输出**，片元段读到的就是 `gl_Color`（我们的 `v_col0`）。
+       下面注入的 `v_col0 = a_col;` 在它**前面**跑，所以脚本写了就覆盖得掉 ——
+       与真固定管线一致（不写就是顶点色）。 */
+    s = s.replace(/\bgl_FrontColor\b/g, 'v_col0');
+    s = s.replace(/\bgl_Normal\b/g, 'a_nrm.xyz');
     s = s.replace(/\bvarying\b/g, 'out');
-    head.push('in vec4 a_pos;', 'in vec4 a_tex;', 'in vec4 a_col;', 'uniform mat4 u_mvp;',
-      'out vec4 v_col0;');
+    head.push('in vec4 a_pos;', 'in vec4 a_tex;', 'in vec4 a_col;', 'in vec4 a_nrm;',
+      'uniform mat4 u_mvp;', 'uniform mat4 u_mv;', 'out vec4 v_col0;');
     if (usesTex0) head.push('out vec4 v_tex0;');
     /* 顶点色要跨段传：`gl_Color` 在片元里是**插值过的**那一格，所以顶点这边总是把
        `a_col` 抄进 `v_col0`（没人读也无害）。注入点是 main 的那个左花括号。 */
