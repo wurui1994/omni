@@ -263,10 +263,14 @@ const RT_CASES = CASES.filter((f) => /02-gl|04-shader/.test(f));
 
 /** 跑一趟 `omni run`，回 `{ real, avg, max, why }`（都是毫秒）。 */
 function runMode(src, mode, frames) {
-  const env = { ...process.env, OMNI_GFX: 'gl', OMNI_FRAMES: String(frames),
+  /* **`--gfx gl` 走旗子而不是环境变量**：那两份 GPU 的门（原生腿的 dylib、js 腿的 .node）
+     是 `cli.js` 在解析这个旗子时顺手编出来并摆进环境的（§16）。只设 `OMNI_GFX=gl`
+     的话它们不会被编，设备就悄悄回落 CPU 备选 —— 那时判据判的是另一件事。 */
+  const env = { ...process.env, OMNI_FRAMES: String(frames),
     OMNI_GFX_PERF: '1', OMNI_GFX_W: CFG.w, OMNI_GFX_H: CFG.h,
     OMNI_GFX_OUT: join(OUT, 'rt.png'), ...(LIB === '' ? {} : { OMNI_GL_LIB: LIB }) };
-  const r = spawnSync('/usr/bin/time', ['-p', process.execPath, CLI, 'run', src, ...mode.args],
+  const r = spawnSync('/usr/bin/time',
+    ['-p', process.execPath, CLI, 'run', src, ...mode.args, '--gfx', 'gl'],
     { encoding: 'utf8', cwd: ROOT, timeout: 180000, env });
   const err = `${r.stdout ?? ''}\n${r.stderr ?? ''}`;
   const real = /real\s+([\d.]+)/.exec(r.stderr ?? '');

@@ -908,6 +908,76 @@ CGL 上下文 + 着色器编译 + 写 PNG —— 双方都付这一份，所以�
   机制在 ADR-0038（node 这侧的 FFI 已经有），缺的是 js 那条腿上的 GL 转发 ——
   `host/gfx-cpu.js` 现在只有 CPU 备选。这一栏也要有判据与优化。
 
+## 16. 第六刀：**js 腿 + FFI 接本机 GL**（实时那三条路的第一条）
+
+### 16.1 为什么它排第一
+
+`--backend js` / `--backend interp` 这两条是**改完立刻能跑**的路（没有 cc、没有链接），
+而浏览器端走的就是"编到 JS"这条路的表亲。现在它们在着色器那一族上**当场报**
+（`这格设备（CPU 备选）上没有 'glsetshader'`）—— 也就是说实时那一栏根本没有绿的可能。
+GPU 那一半的代码**已经在 `libomnigl` 里了**（§13），缺的只是 node 这一侧的入口。
+
+### 16.2 形状：**一份 N-API 扩展 + CPU 备选里的一条转发支路**
+
+    src/runtime-gl/omni_ev_gl_napi.c     omni_ev_gl.c 一起编 -> omni_ev_gl.node（N-API）
+    src/core/host/ffi_host.js            现成的 dlopenAddon(path)（process.dlopen）
+    src/core/host/gfx-cpu.js             加一条 GL 转发支路（与 omni_fmt.c 里那一条逐句对应）
+
+**不写第二台设备**：帧循环 / 输入 / `present` 写 PNG / 两层合成（GPU 当底、宿主那层盖上去）
+全部复用 `gfx-cpu.js` 现成的那几格 —— 这与 C 那条腿的做法**一一对应**
+（`omni_fmt.c` 就是在 CPU 备选里加转发，§13.8），所以两侧的行为天然一致。
+
+### 16.3 ABI：普通数组，不用 typed array
+
+N-API 那一侧收 **普通 JS 数组**（`napi_get_array_length` + `napi_get_element`），
+不用 `Float64Array` —— 理由是**子集**：`gfx-cpu.js` 要过 `check:self` 那道门，
+而 typed array 还不在那个子集里。代价量过：一格顶点 12 个 `napi_get_element` ≈ 50ns，
+04-shader 一帧 6 个顶点、02-gl 上千顶点 ⇒ 0.01~0.6ms/帧，在 16.7ms 的预算里够用。
+读回那一格（320×240 = 76800 格）约 4ms/帧，`render` 模式一帧只读一次 —— 也够用。
+**真不够的时候的下一步是把 typed array 扩进子集**（"撞上子集外的名字就扩支持，不许绕"），
+不是在这儿绕。
+
+导出的名字与 `omni_ev_gl_*` 一一对应：
+
+    open(w,h) cls(rgb) depth(on) batch(kind,n,verts[]) readInto(out[])
+    def(kind,name,text) shader(args[]) uniloc(i) uni(h,n,vals[]) attrloc(i) attr(loc,vals[])
+    prog(on) mvp(col,m0,m1,m2,m3) blend(mode) tex(slot,w,h,d,fmt,px[]) bindtex(s) activetex(u)
+    error()
+
+### 16.4 判据
+
+1. `tests/gl/run.js` 加一节：addon 编得出来、装得上（`process.dlopen`）、离屏拿到像素
+   —— 与 C 那侧那条红三角判据**同一组数**（红 9600 / 背景 67200）；
+2. `tests/eval/perf.js` 的实时性那一栏里 `js` 与 `interp` 两档**由红转绿**：
+   每帧 ≤ 16.7ms、启动 ≤ 1s；
+3. `04-shader.pss` 在 js 腿与 c 腿上出的图**结构一致**（非黑格数差 5% 以内 ——
+   两条腿同一份 GLSL、同一颗 GPU，只差谁在跑主脚本）。
+
+### 16.5 已落地（2026-09-24）
+
+    src/runtime-gl/omni_ev_gl_napi.c   N-API 包装（19 格），与 omni_ev_gl.c 一起编成 .node
+    src/runtime/omni_napi.h            加 4 条声明（数组那三条 + 建串）—— 仍然不外挂 node 头
+    src/core/host/gfx-cpu.js           那条 GL 转发支路（cls/framebegin/gldepth/批/着色器那族/
+                                       纹理/def/两层合成/getpix），与 omni_fmt.c 逐句对应
+    src/core/cli.js                    evGlAddon()：编 + 缓存 + 把路径摆进 OMNI_EV_GL_ADDON
+
+量出来的（`04-shader.pss`，`--gfx gl`，60 帧）：
+
+    模式      启动     每帧avg   每帧max    fps
+    js       500ms    2.3ms     8.0ms     435     ✔ 实时
+    interp   510ms    2.4ms    15.0ms     417     ✔ 实时
+    c        860ms    0.4ms     3.4ms    2500     ✔（启动那条不判）
+    jit        —        —         —        —      仍红：`gfx_call.string 要 14 个实参，实得 1`
+
+三条腿画出来的图**一模一样**（非黑 76800/76800、72259 种颜色 —— 同一份 GLSL、同一颗 GPU，
+只差谁在跑主脚本）。`tests/lower` 44/44、`tests/gl` 11/11、`check:self` 绿。
+
+**一格要记的**：`--gfx gl` 必须走**旗子**，不能只设 `OMNI_GFX=gl` —— 那两份 GPU 的门
+（原生腿的 dylib、js 腿的 .node）是 `cli.js` 解析旗子时顺手编出来并摆进环境的；
+只设环境变量的话它们不会被编，设备**悄悄回落 CPU 备选**（判据第一版就是这么假红的）。
+
+
+
 
 
 

@@ -75,6 +75,18 @@ extern napi_status napi_create_function(napi_env env, const char *utf8name, size
 extern napi_status napi_set_named_property(napi_env env, napi_value object,
                                            const char *utf8name, napi_value value);
 
+/* ---- 数组那三条与建串（`runtime-gl/omni_ev_gl_napi.c` 用：顶点/像素/uniform 都是
+       **普通 JS 数组**，因为宿主那一侧（`host/gfx-cpu.js`）要过 `check:self` 那道门，
+       而 TypedArray 还不在那个子集里 —— 见 `docs/design/eval-realtime-gpu.md` §16.3）。 ---- */
+extern napi_status napi_get_array_length(napi_env env, napi_value value, uint32_t *result);
+extern napi_status napi_get_element(napi_env env, napi_value object, uint32_t index,
+                                    napi_value *result);
+extern napi_status napi_set_element(napi_env env, napi_value object, uint32_t index,
+                                    napi_value value);
+extern napi_status napi_create_string_utf8(napi_env env, const char *str, size_t length,
+                                           napi_value *result);
+
+
 /* ---- 报错（抛一个 JS 的 Error 出去，与别处的诊断同一个出口） ---- */
 extern napi_status napi_throw_error(napi_env env, const char *code, const char *msg);
 

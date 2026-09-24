@@ -21,6 +21,7 @@
 
 import { writeBinary, mkdirAll, stdout, stderr, env, nowMs, localStamp } from './native.js';
 import { pngFromRgba, surfaceKind } from './png.js';
+import { dlopenAddon } from './ffi_host.js';
 
 /** 设备的那几格状态。**一格进程一格设备**（EVAL 的宿主本来就是这个形状）。 */
 const D = {
@@ -206,6 +207,8 @@ function need(w, h) {
   D.col = 0xffffff;
   D.x = 0;
   D.y = 0;
+  /* GL 那一档（`OMNI_GFX=gl`）：尺寸定下来了才开得出离屏那一格。挂不上就照旧 CPU 备选。 */
+  if (glWant()) glNeed();
 }
 
 function px(x, y, c) {
@@ -216,8 +219,75 @@ function px(x, y, c) {
   D.dirty = true;
 }
 
+/* ── **本机 GL 那一档**（`OMNI_GFX=gl`）：走 N-API 扩展转给 `libomnigl` 里那台设备 ────
+ *
+ * 口径 `docs/design/eval-realtime-gpu.md` §16。这一格让 **js 腿与解释器腿也能走 GPU** ——
+ * 那两条是"改完立刻能跑"的路（没有 cc、没有链接），实时那一栏靠的就是它们。
+ *
+ * **与 `runtime/omni_fmt.c` 里那条转发支路逐句对应**（那边是 dlopen + 函数指针、
+ * 这边是 `process.dlopen` 装一份 N-API 扩展）：所以两条腿的行为天然一致，
+ * 帧循环 / 输入 / `present` / 两层合成全都复用这一份现成的，一个字都不用另写。
+ *
+ * **两层怎么合**：GPU 画顶点批；`setpix`/`lineto`/`drawsph` 那一族仍落在 `D.fb` 上
+ * （语言那一侧没把它们变顶点）。所以 GL 开着时 `D.fb` 的初值是 **-1 = 这一格没人画**，
+ * 交帧时 GPU 那一层当底、`D.fb` 盖上去。
+ */
+const G = {
+  tried: false, on: false, m: null,
+  /* 设备还没开起来之前登记的那几份串（着色器原文与名字表）—— 开起来之后一趟补过去。 */
+  defs: [],
+  /* 读回那一格（一格一个 0xRRGGBB，与 `D.fb` 同形）：一帧只读一次，数组复用。 */
+  gpu: null,
+};
+
+const glWant = () => env('OMNI_GFX') === 'gl';
+
+/** 装那份扩展并开设备（尺寸定了才开得出来 —— 所以由 `need` 叫）。回 true = GL 这一档活着。 */
+function glNeed() {
+  if (G.tried) return G.on;
+  G.tried = true;
+  if (!glWant()) return false;
+  const p = env('OMNI_EV_GL_ADDON');
+  if (p === undefined || p === null || p === '') {
+    stderr('#gfx gl 挂不上（OMNI_EV_GL_ADDON 没指到那份 .node）—— 这一趟走 CPU 备选\n');
+    return false;
+  }
+  let m = null;
+  try {
+    m = dlopenAddon(p);
+  } catch (e) {
+    stderr(`#gfx gl 装不上那份扩展（${e && e.message ? e.message : e}）—— 这一趟走 CPU 备选\n`);
+    return false;
+  }
+  if (m === null || m === undefined || typeof m.open !== 'function') {
+    stderr('#gfx gl 那份扩展里没有 open —— 这一趟走 CPU 备选\n');
+    return false;
+  }
+  if (m.open(D.w, D.h) !== 0) {
+    stderr(`#gfx gl 开不出来（${m.error()}）—— 这一趟走 CPU 备选\n`);
+    return false;
+  }
+  G.m = m;
+  G.on = true;
+  GFX_CPU.kind = 'native-gl';
+  for (let i = 0; i < G.defs.length; i++) {
+    const d = G.defs[i];
+    m.def(d[0], d[1], d[2]);
+  }
+  glClearHost();
+  return true;
+}
+
+/** GL 开着时：宿主那格帧缓冲清成"没人画"（-1），GPU 那一层自己清。 */
+function glClearHost() {
+  const n = D.w * D.h;
+  for (let i = 0; i < n; i++) D.fb[i] = -1;
+}
+
+
 function cls(r, g, b) {
   const c = rgb(r, g, b);
+  if (G.on) { G.m.cls(c); glClearHost(); D.dirty = true; return; }
   const n = D.w * D.h;
   for (let i = 0; i < n; i++) D.fb[i] = c;
   D.dirty = true;
@@ -289,7 +359,10 @@ function rgbaBytes() {
   for (let y = 0; y < D.h; y++) {
     let row = '';
     for (let x = 0; x < D.w; x++) {
-      const v = D.fb[y * D.w + x] & 0xffffff;
+      const i = y * D.w + x;
+      /* GL 那一档：`-1` 是"这一格宿主没画" ⇒ 取 GPU 那一层读回来的那一格（§16）。 */
+      const raw = D.fb[i];
+      const v = (raw < 0 ? (G.gpu === null ? 0 : G.gpu[i]) : raw) & 0xffffff;
       row += String.fromCharCode((v - v % 65536) / 65536)
         + String.fromCharCode((v % 65536 - v % 256) / 256)
         + String.fromCharCode(v % 256) + String.fromCharCode(255);
@@ -390,16 +463,18 @@ export function gfxCall(name, args) {
     case 'cls/1': {
       need(320, 240);
       const c = Math.trunc(a(0)) & 0xffffff;
+      if (G.on) { G.m.cls(c); glClearHost(); D.dirty = true; return 0; }
       const n = D.w * D.h;
       for (let i = 0; i < n; i++) D.fb[i] = c;
       D.dirty = true;
       return 0;
     }
     case 'setcol/3': need(320, 240); D.col = rgb(a(0), a(1), a(2)); return 0;
-    /* **深度测试**（语言那一侧的 `gl_enable(GL_DEPTH_TEST)` 转过来的）：这一档**没有
-       z 缓冲**，所以收下记着不用 —— 3D 那一族在这一档只对"没有互相遮挡"的图成立，
-       真 3D 要 GPU 那两档设备。 */
-    case 'gldepth/1': return 0;
+    /* **深度测试**（语言那一侧的 `gl_enable(GL_DEPTH_TEST)` 转过来的）：CPU 备选那一档
+       **没有 z 缓冲**，所以收下记着不用；GL 那一档转过去（GPU 的 z 缓冲只有设备做得到）。 */
+    case 'gldepth/1':
+      if (G.on) G.m.depth(Math.trunc(a(0)) !== 0 ? 1 : 0);
+      return 0;
     case 'setcol/1': need(320, 240); D.col = Math.trunc(a(0)) & 0xffffff; return 0;
     case 'setpix/2': need(320, 240); px(a(0), a(1), D.col); return 0;
     case 'moveto/2': need(320, 240); D.x = a(0); D.y = a(1); return 0;
@@ -466,7 +541,10 @@ export function gfxCall(name, args) {
       const gx = Math.trunc(a(0));
       const gy = Math.trunc(a(1));
       if (gx < 0 || gy < 0 || gx >= D.w || gy >= D.h) return 0;
-      return D.fb[gy * D.w + gx];
+      const c = D.fb[gy * D.w + gx];
+      /* GL 那一档里 -1 是"这一格宿主没画"（GPU 那一层要等交帧才读回来）——
+         读那一格回背景 0，不为一次 `getpix` 去读一整帧。 */
+      return c < 0 ? 0 : c;
     }
     case 'xres/0': need(320, 240); return D.w;
     case 'yres/0': need(320, 240); return D.h;
@@ -496,9 +574,60 @@ export function gfxCall(name, args) {
        收下记着不用 —— 与 `gl-rt.js` 里那几格 `gl_nop*` 同一句话。 */
     case 'framebegin/0': {
       need(320, 240);
+      if (G.on) { G.m.cls(0); glClearHost(); D.dirty = true; return 0; }
       const n = D.w * D.h;
       for (let i = 0; i < n; i++) D.fb[i] = 0;
       D.dirty = true;
+      return 0;
+    }
+    /* ── **可编程管线与纹理那一族**：GL 那一档转给那份扩展（§16），CPU 备选照旧往下走。
+       句柄那两格（uniform / attrib）回的是设备给的数，脚本原样拿着再递回来。
+       这几格可能是这一趟的第一句图形调用（`glsetshader` 在清屏之前），所以先 `need`。 */
+    case 'glsetshader/1': case 'glsetshader/2': case 'glsetshader/3': {
+      need(320, 240);
+      if (!G.on) break;
+      const av = [];
+      for (let i = 0; i < args.length; i++) av.push(a(i));
+      if (G.m.shader(av) !== 0) throw new Error(`本机 OpenGL：${G.m.error()}`);
+      return 0;
+    }
+    case 'glgetuniformloc/1':
+      need(320, 240);
+      if (!G.on) break;
+      return G.m.uniloc(a(0));
+    case 'glgetattribloc/1':
+      need(320, 240);
+      if (!G.on) break;
+      return G.m.attrloc(a(0));
+    case 'gluniform1f/2': case 'gluniform2f/3': case 'gluniform3f/4': case 'gluniform4f/5':
+    case 'gluniform/2': {
+      need(320, 240);
+      if (!G.on) break;
+      const v = [];
+      for (let i = 1; i < args.length; i++) v.push(a(i));
+      while (v.length < 4) v.push(0);
+      return G.m.uni(a(0), args.length - 1, v);
+    }
+    case 'glvertexattrib1f/2': case 'glvertexattrib2f/3':
+    case 'glvertexattrib3f/4': case 'glvertexattrib4f/5': {
+      need(320, 240);
+      if (!G.on) break;
+      /* 少给的那几格照 GL 的默认补（x,y,z 是 0、w 是 1）。 */
+      const v = [a(1), args.length >= 3 ? a(2) : 0, args.length >= 4 ? a(3) : 0,
+        args.length >= 5 ? a(4) : 1];
+      return G.m.attr(a(0), v);
+    }
+    case 'glbindtexture/1':
+      need(320, 240);
+      if (!G.on) break;
+      G.m.bindtex(Math.trunc(a(0)));
+      return 0;
+    case 'glactivetexture/1': {
+      need(320, 240);
+      if (!G.on) break;
+      /* 实参是 `GL_TEXTURE0 + i`（0x84c0）或者直接是 i —— 两种写法都有。 */
+      const u = Math.trunc(a(0));
+      G.m.activetex(u >= 0x84c0 ? u - 0x84c0 : u);
       return 0;
     }
     case 'clz/1': return 0;
@@ -531,13 +660,19 @@ export function gfxCall(name, args) {
        **当场报**（不静默按内建那对画 —— 那就成了"图不对但没人知道"）；那张 `u_mvp`
        与混合开关在这一档没有落点，收下记着不用。 */
     case 'batchprog/1':
+      if (G.on) { G.m.prog(Math.trunc(a(0)) !== 0 ? 1 : 0); return 0; }
       if (Math.trunc(a(0)) !== 0) {
         throw new Error('这格设备（CPU 备选）没有可编程管线 —— 脚本挑了自己那格'
           + ' program（glsetshader），顶点是**物体坐标**，这一档接不了；'
           + ' 要 GPU 那两档设备（浏览器 WebGL2 / 本机 OpenGL）');
       }
       return 0;
-    case 'batchmvp/5': case 'batchblend/1': return 0;
+    case 'batchmvp/5':
+      if (G.on) G.m.mvp(Math.trunc(a(0)), a(1), a(2), a(3), a(4));
+      return 0;
+    case 'batchblend/1':
+      if (G.on) G.m.blend(Math.trunc(a(0)));
+      return 0;
     case 'glpointsize/1': case 'glcullface/1': case 'gllinewidth/1':
     case 'glswapinterval/1': case 'glalphaenable/1': case 'glalphadisable/1':
     case 'sleep/1':
@@ -575,6 +710,17 @@ function outPath() {
  */
 function present() {
   if (!D.on) return;
+  /* GL 那一档：把 GPU 那一层读回来（一帧只读一次），宿主那一层（-1 = 没人画）盖上去 ——
+     合成在 `rgbaBytes` 里按格做（那儿本来就要逐格取一次）。 */
+  if (G.on) {
+    if (G.gpu === null) {
+      const n = D.w * D.h;
+      const buf = [];
+      for (let i = 0; i < n; i++) buf.push(0);
+      G.gpu = buf;
+    }
+    G.m.readInto(G.gpu);
+  }
   const p = outPath();
   const cut = p.lastIndexOf('/');
   if (cut > 0) mkdirAll(p.slice(0, cut));
@@ -641,6 +787,8 @@ function batch(kind, n, verts) {
     throw new Error(`gfxbatch: 顶点不够（${have} 格，要 ${n * VSTRIDE}）`);
   }
   need(320, 240);
+  /* GL 那一档：一段批直接上传 + 一次 draw（软件光栅化那一摊一格都不走）。 */
+  if (G.on) { G.m.batch(kind, n, verts); D.dirty = true; return n; }
   if (kind === 0) {
     for (let i = 0; i + 1 < n; i += 2) {
       const ia = i * VSTRIDE;
@@ -692,8 +840,33 @@ function gfxTex(slot, w, h, d, fmt, pxs) {
   const want = w * h * d * per;
   const have = pxs === undefined || pxs === null ? 0 : pxs.length;
   if (have < want) throw new Error(`gfxtex: 像素不够（${have} 格，要 ${want}）`);
+  /* GL 那一档：真上传（`glTexImage2D`）。这一层仍记下形状 —— 报错的话里要用。 */
+  if (glWant()) need(320, 240);
+  if (G.on) {
+    if (G.m.tex(slot, w, h, d, fmt, pxs) !== 0) {
+      throw new Error(`本机 OpenGL：${G.m.error()}`);
+    }
+  }
   TEX.set(slot, { w, h, d, fmt, n: want });
   return 0;
 }
 
-export const GFX_CPU = { call: gfxCall, batch, tex: gfxTex, present, kind: 'cpu' };
+/**
+ * `(gfxdef 种类 名字 内容)`：往设备上登记一格有名字的串（着色器原文 / 名字表）。
+ *
+ * CPU 备选用不上，但**GL 那一档要** —— 而这几句在设备开起来之前就到了（产物开头那一摊
+ * 登记语句），所以先存下来，`glNeed` 挂上之后一趟补过去（与 `omni_fmt.c` 里那一格同一手）。
+ */
+function gfxDef(kind, name, text) {
+  if (G.on) { G.m.def(String(kind), String(name), String(text)); return 0; }
+  G.defs.push([String(kind), String(name), String(text)]);
+  return 0;
+}
+
+export const GFX_CPU = {
+  call: gfxCall, batch, tex: gfxTex, def: gfxDef, present,
+  /* `kind` 是给判据看的一格记号：GL 那一档挂上之后 `glNeed` 把它改成 `native-gl`
+     （不然判据分不出"真走了 GPU"与"悄悄回落了 CPU 备选" —— 那是自己判自己）。
+     **是可变字段而不是 getter**：这一份要过 `check:self` 那道门，取值器不在那个子集里。 */
+  kind: 'cpu',
+};

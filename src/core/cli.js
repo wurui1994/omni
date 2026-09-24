@@ -3211,6 +3211,46 @@ function glPlugin() {
 }
 
 /**
+ * **EVAL 那台 GL 设备在 node 这一侧的入口**（`docs/design/eval-realtime-gpu.md` §16）：
+ * 把 `omni_ev_gl_napi.c` 与 `omni_ev_gl.c` 编成一格 `.node`，**js 腿与解释器腿**
+ * 用 `process.dlopen` 装它（`host/gfx-cpu.js` 里那条 GL 转发支路）。
+ *
+ * 为什么要它：那两条腿是"改完立刻能跑"的路（没有 cc、没有链接），实时那一栏靠的就是它们
+ * —— 而 GPU 那一半的代码早就在 `omni_ev_gl.c` 里了，缺的只是这道门。
+ *
+ * 与 `glPlugin()` 两处不同：这一份是 **N-API 扩展**（`-undefined dynamic_lookup`，
+ * 符号在 node 进程里）、而且 N-API 的声明用**我们自己那一份**（`runtime/omni_napi.h`，
+ * ADR-0038 的立场：不外挂本机的 node 头）。编不出来回 null —— 那一趟照旧 CPU 备选。
+ */
+function evGlAddon() {
+  if (!exists('/System/Library/Frameworks/OpenGL.framework')) return null;
+  if (!isDir(GL_DIR)) return null;
+  const srcs = ['omni_ev_gl_napi.c', 'omni_ev_gl.c'].map((f) => join(GL_DIR, f));
+  const hdr = join(RUNTIME_DIR, 'omni_napi.h');
+  for (const f of [...srcs, hdr]) if (!exists(f)) return null;
+  const cc = findClang();
+  const slot = cacheSlot(cacheRoot(), 'gl-node', basename(cc),
+    hash16([cc, ...[...srcs, hdr].map((f) => `${f}:${mtimeMs(f)}:${fileSize(f)}`)].join('|')));
+  const out = join(slot.dir, 'omni_ev_gl.node');
+  if (slot.fresh && exists(out)) return out;
+  const stage = workDirFor('gl-node', slot.stamp);
+  const staged = join(stage, 'omni_ev_gl.node');
+  const shared = ['-fPIC', '-shared']
+    .concat(hostIsDarwin() ? ['-undefined', 'dynamic_lookup'] : []);
+  const r = spawn(cc, ['-O2', '-w', ...shared, '-o', staged, ...srcs,
+    '-I', RUNTIME_DIR, '-framework', 'OpenGL'], 'c');
+  if (r[0] !== 0) {
+    vStep(`gl addon  ${cc} 编不过，js 腿那一趟走 CPU 备选`);
+    return null;
+  }
+  mkdirAll(slot.dir);
+  rename(staged, out);
+  slotDone(slot);
+  vStep(`gl addon  ${out}`);
+  return out;
+}
+
+/**
  * 作业数。`OMNI_JOBS` 覆盖（1 = 退回串行），否则问 `getconf` 拿在线核数，上限 16。
  * 问不出来就 4 —— 猜一个小的比猜一个大的安全（作业数超了核数只会互相抢）。
  */
@@ -4744,6 +4784,22 @@ function applyGfxFlags(verb, path, rest) {
       throw new OmniError(`--gfx 只有 host|gl|ir|null 四档，拿到 ${g}`);
     }
     setEnv('OMNI_GFX', g);
+    /* `gl` 那一档要两份东西摆好（编不出来就静默回落 CPU 备选）：
+         - `OMNI_GL_LIB`    原生腿 dlopen 的那份 dylib（§13.8）；
+         - `OMNI_EV_GL_ADDON` js 腿 / 解释器腿 `process.dlopen` 的那份 .node（§16）。
+       **两条腿共用同一份设备代码**，只是进门的方式不同。 */
+    if (g === 'gl') {
+      const cur = env('OMNI_GL_LIB');
+      if (cur === undefined || cur === null || cur === '') {
+        const lib = glPlugin();
+        if (lib !== null) setEnv('OMNI_GL_LIB', lib);
+      }
+      const curA = env('OMNI_EV_GL_ADDON');
+      if (curA === undefined || curA === null || curA === '') {
+        const addon = evGlAddon();
+        if (addon !== null) setEnv('OMNI_EV_GL_ADDON', addon);
+      }
+    }
   }
   /* **这几格旗子是"设备在宿主那一侧"那条路的**（帧循环、画布尺寸、输入、性能账都在设备里）。
      给了其中任何一格就把那条路打开（`OMNI_GFX=host`）—— 不打开的话旗子会静默没效果：
