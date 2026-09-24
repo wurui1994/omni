@@ -390,3 +390,30 @@ GL calls into a flat command buffer"）：立即模式的调用先记进一条�
 
 **不许出现的东西**（写在这儿免得再走回头路）：本机那一档的立即模式（`glBegin`/`glVertex`
 转发给驱动）、两份变换/合批逻辑、"某一档设备自己多一套语义"。
+
+### 9.4 第四刀的设计：**批带上状态**，着色器那一族并进同一条路
+
+第三刀之后还剩一格**过渡开关**（`adapter.js` 的 `usesShaderGL`）：用了着色器的脚本仍走
+"GL 名字原样交给设备"那条老路。原因是两种顶点空间：
+
+* 内建那对着色器（2D 与固定管线）收的是**裁剪空间** —— 语言那一侧已经乘过矩阵；
+* 脚本自己那格顶点着色器收的是**物体坐标** —— 变换是它自己做的（`ftransform()`），
+  `u_mvp` 由设备喂。
+
+所以"批"上要带一格状态说清位置是哪一种。落法（`(gfxcall …)` 摆状态、`(gfxbatch …)` 交批）：
+
+    (gfxcall "batchprog" p)                 p = 0 内建（裁剪空间）；≠0 脚本那格 program（物体坐标）
+    (gfxcall "batchmvp" 行 m0 m1 m2 m3)     只有 p≠0 才发（四行，列主序的 MODELVIEW·PROJECTION）
+    (gfxcall "gldepth" 0|1)                 深度测试（已落地）
+    (gfxcall "batchattr" loc x y z w)       常量属性（`glVertexAttrib*`）
+
+语言那一侧（`gl-rt.js`）跟着改三处：`gl_prog` 记当前 program（`glsetshader` 时 flush +
+记下 + 转给设备）；`gl_vertex4` 在 `gl_prog != 0` 时存**物体坐标**（不乘矩阵、也不丢
+`w<=0` —— 裁剪交给 GPU）；`gl_flush` 在 `gl_prog != 0` 时先发四句 `batchmvp` 再发批。
+
+设备那一侧：WebGL2 把 `glbegin/glvertex/矩阵栈/glXf/mvpNow` 那一整摊**删掉**（那是第二份
+变换与合批），只留"收批 + 编 program + uniform + 纹理 + 读回 + 查询/输入"；CPU 备选两份
+在 `p≠0` 时**当场报**（没有可编程管线，不静默画错）；本机 OpenGL（第五刀）照 `p` 选 program。
+
+判完就把 `usesShaderGL` 那格开关删掉 —— 判据是 `tests/studio/run.js` 里着色器那两条
+（`@v`/`@f` + `glsetshader` + uniform + `glquad`、着色器 + 立即模式几何）不许变。
