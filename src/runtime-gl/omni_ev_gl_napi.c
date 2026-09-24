@@ -11,10 +11,12 @@
  *
  * ## 两个定下来的选择
  *
- * 1. **收普通 JS 数组，不收 typed array**：`gfx-cpu.js` 要过 `check:self` 那道门，
- *    而 typed array 还不在那个子集里。代价量过（§16.3）：一格 `napi_get_element` ≈ 50ns，
- *    一帧几千格顶点也在 16.7ms 的预算里。真不够的时候是**把 typed array 扩进子集**，
- *    不是在这一层绕。
+ * 1. **收普通 JS 数组**（uniform / 像素那几族）—— `gfx-cpu.js` 要过 `check:self` 那道门。
+ *    **顶点那一族已经不这么走了**：一格 `napi_get_element` ≈ 50ns，`disco ball` 一帧
+ *    12 万顶点 × 16 格 = 400 万次跨界 = 115ms/帧（2026-09-25 量的，§16.3 那句
+ *    "一帧几千格顶点也在预算里"在这一份上不成立）。现在顶点写进一块 `ArrayBuffer`
+ *    （`DataView.setFloat64`，小端）整块递过来 —— ArrayBuffer 与 DataView 本来就在
+ *    那个子集里（ADR-0011），所以**不是在这一层绕**，递数组那一路留着当回落。
  * 2. **与 `omni_ev_gl.c` 一起编进同一份 `.node`**：那一份是纯 C、没有 node 依赖，
  *    两份一起编就不必再 dlopen 一次（少一层、少一处路径要对）。
  * 3. **N-API 的声明用我们自己那一份**（`runtime/omni_napi.h`，ADR-0038 的立场：不外挂，
@@ -133,12 +135,29 @@ static napi_value jsCull(napi_env env, napi_callback_info info) {
   return mknum(env, 0);
 }
 
-/** `batch(类, 顶点数, 顶点[])` —— 一格顶点 12 个数（位置 4 / 颜色 4 / 纹理坐标 4）。 */
+/** `batch(类, 顶点数, 顶点)` —— 一格顶点 16 个 double（位置/颜色/纹理坐标/法向，§18.3）。
+ *
+ * **顶点整块过来**（2026-09-25）：宿主那一侧（`host/gfx-cpu.js`）把这一段写进一块
+ * `ArrayBuffer`（小端的 double），这儿一次拿指针，**一格都不抄** —— 先前一格一格取，
+ * `disco ball` 一帧 400 万次跨界、115ms。递数组那一路留着当回落。 */
 static napi_value jsBatch(napi_env env, napi_callback_info info) {
   ARGS(3);
-  /* 一格顶点 16 个 double（位置/颜色/纹理坐标/法向，§18.3）—— 只抄这一批用得着的那一段。 */
   long cnt = (long)num(env, a[1]);
   if (cnt <= 0) return mknum(env, 0);
+  bool isab = false;
+  if (napi_is_arraybuffer(env, a[2], &isab) == omni_napi_ok && isab) {
+    void *data = NULL;
+    size_t nb = 0;
+    if (napi_get_arraybuffer_info(env, a[2], &data, &nb) != omni_napi_ok || data == NULL) {
+      return mknum(env, 1);
+    }
+    long have = (long)(nb / sizeof(double));
+    if (cnt * 16 > have) cnt = have / 16;
+    if (cnt <= 0) return mknum(env, 0);
+    omni_ev_gl_batch((int)num(env, a[0]), cnt, (const double *)data);
+    return mknum(env, 0);
+  }
+  /* 只抄这一批用得着的那一段。 */
   long n = 0;
   double *v = arrN(env, a[2], cnt * 16, &n);
   if (v == NULL) return mknum(env, 1);
@@ -298,6 +317,33 @@ static napi_value jsMvp(napi_env env, napi_callback_info info) {
   return mknum(env, 0);
 }
 
+/**
+ * `mat(哪张, ArrayBuffer)` —— **一整张矩阵一次过来**（16 个小端 double，列主序）。
+ * 哪张：0 = `u_mvp`、1 = `u_mv`。摆下去的次序与四句 `mvp`/`mv` 逐字相同。
+ *
+ * 为什么要它：一段批要发两张矩阵，走 `mvp`/`mv` 是 **8 次**跨界；`disco ball` 一帧
+ * 3994 段批 ⇒ 32k 次，量出来 ~24ms/帧（2026-09-25）。顶点那一族已经走整块字节了
+ * （见 `jsBatch`），矩阵跟着走同一条路。
+ */
+static napi_value jsMat(napi_env env, napi_callback_info info) {
+  ARGS(2);
+  bool isab = false;
+  if (napi_is_arraybuffer(env, a[1], &isab) != omni_napi_ok || !isab) return mknum(env, 1);
+  void *data = NULL;
+  size_t nb = 0;
+  if (napi_get_arraybuffer_info(env, a[1], &data, &nb) != omni_napi_ok || data == NULL) {
+    return mknum(env, 1);
+  }
+  if (nb < 16 * sizeof(double)) return mknum(env, 1);
+  const double *m = (const double *)data;
+  int which = (int)num(env, a[0]);
+  for (int c = 0; c < 4; c++) {
+    if (which == 0) omni_ev_gl_mvp(c, m[c * 4], m[c * 4 + 1], m[c * 4 + 2], m[c * 4 + 3]);
+    else omni_ev_gl_mv(c, m[c * 4], m[c * 4 + 1], m[c * 4 + 2], m[c * 4 + 3]);
+  }
+  return mknum(env, 0);
+}
+
 static napi_value jsMv(napi_env env, napi_callback_info info) {
   ARGS(5);
   omni_ev_gl_mv((int)num(env, a[0]), num(env, a[1]), num(env, a[2]), num(env, a[3]),
@@ -382,6 +428,7 @@ napi_value napi_register_module_v1(napi_env env, napi_value exports) {
   PUT("prog", jsProg);
   PUT("mvp", jsMvp);
   PUT("mv", jsMv);
+  PUT("mat", jsMat);
   PUT("blend", jsBlend);
   PUT("tex", jsTex);
   PUT("texfile", jsTexfile);

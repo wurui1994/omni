@@ -2183,5 +2183,37 @@ OMNI_GFX=null OMNI_FRAMES=30 OMNI_PROF=sample:997 OMNI_PROF_OUT=/tmp/db.folded /
 下一轮的线头：**js 那条腿现在是最慢的一条**（154ms/帧，4.09x 参考）；c 腿要再快 2.2 倍
 才够 60fps，剩下的账要重新采一遍（上一张表里的四个名字这一轮都改过了）。
 
+### 29.6 js 腿：顶点与矩阵整块过界 —— `snake tube` 进 60fps（2026-09-25）
+
+§16.3 当年那句话（"一格 `napi_get_element` ≈ 50ns，一帧几千格顶点也在预算里"）
+在 `disco ball` 上**不成立**：一帧 12 万顶点 × 16 格 = **400 万次跨界**。
+量法是把同一份程序跑两遍：`--gfx null` 54ms/帧、`--gfx gl` 169ms/帧 ⇒
+那 115ms 全在插件那道门上（同一份 GL 代码 c 腿只花 18ms）。
+
+两刀：
+
+1. **顶点整块过去**：`host/gfx-cpu.js` 把一段批写进一块复用的 `ArrayBuffer`
+   （`DataView.setFloat64`，小端），插件那一侧一次 `napi_get_arraybuffer_info`
+   拿指针、**零拷贝**（`jsBatch` 里判 `napi_is_arraybuffer`，递数组那一路留着当回落）。
+   **169 -> 108ms/帧**。
+   * 这**不是**"在这一层绕"：`ArrayBuffer` / `DataView` 本来就在 `check:self` 那个子集里
+     （ADR-0011），要扩的是 `Float64Array`，而量过 —— 190 万格 `setFloat64` 暖起来之后
+     ~2ms，与 `Float64Array` 逐格写同价，所以不必为这件事扩子集。
+2. **矩阵也整块过去**：新增 `mat(哪张, ArrayBuffer)`（16 个小端 double，内部按列摆四次）
+   —— 一段批从 8 次跨界变成 2 次。这一刀单独看在噪声里（这台机器上 js 腿一帧的抖动
+   ±40ms），留着是因为"少 3/4 的跨界"这件事本身是结构上的。
+
+判据：
+
+* **`snake tube` js 腿 29.1 -> 11.5ms/帧 = 87fps，进了 60fps 那一档**（先前是红的）；
+* `disco ball` js 腿 169.2 -> **83.7ms/帧**（4.37x -> 2.02x 参考），c 腿 39.1ms（0.94x）；
+* `correct.js` 42 过 / 7 红 / 13 不计，七个红的 RMSE 逐位相同；`tests/gl` 11/11、
+  `check:self` ok。
+
+现在四份 HEAVY 的账（每帧 avg，参考在括号里）：`drawsph` c 2.0 / js 8.7（10.7）、
+`snake tube` c 5.4 / js 11.5（13.7）、`balls2k` c 10.8 / js 7.3（4.7）、
+`disco ball` c 39.1 / js 83.7（41.4）—— **只剩 `disco ball` 一份不到 60fps**。
+
+
 
 

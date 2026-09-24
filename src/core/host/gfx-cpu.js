@@ -884,6 +884,29 @@ function traceV(kind, n, verts) {
   }
 }
 
+/* ── **顶点按字节整块递给插件**（§16.3 那一格的账，2026-09-25 还上了）。
+ *
+ * 先前 `G.m.batch(kind, n, verts)` 递的是普通 JS 数组，插件那一侧一格顶点一格数
+ * 地取（`napi_get_element` + `napi_get_value_double`）。`disco ball` 一帧 12 万顶点
+ * × 16 格 = **400 万次跨界**，量出来 js 腿 169ms/帧里有 115ms 是这个（同一份程序
+ * `--gfx null` 只花 54ms）。
+ *
+ * 现在先写进一块复用的 `ArrayBuffer`（`DataView.setFloat64`，**小端** —— 与 C 那侧
+ * 的 `double` 同一个字节序，我们的目标机器都是小端），插件那一侧一次
+ * `napi_get_arraybuffer_info` 拿到指针，**零拷贝**。这一层仍在 `check:self` 的子集里
+ * （ArrayBuffer / DataView 是 ADR-0011 那一族），所以不用绕。
+ * 量过：190 万格 `setFloat64` 暖起来之后 ~2ms，与 `Float64Array` 逐格写同价。 */
+let VBUF = null;
+let VDV = null;
+
+function vbufFor(n8) {
+  if (VBUF === null || VBUF.byteLength < n8) {
+    VBUF = new ArrayBuffer(n8 < 65536 ? 65536 : n8);
+    VDV = new DataView(VBUF);
+  }
+  return VBUF;
+}
+
 function batch(kind, n, verts) {
   if (recOn()) { REC.set('gfxbatch', (REC.get('gfxbatch') ?? 0) + 1); return n; }
   const have = verts === undefined || verts === null ? 0 : verts.length;
@@ -893,7 +916,14 @@ function batch(kind, n, verts) {
   need(320, 240);
   traceV(kind, n, verts);
   /* GL 那一档：一段批直接上传 + 一次 draw（软件光栅化那一摊一格都不走）。 */
-  if (G.on) { G.m.batch(kind, n, verts); D.dirty = true; return n; }
+  if (G.on) {
+    const m = n * VSTRIDE;
+    const ab = vbufFor(m * 8);
+    for (let i = 0; i < m; i++) VDV.setFloat64(i * 8, verts[i], true);
+    G.m.batch(kind, n, ab);
+    D.dirty = true;
+    return n;
+  }
   if (kind === 0) {
     for (let i = 0; i + 1 < n; i += 2) {
       const ia = i * VSTRIDE;
@@ -976,6 +1006,15 @@ function gfxArr(name, args, blk) {
      里那段话）。数组短于 16 格就当没发（不该发生，这一层不猜）。 */
   if (nm === 'batchmvp16' || nm === 'batchmv16') {
     if (!G.on || n < 16) return 0;
+    /* 插件那一侧有 `mat` 就走整块字节那条路（一次跨界，不是四次）—— 与四句
+       `batchmvp`/`batchmv` 逐字等价，只是少 3 次。**与顶点共用那一块**：
+       每次跨界都当场吃掉（插件那边同步读完才回来），不存着。 */
+    if (typeof G.m.mat === 'function') {
+      const ab = vbufFor(16 * 8);
+      for (let i = 0; i < 16; i++) VDV.setFloat64(i * 8, blk[i], true);
+      G.m.mat(nm === 'batchmvp16' ? 0 : 1, ab);
+      return 0;
+    }
     const put = nm === 'batchmvp16' ? G.m.mvp : G.m.mv;
     for (let c = 0; c < 4; c++) put(c, blk[c * 4], blk[c * 4 + 1], blk[c * 4 + 2], blk[c * 4 + 3]);
     return 0;

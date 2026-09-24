@@ -59,6 +59,11 @@ extern napi_status napi_get_value_string_utf8(napi_env env, napi_value value, ch
 /* ---- arena 的真地址（ADR-0038 第二条约定） ---- */
 extern napi_status napi_get_arraybuffer_info(napi_env env, napi_value arraybuffer,
                                             void **data, size_t *byte_length);
+/* 顶点那一族走**整块字节**（2026-09-25）：`host/gfx-cpu.js` 把一段批写进一块
+   `ArrayBuffer`（`DataView.setFloat64`，小端），这一侧一次拿指针就够 ——
+   先前一格顶点一格数地取，`disco ball` 一帧 400 万次跨界。判"是不是 ArrayBuffer"
+   要单独一条：`napi_get_arraybuffer_info` 对别的值回的是 invalid_arg，不该当判据用。 */
+extern napi_status napi_is_arraybuffer(napi_env env, napi_value value, bool *result);
 
 /* ---- 注入那条路要的三条（ADR-0038 第二刀）：造个对象、把一块**我们自己的内存**
        包成 ArrayBuffer 交给 JS 直接写（零拷贝）、以及取一格 int64。 ---- */
