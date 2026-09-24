@@ -1946,6 +1946,33 @@ CPU 备选收下不管），量出来：
 判据：`tests/gl/run.js` 11/11、`tests/lower/run.js polydraw evaldraw` 44/44、`check:self` ok、
 `drawsph` / `drawsph_asm` / `metaballs` / `metaballs cube` / `04-shader` 照旧逐像素相同。
 
+### 28.15 `mipmap` 那 48.4：两边跑的不是同一段片元代码（参考掉进 `#else`）
+
+`ken/mipmap.pss` 的正事是"拿鼠标 Y 挑 mip 层"：片元里
+`#ifdef GL_ARB_shader_texture_lod` -> `texture2DLod(tex0,t.xy,dep)`、`#else` -> 普通 `texture2D`，
+`dep = 2^(mousy/yres*3)-1`。两行探针（同一个 `#ifdef`，有那个扩展画红、没有画绿）量出来：
+**参考绿、我们红**。参考把着色器编成 `#version 330 core`，core profile 里那些扩展宏**不定义**
+（扩展早并进核心了）⇒ 它走了给老硬件的兜底那条；原版跑在真 GL 的兼容管线上，
+驱动是定义那个宏的（`texture2DLod` 在片元里本来就只有那个扩展才有）。
+我们照原版走 LOD 那条（`ext/polydraw/glsl.js` 的 `GLSL_HAVE`）⇒ 第 0 帧我们是第 7 层
+（256² 的第 7 层 ≈ 一片灰）、参考是清清楚楚的棋盘。**对不上才对**，记进 `REF_WRONG`。
+
+排掉的三个嫌疑（都用探针量的，省得下次重查）：
+
+* **`^` 是幂不是异或**：`eval.txt:76` 明写着，探针 `(2^3)/16` 两边都是 128（= 8/16）——
+  两边都对；
+* **`xres`/`yres`/`mousy` 两边一样**：探针把它们编进颜色里，两边都是 `(82,61,61)`
+  = 320 / 240 / 240；
+* **mip 是两边都生成的**：参考 `gl_renderer.c:1608` 与我们 `omni_ev_gl.c` 都在
+  `filter >= KGL_MIPMAP` 时 `glGenerateMipmap`；`KGL_MIPMAP*` 那四格的号照正本
+  （`polydraw.c:191`，`MIPMAP3=2<<4` … `MIPMAP0=5<<4`）。
+
+**一格还没判的口径**（两边一样所以量不出来）：`mousy` 开局两边都是 240 —— 参考定死
+`480/2`（`pd_polyhost.c:22`）、我们照它写的（`host/gfx-cpu.js` 的 `mx/my`），
+可正本说的是"光标在窗口正中" ⇒ 320×240 那一档本该是 **(160,120)**。
+`mipmap` 这一份对它最敏感（`dep` 直接由 `mousy/yres` 定）。哪天拿到原版的输出要重裁。
+
+
 
 
 
