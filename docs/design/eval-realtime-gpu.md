@@ -956,6 +956,7 @@ CGL 上下文 + 着色器编译 + 写 PNG —— 双方都付这一份，所以�
      三档设备 + `gl-rt.js` 一起改；`balls2k` 卡在这儿；
    * `gluniform{1,2,3,4}{i,fv,iv}` 那一族（`myext[]` 里全有）。
 
+
 ## 16. 第六刀：**js 腿 + FFI 接本机 GL**（实时那三条路的第一条）
 ### 16.1 为什么它排第一
 
@@ -1023,9 +1024,52 @@ N-API 那一侧收 **普通 JS 数组**（`napi_get_array_length` + `napi_get_el
 （原生腿的 dylib、js 腿的 .node）是 `cli.js` 解析旗子时顺手编出来并摆进环境的；
 只设环境变量的话它们不会被编，设备**悄悄回落 CPU 备选**（判据第一版就是这么假红的）。
 
+## 17. 第七刀：**正确性优先**（2026-09-24 用户定的口径）
 
+> 你需要在正确的情况下优化速度。目前还有很多例子渲染都不正确，包括基本的例子。
+> 黑的显然不正确，像素差异大也不正确。此外 c_impl 实现也只有 80% 正确 ——
+> 如果你连 c_impl 那种正确都保证不了，比较速度没有意义。细节情况看原始实现 polydraw_src。
 
+### 17.1 判据：`tests/eval/correct.js`（与 c_impl 逐像素对照）
 
+我们出 `.rgba`（裸表面、没有编码层），参考出 PNG 再用它自带的 `pd-imgdecode` 转 PPM ——
+两边都不过第三方解码器。量四个数：**RMSE**、两边非黑格数、有差的格数、最大分量差。
+三档判定：**黑图**（参考有东西而我们几乎全黑）、**差异大**（RMSE 过线）、其余算过。
 
+### 17.2 **一格必须传对的东西：fovy**（不然"看着像我们画错"）
 
+参考 `polydraw-render` 的 fovy **默认固定 73.74°**（`src/render_main.c:48` 的注：
+"setfov(90) effective, matches the reference" —— 那是 640×480 那台窗口上的值）；
+我们照 `polydraw_src` 的 `ksetfov`（`polydraw.c:1484`）用**真实画布的宽高比**算：
+`tan(fovy/2) = 高/宽`。于是 320×320 上我们是 90°、它还是 73.74°，三角差 **1.333 倍** ——
+第一版对照就是这么"发现我们画错"的。判据现在按分辨率把 fovy 递过去
+（`fovy = 2·atan(h/w)`）。改对之后：
 
+    01_minimal_noshader.pss   RMSE 0.00   逐像素相同（3698 = 3698）
+    04-shader.pss             RMSE 0.00   逐像素相同（102400 格全中）
+    06-texture.pss            RMSE 0.00   逐像素相同
+    05-shader-geom.pss        RMSE 6.62   够近（每格差一点，最大 38）
+
+### 17.3 第一批账（320×320、第 0 帧）与裁定
+
+    RMSE   我们非黑  参考非黑  判定        例子
+    0.00     3698     3698   逐像素相同   01_minimal_noshader.pss
+    0.00   102400   102400   逐像素相同   04-shader.pss
+    0.00   102375   102375   逐像素相同   06-texture.pss
+    6.62     9216     9216   够近        05-shader-geom.pss
+   14.84     2320     1160   **参考错**   02_primitives_noshader.pss
+   17.59    10223     9832   待查        02-gl.pss
+      —        —        —    跑不起来     03_custom_shader.pss / 04_required_shader.pss（着色器编不过）
+      —        —        —    跑不起来     05_explicit_main_and_funcs.pss（显式 main 的写法没接）
+
+**`02_primitives_noshader` 这一格是参考错**（用连通块数出来的，不是看着像）：脚本
+`for (i = 0; i < 6; i++)` 明写画 **6** 个方块，我们画出 **6 个**、参考只有 **3 个** ——
+每隔一个丢掉。这正是"c_impl 只有 80% 正确"那句话的实例，所以判据里这种分歧要**裁定一次
+再记名单**，不能盲目按 RMSE 判我们红。裁定的依据只有一条：**`polydraw_src` 的语义**。
+
+### 17.4 待修（按"基本例子"优先）
+
+1. `03_custom_shader` / `04_required_shader`：`glsetshader` 那一族编不过（要看驱动给的话）；
+2. `05_explicit_main_and_funcs`：**显式 `main(){}` 与多函数**的写法解析不了（`{` 那一格）；
+3. `02-gl.pss` RMSE 17.59（非黑 10223 vs 9832）—— 差在边缘还是颜色要再分；
+4. `balls2k` 卡在 `gl_Normal`（顶点要加法向那 4 格，见 §15.6）。
