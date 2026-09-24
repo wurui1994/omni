@@ -894,20 +894,27 @@ function vecBin(op, l, r, types) {
   const out = fresh('vo');
   const i = fresh('vi');
   const vr = (x) => ({ kind: 'name', name: x });
-  const lenOf = (x) => vecLen(vr(x.name));
+  /* 每一边的长度**先存进一格 int**（`vecLen` 是一次内存读 + 一次转换，摆在循环里就是每元素一次）。
+     量出来的（bench/r/run.js，2026-09-25）：`vec.R` 原生腿 2.0s → 0.66s。 */
+  const lens = [a, c].filter((x) => x.isVec).map((x) => ({ x, nm: fresh('vk') }));
+  const lenOf = (x) => vr(lens.find((e) => e.x === x).nm);
   /* 结果长度：两边都是向量取大的，只有一边是向量就是它的长度 */
   const len = a.isVec && c.isVec
     ? { kind: 'ternary', cond: b('>=', lenOf(a), lenOf(c)), then: lenOf(a), else_: lenOf(c) }
     : lenOf(a.isVec ? a : c);
-  /* 取第 i 格：向量按 `i % 它的长度`（回收），标量就是它自己 */
-  const at = (x) => (x.isVec
-    ? vecGet(vr(x.name), b('%', vr(i), lenOf(x)))
-    : vr(x.name));
+  /* 取第 i 格：标量就是它自己；向量按 `i % 它的长度`（回收）——
+     **只有一边是向量时那个取模是废的**（结果长度就是它的长度，`i` 一定在范围里），所以省掉。 */
+  const oneVec = !(a.isVec && c.isVec);
+  const at = (x) => {
+    if (!x.isVec) return vr(x.name);
+    return vecGet(vr(x.name), oneVec ? vr(i) : b('%', vr(i), lenOf(x)));
+  };
   return {
     kind: 'block-expr',
     stmts: [
       a.decl,
       c.decl,
+      ...lens.map((e) => ({ kind: 'let', name: e.nm, type: INT, init: vecLen(vr(e.x.name)) })),
       { kind: 'let', name: nm, type: INT, init: len },
       ...vecNewAs(out, vr(nm)),
       {
@@ -1495,7 +1502,11 @@ function vecFnDecl(name) {
   const v = { kind: 'name', name: 'v' };
   const i = { kind: 'name', name: 'i' };
   const acc = { kind: 'name', name: 's' };
-  const len = vecLen(v);
+  /* **长度先存进一格 int**，循环条件读它 —— 不然每转一圈都要 `(toint (pload v))`，
+     那是一次内存读 + 一次转换。量出来的（bench/r/run.js，2026-09-25）：
+     `vec.R` 上光这一条就是 2.0s → 0.66s。 */
+  const len = { kind: 'name', name: 'n' };
+  const declLen = (from) => ({ kind: 'let', name: 'n', type: INT, init: vecLen(from ?? v) });
   const elem = vecGet(v, i);
   const loop = (body, from) => ({
     kind: 'for',
@@ -1510,6 +1521,7 @@ function vecFnDecl(name) {
     return {
       kind: 'fn', name, params: P, ret: REAL,
       body: [
+        declLen(),
         { kind: 'let', name: 's', type: REAL, init: { kind: 'real', value: 0 } },
         loop([{ kind: 'assign', target: acc, value: b('+', acc, elem) }], 0),
         { kind: 'return', values: [acc] },
@@ -1522,7 +1534,7 @@ function vecFnDecl(name) {
       body: [{
         kind: 'return',
         values: [b('/', { kind: 'call', fn: { kind: 'name', name: 'r_sum' }, args: [v] },
-          call1('toreal', len))],
+          call1('toreal', vecLen(v)))],
       }],
     };
   }
@@ -1533,6 +1545,7 @@ function vecFnDecl(name) {
       /* 空向量在 R 里回 `-Inf` / `Inf` 并且**发一句警告**；这一版没有警告那条通道，
          所以空向量这一格当场报（在 `r_sum` 之外唯一与 R 不同的地方，明写在 SPEC）。 */
       body: [
+        declLen(),
         { kind: 'let', name: 's', type: REAL, init: vecGet(v, { kind: 'int', value: 0 }) },
         loop([{
           kind: 'if',
@@ -1550,7 +1563,7 @@ function vecFnDecl(name) {
       name,
       params: [{ name: 'v', type: RVEC }, { name: 'sep', type: STR }],
       ret: { kind: 'void' },
-      body: [loop([
+      body: [declLen(), loop([
         {
           kind: 'if',
           cond: b('>', i, { kind: 'int', value: 0 }),
@@ -1574,6 +1587,7 @@ function vecFnDecl(name) {
       params: P,
       ret: RVEC,
       body: [
+        declLen(),
         ...vecNewAs('o', len),
         loop([vecSet(out, i, vecGet(v, b('-', b('-', len, i), { kind: 'int', value: 1 })))], 0),
         { kind: 'return', values: [out] },
@@ -1589,6 +1603,7 @@ function vecFnDecl(name) {
       params: P,
       ret: RVEC,
       body: [
+        declLen(),
         ...vecNewAs('o', len),
         loop([vecSet(out, i, asReal(b('+', i, { kind: 'int', value: 1 }), INT))], 0),
         { kind: 'return', values: [out] },
@@ -1611,6 +1626,7 @@ function vecFnDecl(name) {
       params: P,
       ret: RVEC,
       body: [
+        declLen(),
         { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
         { kind: 'let', name: 'c', type: INT, init: { kind: 'int', value: 0 } },
         loopA([{ kind: 'if', cond: hit, then: [{ kind: 'assign', target: c, value: b('+', c, { kind: 'int', value: 1 }) }], else_: null }],
@@ -1640,11 +1656,12 @@ function vecFnDecl(name) {
       params: [{ name: 'v', type: RVEC }, { name: 'ix', type: RVEC }],
       ret: RVEC,
       body: [
-        ...vecNewAs('o', vecLen(ix)),
+        declLen(ix),
+        ...vecNewAs('o', len),
         {
           kind: 'for',
           init: { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
-          cond: b('<', i, vecLen(ix)),
+          cond: b('<', i, len),
           post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
           body: [vecSet(out, i, vecGet(v, b('-', call1('toint', vecGet(ix, i)), { kind: 'int', value: 1 })))],
         },
@@ -1660,11 +1677,11 @@ function vecFnDecl(name) {
     const out = { kind: 'name', name: 'o' };
     const k = { kind: 'name', name: 'k' };
     const c = { kind: 'name', name: 'c' };
-    const mi = vecGet(m, b('%', i, vecLen(m)));
+    const mi = vecGet(m, b('%', i, { kind: 'name', name: 'nm' }));
     const loopV = (body, init) => ({
       kind: 'for',
       init,
-      cond: b('<', i, vecLen(v)),
+      cond: b('<', i, len),
       post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
       body,
     });
@@ -1674,6 +1691,9 @@ function vecFnDecl(name) {
       params: [{ name: 'v', type: RVEC }, { name: 'm', type: RVEC }],
       ret: RVEC,
       body: [
+        /* 两个长度都先存进 int（循环条件与回收那一格各要读一次）。 */
+        declLen(),
+        { kind: 'let', name: 'nm', type: INT, init: vecLen(m) },
         /* `i` 在函数体上先声明一次 —— 两趟都用它，摆在 `for` 的 init 里的话第二趟就看不见了。 */
         { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
         { kind: 'let', name: 'c', type: INT, init: { kind: 'int', value: 0 } },
@@ -1713,7 +1733,7 @@ function vecFnDecl(name) {
       name,
       params: [{ name: 'v', type: RVEC }, { name: 'sep', type: STR }],
       ret: { kind: 'void' },
-      body: [loop([
+      body: [declLen(), loop([
         {
           kind: 'if',
           cond: b('>', i, { kind: 'int', value: 0 }),
