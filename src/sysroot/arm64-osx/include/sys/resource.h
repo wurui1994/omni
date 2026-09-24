@@ -6,13 +6,12 @@
 
 #include <sys/types.h>
 #include <time.h>
+/* `struct timeval` 只有一处定义（`<sys/time.h>`）。从前这儿又写了一遍 —— 一个翻译单元
+ * 同时引到这两个头就是 `redefinition of 'struct timeval'`，而那正是
+ * `--libc self` 编整套运行时（`omni_js_host.c` 两个都引）时撞上的第一堵墙。 */
+#include <sys/time.h>
 
 #define RUSAGE_SELF 0
-
-struct timeval {
-  time_t tv_sec;
-  suseconds_t tv_usec;
-};
 
 struct rusage {
   struct timeval ru_utime;   /* 0 */

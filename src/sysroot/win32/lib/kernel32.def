@@ -1,0 +1,70 @@
+; kernel32.def — 符号预设（第 win-c-backend 刀）。
+;
+; 与 tinycc 的 `win32/lib/kernel32.def` 同一种形式（`LIBRARY` + `EXPORTS` + 一行一个名字），
+; 但**只写我们用得着的那些**：那一份是 776 行整套 API，这一份是我们自己那份 libc
+; 与运行时真正引到的。口径与 `src/sysroot/README.md` 里说的一致 ——
+; 缺了哪个，链的时候按名字报，照着加一行就是。
+;
+; ARM64 上导出名不修饰（没有 x86 那套 `_name@N`），所以这里就是干净的 API 名字。
+LIBRARY kernel32.dll
+
+EXPORTS
+AddVectoredExceptionHandler
+CloseHandle
+CreateDirectoryA
+CreateFileA
+CreatePipe
+CreateProcessA
+CreateThread
+DeleteFileA
+DuplicateHandle
+ExitProcess
+FindClose
+FindFirstFileA
+FindNextFileA
+FlushFileBuffers
+FreeEnvironmentStringsA
+GetCommandLineA
+GetCurrentDirectoryA
+GetCurrentProcess
+GetCurrentProcessId
+GetCurrentThread
+GetCurrentThreadStackLimits
+GetEnvironmentStrings
+GetEnvironmentVariableA
+GetExitCodeProcess
+GetFileAttributesA
+GetFileInformationByHandle
+GetFileSizeEx
+GetFileType
+GetFullPathNameA
+GetLastError
+GetStdHandle
+GetSystemTimeAsFileTime
+GetThreadContext
+GetTickCount64
+LoadLibraryA
+FreeLibrary
+GetModuleHandleA
+GetProcAddress
+MoveFileExA
+QueryPerformanceCounter
+QueryPerformanceFrequency
+ReadFile
+RemoveDirectoryA
+ResumeThread
+SetCurrentDirectoryA
+SetEndOfFile
+SetEnvironmentVariableA
+SetFilePointerEx
+Sleep
+SuspendThread
+TerminateProcess
+TlsAlloc
+TlsFree
+TlsGetValue
+TlsSetValue
+VirtualAlloc
+VirtualFree
+WaitForSingleObject
+WriteFile

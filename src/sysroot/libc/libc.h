@@ -18,6 +18,24 @@
 
 #include "syscall.h"
 
+/* **和指针一样宽的无符号整数**（第 win-c-backend 刀）。
+ *
+ * 从前这一份到处用 `unsigned long` 当「大小 / 地址」——在 Linux 与 macOS 上那是 8 字节，
+ * 没问题；可 **Windows 是 LLP64：`long` 只有 4 字节**（我们自己的 C 前端也照这个模型，
+ * 见 `frontend-c/tccdefs.js` 的 `win32: { longSize: 4 … }`）。于是 `__libc_chunk` 回的
+ * 那个「地方的起点」在 win32 上被截成 32 位。
+ *
+ * 为什么先前没炸：`VirtualAlloc(0, …)` 是**从地址空间底下往上找**的，进程早期要到的
+ * 那几块都落在 4GB 以内，截了也还是原值。等到低处用完或者碎了，就会拿到高地址 ——
+ * 那时候 malloc 会静静地把一个截断的指针发出去。这种 bug 不该留着等。
+ *
+ * 两条 Unix 腿上这个 typedef **就是 `unsigned long`**（逐字节不变）；win32 上是 8 字节。 */
+#ifdef _WIN32
+typedef unsigned long long __libc_usize;
+#else
+typedef unsigned long __libc_usize;
+#endif
+
 /* `FILE`：一个 fd 加「读到头了没有」「出过错没有」两位，再加一格 `ungetc` 的退回位。
  * **无缓冲** —— 每次读写都是一条 syscall。慢，但少一整套刷新的账，`fflush` 是空操作。
  * `back` 是 -1 表示空（C11 只保证一格退回，我们就给一格）。 */
@@ -39,7 +57,7 @@ void *memcpy(void *d, const void *s, unsigned long n);
 void *memset(void *s, int c, unsigned long n);
 int strcmp(const char *a, const char *b);
 char *strchr(const char *s, int c);
-void *malloc(unsigned long size);
+void *malloc(__libc_usize size);
 void free(void *p);
 
 /* ---- 基 10^9 的大整数（`dec.c`）：浮点的两头共用一份。
@@ -72,10 +90,15 @@ int open(const char *path, int flags, ...);
 int close(int fd);
 long lseek(int fd, long off, int whence);
 void _exit(int code);
+/** `abort` 要先给自己一枪（SIGABRT）再退 134 —— 那一枪只有目标专有那一半发得出来
+ *  （`misc.c` 的 `kill`）。从前这儿是公用的 stdio.c 直接写 `__omni_syscall(SYS_kill, …)`，
+ *  于是 win32 那条腿一编就停在那行：**Windows 上没有 syscall、也没有信号**。
+ *  改成走 `kill` 之后，两条 Unix 腿逐字节不变，win32 上它回 ENOSYS，收场仍然是 134。 */
+int kill(int pid, int sig);
 /** 跟系统要一块**至少** `least` 字节的地方：回起点，回 0 是要不到；实际给了多少
  *  写回 `*got`。Linux 那边是 `brk`、macOS 那边是 `mmap`（那儿没有 brk）——
  *  所以公用的 malloc **不假设两次要来的地方是连着的**。 */
-unsigned long __libc_chunk(unsigned long least, unsigned long *got);
+__libc_usize __libc_chunk(__libc_usize least, __libc_usize *got);
 /* `atexit` 那张表在各目标的 `misc.c` 上，`exit`（公用的 stdio.c）收场时调这一条。 */
 void __libc_run_atexit(void);
 

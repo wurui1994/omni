@@ -134,15 +134,44 @@ function $dl_arm() {
        sh 的 printf（格式里那个 \n 由它解释），这儿一个转义都不写。 */
     var msg = "omni: 超时 —— 这一趟跑过了开发期的时限（" + ticks
       + "s），外部看门狗把它停了。放宽 OMNI_TIMEOUT=120，关掉 OMNI_TIMEOUT=0。";
-    var sh = "p=" + process.pid + "; n=0; while [ $n -lt " + ticks + " ]; do"
-      + " kill -0 $p 2>/dev/null || exit 0; sleep 1; n=$((n+1)); done;"
-      + " kill -0 $p 2>/dev/null || exit 0;"
-      + " printf '%s\n' " + JSON.stringify(msg) + " >&2;"
-      + " kill -TERM $p 2>/dev/null; m=0; while [ $m -lt 5 ]; do"
-      + " kill -0 $p 2>/dev/null || exit 0; sleep 1; m=$((m+1)); done;"
-      + " kill -KILL $p 2>/dev/null";
-    var ch = $node("node:child_process").spawn("/bin/sh", ["-c", sh],
-      { detached: true, stdio: ["ignore", "ignore", 2] });
+    /* Windows 上没有 /bin/sh、也没有 kill -0，于是同样这三步用 node 自己写一遍：
+       process.kill(p, 0) 探活、writeSync(2, …) 印那句话、SIGTERM 再 SIGKILL。
+       挑 node 而不是 cmd 的 timeout/taskkill：这一格要的是「按 pid 探活」，
+       cmd 那边没有等价物，而 node 本来就在手上（process.execPath）。
+       （这一整份是 String.raw 模板 —— 注释里也不许出现反引号。） */
+    var ch;
+    if (process.platform === "win32") {
+      var js = "var p=" + process.pid + ",n=0,k=0;"
+        + "var m=" + JSON.stringify(msg + "\n") + ";"
+        + "function al(){try{process.kill(p,0);return true;}catch(e){return false;}}"
+        + "var iv=setInterval(function(){"
+        + "if(!al())process.exit(0);"
+        + "if(++n<" + ticks + ")return;"
+        + "clearInterval(iv);"
+        + "process.getBuiltinModule('node:fs').writeSync(2,m);"
+        + "try{process.kill(p,'SIGTERM');}catch(e){}"
+        + "var iv2=setInterval(function(){"
+        + "if(!al())process.exit(0);"
+        + "if(++k<5)return;"
+        + "clearInterval(iv2);"
+        + "try{process.kill(p,'SIGKILL');}catch(e){}"
+        + "process.exit(0);},1000);},1000);";
+      ch = $node("node:child_process").spawn(process.execPath, ["-e", js],
+        { detached: true, stdio: ["ignore", "ignore", 2] });
+    } else {
+      var sh = "p=" + process.pid + "; n=0; while [ $n -lt " + ticks + " ]; do"
+        + " kill -0 $p 2>/dev/null || exit 0; sleep 1; n=$((n+1)); done;"
+        + " kill -0 $p 2>/dev/null || exit 0;"
+        + " printf '%s\n' " + JSON.stringify(msg) + " >&2;"
+        + " kill -TERM $p 2>/dev/null; m=0; while [ $m -lt 5 ]; do"
+        + " kill -0 $p 2>/dev/null || exit 0; sleep 1; m=$((m+1)); done;"
+        + " kill -KILL $p 2>/dev/null";
+      ch = $node("node:child_process").spawn("/bin/sh", ["-c", sh],
+        { detached: true, stdio: ["ignore", "ignore", 2] });
+    }
+    /* spawn 起不来是**异步**的 'error' 事件，不是抛出来的 —— 没这一行的话，
+       在没有 /bin/sh 的机器上是「未处理的 error 事件」直接把整个进程带走。 */
+    ch.on("error", function () { /* 起不来就算了 */ });
     ch.unref();
   } catch (e) { /* 起不来就算了 —— 时限是开发期的便利，不是正确性 */ }
 }

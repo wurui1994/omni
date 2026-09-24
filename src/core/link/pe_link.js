@@ -139,6 +139,14 @@ export function peImage(inp) {
     }
   }
 
+  /* 引到了、可是**谁也没定义**的符号（第 win-c-backend 刀）。
+   * 从前这一层对未定义符号一律回 0，注释写的是「弱的未定义符号在 PE 上就是 0」——
+   * 可那一句对**非弱**的也照办了，于是链接静静地成功、程序跑到那一句去调地址 0。
+   * 踩到的原话：`basics.exe` 一起来就 0xC0000005，查了半天才发现是
+   * `pthread_key_create` 一族在 win32 的 sysroot 里根本没实现。
+   * 现在记下来，落完重定位一起报（一次看全，不是报一个改一个）。 */
+  const missing = new Set();
+
   /* 每个符号的最终地址。 */
   const addrOf = (sym) => {
     const b = imports.bind.get(sym.name);
@@ -151,7 +159,12 @@ export function peImage(inp) {
     if (l !== undefined && (sym.shndx === PLINK_SHN_UNDEF || sym.shndx === PLINK_SHN_COMMON)) {
       return l.sec.vaddr + l.off;
     }
-    if (sym.shndx === PLINK_SHN_UNDEF) return 0;         // 弱的未定义符号在 PE 上就是 0
+    if (sym.shndx === PLINK_SHN_UNDEF) {
+      /* 弱的未定义符号在 PE 上就是 0（`weakUndef` 那一路会把 `adrp`/`bl` 改写掉）；
+       * 非弱的就是**真缺了**。 */
+      if (sym.bind !== PLINK_STB_WEAK && sym.name !== '') missing.add(sym.name);
+      return 0;
+    }
     if (sym.shndx === PLINK_SHN_ABS) return sym.value;
     if (sym.shndx >= PLINK_SHN_LORESERVE) return 0;
     const s = secs[sym.shndx - 1];
@@ -176,6 +189,25 @@ export function peImage(inp) {
     if (sym.shndx === PLINK_SHN_UNDEF || sym.shndx >= PLINK_SHN_LORESERVE) return null;
     return { sec: secs[sym.shndx - 1], off: sym.value };
   };
+
+  /* GOT 的格子（第 win-c-backend 刀）：`peSections` 已经分好「哪个符号占第几格」，
+   * 这儿把最终地址填进去 —— 格子划在 `.data` 里，每格都挂了一条基址重定位。
+   * 加数**不进格子**：arm64 那一对（311/312）的加数一律 0（见 `arm64/from_mir.js`
+   * 的 `symAddr`），格子里装的就是符号本身的地址。 */
+  const gotVA = (symx) => {
+    if (r.got === null || r.got === undefined) return undefined;
+    const idx = r.got.index.get(symx);
+    return idx === undefined ? undefined : r.got.sec.vaddr + r.got.at + idx * 8;
+  };
+  if (r.got !== null && r.got !== undefined) {
+    const g = r.got;
+    const gdv = new DataView(g.sec.data.buffer, g.sec.data.byteOffset, g.sec.data.byteLength);
+    for (const [symx, idx] of g.index) {
+      const sym = syms[symx];
+      if (sym === undefined) throw new OmniError('pe: GOT 里那一格指的符号不存在');
+      gdv.setBigUint64(g.at + idx * 8, BigInt(addrOf(sym)), true);
+    }
+  }
 
   /* 重定位落笔（`relocate_sections`）。 */
   /* 线程局部那几号要 PT_TLS 的起止。PE 上 `pe_build_tls` 只填了 `tls_start`，
@@ -219,9 +251,17 @@ export function peImage(inp) {
         continue;
       }
       relocateOne(machine, type, tgt.data, off, tgt.vaddr + off,
-        addrOf(sym) + addend, imagebase, weak, undefined,
+        addrOf(sym) + addend, imagebase, weak, gotVA(symx),
         TLS_RELOC.has(type) ? tlsSeg : undefined);
     }
+  }
+
+  /* 缺的符号一起报。放在落完重定位之后：一趟就把该说的都说完。 */
+  if (missing.size !== 0) {
+    const names = [...missing].sort();
+    const head = names.slice(0, 20).join('、');
+    throw new OmniError(`pe: 这些符号引到了可是没有定义：${head}`
+      + (names.length > 20 ? `（还有 ${names.length - 20} 个）` : ''));
   }
 
   /* 导出表里那几格函数 RVA：tcc 给它们挂的是 `R_XXX_RELATIVE`，也就是
@@ -396,6 +436,19 @@ export function peWrite(inp) {
   };
   r.img = img;
   r.bytes = writeImage(img);
+  /* **链接图**（`--map`）：名字 -> 链接期的 VA（含映像基址）。ELF 那条腿早就有
+   * （`writeLinkMap`），PE 这条从前没有 —— 而这条腿崩的时候能拿到的只有一个裸地址
+   * （`start.c` 里的 `__veh` 印的 `pc` 与 `base`），没有这张表就翻不成函数名。
+   * 只收**真的落在某一节里**的符号；导入桩与未定义的那些不进表。 */
+  r.mapSyms = [];
+  for (let i = 1; i < r.syms.length; i++) {
+    const sym = r.syms[i];
+    if (sym === undefined || sym.name === '') continue;
+    const p = r.placeOf(sym);
+    if (p === null) continue;                      // 未定义/绝对符号：没有落点
+    r.mapSyms.push({ name: sym.name, addr: p.sec.vaddr + p.off, size: sym.size ?? 0 });
+  }
+  r.mapSyms.sort((a, b) => a.addr - b.addr);
   /* `pe_build_exports` 里那段 `#if 1`：只要真有导出的符号，就顺手往
    * `<输出>.def` 写一份导出清单。落盘的事交给调用方（我们不碰文件系统）。 */
   if (r.exp !== null) r.def = { path: defPath(inp.outName), text: r.exp.def };

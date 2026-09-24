@@ -86,7 +86,7 @@ int *__errno_location(void) {
 /* 公用那份 malloc 跟系统要地方走这一条（约定见 `libc.h`）。
  * Linux 这边是 `brk`：一路往上推，所以要来的地方其实**是**连着的 —— 但公用那一份
  * 不许依赖这一点（macOS 那边没有 brk，是一块块 `mmap` 来的）。 */
-unsigned long __libc_chunk(unsigned long least, unsigned long *got) {
+__libc_usize __libc_chunk(__libc_usize least, __libc_usize *got) {
   static unsigned long top;
   if (top == 0) {
     long cur = __omni_syscall(SYS_brk, 0);

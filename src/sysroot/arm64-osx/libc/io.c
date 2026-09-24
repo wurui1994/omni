@@ -147,7 +147,7 @@ int *__errno_location(void) { return &__libc_errno_val; }
  * Darwin 没有 brk，只能 `mmap`：PROT_READ|PROT_WRITE = 3，
  * MAP_PRIVATE|MAP_ANON = 0x0002 | 0x1000 = 0x1002，fd = -1。
  * 于是**两次要来的地方不连着** —— 公用那一份不许有那个假设。 */
-unsigned long __libc_chunk(unsigned long least, unsigned long *got) {
+__libc_usize __libc_chunk(__libc_usize least, __libc_usize *got) {
   unsigned long want = (least + 16383) & ~16383UL;   /* arm64 macOS 的页是 16K */
   long r = __omni_syscall(SYS_mmap, 0, (long)want, 3, 0x1002, -1, 0);
   if (r < 0 && r >= -4095) return 0;

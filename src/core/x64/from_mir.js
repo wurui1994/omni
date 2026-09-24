@@ -74,9 +74,31 @@ const X64_FTMP1 = XMM.xmm9;
 const X64_FRES = XMM.xmm10;
 
 /** SysV 的整数实参寄存器，**只有六个**（arm64 有八个）。 */
-const IARG = [REG.rdi, REG.rsi, REG.rdx, REG.rcx, REG.r8, REG.r9];
+const IARG_SYSV = [REG.rdi, REG.rsi, REG.rdx, REG.rcx, REG.r8, REG.r9];
 /** 浮点实参 xmm0-7，八个。 */
-const FARG = [XMM.xmm0, XMM.xmm1, XMM.xmm2, XMM.xmm3, XMM.xmm4, XMM.xmm5, XMM.xmm6, XMM.xmm7];
+const FARG_SYSV = [XMM.xmm0, XMM.xmm1, XMM.xmm2, XMM.xmm3, XMM.xmm4, XMM.xmm5, XMM.xmm6, XMM.xmm7];
+
+/** Win64（第 win-c-backend 刀）：整数只有 rcx/rdx/r8/r9 四个、浮点只有 xmm0-3，
+ *  而且**按位置配对** —— 第 i 个实参占的是「整数槽 i」或「xmm 槽 i」，不是两条各自
+ *  往前走的序列（SysV 那样）。第五个实参起摆在 `rsp + 32`：前 32 字节是**影子区**，
+ *  调用方永远得留着（被调方可以把那四个寄存器实参泼进去）。 */
+const IARG_WIN64 = [REG.rcx, REG.rdx, REG.r8, REG.r9];
+const FARG_WIN64 = [XMM.xmm0, XMM.xmm1, XMM.xmm2, XMM.xmm3];
+/** Win64 的影子区有多大（调用方留、被调方用）。 */
+const WIN64_SHADOW = 32;
+
+/* 这一遍按哪套 ABI 发码。`genX64Module` 一进门设一次 —— 一次只编一个模块、
+ * 单线程，所以这三个模块级的量是安全的；写成参数要穿过十几个函数签名，不值。 */
+let WIN64 = false;
+let IARG = IARG_SYSV;
+let FARG = FARG_SYSV;
+
+/** 切 ABI：`os === 'win32'` 走 Win64，别的走 SysV。 */
+function x64SetAbi(win64) {
+  WIN64 = win64 === true;
+  IARG = WIN64 ? IARG_WIN64 : IARG_SYSV;
+  FARG = WIN64 ? FARG_WIN64 : FARG_SYSV;
+}
 
 /** **内核** ABI 的实参寄存器（第一百四十片）。与上面那六个只差第四格：`rcx` 换成
  *  `r10` —— `syscall` 指令把返回地址塞进 rcx，所以内核那边约定第四个实参走 r10。 */
@@ -187,7 +209,77 @@ function classifyMem(mem, ngrn, nsse) {
   return { regs, ngrn: gi, nsse: si };
 }
 
+/**
+ * Win64 的摆位（第 win-c-backend 刀）：**一个实参一个槽**，槽号既数整数也数浮点。
+ *
+ *   槽 0-3   整数进 rcx/rdx/r8/r9、浮点进 xmm0-3（**同一个槽号**，选哪串看类型）
+ *   槽 4 起  摆在 `rsp + 32 + (槽 - 4) * 8`（前 32 是影子区）
+ *
+ * 聚合（`ARGMEM`）在 Win64 上只有两种：1/2/4/8 字节的**按值**塞进一个槽，
+ * 别的**按引用**传（调用方自己复制一份、把地址塞进槽）。按引用那一路这一刀先
+ * `nyi()` 明着拒绝 —— 静静地传错一个结构比报错贵得多（这一轮已经为
+ * 「PE 对未定义符号回 0」交过一次学费）。
+ *
+ * 回的形状与 SysV 那一支**完全一样**（`{x}`/`{v}`/`{off}`/`{sret}`），于是发指令那一侧
+ * 一个字都不用改：`{x}`/`{v}` 是 `IARG`/`FARG` 的下标，而那两个数组已经按 ABI 换过了。
+ */
+function win64ArgPlaces(mod, f, args) {
+  const at = [];
+  let slot = 0;
+  /* Win64 上**一个实参正好一个槽**（聚合也是：按值那几种塞一个槽，按引用那种塞地址），
+   * 所以槽区有多大一开始就知道 —— 按引用要拷的那几块接在槽区后面。 */
+  const slotBytes = WIN64_SHADOW + Math.max(0, args.length - IARG.length) * 8;
+  let copyAt = slotBytes;
+  const put = (isFloat) => {
+    const place = slot < IARG.length
+      ? (isFloat ? { v: slot } : { x: slot })
+      : { off: WIN64_SHADOW + (slot - IARG.length) * 8 };
+    slot++;
+    return place;
+  };
+  for (const ar of args) {
+    const mem = argMemOf(f, ar);
+    if (mem !== null) {
+      if (mem.sret === true) {
+        /* **返回值这一格跟着前端的判据走，不按 Win64 的 8 字节线**：
+         * 「这个函数要不要一个隐藏指针形参」是前端决定的（它按 SysV 的 16 字节线加
+         * `ARGSRET`），后端这一侧只能照着摆 —— 两头都是我们自己的代码，自洽才是要紧的。
+         * 第一版这儿按 Win64 的规矩把 9..16 字节也当成隐藏指针，于是调用方递了一个
+         * 被调方根本不读的指针、而被调方把 struct 回在 rax/rdx 里：`01_basics` 跑到
+         * 第一个字符串就 `out of memory`（拿垃圾当长度去要内存）。
+         * 真正的 Win64 规矩要等前端也按目标分叉时再一起改（那时 `.def` 里的外部函数
+         * 才谈得上「返回大结构」，kernel32 这一批没有一个这样的）。 */
+        if (mem.size > 16) {
+          const place = put(false);
+          at.push({ sret: mem, x: place.x });
+        } else at.push({ sret: mem });
+        continue;
+      }
+      if (mem.f80) nyi('Win64 的 long double 实参');
+      if (mem.size === 1 || mem.size === 2 || mem.size === 4 || mem.size === 8) {
+        const place = put(false);
+        if (place.off !== undefined) at.push({ off: place.off, bytes: mem.size });
+        else at.push({ regs: [{ x: place.x }], size: mem.size });
+        continue;
+      }
+      /* 别的大小**按引用传**（Win64 的规矩）：调用方自己留一份拷贝、把**那一份的地址**
+       * 塞进槽。拷贝落在出参区尾部 —— 不另开一块帧空间，`outArgsBytes` 把它一起算进去。
+       * 为什么必须拷：被调方可以改它手里那一份（C 的「形参是实参的拷贝」），
+       * 直接把原件的地址递过去，改动会漏回调用方。 */
+      const need = mem.size + (mem.size % 8 === 0 ? 0 : 8 - (mem.size % 8));
+      const place = put(false);
+      at.push({ ...place, copy: { off: copyAt, bytes: mem.size } });
+      copyAt += need;
+      continue;
+    }
+    at.push(put(isFloatType(f.typeOf(ar, mod.consts))));
+  }
+  /* 影子区永远算进去：哪怕一个实参都没有，被调方也可以往那 32 字节里写。 */
+  return { at, stack: copyAt, nsse: 0 };
+}
+
 function x64ArgPlaces(mod, f, args) {
+  if (WIN64) return win64ArgPlaces(mod, f, args);
   const at = [];
   let ngrn = 0;
   let nsse = 0;
@@ -272,7 +364,47 @@ function outArgsBytes(mod, f) {
  * `p.sret`（第一百三十一片）是 MEMORY 类返回值那个隐藏指针：SysV 里它就是**头一个
  * 普通整数实参**（占 rdi），与 arm64 的 x8 不是一回事。
  */
+/** Win64 的形参那一侧：与 `win64ArgPlaces` 一一对应（同一套槽号、同一个 32 字节起点）。
+ *  `ngrn` 这儿回的是**用掉的槽数** —— `VASTART` 要的正是它（第一个变参在第几槽）。 */
+function win64ParamPlaces(f) {
+  const at = [];
+  let slot = 0;
+  const put = (isFloat) => {
+    const place = slot < IARG.length
+      ? (isFloat ? { v: slot } : { x: slot })
+      : { off: WIN64_SHADOW + (slot - IARG.length) * 8 };
+    slot++;
+    return place;
+  };
+  for (const p of f.params) {
+    if (p.sret === true) {
+      const place = put(false);
+      at.push({ sret: true, x: place.x });
+      continue;
+    }
+    if (p.ld === true) nyi('Win64 的 long double 形参');
+    if (p.mem !== undefined) {
+      const size = memArgSize(p.mem);
+      if (size === 1 || size === 2 || size === 4 || size === 8) {
+        const place = put(false);
+        if (place.off !== undefined) at.push({ off: place.off, bytes: size });
+        else at.push({ regs: [{ x: place.x }], bytes: size });
+        continue;
+      }
+      /* 按引用收的（> 8 字节且不是 2 的幂那几种）：槽里是**一个地址** —— 所以这儿回
+       * 的是普通整数形参的形状，序言把那个值原样落进槽里，而槽里本来就该是
+       * 「这个 struct 在哪儿」。调用方已经拷过一份（见 `win64ArgPlaces` 的 `copy`），
+       * 所以「形参是实参的一份可改的拷贝」这条仍然成立。 */
+      at.push(put(false));
+      continue;
+    }
+    at.push(put(isFloatType(p.t)));
+  }
+  return { at, ngrn: slot, nsse: 0, bytes: Math.max(0, slot - IARG.length) * 8 };
+}
+
 function paramPlaces(f) {
+  if (WIN64) return win64ParamPlaces(f);
   const at = [];
   let ngrn = 0;
   let nsse = 0;
@@ -506,6 +638,22 @@ class x64FnGen {
     const f = this.f;
     const buf = this.buf;
     buf.emit(push(BP), movRR(8, BP, REG.rsp));
+    /* **Windows 上大于一页的帧要自己探栈**（第 win-c-backend 刀，在 arm64 上量出来的、
+     * 两个 arch 同一笔账）：栈是保留一大片、只提交头几页，紧挨着已提交区放一页
+     * PAGE_GUARD —— 碰到那一页内核才往下接。`sub rsp, 64KB` 再去写就**跳过了它**，
+     * 得到的是 0xC0000005，而且那时 `rsp` 已经在未提交的地方，连异常都报不出来。
+     * MSVC/clang 在这儿发 `__chkstk`；我们自己走一圈：r10 从 `rsp` 往下每 4096 触一下，
+     * 触到帧底为止。r10/r11 在 Win64 上既不是实参寄存器也不用保存。 */
+    if (WIN64 && this.frame > 4096) {
+      buf.emit(movRR(8, X64_TMP0, REG.rsp), movRR(8, X64_TMP1, REG.rsp));
+      buf.emit(aluRI(ALU.sub, 8, X64_TMP1, this.frame));
+      const loop = buf.label();
+      buf.place(loop);
+      buf.emit(aluRI(ALU.sub, 8, X64_TMP0, 4096));
+      buf.emit(movMR(8, X64_TMP0, 0, X64_TMP0));   /* 触一下这一页（写进的是自己的帧） */
+      buf.emit(aluRR(ALU.cmp, 8, X64_TMP0, X64_TMP1));
+      buf.jcc(CC.a, loop);                         /* 还在帧底之上就继续（无符号） */
+    }
     if (this.frame > 0) buf.emit(aluRI(ALU.sub, 8, REG.rsp, this.frame));
     /* 变参函数的序言（第二十四片）：把六个整数实参寄存器与八个 xmm **无条件**泼进
      * 寄存器保存区。clang 会先 `test al, al` 再跳过 xmm 那一段；我们不跳 ——
@@ -513,16 +661,29 @@ class x64FnGen {
      * xmm 借整数草稿过一手（`movq`），省一条「xmm 存内存」的编码。
      * 只泼低 8 字节：C 的变参里 `double` 只用到这些，`__m128` 不在这条腿的范围内。 */
     if (f.variadic) {
-      let k = 0;
-      while (k < IARG.length) {
-        buf.emit(movMR(8, BP, this.regSave + k * 8, IARG[k]));
-        k++;
-      }
-      k = 0;
-      while (k < FARG.length) {
-        this.fromFp(X64_TMP0, FARG[k]);
-        buf.emit(movMR(8, BP, this.regSave + 48 + k * 16, X64_TMP0));
-        k++;
+      if (WIN64) {
+        /* Win64 的变参（第 win-c-backend 刀）：把四个整数寄存器实参泼进**调用方留下的
+         * 影子区**（`rbp + 16` 起那 32 字节）。泼完之后「寄存器实参 + 栈上实参」在内存里
+         * 连成一串，于是 `va_list` 只是一个往前走的游标 —— 比 SysV 那两块加两个游标简单。
+         * 浮点不用另泼：Win64 规定调变参函数时浮点实参**同时**塞进对应的整数寄存器
+         * （那一步在调用方，见 `callArgs`）。 */
+        let k = 0;
+        while (k < IARG.length) {
+          buf.emit(movMR(8, BP, 16 + k * 8, IARG[k]));
+          k++;
+        }
+      } else {
+        let k = 0;
+        while (k < IARG.length) {
+          buf.emit(movMR(8, BP, this.regSave + k * 8, IARG[k]));
+          k++;
+        }
+        k = 0;
+        while (k < FARG.length) {
+          this.fromFp(X64_TMP0, FARG[k]);
+          buf.emit(movMR(8, BP, this.regSave + 48 + k * 16, X64_TMP0));
+          k++;
+        }
       }
     }
     /* 形参照 `paramPlaces` 摆（第一百三十一片起与实参那一侧共用 `classifyMem`）：
@@ -843,6 +1004,20 @@ class x64FnGen {
       const vl = this.vaOffs.get(i);
       if (vl === undefined) throw new OmniError('x64: VASTART 没有分到 va_list 的位置');
       const p = inArgPlaces(f);
+      if (WIN64) {
+        /* Win64：`va_list` 就是一个游标。这一份仍旧用那个 24 字节的结构（前端手里的
+         * `va_list` 是它的地址，两条腿同一个形状），但**只用 `overflow_arg_area` 这一格**：
+         * 两个 offset 直接填到「寄存器那段已经用光」的值（48 / 176），于是 `VAARG`
+         * 那几段判余量的比较一律落到溢出区那一支 —— 而溢出区正是我们要的那一串。
+         * 游标的起点：影子区之后、固定形参之后（`rbp + 16 + 8 * 用掉的槽数`）。 */
+        buf.emit(movRI(4, X64_TMP1, 48), movMR(4, BP, vl, X64_TMP1));
+        buf.emit(movRI(4, X64_TMP1, 176), movMR(4, BP, vl + 4, X64_TMP1));
+        buf.emit(lea(8, X64_TMP1, BP, 16 + 8 * p.ngrn), movMR(8, BP, vl + 8, X64_TMP1));
+        buf.emit(movMR(8, BP, vl + 16, X64_TMP1));        // reg_save_area 这条腿上不用
+        this.loadRef(X64_TMP0, f.a[i]);
+        buf.emit(lea(8, X64_TMP1, BP, vl), movMR(8, X64_TMP0, 0, X64_TMP1));
+        return;
+      }
       /* 固定实参用掉的那一段先记上：`va_arg` 从这儿往后数。 */
       buf.emit(movRI(4, X64_TMP1, 8 * p.ngrn), movMR(4, BP, vl, X64_TMP1));
       buf.emit(movRI(4, X64_TMP1, 48 + 16 * p.nsse), movMR(4, BP, vl + 4, X64_TMP1));
@@ -1002,6 +1177,27 @@ class x64FnGen {
     }
     if (op === OP.SPALLOC) {
       this.loadRef(X64_TMP0, f.a[i]);
+      /* Windows 上这一路也要探栈（第 win-c-backend 刀，与序言里那一段同一笔账）：
+       * 所以先把**新的 rsp** 算在 TMP1 里、探完再落到 rsp 上。别的腿一个字节不变。 */
+      if (WIN64) {
+        buf.emit(movRR(8, X64_TMP1, REG.rsp));
+        buf.emit(aluRR(ALU.sub, 8, X64_TMP1, X64_TMP0));
+        buf.emit(movRR(8, X64_RES, X64_TMP1));               /* 块的基址 */
+        if (this.outArgs > 0) buf.emit(aluRI(ALU.sub, 8, X64_TMP1, this.outArgs));
+        buf.emit(movRR(8, X64_TMP0, REG.rsp));               /* 游标 = 旧 rsp */
+        const loop = buf.label();
+        const tail = buf.label();
+        buf.place(loop);
+        buf.emit(aluRI(ALU.sub, 8, X64_TMP0, 4096));
+        buf.emit(aluRR(ALU.cmp, 8, X64_TMP0, X64_TMP1));
+        buf.jcc(CC.be, tail);                                /* 游标 <= 新 rsp */
+        buf.emit(movMR(8, X64_TMP0, 0, X64_TMP0));
+        buf.jmp(loop);
+        buf.place(tail);
+        buf.emit(movMR(8, X64_TMP1, 0, X64_TMP1));           /* 新栈顶那一页 */
+        buf.emit(movRR(8, REG.rsp, X64_TMP1));
+        return this.def(i, X64_RES);
+      }
       buf.emit(aluRR(ALU.sub, 8, REG.rsp, X64_TMP0));
       buf.emit(movRR(8, X64_RES, REG.rsp));
       if (this.outArgs > 0) buf.emit(aluRI(ALU.sub, 8, REG.rsp, this.outArgs));
@@ -1153,6 +1349,26 @@ class x64FnGen {
         sret = { place, ref: ar };
         continue;
       }
+      /* Win64 按引用传的聚合（第 win-c-backend 刀）：先把内容拷进出参区尾部那一块，
+       * 再把**那一块的地址**塞进槽（槽可能是寄存器、也可能在栈上）。 */
+      if (place.copy !== undefined) {
+        this.loadRef(X64_TMP0, ar);
+        let at2 = 0;
+        for (const w of [8, 4, 2, 1]) {
+          while (place.copy.bytes - at2 >= w) {
+            this.buf.emit(movRM(w, X64_TMP1, X64_TMP0, at2),
+              movMR(w, REG.rsp, place.copy.off + at2, X64_TMP1));
+            at2 += w;
+          }
+        }
+        if (place.x !== undefined) {
+          this.buf.emit(lea(8, IARG[place.x], REG.rsp, place.copy.off));
+        } else {
+          this.buf.emit(lea(8, X64_TMP1, REG.rsp, place.copy.off));
+          this.buf.emit(movMR(8, REG.rsp, place.off, X64_TMP1));
+        }
+        continue;
+      }
       /* 走栈的：一格 8 字节，摆在出参区里（`rsp + off`）。 */
       if (place.off !== undefined) {
         /* 一整块内容进 MEMORY（`ARGMEM`，第四十片）：按 8/4/2/1 递降着拷，
@@ -1192,13 +1408,20 @@ class x64FnGen {
       if (place.v !== undefined) {
         this.loadRef(X64_TMP0, ar);
         this.toFp(FARG[place.v], X64_TMP0);
+        /* Win64：调**变参**函数时浮点实参要**同时**塞进对应的整数寄存器 —— 被调方
+         * 那一侧只认「一串 8 字节的槽」（`va_arg` 从影子区往后数），它不知道这一格
+         * 当初是浮点。少这一步，`printf("%f", x)` 印出来是垃圾。 */
+        if (WIN64 && variadic === true && place.v < IARG.length) {
+          this.buf.emit(movRR(8, IARG[place.v], X64_TMP0));
+        }
         continue;
       }
       this.loadRef(IARG[place.x], ar);
     }
     /* SysV：调变参函数之前 `al` 要等于用掉的 xmm 个数。被调的是不是变参这一层不知道，
-     * 所以外部调用一律发这一条 —— 对非变参函数完全无害，少了它 `printf` 会崩。 */
-    if (variadic === true) this.buf.emit(movRI(1, X64_RES, p.nsse));
+     * 所以外部调用一律发这一条 —— 对非变参函数完全无害，少了它 `printf` 会崩。
+     * Win64 没有这一格（它靠「浮点同时进整数寄存器」那一条解决同一个问题）。 */
+    if (variadic === true && !WIN64) this.buf.emit(movRI(1, X64_RES, p.nsse));
     return sret;
   }
 
@@ -1640,6 +1863,9 @@ export function codeOf(mod, f) {
  * 回一格 `unwind = {offs, funcs: [{start, end}]}`，`.pdata` 那一节由写出器照它排。
  */
 export function genModule(mod, opts) {
+  /* 这一遍按哪套调用约定发码（第 win-c-backend 刀）：`win32` 走 Win64，其余走 SysV。
+   * 放在最前 —— 后面的 `codeOf`/`genFunc` 与那几个摆位函数都读这一格。 */
+  x64SetAbi(opts !== undefined && opts.win64 === true);
   const dataSyms = [];
   /* 初值里的地址（第二十八片）：与 arm64 那一份同一条 —— `POINTER64`、加数在原地。 */
   const dataRelocs = [];

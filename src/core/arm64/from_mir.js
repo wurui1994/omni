@@ -63,6 +63,14 @@ const TMP1 = 10;
 const RES = 8;
 const SP = 31;
 /**
+ * **这一趟在给 Windows 发码吗**（第 win-c-backend 刀）。
+ *
+ * 只影响一件事：大于一页的帧要不要**自己探栈**（见 `gen()` 里那一段）。ABI 那一侧
+ * arm64 三条腿是同一套（AAPCS64），所以没有别的分叉。
+ */
+let WIN32 = false;
+function arm64SetOs(win32) { WIN32 = win32 === true; }
+/**
  * **值的寄存器缓存**（第一百四十三片）：x11-x15。
  *
  * 「每个值一个栈位」这个口径没改 —— 改的是「算完先别急着写回去」：结果落在这五个里的
@@ -1246,6 +1254,28 @@ class FnGen {
       const hi = Math.floor(this.frame / 4096);
       const lo = this.frame % 4096;
       if (hi > 4095) arm64Nyi(`帧 ${this.frame} 字节（一次 sub 装不下）`);
+      /* **Windows 的栈是按页长出来的**（第 win-c-backend 刀，量出来的）：保留多大都行
+       * （我们给 512MB），可**提交的只有头几页**，紧挨着已提交区放着一页 PAGE_GUARD ——
+       * 碰到那一页内核才把栈往下接一段。于是「`sp` 一下降 64KB 再去写」这种帧**跳过了
+       * 那一页**，写下去就是 0xC0000005。MSVC/clang 在这儿发的是 `__chkstk`；我们自己
+       * 一页一页探：游标从 `sp` 往下每 4096 触一个字节，触到帧底为止。
+       *
+       * 这一条是拿 `stk.exe` 量出来的：一个 64KB 局部数组的递归函数，在 512MB 的栈上
+       * 照样 0xC0000005，而且**连 VEH 那一行都印不出来** —— 因为出事时 `sp` 已经落在
+       * 未提交的地方，内核往那儿推异常帧又是一次错，进程当场没。
+       *
+       * x9/x10 在序言里是自由的（形参在 x0-x7 / v0-v7 里）。 */
+      if (WIN32 && this.frame > 4096) {
+        buf.emit(movSp(1, TMP0, SP), movSp(1, TMP1, SP));
+        if (hi > 0) buf.emit(subImm(1, TMP1, TMP1, hi, 1));
+        if (lo > 0) buf.emit(subImm(1, TMP1, TMP1, lo));
+        const loop = buf.label();
+        buf.place(loop);
+        buf.emit(subImm(1, TMP0, TMP0, 1, 1));    /* 一页：`sub x9, x9, #1, lsl #12` */
+        buf.emit(strU(3, 31, TMP0, 0));           /* 31 号在 store 的 Rt 位上是 xzr */
+        buf.emit(cmpReg(1, TMP0, TMP1));
+        buf.bcond(COND.hi, loop);                 /* 游标还在帧底之上就继续（无符号） */
+      }
       if (hi > 0) buf.emit(subImm(1, SP, SP, hi, 1));
       if (lo > 0) buf.emit(subImm(1, SP, SP, lo));
     }
@@ -1880,6 +1910,24 @@ class FnGen {
         if (hi > 4095) arm64Nyi(`出参区 ${oa} 字节（一次 sub 装不下）`);
         if (hi > 0) buf.emit(subImm(1, TMP1, TMP1, hi, 1));
         if (lo > 0) buf.emit(subImm(1, TMP1, TMP1, lo));
+      }
+      /* Windows 上**这一路也要探栈**（第 win-c-backend 刀）：与序言里那一段同一笔账 ——
+       * 栈按页长，跳过那页 PAGE_GUARD 写下去就是 0xC0000005。序言里的帧是常数、这儿的
+       * 大小是运行期的，所以只能真的转一圈：游标从旧 `sp` 往下每 4096 触一下，
+       * 触到新 `sp`（已经把出参区算进去了）为止。
+       * 这时 TMP0 已经用完（大小早减进 TMP1 了），拿它当游标。 */
+      if (WIN32) {
+        buf.emit(movSp(1, TMP0, SP));
+        const loop = buf.label();
+        const tail = buf.label();
+        buf.place(loop);
+        buf.emit(subImm(1, TMP0, TMP0, 1, 1));
+        buf.emit(cmpReg(1, TMP0, TMP1));
+        buf.bcond(COND.ls, tail);                 /* 游标 <= 新 sp：最后一页在下面补 */
+        buf.emit(strU(3, 31, TMP0, 0));
+        buf.b(loop);
+        buf.place(tail);
+        buf.emit(strU(3, 31, TMP1, 0));           /* 新栈顶那一页（在自己这一块里） */
       }
       buf.emit(movSp(1, SP, TMP1));
       return this.def(i, RES);
@@ -2741,7 +2789,9 @@ export function codeOfArm64(mod, f) {
  * ±128MB 够得着，于是这一层不欠链接器任何账（跨模块的符号才欠，见 `asm.js` 的
  * `blSym`）。`offsets[i]` 是第 i 个函数在这段字节里的起点。
  */
-export function genArm64Module(mod) {
+export function genArm64Module(mod, opts) {
+  /* `{win32: true}`：大于一页的帧要自己探栈（见 `arm64SetOs` 与 `gen()`）。 */
+  arm64SetOs(opts !== undefined && opts !== null && opts.win32 === true);
   /* 数据段先排出来 —— 函数体里 `loadRef` 要拿串常量的符号名，所以这一步得在生成之前。
    *
    * 布局：模块级变量**一个八字节一格**、零初始化，串常量接在后面（UTF-8 + 一个 0）。

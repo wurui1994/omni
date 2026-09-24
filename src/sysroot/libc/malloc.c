@@ -33,32 +33,32 @@
 #include "libc.h"
 
 #define HDR       16
-#define ALIGN16(x) (((x) + 15) & ~(unsigned long)15)
+#define ALIGN16(x) (((x) + 15) & ~(__libc_usize)15)
 #define NBIN      32
 
-static unsigned long curPos;        /* 当前这块地方切到哪儿了 */
-static unsigned long curEnd;        /* 当前这块地方的尽头 */
-static unsigned long chunkStep = 1048576;
-static unsigned long bins[NBIN];    /* 每个箱的表头（0 = 空） */
+static __libc_usize curPos;        /* 当前这块地方切到哪儿了 */
+static __libc_usize curEnd;        /* 当前这块地方的尽头 */
+static __libc_usize chunkStep = 1048576;
+static __libc_usize bins[NBIN];    /* 每个箱的表头（0 = 空） */
 
 /* 每一块跟系统要来的地方都记下来 —— **合并那一趟要按地址走**（见 `sweepMerge`）。
  * 64 格够：每块至少 1M 且步长翻倍，64 格能覆盖到 2^63。 */
 #define NCHUNK 64
-static unsigned long chunkBase[NCHUNK];
-static unsigned long chunkEnd[NCHUNK];
+static __libc_usize chunkBase[NCHUNK];
+static __libc_usize chunkEnd[NCHUNK];
 static int nchunk;
 static int freedSince;              /* 上次合并之后放掉过多少块（0 就不用白走一趟） */
 
 /* 块大小 -> 箱号：最高位的位置（`total` 至少 32，所以箱号至少 5）。 */
-static int binOf(unsigned long total) {
+static int binOf(__libc_usize total) {
   int k = 0;
   while ((total >> k) > 1) k++;     /* k = floor(log2 total) */
   return k >= NBIN ? NBIN - 1 : k;
 }
 
 /* 把一块地方推回箱里（`moreCore` 收旧尾巴、`free` 都走它）。 */
-static void binPush(unsigned long p, unsigned long bsz) {
-  unsigned long *h = (unsigned long *)p;
+static void binPush(__libc_usize p, __libc_usize bsz) {
+  __libc_usize *h = (__libc_usize *)p;
   h[0] = bsz;                       /* used 位是 0 */
   int b = binOf(bsz);
   h[1] = bins[b];
@@ -66,11 +66,11 @@ static void binPush(unsigned long p, unsigned long bsz) {
 }
 
 /* 再要一块地方。要不到回 -1。 */
-static int moreCore(unsigned long need) {
-  unsigned long want = need;
+static int moreCore(__libc_usize need) {
+  __libc_usize want = need;
   if (want < chunkStep) want = chunkStep;
-  unsigned long got = 0;
-  unsigned long p = __libc_chunk(want, &got);
+  __libc_usize got = 0;
+  __libc_usize p = __libc_chunk(want, &got);
   if (p == 0 || got < need) return -1;
   /* 旧那块剩下的尾巴不丢：够一个块头就推回箱里。这一步同时让旧那块**被块铺满** ——
    * 合并那一趟按地址往下走，靠的就是「每个字节都属于某个有头的块」。 */
@@ -97,17 +97,17 @@ static int moreCore(unsigned long need) {
 static void sweepMerge(void) {
   for (int b = 0; b < NBIN; b++) bins[b] = 0;
   for (int i = 0; i < nchunk; i++) {
-    unsigned long p = chunkBase[i];
-    unsigned long lim = (i == nchunk - 1) ? curPos : chunkEnd[i];
+    __libc_usize p = chunkBase[i];
+    __libc_usize lim = (i == nchunk - 1) ? curPos : chunkEnd[i];
     while (p + HDR <= lim) {
-      unsigned long *h = (unsigned long *)p;
-      unsigned long bsz = h[0] & ~1UL;
+      __libc_usize *h = (__libc_usize *)p;
+      __libc_usize bsz = h[0] & ~1UL;
       if (bsz < HDR + 16 || p + bsz > lim) break;      /* 头不像样：这一块不再往下走 */
       if ((h[0] & 1) != 0) { p += bsz; continue; }     /* 在用的跳过 */
-      unsigned long end = p + bsz;
+      __libc_usize end = p + bsz;
       while (end + HDR <= lim) {                       /* 把紧跟着的空闲块并进来 */
-        unsigned long *nh = (unsigned long *)end;
-        unsigned long nsz = nh[0] & ~1UL;
+        __libc_usize *nh = (__libc_usize *)end;
+        __libc_usize nsz = nh[0] & ~1UL;
         if (nsz < HDR + 16 || end + nsz > lim || (nh[0] & 1) != 0) break;
         end += nsz;
       }
@@ -124,8 +124,8 @@ static void sweepMerge(void) {
  * 服务 17 字节的请求也占满。碎片那一格的判据（`tests/c/libc/malloc_probe.c` 第五格：
  * 2 万个槽反复换 16..4096 字节的块）量到峰值堆是活着字节的 **3.42 倍**。
  * 切下来的零头至少要装得下一个头加 16 字节，否则不值当。 */
-static void *takeBlock(unsigned long p, unsigned long bsz, unsigned long total) {
-  unsigned long *h = (unsigned long *)p;
+static void *takeBlock(__libc_usize p, __libc_usize bsz, __libc_usize total) {
+  __libc_usize *h = (__libc_usize *)p;
   if (bsz - total >= HDR + 16) {
     binPush(p + total, bsz - total);
     h[0] = total | 1;
@@ -137,34 +137,34 @@ static void *takeBlock(unsigned long p, unsigned long bsz, unsigned long total) 
 }
 
 /* 箱子里找一块 ≥ total 的。找不到回 0。 */
-static void *fromBins(unsigned long total) {
+static void *fromBins(__libc_usize total) {
   /* 从「装得下 total 的那个箱」起往上 —— 箱 k 里最小的块是 2^k，所以 k > binOf(total)
    * 那些箱里的块一定够大（binOf 是向下取的，所以 binOf(total) 那一箱里可能有比 total
    * 小的，得挑一下）。 */
   int k = binOf(total);
   int b = k;
   while (b < NBIN) {
-    unsigned long p = bins[b];
+    __libc_usize p = bins[b];
     /* 高一档的箱子里**每一块都够大**，所以直接弹表头。只有 binOf(total) 那一箱要挑 ——
      * 而那一挑最多看 8 格就走，不然一条长表能把 malloc 拖回 O(n)（第一版就是被「扫」
      * 拖死的，这儿不许再留一条扫的路）。 */
     if (b > k) {
       if (p != 0) {
-        unsigned long *h = (unsigned long *)p;
+        __libc_usize *h = (__libc_usize *)p;
         bins[b] = h[1];
         return takeBlock(p, h[0] & ~1UL, total);
       }
       b++;
       continue;
     }
-    unsigned long prev = 0;
+    __libc_usize prev = 0;
     int look = 0;
     while (p != 0 && look < 8) {
-      unsigned long *h = (unsigned long *)p;
-      unsigned long bsz = h[0] & ~1UL;
+      __libc_usize *h = (__libc_usize *)p;
+      __libc_usize bsz = h[0] & ~1UL;
       if (bsz >= total) {
         if (prev == 0) bins[b] = h[1];
-        else ((unsigned long *)prev)[1] = h[1];
+        else ((__libc_usize *)prev)[1] = h[1];
         return takeBlock(p, bsz, total);
       }
       prev = p;
@@ -176,9 +176,9 @@ static void *fromBins(unsigned long total) {
   return (void *)0;
 }
 
-void *malloc(unsigned long size) {
+void *malloc(__libc_usize size) {
   if (size == 0) size = 1;
-  unsigned long total = ALIGN16(size + HDR);
+  __libc_usize total = ALIGN16(size + HDR);
   /* 1. 箱子里找。 */
   void *r = fromBins(total);
   if (r != (void *)0) return r;
@@ -196,9 +196,9 @@ void *malloc(unsigned long size) {
   if (curEnd == 0 || curPos + total > curEnd) {
     if (moreCore(total) < 0) return (void *)0;
   }
-  unsigned long blk = curPos;
+  __libc_usize blk = curPos;
   curPos += total;
-  unsigned long *h = (unsigned long *)blk;
+  __libc_usize *h = (__libc_usize *)blk;
   h[0] = total | 1;
   h[1] = 0;
   return (void *)(blk + HDR);
@@ -206,27 +206,27 @@ void *malloc(unsigned long size) {
 
 void free(void *ptr) {
   if (ptr == (void *)0) return;
-  unsigned long p = (unsigned long)ptr - HDR;
-  unsigned long *h = (unsigned long *)p;
-  unsigned long bsz = h[0] & ~1UL;
+  __libc_usize p = (__libc_usize)ptr - HDR;
+  __libc_usize *h = (__libc_usize *)p;
+  __libc_usize bsz = h[0] & ~1UL;
   if (bsz < HDR + 16) return;            /* 不像我们发出去的块：不碰 */
   binPush(p, bsz);
   freedSince++;                          /* 合并那一趟看它决定要不要走 */
 }
 
-void *calloc(unsigned long n, unsigned long size) {
-  unsigned long total = n * size;
+void *calloc(__libc_usize n, __libc_usize size) {
+  __libc_usize total = n * size;
   void *p = malloc(total);
   if (p == (void *)0) return p;
   memset(p, 0, total);
   return p;
 }
 
-void *realloc(void *ptr, unsigned long size) {
+void *realloc(void *ptr, __libc_usize size) {
   if (ptr == (void *)0) return malloc(size);
   if (size == 0) { free(ptr); return (void *)0; }
-  unsigned long *h = (unsigned long *)((unsigned long)ptr - HDR);
-  unsigned long old = (h[0] & ~1UL) - HDR;
+  __libc_usize *h = (__libc_usize *)((__libc_usize)ptr - HDR);
+  __libc_usize old = (h[0] & ~1UL) - HDR;
   if (size <= old) return ptr;
   void *nw = malloc(size);
   if (nw == (void *)0) return nw;

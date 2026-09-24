@@ -223,6 +223,125 @@ static void pf_warm(void) {
   (void)backtrace(fr, 4);
 }
 
+#ifdef _WIN32
+/**
+ * Windows 上的采样：**另起一条线程**，不走信号。
+ *
+ * 为什么不能照抄 POSIX 那一支：这条腿上 `sigaction`/`setitimer` 一律回 -1/ENOSYS
+ * （win32 sysroot 的 `libc/misc.c` 明写着），Windows 压根没有「定时器打断当前线程、
+ * 在信号处理函数里看现场」这件事。对应的原生做法是 SuspendThread + GetThreadContext：
+ * 采样线程定时把**主线程**冻住，拿它的 PC 与帧指针，自己走一遍帧链，再放开。
+ *
+ * 三条要点：
+ *  - **帧链自己走**，不叫 `backtrace()`：那一份走的是**调用者自己**的栈
+ *    （`libc/pure.c`），在采样线程里走出来的是采样线程的栈 —— 一帧都不是我们要的。
+ *    好在两个 arch 的帧形状一样（arm64 `stp x29,x30,[sp,#-16]` / x64 `push rbp`）：
+ *    `[fp]` 是上一层的 fp、`[fp+8]` 是返回地址，所以走法只有一份。
+ *  - **冻住的时候只读内存、不记账**：`pf_stack_add` 虽然不分配（开放寻址的定表），
+ *    可主线程可能正停在 `malloc` 里 —— 先把栈抄进本地数组，`ResumeThread` 之后再记。
+ *  - 帧链要**当成脏数据来读**：fp 必须落在主线程的栈上（`Sp` 那一格量出来的下界）、
+ *    8 字节对齐、且一层比一层高。少一条判据，采样线程就会自己踩出一个 0xC0000005 ——
+ *    而它是没人接的（这条腿没有 SEH）。
+ *
+ * CONTEXT 里那几格的偏移是**按 SDK 的结构算出来的**（两个 arch 各一套）：
+ *   arm64：ContextFlags 0，X0 起于 8，于是 Fp=X29 在 240、Lr=X30 在 248、Sp 256、Pc 264
+ *   x64  ：P1..P6Home 48 字节，ContextFlags 在 0x30，Rsp 0x98、Rbp 0xA0、Rip 0xF8
+ * 结构本身要 16 字节对齐（x64 上那片 XMM 存档区的硬要求），所以缓冲区自己对齐一次。
+ */
+#if defined(__aarch64__)
+#define PF_W_CTXSIZE  912
+#define PF_W_FLAGS    0
+#define PF_W_FULL     0x00400003u   /* CONTEXT_ARM64 | CONTROL | INTEGER */
+#define PF_W_FP       240
+#define PF_W_LR       248
+#define PF_W_SP       256
+#define PF_W_PC       264
+#else
+#define PF_W_CTXSIZE  1232
+#define PF_W_FLAGS    0x30
+#define PF_W_FULL     0x00100003u   /* CONTEXT_AMD64 | CONTROL | INTEGER */
+#define PF_W_FP       0xA0
+#define PF_W_LR       0            /* x64 上返回地址只在栈上，没有 lr */
+#define PF_W_SP       0x98
+#define PF_W_PC       0xF8
+#endif
+
+/* kernel32 的那几个（名字都在 `sysroot/win32/lib/kernel32.def` 里）。 */
+void *CreateThread(void *sa, unsigned long long stack,
+                   unsigned long (*fn)(void *), void *arg,
+                   unsigned long flags, unsigned long *tid);
+void *GetCurrentThread(void);
+void *GetCurrentProcess(void);
+int DuplicateHandle(void *sp, void *sh, void *tp, void **th,
+                    unsigned int access, int inherit, unsigned int opts);
+unsigned long SuspendThread(void *h);
+unsigned long ResumeThread(void *h);
+int GetThreadContext(void *h, void *ctx);
+void Sleep(unsigned long ms);
+int CloseHandle(void *h);
+
+static void *pf_w_main;              /* 主线程的句柄（复制过的，伪句柄跨线程没用） */
+static volatile int pf_w_stop;
+static int pf_w_ms;
+
+static unsigned long pf_w_sampler(void *arg) {
+  (void)arg;
+  unsigned char raw[PF_W_CTXSIZE + 16];
+  while (!pf_w_stop) {
+    Sleep((unsigned long)pf_w_ms);
+    if (pf_w_stop) break;
+    unsigned char *ctx = raw + ((16 - ((unsigned long long)raw & 15)) & 15);
+    memset(ctx, 0, PF_W_CTXSIZE);
+    *(unsigned int *)(ctx + PF_W_FLAGS) = PF_W_FULL;
+    if (SuspendThread(pf_w_main) == (unsigned long)-1) continue;
+    void *st[PF_BT];
+    int m = 0;
+    if (GetThreadContext(pf_w_main, ctx)) {
+      unsigned long long pc = *(unsigned long long *)(ctx + PF_W_PC);
+      unsigned long long fp = *(unsigned long long *)(ctx + PF_W_FP);
+      unsigned long long sp = *(unsigned long long *)(ctx + PF_W_SP);
+      if (pc) st[m++] = (void *)(size_t)pc;
+#if PF_W_LR
+      /* arm64：叶子函数还没建帧时返回地址只在 lr 里 —— 那一格补上，否则栈只有一层。 */
+      unsigned long long lr = *(unsigned long long *)(ctx + PF_W_LR);
+      if (lr && m < PF_BT) st[m++] = (void *)(size_t)lr;
+#endif
+      unsigned long long lo = sp;
+      unsigned long long hi = sp + (64ULL << 20);   /* 主线程的栈够大也不过这个量级 */
+      while (m < PF_BT && fp >= lo && fp < hi && (fp & 7) == 0) {
+        unsigned long long ret = *(unsigned long long *)(size_t)(fp + 8);
+        unsigned long long up = *(unsigned long long *)(size_t)fp;
+        if (ret == 0) break;
+        st[m++] = (void *)(size_t)ret;
+        if (up <= fp) break;                        /* 栈往下长：上一层一定更高 */
+        lo = fp + 16;
+        fp = up;
+      }
+    }
+    ResumeThread(pf_w_main);
+    /* 放开之后再记账 —— 见上面那三条要点的第二条。 */
+    if (m > 0) { pf_samples++; pf_stack_add(st, m, 1); }
+    else pf_lost++;
+  }
+  return 0;
+}
+
+/** 起采样线程。装不起来回 0（那时这一趟就没有采样，报告里照实说）。 */
+static int pf_w_start(int hz) {
+  pf_w_ms = 1000 / hz;
+  if (pf_w_ms < 1) pf_w_ms = 1;      /* Sleep 的分辨率就到这儿：>1000Hz 要不来 */
+  if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
+                       GetCurrentProcess(), &pf_w_main, 0, 0,
+                       0x00000002 /* DUPLICATE_SAME_ACCESS */)) {
+    return 0;
+  }
+  void *h = CreateThread(0, 0, pf_w_sampler, 0, 0, 0);
+  if (h == 0) { CloseHandle(pf_w_main); pf_w_main = 0; return 0; }
+  CloseHandle(h);                    /* 线程自己跑，句柄留着也没用 */
+  return 1;
+}
+#endif
+
 void omni_prof_report(void);
 static void pf_trap_signals(void);
 
@@ -238,6 +357,13 @@ void omni_prof_sample_start(int hz) {
   if (hz <= 0) hz = 200;
   if (hz > 100000) hz = 100000;             /* 再高就只是在量自己 */
   pf_warm();
+#ifdef _WIN32
+  /* Windows 上换成采样线程（第 win-c-backend 刀）：`pf_sampling = 3` 是这一档的号，
+   * 停表那一格按它分叉（`omni_prof_report`）。 */
+  if (pf_w_start(hz)) pf_sampling = 3;
+  if (pf_sampling && !pf_on) { pf_on = 1; atexit(omni_prof_report); }
+  return;
+#else
   /* `SA_SIGINFO`：要三个参数才拿得到 ucontext（PC 在里头）。字段名两条腿不一样
    * （`sa_sigaction` 是 POSIX 的名字，我们自己那份头里只有 `sa_handler`），而**两者在
    * 结构里是同一个偏移**（联合），所以这儿按 `sa_handler` 那一格装、把函数指针转过去 ——
@@ -259,6 +385,7 @@ void omni_prof_sample_start(int hz) {
   }
   if (pf_sampling && !pf_on) { pf_on = 1; atexit(omni_prof_report); }
   pf_trap_signals();
+#endif
 }
 
 /**
@@ -554,7 +681,27 @@ static size_t pf_load_base(void) {
   }
   fclose(f);
 #endif
+#ifdef _WIN32
+  /* Windows（第 win-c-backend 刀）：映像开了 DYNAMIC_BASE，**每趟装在哪儿都不一样**，
+     而 `pe-link --map` 里落的是链接期的 VA。滑动量要靠图里那一行 `# imagebase 0x…`
+     —— **不能**从自己头上读：装载器会把内存里那个 ImageBase 字段改成真实基址
+     （量出来的：`declared == actual`，于是滑动量算成 0、报告里全是裸地址）。
+     所以这一格在 `pf_map_load` 里读完图之后才算（见那一段）。 */
+#endif
   return 0;
+}
+
+/** 图里那一行 `# imagebase 0x…` 记下来的链接期映像基址（0 = 图里没有这一行）。 */
+static unsigned long long pf_map_imagebase = 0;
+
+/** 自己这份映像现在装在哪儿（只有 Windows 这条腿要，别的腿回 0）。 */
+static size_t pf_module_base(void) {
+#ifdef _WIN32
+  void *GetModuleHandleA(const char *name);
+  return (size_t)GetModuleHandleA(0);
+#else
+  return 0;
+#endif
 }
 
 static void pf_map_load(void) {
@@ -578,6 +725,18 @@ static void pf_map_load(void) {
       /* `0x<地址> 0x<长度> <名字>`。长度那一格是后加的，缺了也认（当 0）—— 旧的
          两段式 map 还读得动，只是那时候界只能靠"下一格"。 */
       char *p = line;
+      /* `# imagebase 0x…`（PE 那条腿写的头一行）：链接期的映像基址。`#` 开头的行
+         只有这一条有意义，别的一律跳过。 */
+      if (p[0] == '#') {
+        char *k = p + 1;
+        while (*k == ' ' || *k == '\t') k++;
+        if (strncmp(k, "imagebase", 9) == 0) {
+          k += 9;
+          while (*k == ' ' || *k == '\t') k++;
+          pf_map_imagebase = strtoull(k, 0, 16);
+        }
+        continue;
+      }
       size_t a = (size_t)strtoull(p, &p, 16);
       if (p == line) continue;
       while (*p == ' ' || *p == '\t') p++;
@@ -596,6 +755,22 @@ static void pf_map_load(void) {
   /* 两份并到一起，按地址排好 —— 查表要的是有序（`pf_map_at` 是二分）。 */
   if (pf_map_n > 1) qsort(pf_map, (size_t)pf_map_n, sizeof *pf_map, pf_sym_cmp);
   if (pf_map_n > 0) pf_map_hi = pf_map[pf_map_n - 1].addr;
+  /* ASLR 的滑动量（PE 那条腿）：真实基址 - 图里记的链接期基址。`pf_map_name` 本来就是
+     「原样查一遍、不中再减掉 base 查一遍」，所以填进 `pf_map_base` 正好对上。 */
+  if (pf_map_imagebase != 0) {
+    size_t mb = pf_module_base();
+    if (mb != 0 && (unsigned long long)mb >= pf_map_imagebase) {
+      pf_map_base = (size_t)((unsigned long long)mb - pf_map_imagebase);
+    }
+  }
+  /* `OMNI_PROF_DEBUG=1`：说一句「图里几条、滑动量多少」。名字全印成裸地址时，
+     要分的就是这两件事 —— 图没读进来（0 条），还是滑动量不对（PIE/ASLR 那一格）。 */
+  const char *dbg = getenv("OMNI_PROF_DEBUG");
+  if (dbg != 0 && dbg[0] != 0 && dbg[0] != '0') {
+    fprintf(stderr, "omni prof: 链接图 %d 条，滑动量 0x%llx，图里第一条 0x%llx\n",
+            pf_map_n, (unsigned long long)pf_map_base,
+            pf_map_n > 0 ? (unsigned long long)pf_map[0].addr : 0ull);
+  }
 }
 
 /* 在图里二分：最后一个不大于 a 的那一格，**而且 a 要真落在它里头**。
@@ -652,7 +827,9 @@ static const char *pf_name_of(void *fn, char **syms, int nsym, int i) {
     const char *m = pf_map_name(fn);
     if (m) return m;
   }
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(_WIN32)
+  /* Windows 上没有 `dladdr`（模块里最近的符号得自己走 PE 的导出表或 dbghelp，
+   * 那是另一刀），所以这条腿直接落到下面「模块 + 偏移」那一支。 */
   /* **外部模块（libc 之类）里的地址：问 `dladdr`**（第一百六十四片）。
    *
    * `backtrace_symbols` 在拿不到名字时只给 `路径(+偏移)`，而 `dladdr` 答的是两格：
@@ -798,9 +975,16 @@ void omni_prof_report(void) {
   if (pf_reported) return;
   pf_reported = 1;
   if (pf_sampling) {
+#ifdef _WIN32
+    /* 采样线程那一档（3 号）：把旗子放下就行 —— 它自己会在下一轮 `Sleep` 之后退出。
+     * 不等它（`WaitForSingleObject`）：这一趟可能是**要死的那一趟**（时限那一枪），
+     * 而它最多还会记一帧，那一帧记进表里也不碍事。 */
+    pf_w_stop = 1;
+#else
     struct itimerval off;
     memset(&off, 0, sizeof off);
     setitimer(pf_sampling == 1 ? ITIMER_PROF : ITIMER_REAL, &off, 0);
+#endif
   }
   /* **先停表，再读链接图**。反了的话 `pf_map_load` 自己的 `fopen`/`fgets` 会被采进去
      （量到过：`omni_prof_report > pf_map_load > fgets` 真出现在热路径里）—— 收集器

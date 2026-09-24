@@ -446,8 +446,10 @@ void exit(int code) {
 
 void abort(void) {
   /* `kill(0, SIGABRT)`：0 号进程组就是自己那一组。信号处置默认是「核心转储」，
-   * 于是 shell 看到的是 134（128 + 6）而不是我们自己编的退出码。 */
-  __omni_syscall(SYS_kill, 0, 6);
+   * 于是 shell 看到的是 134（128 + 6）而不是我们自己编的退出码。
+   * 走 `kill`（目标专有那一半）而不是直接发 syscall —— win32 上那两样都没有，
+   * 而这一份是**公用**的（见 libc.h 里 `kill` 那一段）。 */
+  kill(0, 6);
   _exit(134);
 }
 

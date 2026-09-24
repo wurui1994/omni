@@ -473,8 +473,52 @@ export function peSections(inp) {
     for (let k = 0; k < nthunks; k++) text.extraDirect.push(thunkAt + k * tsz + fixAt);
   }
 
-  const hasTls = secs.some((s) => (s.flags & PSEC_SHF_TLS) !== 0);
-  /* `sizeof(IMAGE_TLS_DIRECTORY)`：四个指针加两个 DWORD —— 32 位上是 24 字节。 */
+  /* **GOT**（第 win-c-backend 刀）。arm64 上取任何符号的地址一律过 GOT ——
+   * `arm64/from_mir.js` 的 `symAddr` 发 `311`/`312` 那一对，那是 ADR-0017 量过之后
+   * 刻意统一的（局部/外部不再分岔）。ELF 与 Mach-O 两侧早就有这一格；PE 这边从前没有，
+   * 于是 `reloc: 311 号要 .got，可它还没造`。tcc 那边同一条路：`build_got` 在
+   * `tccelf.c` 里，PE 与 ELF **共用**，不是 PE 专有的另一套。
+   *
+   * 不另开一节，照 TLS 那一格的先例在 `.data` 里划一块：一个符号一格 8 字节，
+   * 每格再挂一条 `REL_TYPE_DIRECT` —— 格子里装的是**绝对地址**，映像搬了地方
+   * 装载器得跟着改，所以它们必须进 `.reloc`。
+   *
+   * 这一遍只**分格子**（谁占第几格）；往格子里填地址是 `pe_link` 的事 ——
+   * 那时候每个符号的最终地址才算出来。 */
+  /* 哪几号要 GOT 的格子：arm64 是 `ADR_GOT_PAGE`/`LD64_GOT_LO12_NC`（311/312），
+   * x86_64 是 `GOTPCREL` 一族（9/41/42），i386 与 arm 那两条腿还没走到（走到再加）。
+   * 这张表与 `pe_reloc.js` 里**用 `slot()` 的那几个 case** 是一一对应的。 */
+  const GOT_TYPES = new Map([
+    [PSEC_EM_AARCH64, new Set([311, 312])],
+    [PSEC_EM_X86_64, new Set([9, 41, 42])],
+  ]);
+  let got = null;
+  const gotTypes = GOT_TYPES.get(machine);
+  if (gotTypes !== undefined) {
+    const index = new Map();
+    for (const s of secs) {
+      if (s.type !== relType || s.bytes === undefined) continue;
+      const dv = new DataView(s.bytes.buffer, s.bytes.byteOffset, s.bytes.byteLength);
+      for (let p = 0; p + relSize <= s.bytes.length; p += relSize) {
+        const info32 = c32 ? dv.getUint32(p + 4, true) : 0;
+        const type = c32 ? info32 & 0xff : dv.getUint32(p + 8, true);
+        if (!gotTypes.has(type)) continue;
+        const symx = c32 ? info32 >>> 8 : dv.getUint32(p + 12, true);
+        if (!index.has(symx)) index.set(symx, index.size);
+      }
+    }
+    if (index.size !== 0) {
+      const dataSec = find('.data');
+      if (dataSec === undefined) throw new OmniError('pe: 要一节 .got，可是没有 .data 可以划');
+      const at = psecAlign(dataSec.size, 8);
+      dataSec.size = at + index.size * 8;
+      dataSec.extraDirect = [...(dataSec.extraDirect ?? [])];
+      for (let k = 0; k < index.size; k++) dataSec.extraDirect.push(at + k * 8);
+      got = { sec: dataSec, at, index };
+    }
+  }
+
+  const hasTls = secs.some((s) => (s.flags & PSEC_SHF_TLS) !== 0);  /* `sizeof(IMAGE_TLS_DIRECTORY)`：四个指针加两个 DWORD —— 32 位上是 24 字节。 */
   const ptrSize = c32 ? 4 : 8;
   const tlsSize = hasTls ? 4 * ptrSize + 8 : 0;
 
@@ -620,7 +664,7 @@ export function peSections(inp) {
   }
 
   return {
-    machine, infos, imp, exp, tls, nthunks, syms, secs, merged, imagebase, fileSize: off,
+    machine, infos, imp, exp, tls, got, nthunks, syms, secs, merged, imagebase, fileSize: off,
     imports: imps, text, thunkAt, thunkSize: tsz, thunk, linker, dll, hasReloc,
     dllChars, subsystem, sectionAlign, fileAlign, debug: inp.debug === true,
     class32: c32, relSize, relType,

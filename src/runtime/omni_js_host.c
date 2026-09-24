@@ -219,8 +219,26 @@ static void *run_entry_thread(void *arg) {
 }
 
 /* 主线程现在有多大的栈。查不到就报 0 = "不知道，按不够算"。 */
+#ifdef _WIN32
+/* Windows 上这一格是**链接期定死的** PE 头里那个 `SizeOfStackReserve`（`omni build`
+ * 给 512MB，见 cli.js 里 pe 那一格的 `--stack`）。`GetCurrentThreadStackLimits` 把
+ * 当前线程的上下界直接说出来（Win8+），相减就是那个数。
+ *
+ * 为什么非要这一格：少了它走的是 `getrlimit` 那一支 —— 这条腿上它回 -1/ENOSYS，
+ * 于是「按不够算」→ 去开线程 → 这条腿的 `pthread_create` 回 EAGAIN → 退回直接调用，
+ * 结果是**编译器自己跑在 1MB 的默认栈上**：一进递归下降就 0xC00000FD（栈溢出），
+ * 而这条腿没有 SEH，什么都印不出来。量到的就是 `omni-arm64.exe help` 一个字节不吐、
+ * 而 `if errorlevel 1` 还判成假（0xC00000FD 当有符号数是负的）。 */
+void GetCurrentThreadStackLimits(unsigned long long *low, unsigned long long *high);
+#endif
 static size_t omni_main_stack_bytes(void) {
-#if defined(__APPLE__) || defined(__FreeBSD__)
+#if defined(_WIN32)
+  unsigned long long lo = 0;
+  unsigned long long hi = 0;
+  GetCurrentThreadStackLimits(&lo, &hi);
+  if (hi <= lo) return 0;
+  return (size_t)(hi - lo);
+#elif defined(__APPLE__) || defined(__FreeBSD__)
   if (pthread_main_np() == 0) return 0;
   return pthread_get_stacksize_np(pthread_self());
 #else
@@ -767,6 +785,30 @@ omni_dyn omni_js_local_stamp(void) {
 omni_dyn omni_js_install_dir(void) {
   const char *exe = host_argc > 0 ? host_argv[0] : "";
   char buf[8192];
+#ifdef _WIN32
+  /* Windows（第 win-c-backend 刀）：绝对路径是 `X:\…`/`X:/…` 或 `\\机器\共享\…`，
+     **不是**以 '/' 开头；分隔符还有 '\\'。少了这两条，`C:\omni\bin\omni.exe` 被当成
+     相对路径接在 cwd 后头，`strrchr(buf,'/')` 找到的是 cwd 里的那一个 ——
+     于是 installDir 报的是**当前目录**。量到的后果：sysroot / share / 插件全部按 cwd
+     旁边去找（`没有 arm64-win32 那一份 sysroot`），再顺着 `..` 一路扫进
+     `C:\Users\All Users\Application Data` 那个拒绝访问的交接点。 */
+  const int win_abs = (exe[0] != 0 && exe[1] == ':' && (exe[2] == '\\' || exe[2] == '/'))
+    || (exe[0] == '\\' && exe[1] == '\\');
+  if (win_abs) {
+    snprintf(buf, sizeof buf, "%s", exe);
+  } else {
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof cwd)) omni_error("cannot read the working directory");
+    snprintf(buf, sizeof buf, "%s/%s", cwd, exe);
+  }
+  char *s1 = strrchr(buf, '/');
+  char *s2 = strrchr(buf, '\\');
+  char *slash = s1 > s2 ? s1 : s2;
+  if (!slash) return s16_of_cstr(".");
+  if (slash == buf) return s16_of_cstr("/");
+  *slash = 0;
+  return s16_of_cstr(buf);
+#else
   if (exe[0] == '/') {
     snprintf(buf, sizeof buf, "%s", exe);
   } else {
@@ -779,6 +821,7 @@ omni_dyn omni_js_install_dir(void) {
   if (slash == buf) return s16_of_cstr("/");
   *slash = 0;
   return s16_of_cstr(buf);
+#endif
 }
 
 /* -------------------------------------------------------------- 宿主里的 eval
@@ -875,6 +918,46 @@ int omni_host_spawn(const char *cmd, char *const *argv, int mode, const char *in
   if (cap_err && pipe(pe) != 0) omni_error("cannot create a pipe");
   if (feed && pipe(pi) != 0) omni_error("cannot create a pipe");
 
+#ifdef _WIN32
+  /* Windows 上没有 `fork`（这条腿的 `fork` 一律 ENOSYS），起子进程走 CreateProcessA ——
+   * 拼命令行、把三个 fd 复制成可继承的句柄、起、等。那两格在 win32 sysroot 的
+   * `libc/io.c` 里（`__libc_spawn` / `__libc_spawn_wait`，只有这条腿有）。
+   *
+   * **起不来不是崩**：回 127（与 `execvp` 失败之后子进程 `_exit(127)` 同一个数）。
+   * 这一条要紧 —— 编译器启动时会问一句 `uname`，而 Windows 上根本没有这个程序；
+   * 第一版在这儿 `omni_error("cannot fork")`，于是 `omni.exe build` 一进门就死，
+   * 印的是 `omni: runtime error: cannot fork`（JS 那侧的 try/catch 拦不住它）。 */
+  long __libc_spawn(const char *cmd, char *const argv[], int fd0, int fd1, int fd2);
+  int __libc_spawn_wait(long h);
+  long hproc = __libc_spawn(cmd, argv, feed ? pi[0] : -1,
+                            cap_out ? po[1] : -1, cap_err ? pe[1] : -1);
+  if (cap_out) close(po[1]);
+  if (cap_err) close(pe[1]);
+  if (feed) close(pi[0]);
+  if (hproc < 0) {
+    if (cap_out) close(po[0]);
+    if (cap_err) close(pe[0]);
+    if (feed) close(pi[1]);
+    *out = omni_str_new("", 0);
+    *err = omni_str_new("", 0);
+    return 127;
+  }
+  if (feed) {
+    size_t n = strlen(in), off = 0;
+    while (off < n) {
+      ssize_t w = write(pi[1], in + off, n - off);
+      if (w <= 0) break;
+      off += (size_t)w;
+    }
+    close(pi[1]);
+  }
+  omni_str wo = omni_str_new("", 0), we = omni_str_new("", 0);
+  if (cap_out) { wo = omni_host_slurp(po[0]); close(po[0]); }
+  if (cap_err) { we = omni_host_slurp(pe[0]); close(pe[0]); }
+  *out = wo;
+  *err = we;
+  return __libc_spawn_wait(hproc);
+#else
   pid_t pid = fork();
   if (pid < 0) omni_error("cannot fork");
   if (pid == 0) {
@@ -924,4 +1007,5 @@ int omni_host_spawn(const char *cmd, char *const *argv, int mode, const char *in
   *err = e;
   if (WIFEXITED(st)) return WEXITSTATUS(st);
   return 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
+#endif
 }

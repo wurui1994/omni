@@ -347,7 +347,17 @@ export function peLoad(inp) {
     return { trace, tab, start, entryName, peType, dlls, members, objs, res };
   }
 
-  const want = [[inp.libtcc1], ...runtimeLibs(peType).map((l) => libCandidates(l))];
+  /* `--libc self`（第 win-c-backend 刀）：我们自己那份 libc 已经在 `.o` 里了，
+   * 所以 **msvcrt 与 libtcc1 都不接**，但 `kernel32` 仍然要 —— Windows 上没有
+   * 稳定的裸 syscall，`WriteFile`/`VirtualAlloc` 这一层就是这个平台的地板。
+   * 与 `nostdlib` 不是一回事：那个是「一个库都不要」，这个是「只要地板」。
+   *
+   * DLL/GUI 那两种 `runtimeLibs` 还会接 `user32`/`gdi32` —— 那是给 msvcrt 那一路的
+   * 窗口程序准备的，我们自己这份 libc 一个都不引（插件里更不会有窗口）。留着的结果是
+   * `pe: 找不到 user32.def`（sysroot 里只有 kernel32.def），所以这一路**只留 kernel32**。 */
+  const want = inp.selfLibc === true
+    ? [libCandidates('kernel32')]
+    : [[inp.libtcc1], ...runtimeLibs(peType).map((l) => libCandidates(l))];
   for (const names of want) {
     const f = inp.open(names);
     if (f === null) throw new OmniError(`pe: 找不到 ${names[0]}`);

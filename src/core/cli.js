@@ -192,6 +192,21 @@ function sysIncDirs(argv) {
     out.push(join(argv[si + 1], 'include'));
     return out;
   }
+  /* 没写 `--sysroot`，可这一趟是**交叉**（`--arch`/`--os` 指到了别的目标，或者
+   * `--libc self`）—— 那时 `CROSS` 里有自带的那一份 sysroot，系统头也得换成它。
+   * 读本机的头是错的，量到的两句：
+   *   mac 上 `build x.c --arch arm64 --os win32` 撞 macOS SDK 的
+   *     `sys/cdefs.h:1068: error: #error Unsupported architecture`
+   *   Windows 上更直接：`probe.c:4: error: include file 'stdio.h' not found`
+   *     （那儿压根没有 `/usr/include` 这一套）
+   * 生成的那份 C 早就走对了（`buildSelf` 自己按 `CROSS` 算 `sysIncs`）—— 漏的一直是
+   * **用户自己那份 `.c`**。`omni c obj|link` 不受影响：那一层 `CROSS` 是 null
+   * （见 `main` 里 `infer` 那一格），照旧用本机 SDK 的头当尺子。 */
+  if (CROSS !== null) {
+    out.push(cap('c.sysInclude')()[0]);        // C_INCLUDE_DIR（src/include，编译器自己那几个头）
+    out.push(join(CROSS.sysroot, 'include'));
+    return out;
+  }
   const bi = argv.indexOf('--tcc-lib-dir');
   if (bi >= 0 && argv[bi + 1] === undefined) throw new OmniError('--tcc-lib-dir 后面要一个目录');
   if (!argv.includes('-nostdinc')) out.push(...cap('c.sysInclude')(bi >= 0 ? argv[bi + 1] : undefined));
@@ -381,8 +396,8 @@ function cObj(path, out, arch, incs, defs, fmt, os, sysIncs, instr) {
   /* win32 的 x86_64 上代码节里还多一份共用的展开信息（第一百一十七片）——
    * 摆在第一个函数之后，所以这一格得在生成代码的时候就给。 */
   const blob = arch === 'x86_64'
-    ? genX64(mod, { unwind: fmt === 'elf' && os === 'win32' })
-    : genArm64(mod);
+    ? genX64(mod, { unwind: fmt === 'elf' && os === 'win32', win64: os === 'win32' })
+    : genArm64(mod, { win32: os === 'win32' });
   vNext('codegen');
   const syms = [];
   for (let k = 0; k < mod.funcs.length; k++) {
@@ -1606,7 +1621,16 @@ function srcStamp() {
   if (srcStampMemo !== '') return srcStampMemo;
   const parts = [];
   const walk = (d) => {
-    for (const f of readDir(d).sort()) {
+    /* **读不动的目录跳过**，别把整趟拖死（第 win-c-backend 刀）：Windows 的用户目录下
+     * 满是拒绝访问的交接点（`C:\Users\All Users\Application Data` 那一族），扫到一个
+     * 就抛的话，一条"算个指纹"的辅助路会把整个 build 拽倒。 */
+    let names;
+    try {
+      names = readDir(d).sort();
+    } catch {
+      return;
+    }
+    for (const f of names) {
       const p = join(d, f);
       if (isDir(p)) walk(p);
       else parts.push(`${p}:${mtimeMs(p)}:${fileSize(p)}`);
@@ -1653,10 +1677,15 @@ function srcStamp() {
  * 一格没有下一格 —— 那一格会把它后面所有 libc 的地址都吞掉（量到过：`atexit` /
  * `_end` / `__TMC_END__` 这种假名字）。confidently wrong 比只印地址坏得多。
  */
-function writeLinkMap(path, syms) {
+function writeLinkMap(path, syms, head) {
   if (path === undefined || path === null || path === '' || !Array.isArray(syms)) return;
   const lines = syms.map((s) => `0x${s.addr.toString(16)} 0x${(s.size ?? 0).toString(16)} ${s.name}`);
-  writeText(path, `${lines.join('\n')}\n`);
+  /* `head`（PE 那条腿在用）：`# imagebase 0x…`。读图的人要靠它算 ASLR 的滑动量 ——
+   * Windows 的装载器会**把内存里那个 ImageBase 字段改成真实基址**，所以运行期从自己
+   * 头上读不回链接期的那个数（量出来的：`declared == actual`，滑动量算成 0，
+   * 于是采样报告里全是裸地址）。`#` 开头的行老读者一律跳过，加它不破旧图。 */
+  const body = `${lines.join('\n')}\n`;
+  writeText(path, head === undefined || head === null ? body : `${head}\n${body}`);
 }
 
 function workDirFor(kind, key) {
@@ -2857,6 +2886,16 @@ function unameOut(flag) {
 let ARCH_CACHE = '';
 function hostArch() {
   if (ARCH_CACHE === '') {
+    /* **Windows 上先问环境变量**（第 win-c-backend 刀）：那儿压根没有 `uname` 这个程序，
+     * 于是 `unameOut` 回空串、这一格从前一律落成 `x86_64` —— 在 ARM64 的机器上就是错的
+     * （拿它去挑 sysroot 与后端，编出来的是另一台机器的代码）。`PROCESSOR_ARCHITECTURE`
+     * 是 cmd 自己都在用的那一格（ARM64 / AMD64 / x86），32 位进程跑在 64 位系统上时
+     * 真相在 `PROCESSOR_ARCHITEW6432` 里，所以两格都看。 */
+    const w = (env('PROCESSOR_ARCHITEW6432') ?? env('PROCESSOR_ARCHITECTURE') ?? '').toLowerCase();
+    if (w !== '') {
+      ARCH_CACHE = w === 'arm64' || w === 'aarch64' ? 'arm64' : 'x86_64';
+      return ARCH_CACHE;
+    }
     const m = unameOut('-m') ?? '';
     ARCH_CACHE = (m === 'arm64' || m === 'aarch64') ? 'arm64' : 'x86_64';
   }
@@ -2876,9 +2915,20 @@ function hostArch() {
 function bundledSysroot(tgt) {
   const name = `${tgt.arch}-${tgt.os}`;
   const dirs = [join(installDir(), '..', '..', 'sysroot'), join(installDir(), '..', 'sysroot')];
+  /* 先找 `<arch>-<os>`，找不到再找 `<os>`（第 win-c-backend 刀）。
+   *
+   * 为什么多这一格：win32 那一份**与 arch 无关** —— 它的平台层调的是 kernel32 的导入函数
+   * （Windows 上没有稳定的裸 syscall），头也一样，于是 arm64-win32 与 x86_64-win32
+   * 是**同一份**东西。另两个目标反过来：它们的 `libc/io.c` 里是 syscall 号，那是
+   * 一个 arch 一套，所以仍然按 `<arch>-<os>` 放。
+   *
+   * 退回来的那一份**不悄悄退**：`--sysroot` 显式给的永远优先，而这一层退不到任何一份时
+   * 照旧抛错（交叉编译按本机的头编出来的东西最贵，见下面那段）。 */
   for (const d of dirs) {
-    const p = join(d, name);
-    if (isDir(p)) return p;
+    for (const n of [name, tgt.os]) {
+      const p = join(d, n);
+      if (isDir(p)) return p;
+    }
   }
   const have = [];
   for (const d of dirs) {
@@ -2986,6 +3036,13 @@ function hostIsDarwin() {
 let OS_CACHE = '';
 function hostOs() {
   if (OS_CACHE === '') {
+    /* 真 Windows 上**不必起子进程就能认出来**（第 win-c-backend 刀）：`OS=Windows_NT`
+     * 与 `SystemRoot` 是那儿一定有的两格。省下的不只是一次 `uname`（那儿压根没有这个
+     * 程序）—— 那一趟 spawn 在这条腿上是要真去 CreateProcessA 的，白花几十毫秒。 */
+    if ((env('OS') ?? '') === 'Windows_NT' || (env('SystemRoot') ?? '') !== '') {
+      OS_CACHE = 'win32';
+      return OS_CACHE;
+    }
     const s = unameOut('-s');
     if (s === null) OS_CACHE = 'linux';          /* 没有子进程的腿（浏览器）：见上 */
     else if (s === 'Darwin') OS_CACHE = 'osx';
@@ -3000,6 +3057,26 @@ function fmtOfOs(os) {
   if (os === 'osx') return 'macho';
   if (os === 'win32') return 'pe';
   return 'elf';
+}
+
+/**
+ * **这一趟在给谁编**（本机还是 `--sysroot`/`--os` 指的那个目标）。
+ *
+ * 产物的名字要按它拼，不是按 `hostOs()`：Windows 上没有后缀的文件**压根启动不了**
+ * （`dist/omni` 这个名字在 cmd 里敲下去是「找不到命令」），插件也得是 `.dll` 而不是
+ * 本机那一套 `.dylib`/`.so` —— 在 macOS 上交叉编 Windows 的产物时这两处都会拼错。
+ */
+function targetOs() {
+  return CROSS === null ? hostOs() : CROSS.os;
+}
+
+/**
+ * 可执行文件在目标平台上该叫什么。Windows 上要 `.exe`（已经带后缀的不动），
+ * 别的平台原样回去。
+ */
+function exeName(out) {
+  if (targetOs() !== 'win32') return out;
+  return /\.[A-Za-z0-9]+$/.test(basename(out)) ? out : `${out}.exe`;
 }
 
 /**
@@ -3411,7 +3488,13 @@ function runtimeObjectsSelf(arch, os) {
   const srcs = runtimeSources();
   const deps = runtimeDeps();
   const slot = cacheSlot(cacheRoot(), 'rt', `self-${arch}-${os}`,
-    hash16(['self', arch, os, CROSS === null ? '' : CROSS.sysroot, ...deps].join('|')));
+    /* 键里**必须有编译器自己的印记**（`srcStamp()`，第 win-c-backend 刀）：这一路的 `.o`
+     * 是**我们自己那台后端**编出来的，改了 `x64/from_mir.js` 的调用约定而键不变，
+     * 下一趟就把旧的 `.o` 又端上来 —— 量到过：改完 Win64 的 ABI 再编，`cc 800ms`
+     * 全是缓存命中，跑出来的还是 SysV 那一版（体积都一样，看不出来）。
+     * 与上面 `jsCachePut` 那一格同一个道理，也与第七十九刀"产物名只取基名"同一类错：
+     * 一个会跑错程序的缓存。 */
+    hash16(['self', arch, os, srcStamp(), CROSS === null ? '' : CROSS.sysroot, ...deps].join('|')));
   const dir = slot.dir;
   const objs = srcs.map((p) => join(dir, `${basename(p, '.c')}.o`));
   if (slot.fresh && objs.every((o) => exists(o))) {
@@ -3663,8 +3746,13 @@ function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms)
    * AppKit 只能在真主线程上首次初始化：`glfwInit` 当场 SIGTRAP，一个字节的输出都没有
    * （llvm 轴 glfw-tri @ run-c 那两格红就是它）。dylib 没有 `LC_MAIN`，所以只给可执行文件。 */
   const stk = fmt === 'macho' && plugin === undefined ? ['--stack-size', String(0x20000000)] : [];
+  /* PE 上同一件事叫 `--stack`（`SizeOfStackReserve`，十进制，见 `pe-link` 那一段）。
+   * 少了它主线程只有默认的 1MB：编译器自己一进递归下降就 0xC00000FD，而这条腿没有 SEH
+   * —— 印出来的是**一个字节都没有**（量到过：`omni-arm64.exe help` 静静地死）。
+   * 512MB 只是保留地址空间，页要用到才落地。DLL 没有这一格（栈是宿主进程的）。 */
+  const stkPe = fmt === 'pe' && plugin === undefined ? ['--stack', String(0x20000000)] : [];
   const rc = subMain(['c', 'link', obj, ...rt, '-o', outPath,
-    '--arch', arch, '--os', os, '-f', fmt, ...sh, '--stdlib', ...stk, ...sysArgs, ...libs, '-q',
+    '--arch', arch, '--os', os, '-f', fmt, ...sh, '--stdlib', ...stk, ...stkPe, ...sysArgs, ...libs, '-q',
     /* `--profile` 这一趟顺手落一份链接图：Linux 上 profile 的每一格否则只是裸地址
        （见 writeLinkMap / profMapResolve）。不开 profile 时一个字节都不多写。 */
     ...(PROF === null ? [] : ['--map', `${outPath}.map`])]);
@@ -3683,13 +3771,18 @@ function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms)
     setEnv('OMNI_PROF_MAP', PROF.map);
   }
   /* 执行位（tcc 在 `tcc_output_file` 里 chmod 0777；我们自己写字节，所以自己补一句 ——
-   * 少了它只能看着 `Permission denied`）。 */
-  spawn('chmod', ['+x', outPath], 'c');
+   * 少了它只能看着 `Permission denied`）。PE 上没有这一位（能不能跑看后缀），而在
+   * Windows 上跑的那份核心连 `chmod` 这个程序都没有 —— 所以按**格式**分叉。 */
+  if (fmt !== 'pe') spawn('chmod', ['+x', outPath], 'c');
   /* arm64 macOS 上共享库**没签名就 dlopen 不了**（量到的原话：`missing code signature
    * in <no uuid> '…/omni-c.dylib'`）。签名不在链接器里 —— tcc 自己也是链完
    * `system("codesign -f -s - <文件>")`（`tccmacho.c:2243`，configure 开 CONFIG_CODESIGN），
-   * 所以这一句与 tcc 同口径。可执行文件走到这儿不签也跑得动（量过），只有 dylib 非签不可。 */
-  if (plugin !== undefined && hostIsDarwin()) spawn('codesign', ['-f', '-s', '-', outPath], 'c');
+   * 所以这一句与 tcc 同口径。可执行文件走到这儿不签也跑得动（量过），只有 dylib 非签不可。
+   * 判据是**产物的格式**，不是这台机器：在 macOS 上交叉编 `.dll` 时 `hostIsDarwin()`
+   * 一样为真，而给一份 PE 签名只会得到 `the file … is not a valid Mach-O`。 */
+  if (plugin !== undefined && fmt === 'macho' && hostIsDarwin()) {
+    spawn('codesign', ['-f', '-s', '-', outPath], 'c');
+  }
   vStep(`c link（我们自己的链接器）  -> ${outPath}  ${fileSize(outPath)} bytes`);
   if (extern === true) {
     writeText(`${outPath}.syms`, `${syms.join('\n')}\n`);
@@ -3843,7 +3936,10 @@ function buildPluginSet(core, dir, want, argv) {
   let tot = 0;
   for (const p of PLUGIN_SET) {
     if (want !== null && !want.includes(p.name)) continue;
-    const out = join(dir, `omni-${p.name}${dsoExt(hostOs())}`);
+    /* 后缀按**目标**拼，不按这台机器：在 macOS 上交叉编 Windows 的插件时
+     * `hostOs()` 给的是 `.dylib`，而那份东西是 PE —— 名字与内容对不上，
+     * 核心那侧按名字找 `.dll` 也就找不着。 */
+    const out = join(dir, `omni-${p.name}${dsoExt(targetOs())}`);
     const tFe0 = nowMs();
     const { mod } = compile(join(srcDir, `${p.name}.js`), [...argv, '--plugin', pluginRegName(p.name)]);
     FE_MS = nowMs() - tFe0;
@@ -4651,7 +4747,14 @@ function buildCFile(path, rest) {
     cObj(path, obj, arch, incDirs(flags), defArgs(flags), 'elf', os, sysIncDirs(flags));
     vStep(`c front end + codegen  ${path} -> ${obj}`);
     const rc = subMain(['c', 'link', obj, '-o', out,
-      '-f', fmt, '--arch', arch, '--os', os, '--stdlib', '-q']);
+      '-f', fmt, '--arch', arch, '--os', os, '--stdlib', '-q',
+      /* 交叉与 `--libc self` 也要递下去（第 win-c-backend 刀）：从前这儿只有 arch/os，
+       * 于是 `build x.c --arch arm64 --os win32 --libc self` 落进 `c link` 的**本机**那一支，
+       * 报的是 `pe: 找不到 x86_64-win32-libtcc1.a` —— 连目标都没换过去。
+       * 这两格一递，`c link` 里那段 `--libc self` 自己会把 sysroot 那份 libc 编进来、
+       * 把 `-L`/`--target`/入口摆好（与 `buildSelf` 走的是同一段）。 */
+      ...(LIBC === null ? [] : ['--libc', LIBC]),
+      ...(CROSS === null ? [] : ['--sysroot', CROSS.sysroot])]);
     if (rc !== 0) return rc;
     if (os !== 'win32') spawn('chmod', ['+x', out], 'c');
   }
@@ -5496,12 +5599,12 @@ function main(argv) {
       const libcSelf = rest.indexOf('--libc') >= 0
         && rest[rest.indexOf('--libc') + 1] === 'self';
       if (libcSelf) {
-        if (cmd !== 'elf-link' && cmd !== 'macho-link') {
-          throw new OmniError('--libc self 现在有 ELF（linux）与 Mach-O（osx）两条腿');
+        if (cmd !== 'elf-link' && cmd !== 'macho-link' && cmd !== 'pe-link') {
+          throw new OmniError('--libc self 现在有 ELF（linux）、Mach-O（osx）与 PE（win32）三条腿');
         }
         if (sysroot === null) throw new OmniError('--libc self 要配 --sysroot');
-        const selfOs = cmd === 'macho-link' ? 'osx' : 'linux';
-        const selfFmt = cmd === 'macho-link' ? 'macho' : 'elf';
+        const selfOs = cmd === 'macho-link' ? 'osx' : (cmd === 'pe-link' ? 'win32' : 'linux');
+        const selfFmt = cmd === 'macho-link' ? 'macho' : (cmd === 'pe-link' ? 'pe' : 'elf');
         const libcDir = join(sysroot, 'libc');
         if (!isDir(libcDir)) throw new OmniError(`--libc self: 找不到 ${libcDir}`);
         /* 公用那一半（第一百四十片第五格）：`src/sysroot/libc/` —— string/math/strtox/
@@ -5527,18 +5630,36 @@ function main(argv) {
            * 「macho: 还不会给 0 号架构写可执行文件」—— 那个 0 是把 Mach-O 的头当
            * ELF 的 `e_machine` 读出来的。第一版这儿真按 `macho` 编了，量到的就是那句。
            * 目标只由 `arch`/`os` 说（它们管 ABI 与预定义宏）。 */
-          const o = join(workDirFor('libc-self', hash16(`${selfFmt}|${selfArch}|${selfOs}|${src}`)),
-            base + '.o');
+          /* 键里还得有 `srcStamp()`：改了前端/后端/sysroot 之后，源文件的 mtime 没动，
+           * 缓存就把上一版编的 `.o` 又端上来 —— x64 那一版「过了」的 run 就是这么来的
+           * （`cc 800ms`、字节数一模一样）。编译器自己的指纹进 key，才不会跑错程序。 */
+          const o = join(workDirFor('libc-self',
+            hash16(`${selfFmt}|${selfArch}|${selfOs}|${srcStamp()}|${src}`)), base + '.o');
           cObj(src, o, selfArch, incs, [], 'elf',
             selfOs, [cap('c.sysInclude')()[0], ...incs]);
           if (base === 'start') objs.unshift(o); else objs.push(o);
         }
         files.unshift(...objs.filter((o) => o.endsWith('start.o')));
         files.push(...objs.filter((o) => !o.endsWith('start.o')));
-        /* 入口的**符号名**两条腿不一样：Mach-O 的 C 符号带一条前导下划线，所以
-         * C 里的 `_start` 在那边是 `__start`（ELF 上就是 `_start`）。
-         * `macho_exe` 的默认入口是 `_main`（见它的文件头），不改就找不着。 */
-        if (!rest.includes('-e')) rest.push('-e', selfFmt === 'macho' ? '__start' : '_start');
+        /* 入口的**符号名**三条腿不一样：Mach-O 的 C 符号带一条前导下划线，所以
+         * C 里的 `_start` 在那边是 `__start`（ELF 与 PE 上就是 `_start`）。
+         * `macho_exe` 的默认入口是 `_main`（见它的文件头），不改就找不着。
+         *
+         * **共享库走的是另一个入口**（`--shared`，插件那一路）：PE 上是 `__dllstart`
+         * （`pe_load.js` 的 `peStart` 就找这个名字，实现在 win32 sysroot 的 `start.c`）。
+         * 给成 `_start` 的话，DLL 一被 `dlopen` 就去跑 `main` —— 那是另一个程序。 */
+        const selfShared = rest.includes('--shared');
+        if (!rest.includes('-e')) {
+          if (selfFmt === 'pe' && selfShared) rest.push('-e', '__dllstart');
+          else rest.push('-e', selfFmt === 'macho' ? '__start' : '_start');
+        }
+        /* PE 上还要指出「库到哪儿找」与「哪个目标」：kernel32 的 `.def` 在 sysroot 的
+         * `lib/` 下，而 `pe-link` 的 `--target` 默认是 x86_64-win32。msvcrt 与 libtcc1
+         * 不接那一格由 `pe_load` 的 `selfLibc` 管（它认命令行上的 `--libc self`）。 */
+        if (selfFmt === 'pe') {
+          rest.push('-L', join(sysroot, 'lib'));
+          if (!rest.includes('--target')) rest.push('--target', `${selfArch}-win32`);
+        }
       } else if (sysroot !== null) {
         /* sysroot/lib 里的 `.def` 当成库的来源。格式不同，走法不同：
          *   ELF：`-L DIR/lib -lc -lm …`，findLibElf 认 `lib%s.def`
@@ -6040,7 +6161,10 @@ function main(argv) {
       const { mod } = cr;
       FE_MS = nowMs() - tFe0;
       const oi = rest.indexOf('-o');
-      const out = oi >= 0 ? rest[oi + 1] : basename(path).replace(/\.(omni|omnis|omnid|js)$/, '');
+      /* 名字过一道 `exeName`：Windows 上没后缀的文件启动不了，所以 `-o dist/omni`
+       * 在那条腿上落成 `dist/omni.exe`（`npm run build:native` 一个字不用改）。 */
+      const out = exeName(oi >= 0 ? rest[oi + 1]
+        : basename(path).replace(/\.(omni|omnis|omnid|js)$/, ''));
       // --work DIR：生成的 C 留在 DIR 里而不是临时目录（自举链要能事后翻中间产物）
       const wi = rest.indexOf('--work');
       /* `--plugin NAME`：出一格动态库而不是可执行文件，NAME 是它的 register 函数。 */
@@ -6379,6 +6503,9 @@ function main(argv) {
         entry: valOf('-e'),
         debug: rest.includes('-g') || gdwarf !== undefined,
         dwarf,
+        /* `--libc self`：自己那份 libc 已经在 `.o` 里，于是不接 msvcrt、不接 libtcc1，
+         * 只留 kernel32（见 `pe_load.js` 的 `selfLibc`）。 */
+        selfLibc: valOf('--libc') === 'self',
       };
       const bytesOf = (p) => {
         const s = readBinary(p);
@@ -6418,6 +6545,9 @@ function main(argv) {
         ...opt,
       });
       writeBinary(out, r.bytes);
+      /* 链接图（`--map`）：崩溃那一句印的 `pc`/`base` 要靠它翻函数名（`pe_link` 的
+       * `mapSyms`，地址是**链接期的 VA**：`pc - 运行时基址 + 映像基址`）。 */
+      writeLinkMap(valOf('--map'), r.mapSyms, `# imagebase 0x${r.img.imagebase.toString(16)}`);
       /* 有导出的符号时 tcc 还顺手写一份 `<输出>.def`（`pe_build_exports` 里那段 `#if 1`）。 */
       if (r.def !== undefined) writeText(r.def.path, r.def.text);
       stdout(`${out} (${r.bytes.length} 字节，${r.infos.length} 节，${r.nthunks} 个导入桩)\n`);

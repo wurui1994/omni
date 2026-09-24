@@ -426,7 +426,13 @@ export function localStamp() {
 export function installDir() {
   const url = import.meta.url;
   const p = url.startsWith('file://') ? decodeURIComponent(url.slice('file://'.length)) : url;
-  const i = p.lastIndexOf('/');
+  /* 两种分隔符都认（第 win-c-backend 刀）：编出来的那份核心在 Windows 上，这一格拿到的
+   * 是 `C:\omni\bin\omni.exe`（argv[0]，见 backend-c 里 `import.meta.url` 那一格）——
+   * 只找 '/' 的话一个都找不到、回 '.'，于是 sysroot / share / 插件全部落到当前目录旁边去找。
+   * 量到的原话是 `没有 arm64-win32 那一份 sysroot`，以及紧接着一条更难看的
+   * `ENOENT: cannot read directory 'C:/Users/All Users/Application Data'`
+   * —— 那是 `srcStamp()` 从 `.` 的上一层开始往下走，撞上了 Windows 的那个拒绝访问的交接点。 */
+  const i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
   return i < 0 ? '.' : p.slice(0, i);
 }
 
