@@ -1,0 +1,76 @@
+# ADR-0046：R 这条腿要 libR —— 我们自己从 r-source 编出它，但不要 R 自己那个编译器
+
+状态：进行中（第一刀已落：`src/main` 100 份 C 全编过）
+
+## 背景
+
+`ext/r` 这条路走到这里是一个**编译器**：R 的语法（从 `gram.y` 复刻）→ 标准 IR → 公共 lower →
+`.sx` → JS / 原生。数值那一族借 R 自己的 C（nmath，我们用自带的 ninja 编出
+`libomniRmath`），值与印法逐字节对 `Rscript`（`tests/r/oracle.js` 19 格）。
+
+这一路能走多远是量过的：ggplot2 4.0.3 连它的 16 个依赖（cli / rlang / vctrs / scales /
+S7 / cpp11 / farver / isoband / …）一共 **135 523 行 R + 102 848 行 C/C++**，而那些 C/C++
+引用了 **388 个 R 内部 C API 符号**（`Rf_eval` / `Rf_allocVector` / `Rf_defineVar` /
+`R_NilValue` / `R_RegisterCCallable` …）。也就是说"跑得起 CRAN 的包"不是"再接几个内建"，
+而是要一套**真的 SEXP 对象模型 + GC + 求值器**。自己重写那一层等于重写 R。
+
+## 决定
+
+**libR 由我们自己从 r-source 的 C 编出来**（同一把 ninja，规则还是 JS 写的），
+`R` 这门语言在它上面跑；**不要 R 自己实现的那个编译器**（`src/library/compiler`
+那个用 R 写的字节码编译器）——"编译"这件事是我们的活。
+
+于是这条路上的三条边界是清楚的：
+
+* **要**：r-source 的 C / Objective-C 全都可以要 —— `src/main`（求值器、SEXP、GC、
+  connections、格式化）、`src/appl`、`src/unix`、`src/extra/{tre,tzone}`、`src/nmath`、
+  以及 grDevices 里 R 自己那份 **quartz 设备**（`devQuartz.c` + `qdCocoa.m`，它自己
+  `NSWindow` / `NSView`，只链 `-framework AppKit`）。窗口那一格就走它，不走浏览器。
+* **不要**：R 的字节码编译器（`compiler` 包）。base 那几个包按不字节码编译的方式装，
+  JIT 关掉。
+* **不装 R**：本机那份 R 只当尺子（`Rscript` 是判据，`bench/r/run.js` 是性能参考），
+  运行时一格都不借。
+
+## 第一刀（已落）
+
+`ext/r/rt/gen-rconfig.js`：从 `src/include/config.h.in` 生出**整份** `config.h`。
+不跑 R 的 configure —— 那是 autoconf + make 那一套；这儿把它做的事按种类分开做：
+
+* `HAVE_<X>_H` 真编一遍 include；`HAVE_<FUNC>` 真编 + 真链；`HAVE_DECL_<X>` 回 0/1；
+  `HAVE_<X>_T` 量类型；`SIZEOF_X` 真跑一趟 —— 一共 **282 格靠探针**
+* 探不出来的 **139 格在一张显式的表里**，每格写值与依据（darwin 的内部时区码、
+  quartz 开、X11/cairo/ICU/NLS/OpenMP 不开、gfortran 的名字修饰…）
+* **表里没有、又落不进探针的名字当场报**（连名字一起印）。这一条挡住了四个真坑：
+  `HAVE_DECL_SIZE_MAX` 的符号是**大写**（只按小写探会答 0，然后 `Defn.h` 那句
+  `#error SIZE_MAX is required for C99` 把整棵树挡住）、`HAVE_PTHREAD` 是**库**不是函数
+  （漏了它 `eval.c` 的 `__APPLE__` 分支编不过）、`HAVE_STACK_T` 是**类型**不是函数
+  （漏了它 `main.c` 走进 macOS SDK 里不存在的 `struct sigaltstack`）、
+  `HAVE_POSIX_LEAPSECONDS` 得跟 `USE_INTERNAL_MKTIME` 一起开（`n_leapseconds` 只在
+  另一支里定义）。
+
+`Rconfig.h` / `Rversion.h` 不用新写生成器 —— r-source 自带 `tools/GETCONFIG` 与
+`tools/GETVERSION`，我们照着 `src/include/Makefile.in` 第 70..73 行那两条规则跑一遍就行
+（`GETVERSION` 认的是 `../../SVN-REVISION`，所以要在 `<gen>/src/include` 里跑）。
+
+**量出来的结果：`src/main` 那 100 份 C（105 减去 4 份只被 include 的、加上 macOS 上不编的
+那几份替代品）一份不差全编过。**
+
+## 接下来（按刀排）
+
+1. `src/appl`（6 C + 14 Fortran）、`src/unix`（6 C）、`src/extra/tre`、`src/extra/tzone`，
+   连 `src/main` 一起链成 `libR.dylib`（R 自己也是拿一堆散 `.o` 链的，见
+   `src/main/Makefile.in` 第 97 行）。gfortran 在这台机器上有（Homebrew GCC 16.2）。
+2. 一个 `Rscript` 形状的驱动（`src/unix/Rembedded.c` + `Rf_initialize_R` /
+   `setup_Rmainloop`），能从 C 求值一段 R。
+3. base / stats / grid 那几个包：**不字节码编译**地装出 `.rdb`/`.rdx`。
+4. `install.packages` 装那 17 个包 → `library(ggplot2)` → `ggsave` 出一张图。
+5. quartz 那一格：`devQuartz.c` + `qdCocoa.m` 编进来，`plot()` 开一个真窗口。
+   它自己建 `NSWindow`、不跑 `[NSApp run]`（靠 `ptr_R_ProcessEvents` 协作抽事件），
+   所以要在主线程上调 —— 这一条与我们 host 那侧的线程安排得对齐。
+
+## 后果
+
+* R 这条腿从此有**两档**：编译器那一档（`omni run x.R`，快 —— `bench/r/run.js` 上标量循环
+  比 Rscript 快 40 倍）与 libR 那一档（能装 CRAN、能画 ggplot2）。两档的判据不同，
+  别混在一把尺子里。
+* 仓库里照旧**不落 R 的代码**：只有构建规则与生成器，源码从参考树读（与 nmath 同一条）。
