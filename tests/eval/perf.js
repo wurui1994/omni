@@ -1,22 +1,30 @@
-// tests/eval/perf.js —— **接了 GPU 后端之后的性能判据**（`docs/design/eval-realtime-gpu.md` §15）
+// tests/eval/perf.js —— **实时性判据**（`docs/design/eval-realtime-gpu.md` §15）
 //
-// 口径（2026-09-24 用户定的）：**每个例子 ≤ 5s，而且不能比本机那份 c_impl 实现慢。**
-// 参考就在这台机器上、同一颗 GPU、同一份脚本 —— 没有比它更硬的尺子：
+// 口径（2026-09-24 用户定的，两次纠正之后的最终版）：
 //
-//     /Users/wurui/Documents/polydraw/c_impl/build/polydraw-render x.pss --frame 0 --w W --h H -o out.png
+//   **PolyDraw / EvalDraw 是为实时交互设计的 —— 几十年前的旧电脑上就做到 60fps。**
+//   所以这一层要的不是"比谁快一点"，而是"**是不是实时**"：
+//     1. **每帧 ≤ 16.7ms**（60fps）—— 不到这条线，做出来的就不是 evaldraw 的效果；
+//     2. **改完脚本到看见画面的延迟要小**（编译时间算在里头）—— 交互式编辑的命门；
+//     3. 所以**重要的模式是 LLVM JIT / tcc -run / 编到 JS**（尤其浏览器端），
+//        **编译到 C 那条的整趟时间不重要**（cc 一趟一秒多，那条路是给"出成品"用的）；
+//     4. **shader 渲染往往不是瓶颈**，而且 shader 那一半可以走 FFI 接动态库 ——
+//        所以 GPU 那一档不是"慢"的来源，语言这一半与启动延迟才是。
 //
-// ## 量的是**二进制**，不是 `omni run`
+// 与 c_impl 的对照仍然留着（那是唯一的外部尺子），但它只是一栏账，不是主判据：
+//   * 出图一帧：`c_impl/build/polydraw-render`（同一颗 GPU，双方公平）；
+//   * 主脚本：`polydraw-eval -f x.pss -n N`（它是没优化的解释器，我们编译到 C，
+//     所以门槛是"快几倍"；而且只有**不含图形调用**的脚本算得数 —— 那侧无上下文时
+//     `GLVERTEX`/`GLBEGIN` 是 no-op stub，见 `c_impl/src/pd_polyhost.c:6`）。
 //
-// `omni run` 那条路每趟都要付编译器的启动账（这台机器上 node 空跑 0.42s、再 import
-// 两百多份 ESM +0.3s），那与"接 GPU 后端快不快"是两件事。所以这份判据：
-//   1. `omni build x.pss -o exe`（一次，时间记账但不判）；
-//   2. 那个二进制跑 N 趟取**最小**（暖态，`OMNI_GFX=gl`）；
-//   3. `polydraw-render` 跑 N 趟取**最小**；
-//   4. 门槛：**二进制 ≤ 5s** 且 **二进制 ≤ c_impl**。
+// ## 量法上的坑（踩过）
 //
-// 取最小而不是平均：这一层量的是"这台机器上它能跑多快"，抖动（调度、热）只会让数变大。
-// 没有那份参考（不是这台机器 / 没编）就只判 5s 那条，并在账上说明。
+// **别拿父进程这侧的 `hrtime` 当分子**：同一个二进制从 shell 里跑 0.15s、从 node 里
+// `spawnSync` 量到 1.03s —— 那 0.88s 是起进程 + 收 stdio 的开销。第一版判据就是这么量的，
+// 于是"我们比 c_impl 慢 4.8 倍"这个结论是**工具造出来的**。现在一律 `/usr/bin/time -p`
+// 包一层、读被测进程自己报的 `real`；每帧那个数直接读运行时自己印的 `#perf gfx` 行。
 import { spawnSync } from 'node:child_process';
+
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,9 +47,41 @@ const CFG = {
   cap: Number(val('--cap', '5')) * 1000,   /* 出图那一趟的硬上限（秒） */
   frames: val('--frames', '2000'),         /* 主脚本那一栏跑多少帧（要跑到 ≥100ms 才量得准） */
   fast: Number(val('--fast', '3')),        /* 主脚本那一栏至少要快几倍 */
+  /* 实时性那一栏：跑多少帧、每帧的线、启动延迟的线（毫秒）。 */
+  rtFrames: val('--rt-frames', '120'),
+  rtFrame: Number(val('--rt-frame-ms', '16.7')),
+  rtStart: Number(val('--rt-start-ms', '1000')),
   only: val('--only', ''),
 };
 const REF_EVAL = '/Users/wurui/Documents/polydraw/c_impl/build/polydraw-eval';
+
+/**
+ * **实时那几种模式**（用户点名的三种在最前）：
+ *   * `jit`  —— LLVM ORC JIT：不落文件、不等 cc；
+ *   * `tcc`  —— `--backend c --cc tcc`（tcc 一趟就是几十毫秒，"tcc -run"那一档）；
+ *   * `js`   —— 编到 JS 在本进程里跑（**浏览器端就是这一条**，所以"编译速度 + 执行速度"
+ *               要一起算）；
+ *   * `interp` —— 解释器（改一个字就能跑的那一档）；
+ *   * `c`    —— cc 编译那条：**启动延迟不判**（它是出成品用的，一趟一秒多），
+ *               但每帧那条线照判（它是帧时间的上限参考）。
+ */
+const MODES = [
+  { id: 'jit', args: ['--backend', 'jit'], startJudged: true },
+  { id: 'tcc', args: ['--backend', 'c', '--cc', 'tcc'], startJudged: true, needs: 'tcc' },
+  { id: 'js', args: ['--backend', 'js'], startJudged: true },
+  { id: 'interp', args: ['--backend', 'interp'], startJudged: true },
+  { id: 'c', args: ['--backend', 'c'], startJudged: false },
+].filter((m) => {
+  /* 外部工具不在这台机器上就**跳过那一档**（与 GL 插件那格同一条口径：不算红）。
+     `c` 那一档走的是**我们自带的 C 前端 + 自己的链接器**（`via self`），不需要外部 cc。 */
+  if (m.needs === undefined) return true;
+  const r = spawnSync('which', [m.needs], { encoding: 'utf8' });
+  if (r.status === 0) return true;
+  process.stdout.write(`  --   [${m.id}] 这台机器上没有 ${m.needs}，那一档跳过\n`);
+  return false;
+});
+
+
 
 /* 判据那一组例子：我们自己那几份（2D / GL 立即模式 / 着色器 / 纹理）+ 语料里**重**的那几份
    （光线步进、GPGPU、几何着色器）—— 挑的是"要真算"的，不是最省的。 */
@@ -212,6 +252,87 @@ for (const r of rows) {
 }
 P(`\n${pass} passed, ${fail} failed（出图 ≤ ${CFG.cap / 1000}s 且不慢于 c_impl；`
   + `主脚本要快 ≥${CFG.fast}x）\n`);
+
+/* ── **实时性那一栏**（主判据，见文件头）─────────────────────────────────────────
+ *
+ * 每种模式跑两趟：一趟 1 帧（量"改完到看见画面"的延迟，编译算在里头）、
+ * 一趟 N 帧（量每帧时间，读运行时自己印的 `#perf gfx` 行）。
+ * 门槛：每帧 avg ≤ 16.7ms（60fps）；启动延迟 ≤ 1s（`c` 那条只记账 —— 它是出成品用的）。
+ */
+const RT_CASES = CASES.filter((f) => /02-gl|04-shader/.test(f));
+
+/** 跑一趟 `omni run`，回 `{ real, avg, max, why }`（都是毫秒）。 */
+function runMode(src, mode, frames) {
+  const env = { ...process.env, OMNI_GFX: 'gl', OMNI_FRAMES: String(frames),
+    OMNI_GFX_PERF: '1', OMNI_GFX_W: CFG.w, OMNI_GFX_H: CFG.h,
+    OMNI_GFX_OUT: join(OUT, 'rt.png'), ...(LIB === '' ? {} : { OMNI_GL_LIB: LIB }) };
+  const r = spawnSync('/usr/bin/time', ['-p', process.execPath, CLI, 'run', src, ...mode.args],
+    { encoding: 'utf8', cwd: ROOT, timeout: 180000, env });
+  const err = `${r.stdout ?? ''}\n${r.stderr ?? ''}`;
+  const real = /real\s+([\d.]+)/.exec(r.stderr ?? '');
+  if (r.status !== 0 || real === null) {
+    const line = err.split('\n').find((l) => /error|Error|没有/.test(l)) ?? '';
+    return { why: line.trim().slice(0, 160) || '跑不起来' };
+  }
+  const pf = /#perf gfx \S+ frames=(\d+) total=([\d.]+)ms avg=([\d.]+)ms min=([\d.]+)ms max=([\d.]+)ms/
+    .exec(err);
+  return { real: Number(real[1]) * 1000,
+    avg: pf === null ? null : Number(pf[3]),
+    max: pf === null ? null : Number(pf[5]),
+    why: null };
+}
+
+P('\n实时性那一栏（每帧 ≤ 16.7ms = 60fps；启动 = 改完到看见画面，编译算在里头）：\n');
+const rt = [];
+for (const src of RT_CASES) {
+  const name = basename(src);
+  for (const mode of MODES) {
+    const one = runMode(src, mode, 1);
+    const many = one.why === null ? runMode(src, mode, CFG.rtFrames) : one;
+    rt.push({ name, mode: mode.id, ...many, start: one.real });
+    if (many.why !== null) {
+      fail++;
+      P(`  FAIL ${name} [${mode.id}] 跑得起来\n       ${many.why}\n`);
+      continue;
+    }
+    if (many.avg === null) {
+      fail++;
+      P(`  FAIL ${name} [${mode.id}] 印得出每帧的账（#perf gfx）\n`);
+      continue;
+    }
+    if (many.avg <= CFG.rtFrame) {
+      pass++;
+      P(`  ok   ${name} [${mode.id}] 每帧 ≤ ${CFG.rtFrame}ms `
+        + `[avg ${many.avg.toFixed(1)}ms max ${many.max.toFixed(1)}ms]\n`);
+    } else {
+      fail++;
+      P(`  FAIL ${name} [${mode.id}] 每帧 ≤ ${CFG.rtFrame}ms\n       avg `
+        + `${many.avg.toFixed(1)}ms（max ${many.max.toFixed(1)}ms）= `
+        + `${(1000 / many.avg).toFixed(0)}fps\n`);
+    }
+    if (!mode.startJudged) {
+      P(`  --   ${name} [${mode.id}] 启动 ${one.real.toFixed(0)}ms（这条路不判 —— 出成品用的）\n`);
+    } else if (one.real <= CFG.rtStart) {
+      pass++;
+      P(`  ok   ${name} [${mode.id}] 启动 ≤ ${CFG.rtStart}ms [${one.real.toFixed(0)}ms]\n`);
+    } else {
+      fail++;
+      P(`  FAIL ${name} [${mode.id}] 启动 ≤ ${CFG.rtStart}ms\n       量到 ${one.real.toFixed(0)}ms\n`);
+    }
+  }
+}
+
+P('\n  启动(ms)  每帧avg(ms)  每帧max(ms)   fps   模式    例子\n');
+for (const r of rt) {
+  const fps = r.avg ? (1000 / r.avg).toFixed(0) : '—';
+  P(`  ${(r.start === undefined ? '—' : r.start.toFixed(0)).padStart(8)}  `
+    + `${(r.avg === null || r.avg === undefined ? '—' : r.avg.toFixed(1)).padStart(11)}  `
+    + `${(r.max === null || r.max === undefined ? '—' : r.max.toFixed(1)).padStart(11)}  `
+    + `${fps.padStart(4)}   ${r.mode.padEnd(6)}  ${r.name}${r.why ? `  （${r.why.slice(0, 40)}）` : ''}\n`);
+}
+
+P(`\n${pass} passed, ${fail} failed（实时性 + 与 c_impl 的两栏对照）\n`);
 process.exit(fail === 0 ? 0 : 1);
+
 
 
