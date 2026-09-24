@@ -145,9 +145,12 @@
     (-> (NAME) (fld $1))
     (-> (NAME dims) (fld $1 (dims $*2))))
 
+  ;; 函数**之间与之后也能摆文件级声明**（`demos/planpos.kc:326` 就是一串 `static` 摆在
+  ;; 最后一个函数后头）—— 与 `pre` 那一档同义，adapter 按标签认，不管它长在哪。
   (rule fns
     (-> () ())
-    (-> (fns fndecl) ($*1 $2)))
+    (-> (fns fndecl) ($*1 $2))
+    (-> (fns predecl) ($*1 $2)))
 
   ;; 主函数没有名字，且必须在最前面（说明书 §"Function style"）。
   (rule main
@@ -172,7 +175,12 @@
     (-> ("&" NAME) (pref $2))
     (-> ("$" NAME) (pstr $2))
     (-> (NAME "[" "]") (parr $1))
-    (-> (NAME dims) (parr $1 (dims $*2))))
+    (-> (NAME dims) (parr $1 (dims $*2)))
+    ;; **带类型的形参**（结构体整块传过去）：`drawbox(box_t b)`（`games/box.kc:121`）、
+    ;; `playercontrols(dpoint3d pr, …)`（`demos/planpos.kc:250`）。与 `static T a;` 同一手 ——
+    ;; 一块摊平的 double，所以这一格形参的类型是 `(arr real)`，改得到调用方那一块。
+    (-> (NAME NAME) (pty $1 $2))
+    (-> (NAME NAME dims) (pty $1 $2 (dims $*3))))
 
   ;; ── 语句 ──────────────────────────────────────────────────────────────
   ;; **函数体最后那个表达式就是返回值，不用分号**（说明书 §"Function style" 的第二条）：
@@ -196,6 +204,10 @@
   ;; 当场报 ambiguous 了（`02-gl.pss:21`）。让第三支只收这一格，两支的第一个记号就互斥。
   (rule stmtnb
     (-> (expr ";") (expr $1))
+    ;; **一句里的逗号表达式**：`mx=0,my=0;`（`geeky/space_struct.kc:40`）。
+    ;; 写成"至少两格"（`expr "," forlist`）—— 写成 `forlist ";"` 的话单个表达式就有
+    ;; 两种读法（`a;` 或"一格的逗号表"），当场歧义。
+    (-> (expr "," forlist ";") (comma $1 $*3))
     (-> (";") (empty))
     ;; **没有"空语句"这一支**（`;` 自己成一句）。少了它是有意的：既然分号可省（见下一支），
     ;; 留着空语句就等于每条 `a;` 都有两种读法（`a;` 一句，或者 `a` 一句加 `;` 一句）——
@@ -219,6 +231,10 @@
     ;; 所以**局部数组只有这一种写法**。初值按运行期算（同一份文档 §Init 第三条）。
     (-> ("auto" staticlist ";") (auto $*2))
     (-> ("auto" NAME staticlist ";") (aty $2 $*3))
+    ;; **`auto` 省着写**：`mat_t tmp;`（`geeky/space_struct.kc:120`）——"auto 是默认的"
+    ;; （同一行文档）。只有**带类型**那一格需要这一支：不带类型的单个变量第一次用到
+    ;; 就算声明，而不带类型的数组说明书明说必须显式写，所以那一格照旧要 `auto`。
+    (-> (NAME staticlist ";") (aty $1 $*2))
     ;; 块里也有带类型的 static 与结构体声明（局部结构体，evaldraw.txt 2010-02-10 那条
     ;; 改动日志里提过"local structure"）。
     (-> ("static" NAME staticlist ";") (sty $2 $*3))
@@ -360,6 +376,9 @@
     (-> (postfix "." NAME) (field $1 $3))
     (-> (postfix "(" ")") (call $1))
     (-> (postfix "(" arglist ")") (call $1 $*3))
+    ;; **实参表末尾那个逗号**：`drawcone(ox,oy,96,.25, cx,cy,96,.25,);`
+    ;; （`geeky/space_struct.kc:110`）—— 收下、当没有那一格。
+    (-> (postfix "(" arglist "," ")") (call $1 $*3))
     (-> (postfix "++") (postinc $1))
     (-> (postfix "--") (postdec $1)))
 

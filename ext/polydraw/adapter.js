@@ -645,6 +645,8 @@ function stmtOf(s, C) {
     }];
   }
   if (t === 'expr') return exprStmtOf(kids(s)[0], C);
+  /* **一句里的逗号表达式**（`mx=0,my=0;`）：从左到右各做一句 —— 与 for 头里那一格同义。 */
+  if (t === 'comma') return kids(s).flatMap((e) => exprStmtOf(e, C));
   /* **`auto` 那一格在这儿落**：一句 `let` 带初值 —— 数组每趟开一块新的、标量每趟摆
      一次初值。初值"按运行期算"（`RScript.htm` §Init 第三条），所以是真语句，不像
      static 那样摆进入口。 */
@@ -1388,6 +1390,82 @@ function bodyOf(blk, params, C) {
   return [...lets, ...stmtsOf(kids(blk), C)];
 }
 
+/**
+ * 一张形参表 -> `[{ name, type }]`，顺手把**形状**登记上。
+ *
+ * 四态照 `eval.txt` 那张表（按值 / `&a` / `$a` / `a[…]`），再加 RScript 的**带类型**那一格
+ * （`drawbox(box_t b)`）。数组与结构体那两格的类型是 `(arr real)` —— 这门语言里它们
+ * 就是"一块摊平的 double"，形参拿到的是**同一块**（改得到调用方）。
+ *
+ * 维度与类型记进 `C.arrs` / `C.svars`：下标算式（多维摊平）与 `.字段`（偏移）要靠它们。
+ * 没写长度的（`a[]`）不登记 —— 一维那条路不需要，`aget` 直接走。
+ */
+function paramInfos(psNode, C, register = true) {
+  return kids(psNode).map((p) => {
+    const t = tag(p);
+    const k = kids(p);
+    if (t === 'pty') {
+      const ty = idOf(k[0]);
+      const name = idOf(k[1]);
+      if (ty !== 'double' && !C.structs.has(ty)) {
+        throw new Error(`eval->IR: 形参 \`${idOf(k[0])} ${name}\` 里的类型不是登记过的结构体`);
+      }
+      const dims = k.length > 2 ? kids(k[2]).map((e) => {
+        const v = constOf(e, C);
+        if (v === null || !Number.isFinite(v) || v <= 0) {
+          throw new Error(`eval->IR: 形参 \`${name}[…]\` 的长度算不出一格正整数`);
+        }
+        return v;
+      }) : [];
+      if (register) {
+        C.arrs.set(name, [dims.reduce((a, b) => a * b, 1) * structSize(ty, C)]);
+        C.svars.set(name, { ty: ty === 'double' ? null : ty, dims });
+      }
+      return { name, type: ARR };
+    }
+    if (t === 'parr') {
+      const name = idOf(k[0]);
+      if (k.length > 1 && register) {
+        const dims = kids(k[1]).map((e) => {
+          const v = constOf(e, C);
+          if (v === null || !Number.isFinite(v) || v <= 0) {
+            throw new Error(`eval->IR: 形参 \`${name}[…]\` 的长度算不出一格正整数`);
+          }
+          return v;
+        });
+        C.arrs.set(name, dims);
+      }
+      return { name, type: ARR };
+    }
+    return { name: idOf(k[0]), type: REAL };
+  });
+}
+
+/**
+ * **形参与别处的数组/结构体重名就改名**（`demos/planpos.kc`：`vec` 既是文件级的
+ * `dpoint3d vec`、又是 `getobjectspos` 的形参 `dpoint3d vec[11]`）。
+ *
+ * 形状（维度、结构体类型）记在一张**平表**里（`C.arrs` / `C.svars`），所以重名会把
+ * 先登记的那一格冲掉 —— 冲掉之后 `vec.x` 报"是数组，取字段之前要先给下标"。
+ * 形参本来就是函数自己的，改名在语义上不动任何东西：形参那个记号 + 这一份函数体。
+ */
+function renameParams(psNode, body, fname, C) {
+  const ren = new Map();
+  for (const p of kids(psNode)) {
+    const t = tag(p);
+    if (t !== 'pty' && t !== 'parr') continue;
+    const at = kids(p)[t === 'pty' ? 1 : 0];
+    if (at === undefined || at === null || at.kind !== 'atom') continue;
+    const name = low(at.value);
+    if (!C.arrs.has(name) && !C.svars.has(name)) continue;
+    let nn = `${fname}__${name}`;
+    while (C.arrs.has(nn) || C.svars.has(nn) || C.globals.has(nn) || C.enums.has(nn)) nn = `${nn}_`;
+    at.value = nn;
+    ren.set(name, nn);
+  }
+  if (ren.size > 0) renameStatics(body, ren);
+}
+
 /* ─── 顶层 ───────────────────────────────────────────────────────────── */
 
 /**
@@ -1475,8 +1553,10 @@ export function evalToIR(cst, host, src = '') {
     }
     if (tag(x) === 'fn') {
       const name = idOf(kids(x)[0]);
-      const ps = kids(kids(x)[1]).map((p) => idOf(kids(p)[0]));
-      C.fns.set(name, { params: ps.map(() => REAL), ret: REAL });
+      /* 这一趟只要**签名**（元数与每格的类型），形状那张表留到下头真降的时候登记 ——
+         那时候才知道要不要给形参改名（`renameParams`）。 */
+      const ps = paramInfos(kids(x)[1], C, false);
+      C.fns.set(name, { params: ps.map((p) => p.type), ret: REAL });
     }
   }
 
@@ -1517,19 +1597,20 @@ export function evalToIR(cst, host, src = '') {
   for (const x of top) {
     if (tag(x) !== 'fn') continue;
     const name = idOf(kids(x)[0]);
-    const ps = kids(kids(x)[1]).map((p) => idOf(kids(p)[0]));
+    renameParams(kids(x)[1], kids(x)[2], name, C);
+    const ps = paramInfos(kids(x)[1], C);
     decls.push({
       kind: 'fn',
       name,
-      params: ps.map((p) => ({ name: p, type: REAL })),
+      params: ps,
       ret: REAL,
-      body: bodyOf(kids(x)[2], ps, C),
+      body: bodyOf(kids(x)[2], ps.map((p) => p.name), C),
     });
   }
 
   /* 主函数：EVAL 里它的形参是宿主传进来的（PolyDraw 不传，`()` 是常态）——
      有形参就在入口里当零值的局部量。 */
-  const mainPs = kids(kids(mainNode)[0]).map((p) => idOf(kids(p)[0]));
+  const mainPs = paramInfos(kids(mainNode)[0], C).map((p) => p.name);
   /* 主函数体里的 `return` 是"这一帧到此为止"（那格函数回 void）—— 见 `return` 那一段。 */
   C.inMain = true;
   const mainBody = [

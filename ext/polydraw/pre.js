@@ -50,7 +50,11 @@ function expand(s, macros, depth = 0) {
       let j = i + 1;
       while (j < s.length && /[A-Za-z_0-9]/.test(s[j])) j++;
       const w = s.slice(i, j);
-      if (macros.has(w)) { out += macros.get(w); changed = true; } else out += w;
+      /* 展开出来的那一段**两头各垫一个空格**：宏是按记号替换的，不能与左右粘成一个新记号。
+         少这一手的话 `#define TIMEZONE -5` 遇上 `-TIMEZONE-f(…)`（`demos/planpos.kc:713`）
+         会摊成 `--5-f(…)` —— 词法按最长匹配吃出一个 `--`，于是报"unexpected NUMBER"。
+         垫空格不改行数（这台机器的规矩是行号一格不许动），只挪列。 */
+      if (macros.has(w)) { out += ` ${macros.get(w)} `; changed = true; } else out += w;
       i = j;
       continue;
     }
