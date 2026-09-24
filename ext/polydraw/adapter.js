@@ -387,9 +387,9 @@ function exprOf(x, C, want = 'val') {
     const ch = indexChain(x);
     if (isList(ch.base) && tag(ch.base) === 'name' && C.arrs.has(idOf(ch.base))) {
       const dims = C.arrs.get(idOf(ch.base));
-      if (ch.chain.length !== dims.length) {
+      if (ch.chain.length > dims.length) {
         throw new Error(`eval->IR: \`${idOf(ch.base)}\` 是 ${dims.length} 维的数组，`
-          + `这儿给了 ${ch.chain.length} 格下标（旧实现把多维摊成一块，所以维数要对齐）`);
+          + `这儿给了 ${ch.chain.length} 格下标（比维数还多）`);
       }
       const v = {
         kind: 'builtin',
@@ -733,9 +733,9 @@ function targetOf(x, C) {
     const ch = indexChain(x);
     if (isList(ch.base) && tag(ch.base) === 'name' && C.arrs.has(idOf(ch.base))) {
       const dims = C.arrs.get(idOf(ch.base));
-      if (ch.chain.length !== dims.length) {
+      if (ch.chain.length > dims.length) {
         throw new Error(`eval->IR: \`${idOf(ch.base)}\` 是 ${dims.length} 维的数组，`
-          + `这儿给了 ${ch.chain.length} 格下标`);
+          + `这儿给了 ${ch.chain.length} 格下标（比维数还多）`);
       }
       return {
         kind: 'index',
@@ -1310,6 +1310,14 @@ function clampIdx(ix, n) {
 const iNum = (v) => ({ kind: 'int', value: String(v) });
 
 /** 一格静态数组的下标（多维摊成一格）：`a[i][j]` -> `(i*d2 + j)`，再过越界那一夹。 */
+/**
+ * 摊平下标：`a[i][j][k]` -> `i*d1 + j` 再 `*d2 + k`（行主序），最后过越界那一夹。
+ *
+ * **下标比维数少是合法的**（`ken/texture3d.pss:12` 就是 `static buf[64][64][64]` 拿
+ * `buf[i]` 一路写下去，`i` 从 0 数到 64³-1）：旧实现里多维 `static` 本来就是**一块摊平的
+ * double**，`a[i][j]` 只是"算下标"的糖 —— 少给几格就按给的那几格算，步长是 1。
+ * 比维数**多**才是真错（那说明写的人以为它是嵌套的）。
+ */
 function arrIndex(chain, dims, C) {
   let flat = null;
   for (let i = 0; i < chain.length; i++) {

@@ -594,13 +594,16 @@ static unsigned char *ev_img_load(const char *path, int *w, int *h) {
 
 int omni_ev_gl_tex(int slot, int w, int h, int d, int fmt, const double *px) {
   if (!g_on || px == NULL) return 1;
-  if (d != 1) { ev_err("gfxtex：这一档只接 2D 纹理（3D 纹理还没接）", NULL); return 1; }
   CGLSetCurrentContext(g_ctx);
   int i = ev_tex_slot(slot);
   if (i < 0) return 1;
+  /* **3D 纹理那一档**（`ken/texture3d.pss` 是 64³ 那一块）：`层 > 1` 就是它
+     （`kglsettexarray3` 的第三格就是 zsiz，`polydraw.c:1400`）。 */
+  GLenum tar = d > 1 ? GL_TEXTURE_3D : GL_TEXTURE_2D;
+  g_tex[i].tar = tar;
   glActiveTexture(GL_TEXTURE0 + g_texunit);
-  glBindTexture(GL_TEXTURE_2D, g_tex[i].id);
-  long n = (long)w * (long)h;
+  glBindTexture(tar, g_tex[i].id);
+  long n = (long)w * (long)h * (long)(d > 0 ? d : 1);
   int kind = fmt & 15;
   if (kind == 0) {
     unsigned char *b = (unsigned char *)malloc((size_t)n * 4);
@@ -613,7 +616,11 @@ int omni_ev_gl_tex(int slot, int w, int h, int d, int fmt, const double *px) {
       unsigned int al = (v >> 24) & 255;
       b[k * 4 + 3] = (unsigned char)(al == 0 ? 255 : al);
     }
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, b);
+    if (tar == GL_TEXTURE_3D) {
+      glTexImage3D(tar, 0, GL_RGBA8, w, h, d, 0, GL_RGBA, GL_UNSIGNED_BYTE, b);
+    } else {
+      glTexImage2D(tar, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, b);
+    }
     free(b);
   } else if (kind == 1) {
     unsigned char *b = (unsigned char *)malloc((size_t)n);
@@ -622,21 +629,24 @@ int omni_ev_gl_tex(int slot, int w, int h, int d, int fmt, const double *px) {
       double v = px[k];
       b[k] = (unsigned char)(v < 0 ? 0 : (v > 255 ? 255 : (int)v));
     }
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, w, h, 0, GL_RED, GL_UNSIGNED_BYTE, b);
+    if (tar == GL_TEXTURE_3D) glTexImage3D(tar, 0, GL_R8, w, h, d, 0, GL_RED, GL_UNSIGNED_BYTE, b);
+    else glTexImage2D(tar, 0, GL_R8, w, h, 0, GL_RED, GL_UNSIGNED_BYTE, b);
     free(b);
   } else if (kind == 4 || kind == 5) {
     long per = kind == 5 ? 4 : 1;
     float *f = (float *)malloc(sizeof(float) * (size_t)(n * per));
     if (f == NULL) return 1;
     for (long k = 0; k < n * per; k++) f[k] = (float)px[k];
-    if (kind == 4) glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w, h, 0, GL_RED, GL_FLOAT, f);
-    else glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, f);
+    GLint ifmt = kind == 4 ? GL_R32F : GL_RGBA32F;
+    GLenum efmt = kind == 4 ? GL_RED : GL_RGBA;
+    if (tar == GL_TEXTURE_3D) glTexImage3D(tar, 0, ifmt, w, h, d, 0, efmt, GL_FLOAT, f);
+    else glTexImage2D(tar, 0, ifmt, w, h, 0, efmt, GL_FLOAT, f);
     free(f);
   } else {
     ev_err("gfxtex：这一档没接 KGL 格式（有的是 BGRA32(0)/CHAR(1)/FLOAT(4)/VEC4(5)）", NULL);
     return 1;
   }
-  if (ev_tex_params(fmt)) glGenerateMipmap(GL_TEXTURE_2D);
+  if (ev_tex_params_t(tar, fmt)) glGenerateMipmap(tar);
   g_tex[i].w = w;
   g_tex[i].h = h;
   g_tex[i].fmt = fmt;
