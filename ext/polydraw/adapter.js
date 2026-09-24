@@ -1727,6 +1727,32 @@ function collectBoxed(x, C, out = new Set(), blocks = new Set()) {
     }
     return out;
   }
+  /* **调用点上那几格也要装箱**：被调的函数形参写着 `&x` 时，调用方**不用再写 `&`**
+     （`tigrou/metaballs cube.pss:75` 是 `rotate(x, y, t/2*0.35)`，而 `:194` 的定义是
+     `rotate(&x, &y, r)`）—— 那一格是"按名字传引用"，与 `&x` 同一件事，所以同样装箱。
+     只认**光秃秃的名字**：`a[i]`/`p.x` 那两种本来就成块，走 `blockArg` 那条路。 */
+  if (t === 'call') {
+    const h = kids(x)[0];
+    if (isList(h) && tag(h) === 'name') {
+      const sig = C.fns.get(idOf(h));
+      if (sig !== undefined) {
+        const as = kids(x).slice(1);
+        /* **`sig.params` 里"收整块"的那格占两位**（块 + 偏移，见 `paramInfos`）——
+           所以实参与形参不是一一对应的，要自己挪那格游标。
+           踩过一次：按下标直对时第二个 `&` 形参对上了偏移那一格（REAL），
+           于是 `rot(x, y, r)` 里 `x` 装了箱、`y` 没装。 */
+        let pi = 0;
+        for (let i = 0; i < as.length && pi < sig.params.length; i++) {
+          const block = sig.params[pi] === ARR;
+          pi += block ? 2 : 1;
+          const a = as[i];
+          if (!block || !isList(a) || tag(a) !== 'name') continue;
+          const n = idOf(a);
+          if (!C.arrs.has(n) && !C.svars.has(n) && !blocks.has(n)) out.add(n);
+        }
+      }
+    }
+  }
   for (const k of kids(x)) collectBoxed(k, C, out, blocks);
   return out;
 }
