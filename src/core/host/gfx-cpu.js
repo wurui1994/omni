@@ -38,8 +38,13 @@ const D = {
   mode: '', only: -1,
   /* 性能那几格（`--perf`）：一帧的墙上时间是两次 `nextframe` 之间那一段。 */
   perf: -1, tPrev: 0, tSum: 0, tMin: 0, tMax: 0, tn: 0,
-  /* 输入那几格（`mousx`/`mousy`/`bstatus`/`keystatus[256]`）。`keys` 是"还没开"的记号。 */
-  mx: 0, my: 0, bst: 0, keys: null,
+  /* 输入那几格（`mousx`/`mousy`/`bstatus`/`keystatus[256]`）。`keys` 是"还没开"的记号。
+     **开局那个位置是 (320,240)**：原版一开机光标就在窗口正中（默认窗口 640×480），
+     参考也是这么定死的（`c_impl/src/pd_polyhost.c:22`，注释写着 "original starts the
+     cursor at window center"）—— 它按的是 640×480 那个默认尺寸，**不随 `--w/--h` 变**。
+     13 份 `.pss` 读这两格（`orthoglobe` 的 `z = mousy/yres*4` 给 0 就整张图退化成一条线），
+     所以这一格是判据上最大的一处"开局状态"口径，不是随手写的 0。 */
+  mx: 320, my: 240, bst: 0, keys: null,
 };
 
 /** 一格整数旗子（环境变量那一档，读不出数就用默认）。 */

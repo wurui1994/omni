@@ -323,8 +323,9 @@ function exprOf(x, C, want = 'val') {
       const v = { kind: 'call', fn: nameRef(n === 'rnd' ? 'pd_rnd' : 'pd_nrnd'), args: [] };
       return want === 'cond' ? truthy(v) : v;
     }
-    /* `enum` 是**编译期常量**（`eval.txt`：数组长度可以用它）—— 就地换成那个数。 */
-    if (C.enums.has(n)) return num(C.enums.get(n));
+    /* `enum` 是**编译期常量**（`eval.txt`：数组长度可以用它）—— 就地换成那个数。
+       **除了被本函数里的量盖住的那几个**（见 `bodyOf` 里 `C.shadow` 的头注）。 */
+    if (C.enums.has(n) && C.shadow?.has(n) !== true) return num(C.enums.get(n));
     /* 宿主的那批常量（PolyDraw 的 `GL_TRIANGLE_FAN` 之类：`myext[]` 里它们是
        "名字 -> 一格 double"）。值照 `GL/gl.h`，不是我们自己编的号。 */
     if (C.host.consts?.has(n)) return num(C.host.consts.get(n));
@@ -1857,12 +1858,23 @@ function bodyOf(blk, params, C) {
   const autos = autoDecls(blk).map((s) => autoShape(C, s));
   const autoNames = new Set(autos.map((a) => a.name));
   const written = writtenNames(blk);
+  /**
+   * **这一份函数里哪些名字是"量"**（形参 / `static` / 被赋过值的）——
+   * 它们**盖住同名的 `enum`**。
+   *
+   * `enum` 那张表是**整份程序共用**的（原版也是一份全局表，`eval.c:392`），而名字
+   * 大小写不敏感 ⇒ `ken/gspiral.pss` 里主函数写了 `enum {N=2^16}`，另一个函数里
+   * 又有局部量 `n = min(…)`，两个名字在我们这儿是同一个。原版的次序是"先当变量看"
+   * （赋值就地造一格局部量），所以这儿也得先看量、再看 enum ——
+   * 不然那句赋值会落成给常量赋值（`未声明的变量 'n'`，整份跑不起来）。
+   */
+  C.shadow = new Set([...params, ...autoNames, ...written]);
   const lets = [];
   /* **装箱的局部量**（`&x` 传出去过的那些）：一格长度 1 的数组。形参与全局不算 ——
      形参拿到的就是调用方那一格，全局在模块级已经开好了。 */
   for (const n of usedNames(blk)) {
     if (!C.boxed.has(n) || autoNames.has(n)) continue;
-    if (params.includes(n) || C.globals.has(n) || C.enums.has(n)) continue;
+    if (params.includes(n) || C.globals.has(n)) continue;
     lets.push({
       kind: 'let',
       name: n,
@@ -1876,7 +1888,7 @@ function bodyOf(blk, params, C) {
   }
   for (const n of written) {
     if (autoNames.has(n) || C.boxed.has(n)) continue;
-    if (params.includes(n) || C.globals.has(n) || C.enums.has(n)) continue;
+    if (params.includes(n) || C.globals.has(n)) continue;
     /* 宿主那一侧的量（host 模式下的 `bstatus` 那一族）不是局部：补一格 `let` 会生出个
        没人读的死变量，而写它已经落成 `(gfxcall "set…" …)` 了。 */
     if (C.gfxHost && (HOST_VARS.includes(n) || HOST_ARRS.includes(n))) continue;

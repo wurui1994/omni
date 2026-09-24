@@ -354,7 +354,9 @@ static int64_t g_gonly = -1, g_gtn = 0;
 static double g_gtprev = 0.0, g_gtsum = 0.0, g_gtmin = 0.0, g_gtmax = 0.0;
 /* 输入那几格（与 host/gfx-cpu.js 的 D.mx / D.my / D.bst / D.keys 一一对应）。
    这一档没有窗口，来源是 OMNI_MOUSE=x,y,按键位 与 OMNI_KEYS=0xc8,0x1d（按住的扫描码）。 */
-static double g_gmx = 0.0, g_gmy = 0.0, g_gkeys[256];
+/* 开局那个位置是 (320,240) —— 原版一开机光标在窗口正中（默认窗口 640×480），
+   参考也这么定死（`c_impl/src/pd_polyhost.c:22`）。与 `gfx-cpu.js` 的 `D.mx/my` 同值。 */
+static double g_gmx = 320.0, g_gmy = 240.0, g_gkeys[256];
 static int64_t g_gbst = 0;
 static int g_ginput = 0;
 

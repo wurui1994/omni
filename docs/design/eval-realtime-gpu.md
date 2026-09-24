@@ -1344,7 +1344,41 @@ disco blur / ken 的 texture），从前 `glcapture` 是"收下不管"，于是�
 语言（`gl_capbegin` / `gl_capend`）：**断批**再把那一句转过去 —— 抓屏前后是两拨东西，
 攒在一条批里就错了。矩阵一格都不动。
 
-### 22.3 一个判据陷阱：`.ours.rgba` 前头有 14 字节文本头
+## 23. 第十三刀：三处**开局状态/作用域**的口径（一次治好五份）
+
+这三格都不是"少了个 API"，是**语义定错了**，图照样出、但出的是另一张。
+
+### 23.1 鼠标的开局位置是 (320,240)，不是 (0,0)
+
+13 份 `.pss` 读 `mousx`/`mousy`。原版一开机光标就在窗口正中；参考也定死在那儿
+（`c_impl/src/pd_polyhost.c:22`：`s->mousx = 640/2; s->mousy = 480/2;`，注释写着
+"original starts the cursor at window center"）—— 注意它按的是**默认窗口 640×480**，
+不随 `--w/--h` 变。我们从前给 0，于是 `ken/orthoglobe.pss` 的 `z = mousy/yres*4` 是 0，
+整张图退化成一条线（全黑）。改完：`showmouse.pss` **逐像素相同**（RMSE 123 → 0）、
+`cubetex` 99.9 → 39.3、`texture` 54.3 → 49.2。
+
+### 23.2 `@h`：宿主脚本被挪到了后头（4 份）
+
+`polydraw.txt:167`：「By default, the code at top is the host script. If you wish to
+relocate the host code, you may put `@h` before it. Note that only 1 host block is
+allowed - whichever comes last in the file.」
+
+而词法层是**从第一个 `@` 整段跳到末尾**的，于是写了 `@h` 的脚本在我们这儿就是
+"一句代码都没有"—— `orthoglobe` / `gspiral` / `geo_test` 三份全黑就是这一格。
+落点在预处理那一趟（`ext/polydraw/pre.js` 的 `hostBlock`）：**把不属于宿主那一段的行
+换成空行**，于是词法器看见的是宿主那段，而**行号一格不动**（那台机器的规矩）。
+着色器原文那一半不受影响 —— adapter 拿的是未经预处理的原文（`drive.js` 的 `mainSrc`）。
+
+### 23.3 同名的量**盖住** `enum`
+
+`enum` 那张表整份程序共用（原版也是一份全局表，`eval.c:392`），而**名字大小写不敏感**
+（`eval.txt:61`）。`ken/gspiral.pss` 主函数里写了 `enum {N=2^16}`，另一个函数里
+又有局部量 `n = min(…)` —— 在我们这儿是同一个名字，于是那句赋值成了"给常量赋值"
+（`未声明的变量 'n'`，整份跑不起来）。原版的次序是**先当变量看**（赋值就地造一格局部量），
+所以 `bodyOf` 里记一格 `C.shadow`（形参 + `static` + 被赋过值的名字），
+名字解析时它盖住 `enum`。gspiral 从"跑不起来"到出图（RMSE 20.6、非黑 27328 vs 26796）。
+
+### 23.4 一个判据陷阱：`.ours.rgba` 前头有 14 字节文本头
 
 判据留的那份原始像素是 `#rgba 宽 高\n` + RGBA，**看图/取像素前要跳过那一行**
 （判据自己是 `b.indexOf(10)+1`）。忘了跳的话每个像素错位两字节，黑底变成纯绿、

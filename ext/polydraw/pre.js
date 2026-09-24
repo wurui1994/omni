@@ -178,12 +178,52 @@ function evalExpr(ts, macros, where) {
 }
 
 /**
+ * **`@h` 那一格：宿主脚本被挪到了后头**（`polydraw.txt:167`）。
+ *
+ * 默认"最上头那一段就是宿主脚本"，而 `@h` 那一行能把它挪走 ——「only 1 host block is
+ * allowed - whichever comes last in the file」。词法层是从**第一个 `@` 整段跳到末尾**的
+ * （`polydraw.grammar` 的头注），所以写了 `@h` 的脚本在我们这儿就成了"一句代码都没有"：
+ * `ken/orthoglobe.pss` / `gspiral.pss` / `geo_test.pss` 三份全黑就是这一格（查了两轮）。
+ *
+ * 这一趟只做一件事：**把不属于宿主那一段的行换成空行**（`@h` 那一行本身也换掉）。
+ * 于是词法器看见的就是宿主那一段，而**行号一格不动**（这台机器的规矩，见头注第 1 条）。
+ * 着色器原文那一半不从这儿走 —— adapter 拿的是**未经预处理的原文**（`drive.js` 的
+ * `mainSrc`），所以这儿抹掉不影响 `splitSections`。
+ *
+ * 没有 `@h` 的脚本原样回（语料里 4 份用它）。
+ */
+function hostBlock(src) {
+  if (!/^[ \t]*@[ \t]*h/m.test(src)) return src;
+  const lines = src.split(/\r?\n/);
+  /* 每一行属于哪一段：-1 = 第一个 `@` 之前（默认的宿主），别的就是段号。 */
+  const marks = [];
+  let seg = -1;
+  let kind = null;
+  let hostSeg = null;
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^[ \t]*@([vgfh]?)/.exec(lines[i]);
+    if (m !== null) {
+      seg += 1;
+      if (m[1] !== '') kind = m[1];
+      if (kind === 'h' && m[1] === 'h') hostSeg = seg;
+      marks.push(null);            /* 段头那一行不是代码 */
+      continue;
+    }
+    marks.push(seg);
+  }
+  if (hostSeg === null) return src;
+  const out = [];
+  for (let i = 0; i < lines.length; i++) out.push(marks[i] === hostSeg ? lines[i] : '');
+  return out.join('\n');
+}
+
+/**
  * 预处理一份源码。**行数不变**、第一个 `@` 之后原样不动（见头注那两条规矩）。
  *
  * `where` 只进错误消息（文件名）。回的是同样行数的文本。
  */
 export function preprocess(text, where = 'eval') {
-  const src = String(text ?? '');
+  const src = hostBlock(String(text ?? ''));
   if (!/^[ \t]*#/m.test(src)) return src;        /* 一行指令都没有：原样回（常见情况） */
   /* **按 `\r?\n` 切、用 `\n` 接**：语料里一半的文件是 CRLF，而 JS 的 `.` 不匹配 `\r`
      （它算行终止符）—— `(.*)$` 那一段会在 `\r` 前停住、`$` 再匹配不上，于是
