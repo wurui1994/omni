@@ -2181,6 +2181,22 @@ export function evalToIR(cst, host, src = '') {
     });
   }
 
+  /* **每帧开头那一句 `qglsetshader(0)`**（`polydraw.c:2283` —— 就在 `gevalfunc()` 前面）：
+     有 `@v`/`@f` 区段的脚本，**这一对从帧头就在用着**，不用自己调 `glsetshader`。
+     `ken/interference.pss` 就是这么写的（整份脚本只有 `glBegin/glVertex/glEnd`）——
+     从前我们按内建那对画，它那句 `glColor(klock(),0,0)` 在第 0 帧是黑的，
+     于是整张图全黑；照这一句改过来才是参考画的那张干涉条纹。
+     只在**两类区段都有**的时候发：`setshader_int` 缺一类就挑不出一对。 */
+  if (C.host.frameReset === true && C.needGL
+    && C.shaders.some((s) => s.kind === 'vert') && C.shaders.some((s) => s.kind === 'frag')) {
+    /* 摆在 `gl_framebegin` **后面**（它刚被 unshift 到第 0 格）—— 原版也是先摆 GL 初态、
+       再 `qglsetshader(0)`、再调脚本。 */
+    mainBody.splice(1, 0, {
+      kind: 'expr-stmt',
+      expr: { kind: 'call', fn: nameRef('gl_setshader1'), args: [num(0)] },
+    });
+  }
+
   /* **宿主那"每帧盖一次"的几格**（`xres`/`yres`/`mousx`/`mousy`，见 `HOST_WRITABLE` 头注）：
      照 `polydraw.c:2276-2280`，在脚本跑之前盖上去。摆在最前面 —— 那四句在原版里
      也在 `gevalfunc()` 之前。 */

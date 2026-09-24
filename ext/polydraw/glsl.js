@@ -48,7 +48,12 @@ export function glslAlign(kind, src) {
   s = s.replace(/\bgl_NormalMatrix\b/g, 'mat3(transpose(inverse(u_mv)))');
   s = s.replace(/\bgl_ModelViewMatrix\b/g, 'u_mv');
   s = s.replace(/\bgl_Vertex\b/g, 'a_pos');
-  s = s.replace(/\btexture2D\s*\(/g, 'texture(');
+  /* **取样那一族**：旧式按维度分名字（`texture2D`/`texture3D`/`textureCube`/`…Lod`），
+     新式一律 `texture` / `textureLod`（采样器类型自己带着维度）。语料里这四种都有
+     （`texture2D` 29 次、`textureCube` 2、`texture3D` 1、`texture2DLod` 1）。 */
+  s = s.replace(/\btexture(?:1D|2D|3D|Cube)Lod\s*\(/g, 'textureLod(');
+  s = s.replace(/\btexture(?:1D|2D|3D|Cube)Proj\s*\(/g, 'textureProj(');
+  s = s.replace(/\btexture(?:1D|2D|3D|Cube)\s*\(/g, 'texture(');
   s = s.replace(/\battribute\b/g, 'in');
   const head = [];
   if (kind === 'vert') {
