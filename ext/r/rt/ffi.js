@@ -59,16 +59,24 @@ function ensure() {
 }
 
 /**
- * 那份头里所有函数声明：`名字 → {ret, params}`（`params` 是 `(cabi …)` 那套类型词
+ * 那两份头里所有函数声明：`名字 → {ret, params}`（`params` 是 `(cabi …)` 那套类型词
  * `i32 i64 f64 ptr void`，`c.declsOf` 已经折好了）。
+ *
+ * 两份：R 的 `Rmath.h`（生成出来的那一份）与**我们自己那一份** `omni_rna.h`
+ * （`NA` / `NaN` / `Inf` 三格真值 —— 它们在 R 那边属于解释器，nmath 里没有）。
+ * 两份都过同一个 `c.declsOf`：签名只有"从头里读"这一个来源，我们自己那几格也不手抄。
  */
 export function rmathSigs() {
   if (sigs !== null) return sigs;
   ensure();
-  const got = cDeclsOf(HDR, {
-    includeDirs: [GEN], sysIncludeDirs: cSysInclude(),
-  }, [['MATHLIB_STANDALONE', '1']]);
-  sigs = new Map(got.decls.map((d) => [d.name, { ret: d.ret, params: d.params, variadic: d.variadic === true }]));
+  const opts = { includeDirs: [GEN, join(HERE)], sysIncludeDirs: cSysInclude() };
+  sigs = new Map();
+  for (const h of [HDR, join(HERE, 'omni_rna.h')]) {
+    const got = cDeclsOf(h, opts, [['MATHLIB_STANDALONE', '1']]);
+    for (const d of got.decls) {
+      sigs.set(d.name, { ret: d.ret, params: d.params, variadic: d.variadic === true });
+    }
+  }
   return sigs;
 }
 

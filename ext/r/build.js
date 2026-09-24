@@ -69,6 +69,14 @@ const srcs = nmathSources().map((n) => ({ name: n, path: join(RSRC, 'src/nmath',
    `norm_rand` / `exp_rand` —— 少了它 `r*` 那一族全部链不上。 */
 srcs.push({ name: 'std_unif.c', path: join(RSRC, 'src/nmath/standalone/sunif.c') });
 
+/**
+ * **我们自己那几格**，与上面那张 R 的名单分开列（一眼能看出哪些代码是谁的）。
+ * 今天只有一份：`NA` / `NaN` / `Inf` 三格真值 —— 它们在 R 那边属于解释器
+ * （`src/main/arithmetic.c` 的 `R_NaReal`），standalone 的 nmath 里没有，
+ * 所以按 *R Internals* §1.3 公开的表示自己写（账在 `rt/omni_rna.h` 头上）。
+ */
+const OURS = [{ name: 'omni_rna.c', path: join(HERE, 'rt/omni_rna.c'), hdr: join(HERE, 'rt/omni_rna.h') }];
+
 for (const d of [GEN, OBJ]) mkdirSync(d, { recursive: true });
 
 const b = new Build();
@@ -131,6 +139,12 @@ for (const s of srcs) {
      真正的逐头依赖（`depfile`）这套引擎还没实现 —— 所以这儿是"全体挂三份头"这个保守口径，
      代价是改一格探针会重编 123 份（几秒），换来的是**不会漏**。 */
   b.build(o, 'cc', s.path, { implicit: [CONFIG_H, RCONFIG_H, RMATH_H] });
+}
+/* 我们自己那几格：只依赖它自己的头（它不碰 R 的那三份），所以不跟着探针重编。 */
+for (const s of OURS) {
+  const o = join(OBJ, `${s.name.replace(/\.c$/, '')}.o`);
+  objs.push(o);
+  b.build(o, 'cc', s.path, { implicit: [s.hdr, CONFIG_H] });
 }
 b.build(LIB, 'dylib', objs);
 b.default(LIB);

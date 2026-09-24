@@ -1,7 +1,7 @@
 # ext/r —— R（GNU R）
 
 **状态**：语法读下 R 自己那棵树里 **958 份 `.R`／`.r` 全过**（4 份挑出来不算，理由在
-`bench.json`）；映射接了 **9 个家族**，每一份逐字节对本机 `Rscript`；
+`bench.json`）；映射接了 **10 个家族**，每一份逐字节对本机 `Rscript`；
 **数值那一半由 R 自己的 C 代码答** —— `r-source/src/nmath` 的 121 份 `.c` 由我们的 ninja
 编成 `libomniRmath`，走自动 FFI 在 JS 上调。
 
@@ -103,6 +103,30 @@ r-source/src/nmath/*.c  ──ext/r/build.js（我们那份纯 JS 的 ninja）�
 `dnorm`/`pnorm`/`qnorm` 与 `dbinom`/`pbinom`/`dpois`/`ppois`/`dgamma`/`pgamma`/`dbeta`/
 `pbeta`/`dt`/`pt`/`dchisq`/`pchisq`、`besselI`/`besselJ`/`besselK`/`besselY`。
 
+libm 那一族（`sqrt` `exp` `log` `log2` `log10` `floor` `ceiling` 与三角/双曲）落方言的
+`rmath` —— R 自己这几个也是直接调 libm，不在 nmath 里。`log(x, base)` 那种两格的**当场报**：
+那一档要我们替它算（`log(x)/log(b)`），而"替它算"与"照它算"是两件事。
+
+`NaN` / `Inf` / `-Inf` 三格真值由**我们自己那份** `rt/omni_rna.c` 给（R 那边它们在解释器里）；
+`is.finite` 用 R 自己的 `R_finite`。印法照 R 的三处特例（`NaN` / `Inf` / `-Inf`），
+布尔印 `TRUE` / `FALSE` —— 都在生成出来的那格 `r_num_str` 里，用到才发。
+
+### `NA` 落不下来 —— 量出来的，不是没接
+
+R 的 `NA_real_` 是"一个带 1954 载荷的 NaN"（*R Internals* §1.3）。那个载荷：
+
+- 在 C 里**好好的**：`rt/omni_rna.c` 编出来直接调，`is_na=1 is_nan=0`；
+- 在 JS 的 `number` 里也**好好的**：从 `Float64Array` 读出来再写回去，低 32 位还是 1954；
+- **过一趟 N-API 就没了**：`(ccall omni_r_na)` 拿回来的值再交回 C，`is_nan` 变成 1 ——
+  `napi_create_double` 要把 double 装成一格 JS 值，那一步 V8 把 NaN 规范化了
+  （ArrayBuffer 那条路没这一步，所以第二条成立）。
+
+于是 `NA` 与 `NaN` 在这条腿上**分不开**。硬接的后果是 `cat(NA)` 印 `NaN`、`is.nan(NA)` 答
+`TRUE` —— 两句都是静默的错答案，比报出来糟得多，所以 adapter 遇到 `NA` 当场报。
+
+要它就得让 R 的值**不是一格裸 double**（tag 在 double 外面）。这一条正是"向量与值模型"
+那一版绕不过去的理由 —— 它不是一格函数能补的。
+
 **随机数那一族（`r*`）刻意没接**：它们要 `set.seed` 那套状态，而 R 的发生器在解释器里，
 standalone 这一份的流不一样 —— 接上去是"看着像对、每个数都不一样"。
 
@@ -159,4 +183,5 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、别的 `alen` —— `una
    我们印 `100000` 而 R 印 `1e+05`、`cat(123456789)` 我们印 `1.234568e+08` 而 R 印
    `123456789`。那条挑法在 `src/main/format.c`（解释器那半边）。量过：要么整数、
    要么 ≥1e5 才碰得到。
-8. 随机数那一族（`r*` / `set.seed`）没接 —— 见第二节最后那段。
+8. 随机数那一族（`r*` / `set.seed`）没接 —— 见第二节。
+9. **`NA`** 落不下来（不是"没接"）—— 根因与后果见第二节那一小节。

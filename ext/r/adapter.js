@@ -93,6 +93,25 @@ const RMATH = new Map([
 /** 这一趟真用到的 nmath 符号 —— 模块里只发**用到的**那几条 `(cabi …)`。 */
 const cabiUsed = new Set();
 
+/**
+ * `is.na` 一族。回的是 C 的 `int`，所以外面要包一格 `!= 0` 才是布尔。
+ * `is.finite` 用的是 **R 自己的** `R_finite`（nmath 里有），别的三格是我们那份
+ * `rt/omni_rna.c`（R 那边它们在解释器里）。
+ */
+const PRED = new Map([
+  /* `NA` 落不下来（见 `NA_WHY`），于是手上不可能有 NA —— `is.na` 与 `is.nan` 在这条腿上
+     是同一件事，两个都答"这是不是 NaN"。R 那边它们不同（`is.na(NaN)` 真、`is.nan(NA)` 假），
+     而那处差别要等 NA 真能表示出来。 */
+  ['is.na', 'omni_r_is_na'],
+  ['is.nan', 'omni_r_is_nan'],
+  ['is.infinite', 'omni_r_is_infinite'],
+  ['is.finite', 'R_finite'],
+]);
+
+/** 这一趟要不要那格"数怎么印"的辅助函数（见 `numStrDecl`）。 */
+let needNumStr = false;
+const NUM_STR = 'r_num_str';
+
 /* ─── 类型（标准 IR 的类型描述，§1.2） ─────────────────────────────────── */
 
 const INT = { kind: 'int' };
@@ -125,14 +144,51 @@ const CONSTS = new Map([
   ['FALSE', { kind: 'bool', value: false }],
 ]);
 
+/**
+ * R 的三格"非数"。它们**不是字面量** —— `NA` 的位模式（NaN + 低 32 位 1954）写不进
+ * `(real …)`，方言里也没有位重解释那一格。所以由 `rt/omni_rna.c` 那三个函数答，
+ * 与 `round` 走 `fround` 是同一条路：拿不到的东西不自己编一个近似的。
+ *
+ * `NA_integer_` / `NA_character_` / `NA_complex_` **没接**：整数与串的 NA 在 R 那边是
+ * 另外两种表示（`INT_MIN` 与一格特殊的 CHARSXP），而我们还没有"带缺失的整数/串"这一层。
+ */
+const NONNUM = new Map([
+  ['NaN', 'omni_r_nan'],
+  ['Inf', 'omni_r_posinf'],
+]);
+
+/**
+ * **`NA` 在 JS 这条腿上落不下来** —— 量出来的，不是没接。
+ *
+ * R 的 `NA_real_` 是"一个带 1954 载荷的 NaN"（*R Internals* §1.3）。那个载荷：
+ *   * 在 C 里好好的 —— `rt/omni_rna.c` 编出来之后直接调，`is_na=1 is_nan=0`；
+ *   * 在 JS 的 `number` 里也好好的 —— 从 `Float64Array` 读出来再写回去，低 32 位还是 1954；
+ *   * **过一趟 N-API 就没了** —— `(ccall omni_r_na)` 拿回来的值再交回 C，`is_nan` 变成 1。
+ *     `napi_create_double` 要把 double 装成一格 JS 值，而那一步 V8 把 NaN 规范化了
+ *     （ArrayBuffer 那条路没这一步，所以上面第二条成立）。
+ *
+ * 于是 `NA` 与 `NaN` 在这条腿上**分不开**。硬接的后果是 `cat(NA)` 印 `NaN`、
+ * `is.nan(NA)` 答 `TRUE` —— 两句都是静默的错答案，比报出来糟得多。
+ *
+ * 要它就得让 R 的值**不是一格裸 double**（tag 在 double 外面）—— 那是"向量与值模型"
+ * 那一版的事，而这一条正是它绕不过去的理由。
+ */
+const NA_WHY = 'NA 在 JS 这条腿上落不下来：它是"带 1954 载荷的 NaN"，而那个载荷过 N-API'
+  + '（napi_create_double）会被 V8 规范化掉 —— 量过：C 里 is_nan=0、过一趟之后 is_nan=1。'
+  + '所以 NA 与 NaN 分不开，硬接就是静默答错。要它得先有"值不是裸 double"那一层。';
+
 /** 一格 NUM_CONST 的文本 → 标准 IR 的字面量。写法定类型，见文件头第 4 条。 */
 function numLit(text) {
   const t = String(text);
   const c = CONSTS.get(t);
   if (c !== undefined) return c;
-  if (t === 'NA' || t === 'NaN' || t === 'Inf' || t.startsWith('NA_')) {
-    throw new Error(`r->IR: ${t} 落不下来 —— 方言里没有"缺失"这一格（见 adapter 文件头第 3 条）`);
+  if (NONNUM.has(t)) {
+    const sym = NONNUM.get(t);
+    cabiUsed.add(sym);
+    rmathSig(sym);
+    return { kind: 'ccall', sym, args: [] };
   }
+  if (t === 'NA' || t.startsWith('NA_')) throw new Error(`r->IR: ${t} —— ${NA_WHY}`);
   if (t.endsWith('i')) throw new Error(`r->IR: 复数还没接：${t}`);
   if (t.endsWith('L')) return { kind: 'int', value: Number(t.slice(0, -1)) };
   if (/^0[xX]/.test(t)) return { kind: 'int', value: Number(t) };
@@ -148,7 +204,21 @@ function numLit(text) {
  */
 const BUILTINS = new Set([
   'cat', 'paste', 'paste0', 'c', 'list', 'length', 'nchar', 'return', 'is.null',
-  'as.integer', 'as.numeric', 'as.character', 'sqrt', 'abs', 'floor', 'seq_len',
+  'as.integer', 'as.numeric', 'as.character', 'abs', 'seq_len',
+  /* libm 那一族：R 自己这几个也是直接调 libm（不在 nmath 里），所以落方言的 `rmath`。
+     一格实参、回 double —— `log(x, base)` 那种两格的**当场报**（R 那一档是 `log(x)/log(b)`，
+     而"替它算"与"照它算"是两件事）。 */
+  'sqrt', 'exp', 'log', 'log2', 'log10', 'floor', 'ceiling',
+  'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'sinh', 'cosh', 'tanh',
+]);
+
+/** R 的名字 → `rmath` 那一格的名字（多半同名，`ceiling` 与 `log2`/`log10` 不同）。 */
+const LIBM = new Map([
+  ['sqrt', 'sqrt'], ['exp', 'exp'], ['log', 'log'], ['log2', 'log2'], ['log10', 'log10'],
+  ['floor', 'floor'], ['ceiling', 'ceil'],
+  ['sin', 'sin'], ['cos', 'cos'], ['tan', 'tan'],
+  ['asin', 'asin'], ['acos', 'acos'], ['atan', 'atan'],
+  ['sinh', 'sinh'], ['cosh', 'cosh'], ['tanh', 'tanh'],
 ]);
 
 /* ─── 扫一段：哪些名字被写过、写进去的是什么 ────────────────────────────── */
@@ -187,8 +257,12 @@ const joinNum = (a, b) => (a.kind === 'real' || b.kind === 'real' ? REAL : INT);
 /** 一格表达式装的是什么。`types` 是这一段边推边查的那张表。 */
 function typeOfExpr(x, types) {
   switch (tag(x)) {
-    case 'num': return numLit(leaf(kids(x)[0])).kind === 'real' ? REAL
-      : (numLit(leaf(kids(x)[0])).kind === 'bool' ? BOOL : INT);
+    case 'num': {
+      const v = numLit(leaf(kids(x)[0]));
+      if (v.kind === 'bool') return BOOL;
+      /* `NA` / `NaN` / `Inf` 走 ccall，回的是 double */
+      return v.kind === 'real' || v.kind === 'ccall' ? REAL : INT;
+    }
     case 'str': return STR;
     case 'paren': return typeOfExpr(kids(x)[0], types);
     case 'sym': return types.get(mangle(nameOf(x))) ?? INT;
@@ -235,12 +309,17 @@ function typeOfCall(x, types) {
   const args = argsOf(x).map((a) => a.value).filter((v) => v !== null);
   /* R 自己的 C 那一族回的都是 `double` —— 这是 nmath 的形状，不是我们的选择。 */
   if (fn !== null && RMATH.has(fn)) return REAL;
+  if (fn !== null && PRED.has(fn)) return BOOL;
   switch (fn) {
     case 'paste': case 'paste0': case 'as.character': return STR;
     case 'length': case 'nchar': case 'as.integer': return INT;
-    case 'sqrt': case 'as.numeric': return REAL;
+    case 'as.numeric': return REAL;
     case 'is.null': return BOOL;
-    case 'abs': case 'floor': return args.length === 0 ? INT : typeOfExpr(args[0], types);
+    case 'sqrt': case 'exp': case 'log': case 'log2': case 'log10':
+    case 'floor': case 'ceiling':
+    case 'sin': case 'cos': case 'tan': case 'asin': case 'acos': case 'atan':
+    case 'sinh': case 'cosh': case 'tanh': return REAL;
+    case 'abs': return args.length === 0 ? INT : typeOfExpr(args[0], types);
     case 'return': return args.length === 0 ? INT : typeOfExpr(args[0], types);
     case 'c': return arrOf(args.length === 0 ? INT
       : args.map((a) => typeOfExpr(a, types)).reduce(joinNum));
@@ -414,7 +493,19 @@ function zeroBased(e) {
 const asStr = (x, types) => {
   const t = typeOfExpr(x, types);
   if (t.kind === 'string') return exprOf(x, types);
-  if (t.kind === 'real') return call1('sgen', exprOf(x, types), { kind: 'int', value: 7 });
+  if (t.kind === 'real') {
+    needNumStr = true;
+    return { kind: 'call', fn: { kind: 'name', name: NUM_STR }, args: [exprOf(x, types)] };
+  }
+  /* 布尔在 R 里印 `TRUE` / `FALSE`（不是 `true` / `false`）—— 那是这门语言的写法。 */
+  if (t.kind === 'bool') {
+    return {
+      kind: 'ternary',
+      cond: exprOf(x, types),
+      then: { kind: 'string', value: 'TRUE' },
+      else_: { kind: 'string', value: 'FALSE' },
+    };
+  }
   return call1('tostr', exprOf(x, types));
 };
 
@@ -493,7 +584,19 @@ function exprOf(x, types, want) {
       if (op === '$' || op === '@' || op === '::' || op === ':::' || op === '~' || op === '?') {
         throw new Error(`r->IR: \`${op}\` 还没接`);
       }
-      return b(op, exprOf(l, types), exprOf(r, types));
+      /* **数值提升**：R 里 `/` 一律回 double，别的算符只要有一边是 double 就回 double
+         （`NA + 1` 也走这条 —— `NA` 是 double）。方言那侧要求两边同型，所以提升在这儿做。
+         比较也一样：`1 > 0.5` 两边得先对齐。 */
+      const lt = typeOfExpr(l, types);
+      const rt = typeOfExpr(r, types);
+      const le = exprOf(l, types);
+      const re = exprOf(r, types);
+      const numeric = ['+', '-', '*', '/', '<', '<=', '>', '>=', '==', '!='].includes(op);
+      if (numeric && (op === '/' || lt.kind === 'real' || rt.kind === 'real')
+          && lt.kind !== 'string' && rt.kind !== 'string') {
+        return b(op, asReal(le, lt), asReal(re, rt));
+      }
+      return b(op, le, re);
     }
     default:
       throw new Error(`r->IR: 这一格表达式还没接：${tag(x) ?? JSON.stringify(x).slice(0, 40)}`);
@@ -525,6 +628,16 @@ function callOf(x, types, extra, want) {
   const all = extra === undefined ? args : [null, ...args];
   const ev = (i) => (all[i] === null ? extra : exprOf(all[i], types));
   const n = all.length;
+
+  /* `is.na` 一族：C 回 int，包一格 `!= 0` 成布尔。 */
+  if (fn !== null && PRED.has(fn)) {
+    if (n !== 1) throw new Error(`r->IR: ${fn}() 要正好一格实参（给了 ${n}）`);
+    const sym = PRED.get(fn);
+    cabiUsed.add(sym);
+    rmathSig(sym);
+    const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+    return b('!=', { kind: 'ccall', sym, args: [asReal(ev(0), t)] }, { kind: 'int', value: 0 });
+  }
 
   /* **R 自己的 C 先问一遍**（摆在 BUILTINS 之前）：这一族的答案不由我们给。 */
   if (fn !== null && RMATH.has(fn)) {
@@ -594,14 +707,23 @@ function callOf(x, types, extra, want) {
         const key = kids(kids(all[0])[1])[0];
         return { kind: 'unop', op: '!', operand: call1('dhas', exprOf(obj, types), exprOf(key, types)) };
       }
+      case 'sqrt': case 'exp': case 'log': case 'log2': case 'log10':
+      case 'floor': case 'ceiling':
+      case 'sin': case 'cos': case 'tan': case 'asin': case 'acos': case 'atan':
+      case 'sinh': case 'cosh': case 'tanh': {
+        if (n !== 1) {
+          throw new Error(`r->IR: ${fn}() 这一批只接一格实参（给了 ${n}）——`
+            + ' 两格那一档（`log(x, base)`）要我们替它算，而"替它算"与"照它算"是两件事');
+        }
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        return call1('rmath', { kind: 'strlit', value: LIBM.get(fn) }, asReal(ev(0), t));
+      }
       case 'as.integer': return call1('toint', ev(0));
       case 'as.numeric': return call1('toreal', ev(0));
       case 'as.character': return call1('tostr', ev(0));
-      case 'sqrt': return call1('rmath', { kind: 'strlit', value: 'sqrt' }, ev(0));
-      case 'abs': case 'floor': {
+      case 'abs': {
         const t = all[0] === null ? INT : typeOfExpr(all[0], types);
-        if (fn === 'floor' && t.kind !== 'real') return ev(0);
-        if (t.kind === 'real') return call1('rmath', { kind: 'strlit', value: fn }, ev(0));
+        if (t.kind === 'real') return call1('rmath', { kind: 'strlit', value: 'fabs' }, ev(0));
         /* 整数上的 `abs`：方言里没有这一格算子，落成一格三元 */
         return { kind: 'ternary', cond: b('<', ev(0), { kind: 'int', value: 0 }), then: { kind: 'unop', op: '-', operand: ev(0) }, else_: ev(0) };
       }
@@ -818,6 +940,54 @@ function zeroInit(t) {
   return null;
 }
 
+/**
+ * 那格"数怎么印"的辅助函数，**用到了才发**。
+ *
+ * R 印 double 有三处特例：`NA` 印 `NA`、`NaN` 印 `NaN`、无穷印 `Inf` / `-Inf`，
+ * 剩下的才是 7 位有效数字。这三格判在 C 那侧（`is.na` 对 NaN 也真，所以要先问
+ * `is.nan` 才分得开 NA 与 NaN），而"印法"这件事是**每个 cat 都要做一遍**的 ——
+ * 所以落成一个函数发一次，而不是在每个调用点摊开一串三元（那样 `.sx` 读不动）。
+ */
+function numStrDecl() {
+  for (const sym of ['omni_r_is_na', 'omni_r_is_nan', 'omni_r_is_infinite']) {
+    cabiUsed.add(sym);
+    rmathSig(sym);
+  }
+  const x = { kind: 'name', name: 'x' };
+  const c = (sym) => b('!=', { kind: 'ccall', sym, args: [x] }, { kind: 'int', value: 0 });
+  const ret = (v) => ({ kind: 'return', values: [{ kind: 'string', value: v }] });
+  return {
+    kind: 'fn',
+    name: NUM_STR,
+    params: [{ name: 'x', type: REAL }],
+    ret: STR,
+    body: [
+      /* `is.na` 对 NA 与 NaN 都真 —— 先问 `is.nan` 才分得开这两格 */
+      {
+        kind: 'if',
+        cond: c('omni_r_is_na'),
+        then: [{ kind: 'if', cond: c('omni_r_is_nan'), then: [ret('NaN')], else_: null }, ret('NA')],
+        else_: null,
+      },
+      {
+        kind: 'if',
+        cond: c('omni_r_is_infinite'),
+        then: [
+          {
+            kind: 'if',
+            cond: b('>', x, { kind: 'real', value: 0 }),
+            then: [ret('Inf')],
+            else_: null,
+          },
+          ret('-Inf'),
+        ],
+        else_: null,
+      },
+      { kind: 'return', values: [call1('sgen', x, { kind: 'int', value: 7 })] },
+    ],
+  };
+}
+
 /** 这条语句（或它里头）有没有一格**带值的** `return`。 */function hasValueReturn(s) {
   if (s === null || s === undefined) return false;
   if (s.kind === 'return') return s.values.length > 0;
@@ -908,6 +1078,7 @@ export function rToIR(tree) {
   if (tag(tree) !== 'program') throw new Error('r->IR: 这不是 (program …)');
   tmpN = 0;
   cabiUsed.clear();
+  needNumStr = false;
   const items = kids(tree);
   const fns = [];
   const rest = [];
@@ -929,6 +1100,8 @@ export function rToIR(tree) {
   const lets = [];
   for (const [n, t] of types) lets.push({ kind: 'let', name: n, type: t, init: zeroInit(t) });
   decls.push({ kind: 'main', body: [...lets, ...stmts] });
+  /* 那格印法的辅助函数：**在 cabi 之前定**（它自己也会往 `cabiUsed` 里加三格）。 */
+  if (needNumStr) decls.unshift(numStrDecl());
 
   /* **自动 FFI 的那几行**（模块头上）。只发这一趟真用到的符号 —— 一份 271 条声明的头
      全发出来的话，`.sx` 会被 271 行 `(cabi …)` 淹掉，而没用到的那些还要求链接期真有它们。
