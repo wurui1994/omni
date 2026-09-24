@@ -705,6 +705,10 @@ function call(name, args) {
     case 'nextframe/0': flush(); return 0;
     case 'numframes/0': return D.fno > 0 ? D.fno - 1 : 0;
     case 'klock/0': return (performance.now() - D.t0) / 1000;
+    /* `FRAMEINIT`（见 CPU 备选那一份的注）：第一帧 1、之后 0。 */
+    case 'frameinit/0': return D.fno <= 1 ? 1 : 0;
+    /* `getpix(x,y)`：这一档要从 GPU 读回一格像素 —— 每格一次 `readPixels` 太贵，
+       所以**明着拒**（`gethlin` 那一族在这一档没有落点，CPU 备选那一档有）。 */
     case 'xres/0': return D.w;
     case 'yres/0': return D.h;
     /* ── 输入那一族。位置是 canvas 像素，`bstatus`/`keystatus` 脚本写得动（消一次点击）。 */

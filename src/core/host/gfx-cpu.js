@@ -457,6 +457,17 @@ export function gfxCall(name, args) {
         return modeOf() === 'view' ? nowMs() / 1000 : (D.fno > 0 ? D.fno - 1 : 0) / 60;
       }
       return klockParts(a(0));
+    /* `FRAMEINIT`（`evaldraw.txt:40`）：第一帧回 1、之后回 0 —— 脚本拿它当"这一帧
+       要不要重新初始化"。`refresh`/`nextframe` 那一格推帧号，所以这儿只读。 */
+    case 'frameinit/0': need(320, 240); return D.fno <= 1 ? 1 : 0;
+    /* `getpix(x,y)`：读一格像素（`gethlin` 那一族靠它）。出界回 0。 */
+    case 'getpix/2': {
+      need(320, 240);
+      const gx = Math.trunc(a(0));
+      const gy = Math.trunc(a(1));
+      if (gx < 0 || gy < 0 || gx >= D.w || gy >= D.h) return 0;
+      return D.fb[gy * D.w + gx];
+    }
     case 'xres/0': need(320, 240); return D.w;
     case 'yres/0': need(320, 240); return D.h;
     /* ── 输入那一族（读四格、写两格）。写的两格照说明书：`bstatus` 与 `keystatus[k]`
@@ -498,6 +509,7 @@ export function gfxCall(name, args) {
        为什么不报：这些脚本的主体是几何（3D 的球/锥/线），贴图与文字只是点缀 ——
        报了整份图都出不来，收下则"图能出、少了贴图与文字"。这一条偏差明写在
        `docs/design/eval-realtime-gpu.md` 第 12 节，真要贴图与文字得走 GPU 那两档设备。 */
+    case 'pic/1': case 'pic/2': case 'pic/3': case 'pic/4': case 'pic/5': case 'pic/6':
     case 'glsettex/1': case 'glsettex/2': case 'glsettex/3': case 'glsettex/4':
     case 'glsettex/5': case 'glsettex/6':
     case 'glgettex/4': case 'glgettex/5':
@@ -508,7 +520,8 @@ export function gfxCall(name, args) {
     case 'drawvox/4': case 'drawvox/5':
     case 'setfont/2': case 'setfont/3':
     case 'printg/1': case 'printg/2': case 'printg/3': case 'printg/4': case 'printg/5':
-    case 'printchar/3': case 'printchar/4':
+    case 'printchar/1': case 'printchar/2': case 'printchar/3':
+    case 'printchar/4': case 'printchar/5': case 'printchar/6':
     case 'setview/4': case 'setview/7':
     case 'glnormal/3': case 'gltexcoord/2': case 'gltexcoord/3': case 'gltexcoord/4':
       return 0;

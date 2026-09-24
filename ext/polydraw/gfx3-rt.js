@@ -31,7 +31,8 @@
 // z 在相机后头（`z <= 近`）的图元**整格丢掉**（近平面裁剪这一版没做）。
 
 import {
-  REAL, ARR, num, str, nm, bin, call, bi, rm, set, letR, ret, iff, ex, fn, glob,
+  REAL, ARR, num, str, nm, bin, call, bi, rm, set, letR, ret, iff, whil, ex, aset, aget, ix,
+  fn, fnT, glob,
 } from './ir.js';
 
 /** 相机与视口那几格（名字都带 `g3_` 前缀）。 */
@@ -65,6 +66,16 @@ export const EVALDRAW_3D = new Map([
   ['drawcone/7', 'g3_cone2d7'],
   ['moveto/3', 'g3_moveto'],
   ['lineto/3', 'g3_lineto'],
+  /* **横线那一族**（`evaldraw.txt:1491`）：`gethlin(x0,y,buf,dx)` 读一行、
+     `sethlin(x0,y,buf,dx[,flags])` 写一行 —— 一整块像素，所以形参里有数组
+     （调用点按 `BLOCK_ARGS` 那张白名单配对着发：块 + 偏移）。 */
+  ['sethlin/4', 'g3_sethlin4'],
+  ['sethlin/5', 'g3_sethlin5'],
+  ['gethlin/4', 'g3_gethlin4'],
+  /* `getpicsiz(&x,&y)` / `getpicsiz("a.png",&x,&y)`（`evaldraw.txt:1348`）：这条腿上没有
+     图片（解码器那一层还没有，见 11.3）⇒ **写回 0×0**，脚本自己判得出来。 */
+  ['getpicsiz/2', 'g3_getpicsiz2'],
+  ['getpicsiz/3', 'g3_getpicsiz3'],
   /* 声音那一族：收下不响（见头注）。 */
   ['playsound/1', 'g3_nop1'], ['playsound/2', 'g3_nop2'], ['playsound/3', 'g3_nop3'],
   ['playsound/4', 'g3_nop4'], ['playsound/5', 'g3_nop5'],
@@ -93,6 +104,10 @@ function d2(host) {
     lineto: (x, y) => (host ? dev('lineto', [x, y]) : call('gfx_lineto', [x, y])),
     xres: () => (host ? dev('xres', []) : nm('gfx_w')),
     yres: () => (host ? dev('yres', []) : nm('gfx_h')),
+    setcol1: (c) => (host ? dev('setcol', [c]) : call('gfx_setcol1', [c])),
+    setpix: (x, y) => (host ? dev('setpix', [x, y]) : call('gfx_setpix', [x, y])),
+    /* `getpix` 只有宿主设备那一档有（生成出来那一份没做读回）—— 那一档回 0。 */
+    getpix: (x, y) => (host ? dev('getpix', [x, y]) : num(0)),
   };
 }
 
@@ -223,6 +238,45 @@ export function gfx3FnDecls(host = false) {
     fn('g3_lineto', ['x', 'y', 'z'], [
       iff(bin('==', call('g3_xf', [nm('x'), nm('y'), nm('z')]), num(0)), [ret(num(0))]),
       ex(D.lineto(nm('g3_sx'), nm('g3_sy'))),
+      ret(num(0)),
+    ]),
+    /**
+     * `sethlin(x0,y,buf,dx)`：从 `buf` 往 `(x0,y)` 起的横线写 `dx` 格像素
+     * （`evaldraw.txt:1492`：它就是"省掉 dx 次 setcol+setpix"的快路）。
+     * 像素是**打包好的颜色**（`0xRRGGBB`，与 `rgb()` 回的那种数同一形）。
+     * `buf` 后头那格 `bo` 是它的偏移（`&buf[i]` 那一族 —— 见第 8.6 节）。
+     */
+    fnT('g3_sethlin4', [['x0'], ['y'], ['buf', ARR], ['bo'], ['dx']], [
+      letR('i', num(0)),
+      whil(bin('<', nm('i'), nm('dx')), [
+        ex(D.setcol1(aget('buf', bin('+', nm('bo'), nm('i'))))),
+        ex(D.setpix(bin('+', nm('x0'), nm('i')), nm('y'))),
+        set('i', bin('+', nm('i'), num(1))),
+      ]),
+      ret(num(0)),
+    ]),
+    /* 带 flags 的那一档（mask/blend/add，`evaldraw.txt:83`）：**旗子收下不用**。 */
+    fnT('g3_sethlin5', [['x0'], ['y'], ['buf', ARR], ['bo'], ['dx'], ['fl']], [
+      ex(call('g3_sethlin4', [nm('x0'), nm('y'), nm('buf'), nm('bo'), nm('dx')])),
+      ret(num(0)),
+    ]),
+    /* `gethlin(x0,y,buf,dx)`：反过来 —— 读一行像素进 `buf`。 */
+    fnT('g3_gethlin4', [['x0'], ['y'], ['buf', ARR], ['bo'], ['dx']], [
+      letR('i', num(0)),
+      whil(bin('<', nm('i'), nm('dx')), [
+        aset('buf', bin('+', nm('bo'), nm('i')), D.getpix(bin('+', nm('x0'), nm('i')), nm('y'))),
+        set('i', bin('+', nm('i'), num(1))),
+      ]),
+      ret(num(0)),
+    ]),
+    /* `getpicsiz(&x,&y)`：没有图片 ⇒ 写回 0×0（见那张表里的注）。 */
+    fnT('g3_getpicsiz2', [['px', ARR], ['po'], ['py', ARR], ['qo']], [
+      aset('px', nm('po'), num(0)),
+      aset('py', nm('qo'), num(0)),
+      ret(num(0)),
+    ]),
+    fnT('g3_getpicsiz3', [['nam'], ['px', ARR], ['po'], ['py', ARR], ['qo']], [
+      ex(call('g3_getpicsiz2', [nm('px'), nm('po'), nm('py'), nm('qo')])),
       ret(num(0)),
     ]),
   ];

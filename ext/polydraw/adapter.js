@@ -67,7 +67,10 @@ function gfxMode() {
  * `KEYSTATUS[256]` 在那张表里是**一块 256 格的 double**（`polydraw.c:2222`），
  * 所以它在这儿是 `HOST_ARRS`：`keystatus[k]` 落成 `(gfxcall "keystatus" k)`。
  */
-const HOST_VARS = ['xres', 'yres', 'numframes', 'mousx', 'mousy', 'bstatus'];
+const HOST_VARS = ['xres', 'yres', 'numframes', 'mousx', 'mousy', 'bstatus',
+  /* `FRAMEINIT`（`evaldraw.txt:40`："per-frame init" 那格量）：第一帧是 1、之后是 0 ——
+     脚本拿它当"这一帧要不要重新初始化"（`demos/ceilflor.kc`、`voxes/pacman.kc`）。 */
+  'frameinit'];
 /** 宿主那侧按下标读的量。 */
 const HOST_ARRS = ['keystatus'];
 /**
@@ -163,6 +166,19 @@ const gfxDefIR = (kind, name, text) => ({
   args: [{ kind: 'string', value: kind }, { kind: 'string', value: String(name) },
     { kind: 'string', value: text }],
 });
+/**
+ * **哪几格实参是"一整块"**（宿主/生成那一族里带数组的那几个）。
+ *
+ * 与 `SHADER_FNS`（哪几格是串）同一手：那几格实参按 `blockArg` 配对着发（块 + 偏移，
+ * 见 `offName` 的头注），所以被调用的生成函数形参里也是两格。
+ * 名字/元数照 `evaldraw.txt`：`sethlin(x0,y,buf,dx[,flags])` / `gethlin(x0,y,buf,dx)` /
+ * `getpicsiz([名字,]&x,&y)`。
+ */
+const BLOCK_ARGS = new Map([
+  ['sethlin/4', [2]], ['sethlin/5', [2]], ['gethlin/4', [2]],
+  ['getpicsiz/2', [0, 1]], ['getpicsiz/3', [1, 2]],
+]);
+
 /** 宿主那边**无参的函数**（`KLOCK()`）。 */
 const HOST_FNS0 = ['klock'];
 
@@ -593,6 +609,17 @@ function callOf(x, C) {
        模型"放在语言这一侧 —— 设备只收投影完的 2D 图元（声音那几格也在这张表里，收下不响）。 */
     if (drawFn.startsWith('g3_')) {
       C.need3D = true;
+      /* 带数组实参的那几格（`BLOCK_ARGS`）：那一格发两个 —— 块本身 + 偏移。 */
+      const blk = BLOCK_ARGS.get(`${n}/${rawArgs.length}`);
+      if (blk !== undefined) {
+        const out = [];
+        rawArgs.forEach((raw, i) => {
+          if (!blk.includes(i)) { out.push(exprOf(raw, C)); return; }
+          const bl = blockArg(raw, C, n);
+          out.push(nameRef(bl.name), bl.off);
+        });
+        return { kind: 'call', fn: nameRef(drawFn), args: out };
+      }
       return { kind: 'call', fn: nameRef(drawFn), args };
     }
     /* **宿主调用那条路**：一格 `(gfxcall "名字" 实参…)`，设备在宿主那一侧。
@@ -1068,7 +1095,11 @@ function exprStmtOf(e, C) {
   if (t === 'postdec' || t === 'predec') return [stepOf(e, C, -1)];
   if (t === 'call') {
     const head = kids(e)[0];
-    if (tag(head) === 'name' && idOf(head) === 'printf') return printfOf(e, C);
+    /* `fprintf` 与 `printf` 是**同一手**（`evaldraw.txt:1538`：它只是"也写进那份抓下来的
+       文件"，而抓文件是编辑器的事）—— 语料里 42 处。 */
+    if (tag(head) === 'name' && (idOf(head) === 'printf' || idOf(head) === 'fprintf')) {
+      return printfOf(e, C);
+    }
     return [{ kind: 'expr-stmt', expr: callOf(e, C) }];
   }
   return [{ kind: 'expr-stmt', expr: exprOf(e, C) }];
@@ -1877,6 +1908,13 @@ function renameParams(psNode, body, fname, C) {
  * （`gl-rt.js`），2D 那几格也交给同一格设备 —— 不然一趟里会有两块帧缓冲
  * （生成出来那块 + 设备那块），出两份图。见 `docs/design/eval-realtime-gpu.md` 第 9 节。
  */
+/** 树里出现过这个名字没有（`glob[]` 那一格靠它 —— 脚本从不声明它）。 */
+function usesName(x, want) {
+  if (!isList(x)) return false;
+  if (tag(x) === 'name' && idOf(x) === want) return true;
+  return kids(x).some((k) => usesName(k, want));
+}
+
 function usesGL(x, host) {
   if (!isList(x)) return false;
   if (tag(x) === 'call') {
@@ -1950,7 +1988,18 @@ export function evalToIR(cst, host, src = '') {
   collectStructs(cst, C);
 
   /* 第一遍：登记文件级的 `static`，以及每个用户函数的签名。 */
+  /**
+   * **`glob[]`**：EvalDraw 的那格**全局 scratch 数组**（`evaldraw.txt:1293`；
+   * `demos/lab3d.kc` / `goldball2.kc` / `rotozoom4.kc` 拿它当"不用声明的公共内存"）。
+   * 脚本里从来不声明 ⇒ 用到了就登记成一格模块级 `(arr real)`，长度取 **65536**
+   * （原版没写上限；语料里最大的下标是几千）。摆在 `preDecls` 前头 —— 那一格要跟着走。
+   */
   const preDecls = [];
+  if (usesName(cst, 'glob')) {
+    C.arrs.set('glob', [65536]);
+    preDecls.push({ kind: 'global', name: 'glob', type: ARR });
+    C.arrInits.push({ name: 'glob', total: 65536, vals: [] });
+  }
   for (const x of top) {
     if (tag(x) === 'enum' || tag(x) === 'struct') continue;   /* 上面两趟已经收过 */
     /* 带类型的 static（`static point3d p[N];`）—— 与下面那一支的差别只在"多一个类型"。 */
@@ -2035,6 +2084,7 @@ export function evalToIR(cst, host, src = '') {
       C.arrInits.push({ name: d.name, total: 1, vals: [] });
     }
   }
+
 
   const decls = [...preDecls];
   for (const x of top) {

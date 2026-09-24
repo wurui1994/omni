@@ -717,6 +717,7 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
   if (!strcmp(nm, "clz") && argc == 1) { return 0.0; }
   /* ── **收下但这一档画不出来的那几族**（与 `host/gfx-cpu.js` 逐句相同，见那份的头注）：
      纹理与贴图、体素、画布文字 —— 这一档是个平面帧缓冲，收下记着不用，图照旧出得来。 */
+  if (!strcmp(nm, "pic") && argc >= 1 && argc <= 6) { return 0.0; }
   if (!strcmp(nm, "glsettex") && argc == 1) { return 0.0; }
   if (!strcmp(nm, "glsettex") && argc == 2) { return 0.0; }
   if (!strcmp(nm, "glsettex") && argc == 3) { return 0.0; }
@@ -746,8 +747,8 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
   if (!strcmp(nm, "printg") && argc == 3) { return 0.0; }
   if (!strcmp(nm, "printg") && argc == 4) { return 0.0; }
   if (!strcmp(nm, "printg") && argc == 5) { return 0.0; }
-  if (!strcmp(nm, "printchar") && argc == 3) { return 0.0; }
-  if (!strcmp(nm, "printchar") && argc == 4) { return 0.0; }
+  if (!strcmp(nm, "printchar") && argc >= 1 && argc <= 6) { return 0.0; }
+
   if (!strcmp(nm, "setview") && argc == 4) { return 0.0; }
   if (!strcmp(nm, "setview") && argc == 7) { return 0.0; }
   if (!strcmp(nm, "glnormal") && argc == 3) { return 0.0; }
@@ -851,6 +852,14 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
       if (k == 9) return (double)msec;
     }
     return 0.0;
+  }
+  /* `FRAMEINIT` 与 `getpix`（与 `host/gfx-cpu.js` 逐句相同）。 */
+  if (!strcmp(nm, "frameinit") && argc == 0) { gfx_need(); return g_gfno <= 1 ? 1.0 : 0.0; }
+  if (!strcmp(nm, "getpix") && argc == 2) {
+    gfx_need();
+    int64_t gx = (int64_t)a0, gy = (int64_t)a1;
+    if (gx < 0 || gy < 0 || gx >= g_gw || gy >= g_gh) return 0.0;
+    return (double)g_gfb[gy * g_gw + gx];
   }
   if (!strcmp(nm, "xres") && argc == 0) { gfx_need(); return (double)g_gw; }
   if (!strcmp(nm, "yres") && argc == 0) { gfx_need(); return (double)g_gh; }
