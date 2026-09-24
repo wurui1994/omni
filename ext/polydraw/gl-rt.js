@@ -1032,9 +1032,21 @@ function glDrawDecls() {
       iff(bin('==', nm('m'), num(4)),
         loop(num(0), 2, 3, [ex(call('gl_tri', [nm('i'),
           bin('+', nm('i'), num(1)), bin('+', nm('i'), num(2))]))])),
+      /**
+       * `GL_TRIANGLE_STRIP`：第 k 个三角（k 从 0 起）是 `(k, k+1, k+2)`，
+       * **k 为奇数时前两个换位**（`(k+1, k, k+2)`）—— GL 就是这么定的，为的是让整条带的
+       * **绕向一致**（不换位每隔一个三角就是反的）。从前这儿一律 `(i-2, i-1, i)`：
+       * 光栅化看不出来（三个点一样、颜色按重心插值也一样），可**面剔除一开就现形**
+       * —— §28.11 那一趟 CCW 下剔掉的正是该留的一半，就是这一格。
+       */
       iff(bin('==', nm('m'), num(5)),
-        loop(num(2), 0, 1, [ex(call('gl_tri', [bin('-', nm('i'), num(2)),
-          bin('-', nm('i'), num(1)), nm('i')]))])),
+        loop(num(2), 0, 1, [
+          iff(bin('==', rm('fmod', [bin('-', nm('i'), num(2)), num(2)]), num(0)),
+            [ex(call('gl_tri', [bin('-', nm('i'), num(2)),
+              bin('-', nm('i'), num(1)), nm('i')]))],
+            [ex(call('gl_tri', [bin('-', nm('i'), num(1)),
+              bin('-', nm('i'), num(2)), nm('i')]))]),
+        ])),
       iff(bin('||', bin('==', nm('m'), num(6)), bin('==', nm('m'), num(9))),
         loop(num(2), 0, 1, [ex(call('gl_tri', [num(0), bin('-', nm('i'), num(1)), nm('i')]))])),
       iff(bin('==', nm('m'), num(7)),
