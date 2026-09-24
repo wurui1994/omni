@@ -195,15 +195,16 @@ R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不�
 `length` / `c` / `cat` / `print` / `for … in` 都要各写一档（各自一段，不是一段带分支）。
 
 接了的：`c(…)`（摊平，含"有一格是串就整条收成字符向量"，数按 `as.character` 的 15 位转）、
-`character(n)`、`v[i]` 读与写、`length`、`cat`、`print`、`for (s in v)`、`seq_along`、
-`rev`、`paste(v, collapse = s)`。
+`character(n)`、`v[i]` 读与写、`v[c(1,3)]` / `v[掩码]`、`length`、`cat`、`print`、
+`for (s in v)`、`seq_along`、`rev`、`nchar` / `toupper` / `tolower` / `paste` **逐元素**
+（回收规则与数值那一侧同一条；零长那一格在 `paste` 里收成空串，这是 R 的规矩）。
 
 `print` 与数值那一侧差三处，都是 R 自己的规矩：元素**带引号**、宽度按"最长那格 + 两个
 引号"取、而且**左对齐**（数值右对齐）—— 所以 R 印出来的**行尾真的有空格**，逐字节对
 `Rscript` 时这一格躲不过去。零长印 `character(0)`。
 
-没接的几格明写在第四节第 12 条（`sort` 要 R 的 locale collation、`nchar` / `toupper`
-逐元素要造另一种向量、`v[c(1,3)]` 要"按下标挑"）—— 都**当场报**，不给一个看着像对的答案。
+没接的几格明写在第四节第 12 条（`sort` 要 R 的 locale collation、越界与接长要串的缺失、
+`tolower` 只管 ASCII）—— 都**当场报**，不给一个看着像对的答案。
 `sort` 用的是 Shell 排序（Knuth 的 gap 序列）；R 自己用快排/基数排序，但**全排序的结果
 是唯一的**（double 上相等的元素分不出来），所以两边逐字节一致。
 
@@ -301,8 +302,11 @@ R 的 `cat` 不带，差一个字节就对不上 `Rscript`）。
 `(sfix …)` / `(ssci …)` / `(sgen …)`，也就是 C 的 `%.Nf` / `%.Ne` / `%.Ng`；格式串不是
 字面量、或者出现没接的转换，**当场报**。判据是 `ext/r/examples/str.R`。
 
-**`tolower` 没接**：方言里只有 `(supper …)`，没有反过来的那一格 —— 补它要给核心方言加一格
-算子（五条腿都要动），那不属于 R 这一刀。`strsplit` / `gsub` / `grepl` 同理（要正则那一层）。
+**`tolower` 只管 ASCII**：方言里只有 `(supper …)`，没有反过来的那一格 —— 补它要给核心方言
+加一格算子（五条腿都要动），那不属于 R 这一刀。所以 `r_lower` 用现成的算子办：拿两张 26 个
+字母的表查一遍（`(sfind 大写表 这个字符)` 给位置，再从小写表里取同一格），表里查不到的
+字符原样留下。R 那边非 ASCII 是跟 locale 走的，那一层没有。
+`strsplit` / `gsub` / `grepl` 没接（要正则那一层）。
 
 ### `print` 与顶层的自动印
 
@@ -407,17 +411,19 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
     `rweibull` 那几个要先换算参数的。
 11. `NA_integer_` / `NA_character_` 没接（实数的 `NA` 已经立住了）—— 见第二节那一小节。
 12. **字符向量接了**（`(arr string)`，判据是 `ext/r/examples/strvec.R`，见第二节那一小节）：
-    `c(…)` / `character(n)` / `v[i]` 读写 / `length` / `cat` / `print` / `for (s in v)` /
-    `seq_along` / `rev` / `paste(v, collapse = s)`。**没接的是这几格**：
+    `c(…)` / `character(n)` / `v[i]` 读写 / `v[c(1,3)]` / `v[掩码]` / `length` / `cat` /
+    `print` / `for (s in v)` / `seq_along` / `rev` / `nchar(v)` / `toupper(v)` /
+    `tolower(v)` / `paste(…)` 逐元素（含回收与 `collapse=`）。**没接的是这几格**：
     * `sort(v)` —— R 排串按 **locale 的排序规则**（`Scollate`），不是按字节：
       `sort(c("pear","apple","Banana"))` 在 R 那边是 `"apple" "Banana" "pear"`，
       按字节比 `"Banana"` 会跑到最前面。要对上得先有那套 collation。同理 `head` /
       `tail` / `rep` / `which` 在字符向量上也都当场报。
-    * **逐元素出另一种向量**的那几格：`nchar(v)`（出数值向量）、`toupper(v)` /
-      `tolower(v)`、`paste0("#", 1:3)`（出字符向量）—— 要"回收 + 造向量"那一层在两种
-      存法之间搭一遍，这一刀没做。一格串那一档照旧（`nchar("abc")` / `toupper("a")`）。
-    * `v[c(1,3)]` / `v[m]`（按下标挑、按掩码挑）、`v[n+1] <- s` **接长**
-      （`(aset …)` 越界当场报，R 那边会把向量接长）。
+    * `tolower` 只管 **ASCII**：方言里只有 `(supper …)`，没有反过来的那一格，所以
+      `r_lower` 拿两张 26 个字母的表查（`(sfind 大写表 这个字符)` 给位置）。表里查不到的
+      字符原样留下 —— R 那边非 ASCII 是跟 locale 走的。`toupper` 走方言的算子，口径随它。
+    * 越界与接长：`v[10]` 在 R 里出 `NA_character_`、`v[n+1] <- s` 会把向量接长，
+      这儿两格都是 `(aget …)` / `(aset …)` 越界**当场报**（我们没有串的缺失）。
+      掩码里有 `NA` 时 R 挑出一格 `NA`，这儿停下来（`(fail …)`）。
     * 引号与反斜杠在 `print` 里**不转义**（与标量那一格同一条，见第 6 条）；
       `NA_character_` 没有（见第 11 条）—— 空串就是空串，不是缺失。
     连带没有的：`strsplit` / `gsub` / `grepl`（后两个还要正则）。

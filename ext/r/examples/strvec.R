@@ -56,3 +56,19 @@ cat(paste(labels, collapse = ", "), "\n")
 # 混着数写：R 把整条收成字符向量，数按 `as.character` 的 15 位有效数字转
 mixed <- c("n=", 3, 1 / 3)
 print(mixed)
+
+# 逐元素那一层：出另一条向量（`nchar` 出数值，`toupper` / `tolower` / `paste0` 出字符）
+print(nchar(words))
+print(toupper(labels))
+print(tolower(c("Ab", "cDe")))
+cat(tolower("MiXeD 123!"), "\n")
+print(paste0("#", 1:3))
+print(paste("id", 1:3, sep = "-"))
+print(paste0(c("a", "b"), 1:4))        # 回收：长的那边说话
+print(paste0("x", character(0)))       # 零长收成空串，不是零长
+cat(paste0("#", 1:3, collapse = "+"), "\n")
+
+# 下标也能是向量：按位置挑、按掩码挑
+print(labels[c(1, 3)])
+print(words[nchar(words) > 2])
+print(labels[c(TRUE, FALSE)])
