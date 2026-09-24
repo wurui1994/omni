@@ -203,6 +203,25 @@ const FN_DEPS = new Map([
   ['r_pick_str', []],
   ['r_mask_str', ['r_is_na']],
   ['r_drop_na', ['r_is_na']],
+  /* 集合与位置那一族（`match` / `%in%` / `unique` / `order`…）。"两格值算不算同一格"
+     单独一个函数（`r_same`）—— R 里 `NA` 与 `NA` 算同一格、`NaN` 与 `NaN` 算同一格，
+     而按 `==` 比这两对都是假（浮点的规矩），所以那一问不能摊在调用点上写。 */
+  ['r_same', ['r_is_na', 'r_is_nan']],
+  ['r_which_max', ['r_is_na']],
+  ['r_which_min', ['r_is_na']],
+  ['r_cumprod', []],
+  ['r_pmax', ['r_is_na', 'r_na']],
+  ['r_pmin', ['r_is_na', 'r_na']],
+  ['r_ord_lt', ['r_is_na']],
+  ['r_order', ['r_ord_lt']],
+  ['r_match', ['r_same', 'r_na']],
+  ['r_in_v', ['r_same']],
+  ['r_in1', ['r_same']],
+  ['r_unique', ['r_same']],
+  ['r_dup', ['r_same']],
+  ['r_union', ['r_same']],
+  ['r_intersect', ['r_same']],
+  ['r_setdiff', ['r_same']],
   /* 三态逻辑那一族（`RLGL1` 那段账）。比较那六格各发一个函数 —— 不摊在调用点上是
      因为"两边各读两遍"要临时量，而临时量在**条件位**上没地方摆（`while` 的条件被降级到
      循环外头，摊开的 `let` 会变成"只算一次"）。一次函数调用是纯表达式，哪儿都放得下。 */
@@ -557,6 +576,9 @@ const BUILTINS = new Set([
   'print', 'invisible', 'xor', 'isTRUE', 'isFALSE', 'ifelse',
   /* base 里"向量进向量出"那一族 + 两格统计量。`seq` 与 `rep` 是造向量的。 */
   'sort', 'cumsum', 'prod', 'range', 'diff', 'head', 'tail', 'var', 'sd', 'rep', 'seq',
+  /* 集合与位置那一族（见 `setFnDecl`）。`%in%` 是个算子，不在这张表里。 */
+  'which.max', 'which.min', 'match', 'unique', 'duplicated',
+  'union', 'intersect', 'setdiff', 'order', 'cumprod',
   /* 串那一族。`tolower` 方言里没有算子（只有 `(supper …)`），由 `r_lower` 拿两张字母表
      查出来 —— **只管 ASCII**（见 SPEC 第四节第 12 条）。 */
   'toupper', 'tolower', 'substr', 'sprintf', 'startsWith', 'endsWith',
@@ -683,6 +705,10 @@ function typeOfExpr(x, types) {
     }
     case 'bin': {
       const op = String(leaf(kids(x)[0]));
+      /* `%in%`：左边是向量就逐元素出逻辑向量，左边一格数就出三态标量。 */
+      if (op === '%in%') {
+        return isVecTy(typeOfExpr(kids(x)[1], types)) ? RLGL : RLGL1;
+      }
       /* **向量那一问要摆在最前**：`xs > 2` 回的是**逻辑向量**，不是一格布尔 ——
          摆在 `return BOOL` 后面的话永远到不了（`sum(xs > 2)` 就会说"实参不是向量"）。 */
       if (VEC_OPS.has(op)) {
@@ -723,6 +749,11 @@ function typeOfCall(x, types) {
   /* R 自己的 C 那一族回的都是 `double` —— 这是 nmath 的形状，不是我们的选择。
      第一格实参是向量时逐元素，于是回的是一格向量（`sqrt(xs)` / `round(xs, 1)`）。 */
   if (fn !== null && RMATH.has(fn)) {
+    /* `pmax` / `pmin` 在 R 里是**逐元素两头回收**的，不是"只在第一格上逐元素" ——
+       有一边是向量就走生成出来的那格（见 `setFnDecl`）。 */
+    if (fn === 'pmax' || fn === 'pmin') {
+      return args.length >= 1 && args.some((a) => isVecTy(typeOfExpr(a, types))) ? RVEC : REAL;
+    }
     return args.length > 0 && isVecTy(typeOfExpr(args[0], types)) ? RVEC : REAL;
   }
   /* `r*` 那一族出的是**长度 n 的向量**（R 里 `rnorm(1)` 也是一格长度 1 的向量）。 */
@@ -781,6 +812,11 @@ function typeOfCall(x, types) {
       return isVecTy(t) ? t : RVEC;
     }
     case 'cumsum': case 'diff': case 'range': case 'seq': return RVEC;
+    /* 集合与位置那一族：位置回一格 int，别的回向量（`duplicated` 回逻辑向量）。 */
+    case 'which.max': case 'which.min': return INT;
+    case 'match': case 'unique': case 'union': case 'intersect': case 'setdiff':
+    case 'order': case 'cumprod': return RVEC;
+    case 'duplicated': return RLGL;
     /* `numeric(n)` 那一族：出一条零向量（`logical(n)` 是一条 FALSE 的逻辑向量）。 */
     case 'numeric': case 'double': case 'integer': return RVEC;
     case 'logical': return RLGL;
@@ -1490,6 +1526,16 @@ function exprOf(x, types, want) {
         return modOf(op, asReal(exprOf(l, types), typeOfExpr(l, types)), asReal(exprOf(r, types), typeOfExpr(r, types)));
       }
       if (op === ':') return vecSeq(exprOf(l, types), typeOfExpr(l, types), exprOf(r, types), typeOfExpr(r, types));
+      /* `x %in% t` —— 左边是一格数时回**三态标量**（那一格能直接进 `if`），
+         左边是向量时回逐元素的逻辑向量。两档都用同一条"算不算同一格"（`r_same`）。 */
+      if (op === '%in%') {
+        const lt2 = typeOfExpr(l, types);
+        const rt2 = typeOfExpr(r, types);
+        if (isStrVec(lt2) || isStrVec(rt2)) throw new Error(strvGap('%in%'));
+        const tbl = isVecTy(rt2) ? exprOf(r, types) : lglCall('r_vec1', asReal(exprOf(r, types), rt2));
+        if (isVecTy(lt2)) return lglCall('r_in_v', exprOf(l, types), tbl);
+        return lglCall('r_in1', asReal(exprOf(l, types), lt2), tbl);
+      }
       if (op === '$' || op === '@' || op === '::' || op === ':::' || op === '~' || op === '?') {
         throw new Error(`r->IR: \`${op}\` 还没接`);
       }
@@ -1788,6 +1834,15 @@ function callOf(x, types, extra, want) {
 
   /* **R 自己的 C 先问一遍**（摆在 BUILTINS 之前）：这一族的答案不由我们给。 */
   if (fn !== null && RRAND.has(fn)) return randVecOf(fn, x, types);
+  if ((fn === 'pmax' || fn === 'pmin') && n === 2
+      && all.some((a) => a !== null && isVecTy(typeOfExpr(a, types)))) {
+    /* 逐元素两头回收那一档（标量那边先摆成长度 1 的向量，回收那一层就只写一遍）。 */
+    const asVec = (kk) => {
+      const t = all[kk] === null ? REAL : typeOfExpr(all[kk], types);
+      return isVecTy(t) ? ev(kk) : lglCall('r_vec1', asReal(ev(kk), t));
+    };
+    return lglCall(fn === 'pmax' ? 'r_pmax' : 'r_pmin', asVec(0), asVec(1));
+  }
   if (fn !== null && RMATH.has(fn)) {
     const tys = all.map((a) => (a === null ? REAL : typeOfExpr(a, types)));
     const args = all.map((a, i) => ev(i));
@@ -2177,6 +2232,29 @@ function callOf(x, types, extra, want) {
           sum: 'r_sum', mean: 'r_mean', max: 'r_max', min: 'r_min',
         }[fn]);
         return { kind: 'call', fn: { kind: 'name', name }, args: [dropNa(ev(0))] };
+      }
+      case 'which.max': case 'which.min': case 'unique': case 'duplicated':
+      case 'order': case 'cumprod': {
+        if (n !== 1) throw new Error(`r->IR: ${fn}() 要一格向量实参（给了 ${n}）`);
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        if (isStrVec(t)) throw new Error(strvGap(fn));
+        if (!isVecTy(t)) throw new Error(`r->IR: ${fn}() 的实参不是向量（是 ${t.kind}）`);
+        const gen = {
+          'which.max': 'r_which_max', 'which.min': 'r_which_min', unique: 'r_unique',
+          duplicated: 'r_dup', order: 'r_order', cumprod: 'r_cumprod',
+        }[fn];
+        return lglCall(gen, ev(0));
+      }
+      case 'match': case 'union': case 'intersect': case 'setdiff': {
+        if (n !== 2) throw new Error(`r->IR: ${fn}() 要两格实参（给了 ${n}）`);
+        const tys = all.map((a) => (a === null ? REAL : typeOfExpr(a, types)));
+        if (tys.some(isStrVec)) throw new Error(strvGap(fn));
+        /* 标量也收（R 里 `match(2, t)` 是常用写法）—— 先摆成长度 1 的向量。 */
+        const asVec = (kk) => (isVecTy(tys[kk]) ? ev(kk) : lglCall('r_vec1', asReal(ev(kk), tys[kk])));
+        const gen = {
+          match: 'r_match', union: 'r_union', intersect: 'r_intersect', setdiff: 'r_setdiff',
+        }[fn];
+        return lglCall(gen, asVec(0), asVec(1));
       }
       case 'as.integer': return call1('toint', ev(0));
       case 'as.numeric': return call1('toreal', ev(0));
@@ -2876,14 +2954,351 @@ const STRV_FNS = new Set([
   'r_pick_str', 'r_mask_str',
 ]);
 
+/** 这一批由 `setFnDecl` 发（集合与位置那一族，见 `FN_DEPS` 上那段账）。 */
+const SET_FNS = new Set([
+  'r_same', 'r_which_max', 'r_which_min', 'r_cumprod', 'r_pmax', 'r_pmin',
+  'r_ord_lt', 'r_order', 'r_match', 'r_in_v', 'r_in1', 'r_unique', 'r_dup',
+  'r_union', 'r_intersect', 'r_setdiff',
+]);
+
 /**
- * 字符向量那几格生成出来的辅助函数（`RSTRV`）。
+ * 集合与位置那一族生成出来的辅助函数：`match` / `%in%` / `unique` / `duplicated` /
+ * `union` / `intersect` / `setdiff` / `order` / `which.max` / `which.min` /
+ * `cumprod` / `pmax` / `pmin`。
  *
- * `print` 与数值那一侧的差别有两处，都是 R 自己的规矩：
- *   * 元素**带引号**，宽度按"最长那格 + 两个引号"取（`formatString` 的 `quote=TRUE`）；
- *   * **左对齐**（数值是右对齐）—— 于是最后一格后面也补空格，R 印出来行尾真的有空格。
- * 转义没做（R 印 `"a\"b"`，我们印 `"a"b"`）—— 与标量那一格同一条，明写在 SPEC。
+ * 两处 R 的规矩，都在 `r_same` 与 `r_ord_lt` 里：
+ *
+ *   * **`NA` 与 `NA` 算同一格**（`NA %in% NA` 是 TRUE、`unique(c(NA, NA))` 只剩一格），
+ *     `NaN` 与 `NaN` 也算同一格，而 `NA` 与 `NaN` **不是**同一格。按 `==` 比这三问全是假
+ *     （浮点的规矩），所以单独一个函数答。
+ *   * `order` 把缺失摆**最后**，而且是**稳定**的（同值按原来的次序）。这儿的比较把
+ *     "原下标"当最后一把钥匙 —— 于是那个次序是**唯一**的，用哪种排序算法都得到 R 那一条
+ *     （不必真写一个稳定排序）。
  */
+function setFnDecl(name) {
+  const nm = (s) => ({ kind: 'name', name: s });
+  const I = (v) => ({ kind: 'int', value: v });
+  const R = (v) => ({ kind: 'real', value: v });
+  const letI = (s, init) => ({ kind: 'let', name: s, type: INT, init });
+  const letB = (s, init) => ({ kind: 'let', name: s, type: BOOL, init });
+  const set = (s, v) => ({ kind: 'assign', target: nm(s), value: v });
+  const iff = (cond, then, else_ = null) => ({ kind: 'if', cond, then, else_ });
+  const ret = (e) => ({ kind: 'return', values: [e] });
+  const cal = (f, ...a) => ({ kind: 'call', fn: { kind: 'name', name: useFn(f) }, args: a });
+  const i = nm('i');
+  const j = nm('j');
+  const v = nm('v');
+  const w = nm('w');
+  const o = nm('o');
+  const k = nm('k');
+  /* `for (idx = 0; idx < upto; idx++)` */
+  const forTo = (idx, upto, body) => ({
+    kind: 'for',
+    init: letI(idx, I(0)),
+    cond: b('<', nm(idx), upto),
+    post: set(idx, b('+', nm(idx), I(1))),
+    body,
+  });
+  /* 结果向量的长度改写成 k（先按上界开、填完再说实际有几格 —— 槽 0 就是长度）。 */
+  const setLen = (e) => ({ kind: 'assign', target: { kind: 'deref', expr: o }, value: call1('toreal', e) });
+  const naOf = () => cal('r_na');
+  const isNa = (e) => cal('r_is_na', e);
+  const same = (a, c) => cal('r_same', a, c);
+  const P1 = [{ name: 'v', type: RVEC }];
+  const P2 = [{ name: 'v', type: RVEC }, { name: 'w', type: RVEC }];
+
+  if (name === 'r_same') {
+    /* "算不算同一格"：`NaN` 只与 `NaN` 同、`NA` 只与 `NA` 同、别的按 `==`。 */
+    const a = nm('a');
+    const c = nm('c');
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'a', type: REAL }, { name: 'c', type: REAL }],
+      ret: BOOL,
+      body: [
+        letB('qa', cal('r_is_nan', a)),
+        letB('qc', cal('r_is_nan', c)),
+        iff(b('||', nm('qa'), nm('qc')), [ret(b('&&', nm('qa'), nm('qc')))]),
+        letB('ma', isNa(a)),
+        letB('mc', isNa(c)),
+        iff(b('||', nm('ma'), nm('mc')), [ret(b('&&', nm('ma'), nm('mc')))]),
+        ret(b('==', a, c)),
+      ],
+    };
+  }
+  if (name === 'r_which_max' || name === 'r_which_min') {
+    /* R 的 `which.max` **跳过缺失**，回第一个取到极值的那一格（1 起）。
+       一格非缺失都没有时 R 回 `integer(0)`（印出来什么都没有）—— 这一档没有"零长整数"
+       这种值，所以当场停下来（明写在 SPEC）。 */
+    const op = name === 'r_which_max' ? '>' : '<';
+    return {
+      kind: 'fn',
+      name,
+      params: P1,
+      ret: INT,
+      body: [
+        letI('n', vecLen(v)),
+        letI('bi', I(-1)),
+        forTo('i', nm('n'), [
+          iff({ kind: 'unop', op: '!', operand: isNa(vecGet(v, i)) }, [
+            iff(b('||', b('<', nm('bi'), I(0)), b(op, vecGet(v, i), vecGet(v, nm('bi')))),
+              [set('bi', i)]),
+          ]),
+        ]),
+        iff(b('<', nm('bi'), I(0)), [{
+          kind: 'builtin-stmt',
+          name: 'fail',
+          args: [{ kind: 'string', value: 'which.max/which.min: 一格非缺失的都没有（R 回 integer(0)，这一档没有那种值）' }],
+        }]),
+        ret(b('+', nm('bi'), I(1))),
+      ],
+    };
+  }
+  if (name === 'r_cumprod') {
+    return {
+      kind: 'fn',
+      name,
+      params: P1,
+      ret: RVEC,
+      body: [
+        letI('n', vecLen(v)),
+        ...vecNewAs('o', nm('n')),
+        { kind: 'let', name: 'p', type: REAL, init: R(1) },
+        forTo('i', nm('n'), [
+          set('p', b('*', nm('p'), vecGet(v, i))),
+          vecSet(o, i, nm('p')),
+        ]),
+        ret(o),
+      ],
+    };
+  }
+  if (name === 'r_pmax' || name === 'r_pmin') {
+    /* 逐元素取大/取小，两边按 R 的回收规则对齐；有一边是缺失就交缺失（`na.rm` 默认是
+       FALSE）。有一边零长时 R 出零长（这儿也一样 —— 不然 `i % 0` 要炸）。 */
+    const op = name === 'r_pmax' ? '>' : '<';
+    const x = vecGet(v, b('%', i, nm('nv')));
+    const y = vecGet(w, b('%', i, nm('nw')));
+    return {
+      kind: 'fn',
+      name,
+      params: P2,
+      ret: RVEC,
+      body: [
+        letI('nv', vecLen(v)),
+        letI('nw', vecLen(w)),
+        letI('m', nm('nv')),
+        iff(b('<', nm('m'), nm('nw')), [set('m', nm('nw'))]),
+        iff(b('||', b('==', nm('nv'), I(0)), b('==', nm('nw'), I(0))), [set('m', I(0))]),
+        ...vecNewAs('o', nm('m')),
+        forTo('i', nm('m'), [
+          iff(b('||', isNa(x), isNa(y)),
+            [vecSet(o, i, naOf())],
+            [vecSet(o, i, { kind: 'ternary', cond: b(op, x, y), then: x, else_: y })]),
+        ]),
+        ret(o),
+      ],
+    };
+  }
+  return setFnDecl2(name);
+}
+
+/** `setFnDecl` 的后一半（同一族，分两段只为每段读得完）。 */
+function setFnDecl2(name) {
+  const nm = (s) => ({ kind: 'name', name: s });
+  const I = (v) => ({ kind: 'int', value: v });
+  const R = (v) => ({ kind: 'real', value: v });
+  const letI = (s, init) => ({ kind: 'let', name: s, type: INT, init });
+  const letB = (s, init) => ({ kind: 'let', name: s, type: BOOL, init });
+  const set = (s, v) => ({ kind: 'assign', target: nm(s), value: v });
+  const iff = (cond, then, else_ = null) => ({ kind: 'if', cond, then, else_ });
+  const ret = (e) => ({ kind: 'return', values: [e] });
+  const cal = (f, ...a) => ({ kind: 'call', fn: { kind: 'name', name: useFn(f) }, args: a });
+  const i = nm('i');
+  const j = nm('j');
+  const v = nm('v');
+  const w = nm('w');
+  const o = nm('o');
+  const forTo = (idx, upto, body) => ({
+    kind: 'for',
+    init: letI(idx, I(0)),
+    cond: b('<', nm(idx), upto),
+    post: set(idx, b('+', nm(idx), I(1))),
+    body,
+  });
+  const setLen = (e) => ({ kind: 'assign', target: { kind: 'deref', expr: o }, value: call1('toreal', e) });
+  const isNa = (e) => cal('r_is_na', e);
+  const same = (a, c) => cal('r_same', a, c);
+  const P1 = [{ name: 'v', type: RVEC }];
+  const P2 = [{ name: 'v', type: RVEC }, { name: 'w', type: RVEC }];
+
+  if (name === 'r_ord_lt') {
+    /* `order` 的比较：缺失摆最后，同值按**原下标**分先后（于是这个次序是唯一的）。
+       `a` / `c` 是两格下标（按 double 存在那条索引向量里）。 */
+    const ai = call1('toint', nm('a'));
+    const ci = call1('toint', nm('c'));
+    const xa = vecGet(v, ai);
+    const xc = vecGet(v, ci);
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RVEC }, { name: 'a', type: REAL }, { name: 'c', type: REAL }],
+      ret: BOOL,
+      body: [
+        letB('ma', isNa(xa)),
+        letB('mc', isNa(xc)),
+        iff(b('&&', nm('ma'), nm('mc')), [ret(b('<', nm('a'), nm('c')))]),
+        iff(nm('ma'), [ret({ kind: 'bool', value: false })]),
+        iff(nm('mc'), [ret({ kind: 'bool', value: true })]),
+        iff(b('<', xa, xc), [ret({ kind: 'bool', value: true })]),
+        iff(b('>', xa, xc), [ret({ kind: 'bool', value: false })]),
+        ret(b('<', nm('a'), nm('c'))),
+      ],
+    };
+  }
+  if (name === 'r_order') {
+    /* 排的是**下标**（Shell 排序，与 `r_sort` 同一条 gap 序列），比较交给 `r_ord_lt`。 */
+    return {
+      kind: 'fn',
+      name,
+      params: P1,
+      ret: RVEC,
+      body: [
+        letI('n', vecLen(v)),
+        ...vecNewAs('o', nm('n')),
+        forTo('i', nm('n'), [vecSet(o, i, call1('toreal', i))]),
+        letI('h', I(1)),
+        { kind: 'while', cond: b('<', nm('h'), b('/', nm('n'), I(3))), body: [set('h', b('+', b('*', I(3), nm('h')), I(1)))] },
+        {
+          kind: 'while',
+          cond: b('>=', nm('h'), I(1)),
+          body: [
+            {
+              kind: 'for',
+              init: letI('i', nm('h')),
+              cond: b('<', i, nm('n')),
+              post: set('i', b('+', i, I(1))),
+              body: [
+                { kind: 'let', name: 't', type: REAL, init: vecGet(o, i) },
+                letI('j', i),
+                {
+                  kind: 'while',
+                  cond: b('&&', b('>=', j, nm('h')),
+                    cal('r_ord_lt', v, nm('t'), vecGet(o, b('-', j, nm('h'))))),
+                  body: [
+                    vecSet(o, j, vecGet(o, b('-', j, nm('h')))),
+                    set('j', b('-', j, nm('h'))),
+                  ],
+                },
+                vecSet(o, j, nm('t')),
+              ],
+            },
+            set('h', b('/', b('-', nm('h'), I(1)), I(3))),
+          ],
+        },
+        /* 内部是 0 起的，交出去要 1 起（R 的 `order` 回的是位置）。 */
+        forTo('i', nm('n'), [vecSet(o, i, b('+', vecGet(o, i), R(1)))]),
+        ret(o),
+      ],
+    };
+  }
+  if (name === 'r_match' || name === 'r_in_v') {
+    /* `match(x, t)` 回位置（找不到是 `NA`）、`x %in% t` 回真假。两格都是"对 x 的每一格
+       在 t 里找第一处相同的"，所以合在一处写。 */
+    const mat = name === 'r_match';
+    return {
+      kind: 'fn',
+      name,
+      params: P2,
+      ret: mat ? RVEC : RLGL,
+      body: [
+        letI('n', vecLen(v)),
+        letI('m', vecLen(w)),
+        ...vecNewAs('o', nm('n')),
+        forTo('i', nm('n'), [
+          vecSet(o, i, mat ? cal('r_na') : R(0)),
+          forTo('j', nm('m'), [
+            iff(same(vecGet(v, i), vecGet(w, j)), [
+              vecSet(o, i, mat ? call1('toreal', b('+', j, I(1))) : R(1)),
+              { kind: 'break' },
+            ]),
+          ]),
+        ]),
+        ret(o),
+      ],
+    };
+  }
+  if (name === 'r_in1') {
+    /* `一格数 %in% t` —— 回的是**三态标量**（那一格能直接进 `if`）。 */
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'a', type: REAL }, { name: 'w', type: RVEC }],
+      ret: RLGL1,
+      body: [
+        letI('m', vecLen(w)),
+        forTo('j', nm('m'), [iff(same(nm('a'), vecGet(w, j)), [ret(R(1))])]),
+        ret(R(0)),
+      ],
+    };
+  }
+  if (name === 'r_unique' || name === 'r_dup') {
+    /* `unique` 留**第一次出现**的那些（次序不变）；`duplicated` 回"这一格前面见过没有"。 */
+    const uniq = name === 'r_unique';
+    return {
+      kind: 'fn',
+      name,
+      params: P1,
+      ret: uniq ? RVEC : RLGL,
+      body: [
+        letI('n', vecLen(v)),
+        ...vecNewAs('o', nm('n')),
+        letI('k', I(0)),
+        forTo('i', nm('n'), [
+          letB('seen', { kind: 'bool', value: false }),
+          forTo('j', i, [iff(same(vecGet(v, i), vecGet(v, j)), [set('seen', { kind: 'bool', value: true }), { kind: 'break' }])]),
+          uniq
+            ? iff({ kind: 'unop', op: '!', operand: nm('seen') }, [vecSet(o, nm('k'), vecGet(v, i)), set('k', b('+', nm('k'), I(1)))])
+            : vecSet(o, i, { kind: 'ternary', cond: nm('seen'), then: R(1), else_: R(0) }),
+        ]),
+        ...(uniq ? [setLen(nm('k'))] : []),
+        ret(o),
+      ],
+    };
+  }
+  /* `union` / `intersect` / `setdiff` —— 三格都**去重**（R 的文档），次序按 a 再按 b。 */
+  const kind = name === 'r_union' ? 'u' : (name === 'r_intersect' ? 'i' : 'd');
+  const inW = cal('r_in1', vecGet(v, i), w);
+  const takeA = kind === 'u' ? null
+    : (kind === 'i' ? b('!=', inW, R(0)) : b('==', inW, R(0)));
+  const pushIfNew = (src, idx) => [
+    letB('seen', { kind: 'bool', value: false }),
+    forTo('j', nm('k'), [iff(same(vecGet(src, idx), vecGet(o, j)), [set('seen', { kind: 'bool', value: true }), { kind: 'break' }])]),
+    iff({ kind: 'unop', op: '!', operand: nm('seen') }, [
+      vecSet(o, nm('k'), vecGet(src, idx)),
+      set('k', b('+', nm('k'), I(1))),
+    ]),
+  ];
+  return {
+    kind: 'fn',
+    name,
+    params: P2,
+    ret: RVEC,
+    body: [
+      letI('nv', vecLen(v)),
+      letI('nw', vecLen(w)),
+      ...vecNewAs('o', kind === 'u' ? b('+', nm('nv'), nm('nw')) : nm('nv')),
+      letI('k', I(0)),
+      forTo('i', nm('nv'), takeA === null
+        ? pushIfNew(v, i)
+        : [iff(takeA, pushIfNew(v, i))]),
+      ...(kind === 'u' ? [forTo('i', nm('nw'), pushIfNew(w, i))] : []),
+      setLen(nm('k')),
+      ret(o),
+    ],
+  };
+}
+
 function strvFnDecl(name) {
   const nm = (n2) => ({ kind: 'name', name: n2 });
   const I = (v) => ({ kind: 'int', value: v });
@@ -4490,6 +4905,7 @@ function vecFnDecl(name) {
     return strFnDecl(name);
   }
   if (STRV_FNS.has(name)) return strvFnDecl(name);
+  if (SET_FNS.has(name)) return setFnDecl(name);
   if (name === 'r_sci') return sciFnDecl();
   if (name === 'r_num_fmt' || name === 'r_print_num' || name === 'r_print_lgl') return printFnDecl(name);
   if (name === NUM_STR) return numStrDecl();

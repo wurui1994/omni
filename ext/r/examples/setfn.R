@@ -1,0 +1,47 @@
+# ext/r/examples/setfn.R —— 集合与位置那一族（`match` / `%in%` / `unique` / `order`…）
+#
+# 这一族真正难的只有两问，而且都是 R 自己的规矩：
+#
+#   1. **"两格值算不算同一格"** —— `NA` 与 `NA` 算同一格（`NA %in% c(1, NA)` 是 TRUE、
+#      `unique(c(NA, NA))` 只剩一格），`NaN` 与 `NaN` 也算，而 `NA` 与 `NaN` **不算**。
+#      按 `==` 比这三问全是假（浮点的规矩），所以单独落成一个函数（`r_same`）。
+#   2. **`order` 的次序** —— 缺失摆最后，同值按原来的先后（稳定）。这儿的比较把"原下标"
+#      当最后一把钥匙，于是那个次序是**唯一的** —— 用哪种排序算法都得到 R 那一条，
+#      不必真写一个稳定排序。
+#
+# `pmax` / `pmin` 是**两头回收**的（R 的 `max(a, b)` 才是"任意多格实参"那一层）。
+
+x <- c(3, 1, 4, 1, 5)
+
+# 位置
+cat(which.max(x), which.min(x), "\n")
+print(order(x))
+print(x[order(x)])
+print(order(c(2, 1, 2, 1)))     # 同值按原来的先后
+print(match(c(4, 9), x))        # 找不到是 NA
+
+# 在不在里头
+cat(4 %in% x, 9 %in% x, "\n")
+if (4 %in% x) cat("4 在里头\n")
+print(x %in% c(1, 5))
+
+# 去重与集合
+print(unique(c(1, 2, 2, 3, 1)))
+print(duplicated(c(1, 2, 2, 1)))
+print(union(c(1, 2), c(2, 3)))
+print(intersect(c(1, 2, 3), c(2, 3, 4)))
+print(setdiff(c(1, 2, 3), c(2)))
+
+# 逐元素两头取大取小（回收；有一边缺失就交缺失）
+print(pmax(c(1, 5, 2), c(3, 2, 2)))
+print(pmin(c(1, 5), 3))
+print(pmax(c(1, NA), c(0, 5)))
+
+# 累乘
+print(cumprod(c(1, 2, 3, 4)))
+
+# 缺失那几问
+print(unique(c(1, NA, NA)))
+print(match(NA, c(1, NA)))
+cat(NA %in% c(1, NA), "\n")
+print(order(c(3, NA, 1)))

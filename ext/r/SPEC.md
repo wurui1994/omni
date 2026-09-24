@@ -175,10 +175,28 @@ R 往数值那边收，所以"每一格都是逻辑"才算逻辑。
 nmath 那一族**只在第一格实参上**逐元素，别的格先存进临时量（循环里要读好多遍）——
 R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不假装。
 
-进出都是向量的几格：`rev` / `seq_along` / `which` / `sort` / `cumsum` / `diff` / `range` /
-`head` / `tail` / `rep` / `seq`；出一格数的几格：`sum` / `mean` / `max` / `min` / `prod` /
-`var` / `sd`。`which` 回的是**位置**（数值向量），`NA` 直接丢 —— 与 `xs[m]` 不同
+进出都是向量的几格：`rev` / `seq_along` / `which` / `sort` / `cumsum` / `cumprod` / `diff` /
+`range` / `head` / `tail` / `rep` / `seq`；出一格数的几格：`sum` / `mean` / `max` / `min` /
+`prod` / `var` / `sd`。`which` 回的是**位置**（数值向量），`NA` 直接丢 —— 与 `xs[m]` 不同
 （那边 `NA` 挑出一格 `NA`），这两条口径是 R 自己分开的。
+
+### 集合与位置那一族（判据 `ext/r/examples/setfn.R`）
+
+`match` / `%in%` / `unique` / `duplicated` / `union` / `intersect` / `setdiff` / `order` /
+`which.max` / `which.min` / `pmax` / `pmin`。难的只有两问，都是 R 自己的规矩：
+
+* **"两格值算不算同一格"**（`r_same`）：`NA` 与 `NA` 算同一格（`NA %in% c(1, NA)` 是 TRUE、
+  `unique(c(NA, NA))` 只剩一格）、`NaN` 与 `NaN` 也算、而 `NA` 与 `NaN` **不算**。
+  按 `==` 比这三问全是假（浮点的规矩），所以单独落成一个函数，不摊在调用点上。
+* **`order` 的次序**：缺失摆最后、同值按原来的先后（稳定）。这儿的比较把"原下标"当最后
+  一把钥匙 —— 于是那个次序**唯一**，用哪种排序算法都得到 R 那一条（不必真写一个稳定排序，
+  排的也是下标而不是值）。
+
+`%in%` 的左边是一格数时回**三态标量**（那一格能直接进 `if (x %in% t)`），左边是向量时
+逐元素出逻辑向量。`pmax` / `pmin` 是**两头回收**的（有一边零长就出零长）。
+`which.max` / `which.min` 在"一格非缺失都没有"时 R 回 `integer(0)`，这一档没有那种值 ——
+当场停下来（`(fail …)`）。字符向量上这一族都还没接（见第四节第 12 条）。
+
 
 **缺失那一格每个函数的口径都不一样**，照 R 的文档办（判据是 `ext/r/examples/vecfn.R`）：
 `sort` 把 `NA` **丢掉**（`na.last = NA` 是默认）、`max` / `min` / `range` **传下去**
@@ -427,7 +445,8 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
     * `sort(v)` —— R 排串按 **locale 的排序规则**（`Scollate`），不是按字节：
       `sort(c("pear","apple","Banana"))` 在 R 那边是 `"apple" "Banana" "pear"`，
       按字节比 `"Banana"` 会跑到最前面。要对上得先有那套 collation。同理 `head` /
-      `tail` / `rep` / `which` 在字符向量上也都当场报。
+      `tail` / `rep` / `which` / `order` / `match` / `%in%` / `unique` / `duplicated` /
+      `union` / `intersect` / `setdiff` 在字符向量上也都当场报。
     * `tolower` 只管 **ASCII**：方言里只有 `(supper …)`，没有反过来的那一格，所以
       `r_lower` 拿两张 26 个字母的表查（`(sfind 大写表 这个字符)` 给位置）。表里查不到的
       字符原样留下 —— R 那边非 ASCII 是跟 locale 走的。`toupper` 走方言的算子，口径随它。
