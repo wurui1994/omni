@@ -589,6 +589,8 @@ const BUILTINS = new Set([
   /* `strsplit` 只接两种形状（见 `splitOf`）：`strsplit(s, sep)[[1]]` 与
      `unlist(strsplit(s, sep))` —— R 那边它回的是一张**表**，而这一层没有"表里装向量"。 */
   'strsplit', 'unlist',
+  /* 函数当实参那一族 —— **只接就地写的匿名函数**（见 `applyOf`）。 */
+  'sapply', 'vapply', 'lapply', 'Reduce', 'Filter',
   /* "这是什么东西"那三问 —— 类型在这一层是**推出来的**，所以答案是编译期常量。 */
   'is.character', 'is.numeric', 'is.logical',
   /* 停下来那一档（落方言的 `(fail …)`，只能摆在语句位上）。 */
@@ -755,8 +757,29 @@ function typeOfExpr(x, types) {
   }
 }
 
-/** 一次调用的结果类型。内建各自说，用户函数按"这门语言的数"算（见文件头第 4 条）。 */
-function typeOfCall(x, types) {
+/**
+ * `sapply` / `lapply` / `vapply` / `Reduce` / `Filter` 回什么 —— 与 `applyOf` 摊开时
+ * 用的是同一条推法：形参按"元素装什么"绑上，再问一遍函数体。
+ */
+function applyTy(fn, x, types) {
+  const args = posArgs(x);
+  const fnFirst = fn === 'Reduce' || fn === 'Filter';
+  const fnode = fnFirst ? args[0] : args[1];
+  const data = fnFirst ? args[1] : args[0];
+  if (fnode === undefined || data === undefined || !isList(fnode) || tag(fnode) !== 'fn') return INT;
+  const dt = typeOfExpr(data, types);
+  const strIn = isStrVec(dt);
+  const child = new Map(types);
+  for (const p of formalsOf(fnode)) child.set(p, strIn ? STR : REAL);
+  const bt = typeOfExpr(kids(fnode)[1], child);
+  if (fn === 'Filter') return strIn ? RSTRV : dt;
+  if (fn === 'Reduce') return bt.kind === 'string' ? STR : REAL;
+  if (bt.kind === 'string') return RSTRV;
+  if (bt.kind === 'bool' || isLgl1(bt)) return RLGL;
+  return RVEC;
+}
+
+/** 一次调用的结果类型。内建各自说，用户函数按"这门语言的数"算（见文件头第 4 条）。 */function typeOfCall(x, types) {
   const fn = tag(kids(x)[0]) === 'sym' ? nameOf(kids(x)[0]) : null;
   const args = argsOf(x).map((a) => a.value).filter((v) => v !== null);
   /* R 自己的 C 那一族回的都是 `double` —— 这是 nmath 的形状，不是我们的选择。
@@ -787,7 +810,14 @@ function typeOfCall(x, types) {
     case 'substr': case 'sprintf': return STR;
     case 'substring': case 'trimws': return STR;
     /* `strsplit(…)[[1]]` 在 `sub2` 那一格答；`unlist(strsplit(…))` 与它同解。 */
-    case 'unlist': return args.length === 1 && isSplitCall(args[0]) ? RSTRV : INT;
+    case 'unlist': {
+      if (args.length !== 1) return INT;
+      if (isSplitCall(args[0])) return RSTRV;
+      if (isApplyCall(args[0], 'lapply')) return applyTy('lapply', args[0], types);
+      return INT;
+    }
+    case 'sapply': case 'vapply': case 'lapply': case 'Reduce': case 'Filter':
+      return applyTy(fn, x, types);
     case 'strsplit': return RSTRV;
     case 'is.character': case 'is.numeric': case 'is.logical': return BOOL;
     case 'toupper': return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RSTRV : STR;
@@ -1355,6 +1385,163 @@ function splitOf(callNode, types) {
 /** 这一格是不是 `strsplit(…)` 那一次调用（`[[1]]` 与 `unlist` 两处都要问）。 */
 const isSplitCall = (node) => isList(node) && tag(node) === 'call'
   && tag(kids(node)[0]) === 'sym' && nameOf(kids(node)[0]) === 'strsplit';
+/** 这一格是不是 `名字(…)` 那一次调用（`unlist(lapply(…))` 要问）。 */
+const isApplyCall = (node, name) => isList(node) && tag(node) === 'call'
+  && tag(kids(node)[0]) === 'sym' && nameOf(kids(node)[0]) === name;
+
+/**
+ * `sapply` / `lapply` / `Reduce` / `Filter` —— **把那段匿名函数摊开**，不造函数值。
+ *
+ * R 里这几格收的是一个函数。这一档没有闭包与函数值那一层（方言有 `fnref` / `call-value`，
+ * 但"R 的函数是值"要连着环境一起搬，那是另一刀）。而真代码里这几格的实参**几乎总是就地写的
+ * 匿名函数** —— 那时根本不需要函数值：把形参绑到元素上、把函数体当一段表达式摊进循环里就行。
+ *
+ * 所以这儿只接"就地写的 `function(…) …`"。给一个函数**名字**（`sapply(v, sqrt)`）也当场报 ——
+ * 那要真的函数值。判据是 `ext/r/examples/apply.R`。
+ *
+ * 形参在摊开之后是循环体里的一格 `let`：类型按"元素装什么"给（数值向量出 double、
+ * 字符向量出串），函数体的类型再问一遍（于是 `sapply(v, function(x) paste0("#", x))`
+ * 出的是一条字符向量）。
+ */
+function applyOf(fn, x, types) {
+  const args = posArgs(x);
+  const vr = (nm) => ({ kind: 'name', name: nm });
+  const I = (v) => ({ kind: 'int', value: v });
+  /* 哪一格是函数、哪一格是数据：`Reduce` / `Filter` 是函数在前，`sapply` 是数据在前。 */
+  const fnFirst = fn === 'Reduce' || fn === 'Filter';
+  const initNode = fn === 'Reduce' && args.length === 3 ? args[2] : undefined;
+  /* `vapply` 多一格 `FUN.VALUE`（R 拿它定形状）—— 这一层是**推**出来的，所以那一格只检查有没有。 */
+  const want = fn === 'Reduce' ? (args.length === 3 ? 3 : 2) : (fn === 'vapply' ? 3 : 2);
+  if (args.length !== want) {
+    throw new Error(`r->IR: ${fn}() 这一格接 ${want} 格实参（给了 ${args.length}）`);
+  }
+  const fnode = fnFirst ? args[0] : args[1];
+  const data = fnFirst ? args[1] : args[0];
+  if (!isList(fnode) || tag(fnode) !== 'fn') {
+    throw new Error(`r->IR: ${fn}() 的那格函数要**就地写成 \`function(…) …\`** —— `
+      + '给一个函数名字要真的"函数值"那一层，这一档没有（见 ext/r/SPEC.md）');
+  }
+  const ps = formalsOf(fnode);
+  const nps = fn === 'Reduce' ? 2 : 1;
+  if (ps.length !== nps) throw new Error(`r->IR: ${fn}() 那格函数要 ${nps} 个形参（给了 ${ps.length}）`);
+  const body = kids(fnode)[1];
+  const dt = typeOfExpr(data, types);
+  const strIn = isStrVec(dt);
+  if (!isVecTy(dt) && !strIn) {
+    throw new Error(`r->IR: ${fn}() 的那格数据要是一条向量（是 ${dt.kind}）`);
+  }
+  const elemTy = strIn ? STR : REAL;
+  /* **`sapply` / `vapply` 在字符向量上会加名字**（`USE.NAMES = TRUE`）：
+     `sapply(c("ab","c"), nchar)` 在 R 里印的是一条**带名字**的向量（名字就是那些串），
+     而这一层没有 `names` 那一格。所以这一档当场报 —— 换 `unlist(lapply(…))` 就没有名字，
+     两边同解（量出来的）。 */
+  if (strIn && (fn === 'sapply' || fn === 'vapply')) {
+    throw new Error(`r->IR: ${fn}() 在字符向量上会给结果加名字（R 的 USE.NAMES）——`
+      + ' 这一层没有 `names`，写成 `unlist(lapply(v, function(x) …))` 那一格没有名字，两边同解');
+  }
+  const src = fresh('ap');
+  const idx = fresh('ai');
+  const len = strIn ? svLen(vr(src)) : vecLen(vr(src));
+  const at = (k) => (strIn ? svGet(vr(src), k) : vecGet(vr(src), k));
+  const child = new Map(types);
+  for (const p of ps) child.set(p, elemTy);
+  const pre = [{ kind: 'let', name: src, type: strIn ? RSTRV : dt, init: exprOf(data, types) }];
+
+  if (fn === 'Reduce') {
+    /* 折叠：`acc` 的类型按函数体来（数或串），没给初值就拿第一格当初值。 */
+    let accTy = typeOfExpr(body, child);
+    if (accTy.kind !== 'string') accTy = REAL;
+    child.set(ps[0], accTy);
+    const acc = fresh('acc');
+    const from = initNode === undefined ? I(1) : I(0);
+    pre.push({
+      kind: 'let',
+      name: acc,
+      type: accTy,
+      init: initNode === undefined
+        ? (accTy.kind === 'string' ? at(I(0)) : asReal(at(I(0)), elemTy))
+        : (accTy.kind === 'string' ? exprOf(initNode, types) : asReal(exprOf(initNode, types), typeOfExpr(initNode, types))),
+    });
+    return {
+      kind: 'block-expr',
+      stmts: [...pre, {
+        kind: 'for',
+        init: { kind: 'let', name: idx, type: INT, init: from },
+        cond: b('<', vr(idx), len),
+        post: { kind: 'assign', target: vr(idx), value: b('+', vr(idx), I(1)) },
+        body: [
+          { kind: 'let', name: ps[0], type: accTy, init: vr(acc) },
+          { kind: 'let', name: ps[1], type: elemTy, init: at(vr(idx)) },
+          {
+            kind: 'assign',
+            target: vr(acc),
+            value: accTy.kind === 'string' ? exprOf(body, child) : asReal(exprOf(body, child), typeOfExpr(body, child)),
+          },
+        ],
+      }],
+      value: vr(acc),
+    };
+  }
+
+  if (fn === 'Filter') {
+    /* 挑出"函数说真"的那些 —— 出来的还是同一种向量。 */
+    const out = fresh('fo');
+    const k = fresh('fk');
+    const keep = condOf(body, child);
+    const stmts = [...pre];
+    if (strIn) {
+      stmts.push({ kind: 'let', name: out, type: RSTRV, init: call1('anew', tyArg(RSTRV), I(0)) });
+    } else {
+      stmts.push(...vecNewAs(out, len), { kind: 'let', name: k, type: INT, init: I(0) });
+    }
+    stmts.push({
+      kind: 'for',
+      init: { kind: 'let', name: idx, type: INT, init: I(0) },
+      cond: b('<', vr(idx), len),
+      post: { kind: 'assign', target: vr(idx), value: b('+', vr(idx), I(1)) },
+      body: [
+        { kind: 'let', name: ps[0], type: elemTy, init: at(vr(idx)) },
+        {
+          kind: 'if',
+          cond: keep,
+          then: strIn
+            ? [{ kind: 'builtin-stmt', name: 'apush', args: [vr(out), vr(ps[0])] }]
+            : [vecSet(vr(out), vr(k), vr(ps[0])), { kind: 'assign', target: vr(k), value: b('+', vr(k), I(1)) }],
+          else_: null,
+        },
+      ],
+    });
+    if (!strIn) {
+      stmts.push({ kind: 'assign', target: { kind: 'deref', expr: vr(out) }, value: call1('toreal', vr(k)) });
+    }
+    return { kind: 'block-expr', stmts, value: vr(out) };
+  }
+
+  /* `sapply` / `unlist(lapply(…))`：一格进一格出，出来的种类看函数体。 */
+  const bt = typeOfExpr(body, child);
+  const strOut = bt.kind === 'string';
+  const lglOut = !strOut && (bt.kind === 'bool' || isLgl1(bt));
+  const out = fresh('so');
+  const stmts = [...pre];
+  if (strOut) {
+    stmts.push({ kind: 'let', name: out, type: RSTRV, init: call1('anew', tyArg(RSTRV), len) });
+  } else {
+    stmts.push(...vecNewAs(out, len));
+  }
+  stmts.push({
+    kind: 'for',
+    init: { kind: 'let', name: idx, type: INT, init: I(0) },
+    cond: b('<', vr(idx), len),
+    post: { kind: 'assign', target: vr(idx), value: b('+', vr(idx), I(1)) },
+    body: [
+      { kind: 'let', name: ps[0], type: elemTy, init: at(vr(idx)) },
+      strOut
+        ? { kind: 'assign', target: svGet(vr(out), vr(idx)), value: exprOf(body, child) }
+        : vecSet(vr(out), vr(idx), lglOut ? asLgl(exprOf(body, child), bt) : asReal(exprOf(body, child), bt)),
+    ],
+  });
+  return { kind: 'block-expr', stmts, value: vr(out) };
+}
 
 /**
  * `r*` 那一族（`runif(n, …)`）→ 一条长度 n 的向量。
@@ -2394,11 +2581,20 @@ function callOf(x, types, extra, want) {
         return lglCall('r_trim', ev(0));
       }
       case 'unlist': {
-        /* `unlist(strsplit(s, sep))` —— 与 `strsplit(s, sep)[[1]]` 同解（那张表只有一格）。 */
+        /* `unlist(strsplit(s, sep))` 与 `unlist(lapply(v, f))` —— 前者与 `[[1]]` 同解，
+           后者与 `sapply` 同解（R 里 `sapply` 就是"`lapply` 之后能简化就简化"）。 */
         if (n === 1 && all[0] !== null && isSplitCall(all[0])) return splitOf(all[0], types);
-        throw new Error('r->IR: unlist() 只接 `unlist(strsplit(s, sep))` 那一种形状'
-          + '（这一层没有"表里装向量"，见 ext/r/SPEC.md）');
+        if (n === 1 && all[0] !== null && isApplyCall(all[0], 'lapply')) {
+          return applyOf('lapply', all[0], types);
+        }
+        throw new Error('r->IR: unlist() 只接 `unlist(strsplit(s, sep))` 与'
+          + ' `unlist(lapply(v, function(x) …))` 这两种形状（这一层没有"表里装向量"）');
       }
+      case 'sapply': case 'vapply': case 'Reduce': case 'Filter':
+        return applyOf(fn, x, types);
+      case 'lapply':
+        throw new Error('r->IR: lapply(…) 要写成 `unlist(lapply(…))` 或直接用 `sapply(…)`'
+          + ' —— R 里它回的是一张表，而这一层没有"表里装向量"');
       case 'strsplit':
         throw new Error('r->IR: strsplit(…) 要写成 `strsplit(s, sep)[[1]]` 或'
           + ' `unlist(strsplit(s, sep))` —— R 那边它回的是一张**表**，而这一层没有"表里装向量"');
