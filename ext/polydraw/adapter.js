@@ -614,13 +614,115 @@ function hostStore(ht, op, val, C) {
   return { kind: 'expr-stmt', expr: gfxCallIR(`set${ht.name}`, args) };
 }
 
+/**
+ * **`goto` / `label:`**（RScript 的关键字表里那两行）。标准 IR 里没有无条件跳转，
+ * 所以这儿只接**往前跳**那一档，落法是一格**旗子**（经典的 goto 消除法）：
+ *
+ *     ... goto skip; ...        ->    pd_go_skip = 0;
+ *     skip:                            if (!pd_go_skip) { ... pd_go_skip = 1; ... }
+ *     后面的语句                        后面的语句
+ *
+ * 也就是：从这一格语句表的开头到 `skip:` 那一句之间（**含嵌套**）每一句都加一层
+ * `if (旗子 == 0)`，循环的条件上再 `&& 旗子 == 0` —— 于是 `goto` 一置旗，控制流
+ * 就一路退到标号那儿。语义与真跳转相同，代价是那一段里每句多一格判断（只有用了
+ * `goto` 的函数摊这份）。
+ *
+ * **往后跳**（`goto` 在标号后头，`games/kenken.kc:909` 的 `goto back2it` 那种循环）
+ * 这一版不接 —— 那要把那一段变成真循环，判据是"哪几句在环里"，另一笔账。
+ */
+const gotoFlag = (name) => `pd_go_${name}`;
+
+/** 这一格语句表里第一个标号的位置（没有就是 -1）。 */
+function labelAt(list) {
+  return list.findIndex((s) => isList(s) && tag(s) === 'label');
+}
+
+/** 一段（**一串语句**）里 `goto` 到的标号名（含嵌套）。 */
+function gotoNames(list, out = new Set()) {
+  for (const s of list) gotoNamesIn(s, out);
+  return out;
+}
+
+function gotoNamesIn(x, out) {
+  if (!isList(x)) return out;
+  if (tag(x) === 'goto') { out.add(idOf(kids(x)[0])); return out; }
+  for (const k of kids(x)) gotoNamesIn(k, out);
+  return out;
+}
+
 function stmtsOf(list, C) {
+  /* 标号那一刀。两个方向各一种落法，旗子那一格是同一个：
+     * **往前跳**（`goto` 在标号前头）：`旗子=0;` + 前面那段整段加护卫，后面那段照常降；
+     * **往后跳**（`goto` 在标号后头）：标号到这段末尾包进 `while (旗子) { 旗子=0; …护卫… }`
+       —— 置旗就是"再走一趟"。放到末尾而不是精确到 `goto` 那一句：多包进来的几句在
+       旗子置起来的那一趟本来就被护卫挡着，只在最后一趟跑一次，与原来同义。 */
+  const at = labelAt(list);
+  if (at >= 0) {
+    const name = idOf(kids(list[at])[0]);
+    const flag = gotoFlag(name);
+    const fwd = gotoNames(list.slice(0, at)).has(name);
+    const back = gotoNames(list.slice(at + 1)).has(name);
+    if (fwd && back) {
+      throw new Error(`eval->IR: \`${name}:\` 这个标号**两个方向都有人跳**（前后各有 goto）`
+        + ' —— 这一版一个标号只接一个方向');
+    }
+    if (back) {
+      const region = list.slice(at + 1);
+      C.gotoActive.push(flag);
+      const guarded = stmtsOf(region, C);
+      C.gotoActive.pop();
+      return [
+        { kind: 'let', name: flag, type: REAL, init: num(1) },
+        {
+          kind: 'while',
+          cond: bin('!=', nameRef(flag), num(0)),
+          body: [
+            { kind: 'assign', target: nameRef(flag), value: num(0) },
+            ...guarded,
+          ],
+        },
+      ];
+    }
+    const region = list.slice(0, at);
+    if (!fwd) {
+      /* 这标号没人跳（语料里有留着不用的）—— 丢掉就是。 */
+      return [...stmtsOf(region, C), ...stmtsOf(list.slice(at + 1), C)];
+    }
+    C.gotoActive.push(flag);
+    const guarded = stmtsOf(region, C);
+    C.gotoActive.pop();
+    return [
+      { kind: 'let', name: flag, type: REAL, init: num(0) },
+      ...guarded,
+      ...stmtsOf(list.slice(at + 1), C),
+    ];
+  }
   const out = [];
   for (const s of list) out.push(...stmtOf(s, C));
   return out;
 }
 
+/**
+ * 一句语句 -> 若干句 IR。
+ *
+ * **护卫那一层在这儿加**（`C.gotoActive` 非空 = 正在降某个标号前头那一段）：每句外面
+ * 套一层 `if (旗子 == 0)`，循环的条件上再 `&& 旗子 == 0`（见 `stmtsOf` 头上那段）。
+ */
 function stmtOf(s, C) {
+  const res = stmtOf1(s, C);
+  if (C.gotoActive.length === 0) return res;
+  const g = C.gotoActive
+    .map((f) => bin('==', nameRef(f), num(0)))
+    .reduce((a, b) => bin('&&', a, b));
+  return res.map((st) => {
+    /* 循环：条件上加一格 —— 光在外头套 `if` 退不出来（旗子是循环体里置的）。 */
+    if (st.kind === 'while') return { ...st, cond: bin('&&', st.cond, g) };
+    if (st.kind === 'for') return { ...st, cond: st.cond === null ? g : bin('&&', st.cond, g) };
+    return { kind: 'if', cond: g, then: [st], else_: [] };
+  });
+}
+
+function stmtOf1(s, C) {
   const t = tag(s);
   if (t === 'empty') return [];
   if (t === 'block') return [{ kind: 'block', stmts: stmtsOf(kids(s), C) }];
@@ -720,8 +822,22 @@ function stmtOf(s, C) {
     });
   }
   if (t === 'static' || t === 'enum' || t === 'sty' || t === 'struct') return [];
-  if (t === 'label' || t === 'goto') {
-    throw new Error('eval->IR: `goto` / `label:` 还没接（标准 IR 里没有无条件跳转）');
+  if (t === 'label') {
+    /* 标号那一格由 `stmtsOf` 拆掉（它要看见"前后两段"）。走到这儿说明它不在一格语句表的
+       位置上（比如 `if (c) lab:`）—— 那种写法这一版不接。 */
+    throw new Error(`eval->IR: \`${idOf(kids(s)[0])}:\` 这个标号不在一格语句表里 ——`
+      + ' 这一版只接"整段语句里的标号"（`if (c) 标号:` 那种写法不接）');
+  }
+  if (t === 'goto') {
+    const name = idOf(kids(s)[0]);
+    const flag = gotoFlag(name);
+    if (!C.gotoActive.includes(flag)) {
+      throw new Error(`eval->IR: \`goto ${name}\` 找不到往前跳的那个标号 ——`
+        + ' 这一版只接"同一函数里、往前跳到某一格语句表上的标号"');
+    }
+    /* 置旗。后面每一句都在 `if (旗子 == 0)` 里头（见 `stmtOf`），所以控制流一路退到标号。
+       注意这一句自己也被那层护卫裹着 —— 置旗只在"还没跳"的时候发生。 */
+    return [{ kind: 'assign', target: nameRef(flag), value: num(1) }];
   }
   throw new Error(`eval->IR: 这一格语句还没接：${t}`);
 }
@@ -1596,6 +1712,7 @@ export function evalToIR(cst, host, src = '') {
     boxed: new Set(),                   /* 被取过地址的量（`&x`）：落成一格长度 1 的数组 */
     boxedAll: new Set(),                /* 整份程序那一张（`C.boxed` 是**当前这个函数**那一张） */
     valParams: new Set(),               /* 当前函数**按值**收的形参（`&x` 碰上它要报） */
+    gotoActive: [],                     /* 正在降哪几格标号前头那一段（`goto` 的旗子名） */
     needRnd: false,                     /* 用过 `RND`/`NRND`/`SRAND` 没有 */
     usedGL: false,                      /* 这份脚本用过 GL 那一族没有（每帧初态要不要发） */
     needFact: false,
