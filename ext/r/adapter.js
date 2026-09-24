@@ -173,6 +173,12 @@ const FN_DEPS = new Map([
   ['r_ifelse1', ['r_is_na', 'r_na']],
   ['r_ifelse', ['r_is_na', 'r_na']],
   ['r_vec1', []],
+  /* 串那一族（`substr` 要量长度、`startsWith` 要读两遍、`sprintf` 的宽度要补空格）。 */
+  ['r_substr', []],
+  ['r_starts', []],
+  ['r_ends', []],
+  ['r_padl', []],
+  ['r_padr', []],
   ['r_lgl_str', ['r_is_na']],
   ['r_any', ['r_is_na', 'r_na']],
   ['r_all', ['r_is_na', 'r_na']],
@@ -371,6 +377,9 @@ const BUILTINS = new Set([
   'print', 'invisible', 'xor', 'isTRUE', 'isFALSE', 'ifelse',
   /* base 里"向量进向量出"那一族 + 两格统计量。`seq` 与 `rep` 是造向量的。 */
   'sort', 'cumsum', 'prod', 'range', 'diff', 'head', 'tail', 'var', 'sd', 'rep', 'seq',
+  /* 串那一族。`tolower` **没接** —— 方言里只有 `(supper …)`，没有反过来的那一格，
+     补它要给核心方言加一格算子（五条腿都要动），不在 R 这一刀里。 */
+  'toupper', 'substr', 'sprintf', 'startsWith', 'endsWith',
   /* libm 那一族：R 自己这几个也是直接调 libm（不在 nmath 里），所以落方言的 `rmath`。
      一格实参、回 double —— `log(x, base)` 那种两格的**当场报**（R 那一档是 `log(x)/log(b)`，
      而"替它算"与"照它算"是两件事）。 */
@@ -522,6 +531,8 @@ function typeOfCall(x, types) {
   if (fn === 'is.na' || fn === 'is.nan') return BOOL;
   switch (fn) {
     case 'paste': case 'paste0': case 'as.character': return STR;
+    case 'toupper': case 'substr': case 'sprintf': return STR;
+    case 'startsWith': case 'endsWith': return BOOL;
     case 'length': case 'nchar': case 'as.integer': return INT;
     case 'as.numeric': return REAL;
     case 'is.null': return BOOL;
@@ -751,27 +762,100 @@ function rmathCall(rname, spec, args, argTys) {
 }
 
 
+/**
+ * `sprintf(fmt, …)` —— **格式串在编译期就拆开**，落成一串接起来的片段。
+ *
+ * 为什么能这么做：R 的 `sprintf` 的格式串在真实代码里几乎总是字面量，而方言里没有
+ * "运行期解析格式串"那一格（那是 `printf` 那一族的事，见 `lower/fmt.js`）。所以这儿的
+ * 规矩是：**字面量才接，不是字面量当场报** —— 不假装支持一半。
+ *
+ * 认的是 `%[-][宽][.精度]{d,i,s,f,e,g}` 与 `%%`。位数那几格直接落方言的
+ * `(sfix …)` / `(ssci …)` / `(sgen …)`（就是 C 的 `%.Nf` / `%.Ne` / `%.Ng`），
+ * 所以"印出来什么"这件事仍然只有一份实现。`%s` 上的数走 15 位有效数字那一档
+ * （R 的 `sprintf("%s", 1/3)` 与 `as.character` 同口径）。
+ */
+function sprintfOf(x, types) {
+  const args = posArgs(x);
+  if (args.length === 0) throw new Error('r->IR: sprintf() 至少要一格格式串');
+  if (tag(args[0]) !== 'str') {
+    throw new Error('r->IR: sprintf() 的格式串只接**字面量** —— 运行期拆格式串那一层没有，'
+      + ' 而"支持一半"比当场报更糟');
+  }
+  const fmt = String(leaf(kids(args[0])[0]));
+  const rest = args.slice(1);
+  const S = (v) => ({ kind: 'string', value: v });
+  const pieces = [];
+  let lit = '';
+  let ai = 0;
+  const nextArg = () => {
+    if (ai >= rest.length) throw new Error(`r->IR: sprintf("${fmt}") 的实参不够用`);
+    const a = rest[ai];
+    ai += 1;
+    return a;
+  };
+  for (let i = 0; i < fmt.length; i++) {
+    if (fmt[i] !== '%') { lit += fmt[i]; continue; }
+    if (fmt[i + 1] === '%') { lit += '%'; i += 1; continue; }
+    const m = /^%(-?)(\d*)(?:\.(\d+))?([disfeg])/.exec(fmt.slice(i));
+    if (m === null) {
+      throw new Error(`r->IR: sprintf 的 "${fmt.slice(i, i + 4)}" 这一格转换还没接`
+        + '（认的是 %[-][宽][.精度]{d,i,s,f,e,g} 与 %%）');
+    }
+    if (lit !== '') { pieces.push(S(lit)); lit = ''; }
+    const [all, dash, wid, prec, conv] = m;
+    const node = nextArg();
+    const t = typeOfExpr(node, types);
+    if (isVecTy(t)) throw new Error('r->IR: sprintf() 的实参是向量 —— R 那一格会出一整条串向量，这一层没有');
+    let piece;
+    if (conv === 's') piece = asStr(node, types, 15);
+    else if (conv === 'd' || conv === 'i') piece = call1('tostr', asIntE(exprOf(node, types), t));
+    else {
+      const p = prec === undefined ? 6 : Number(prec);
+      const e = asReal(exprOf(node, types), t);
+      piece = conv === 'f' ? call1('sfix', e, { kind: 'int', value: p })
+        : (conv === 'e' ? call1('ssci', e, { kind: 'int', value: p })
+          : call1('sgen', e, { kind: 'int', value: prec === undefined ? 6 : p }));
+    }
+    if (wid !== '') {
+      piece = lglCall(dash === '-' ? 'r_padr' : 'r_padl', piece, { kind: 'int', value: Number(wid) });
+    }
+    pieces.push(piece);
+    i += all.length - 1;
+  }
+  if (lit !== '') pieces.push(S(lit));
+  if (pieces.length === 0) return S('');
+  return pieces.reduce((acc, p) => b('+', acc, p));
+}
+
 /** 下标从 1 起 → 从 0 起。字面量当场折掉（`x[1]` 出 `aget(x, 0)` 而不是 `1-1`）。 */function zeroBased(e) {
   if (e.kind === 'int') return { kind: 'int', value: e.value - 1 };
   return b('-', e, { kind: 'int', value: 1 });
 }
 
 /**
- * 一格值变成串。
+ * 一格值变成串。**`dig` 是有效数字位数** —— R 在这一格有两套口径：
  *
- * **实数走 `r_num_str`** —— 那一格是照 `src/main/format.c` 抄的"定点还是科学记数"
- * （见 `numFmtStmts()`）。原来这儿一律 `tostr`，于是 `cat(dnorm(1))` 印
- * `0.24197072451914337` 而 R 印 `0.2419707` —— 差的不是精度，是"印几位"这条规矩。
+ *   `cat` / `print`                          7（`options(digits)`）
+ *   `as.character` / `paste` / `sprintf("%s")`  **15**
+ *
+ * 所以 `cat(1/3)` 是 `0.3333333` 而 `paste(1/3)` 是 `0.333333333333333` ——
+ * 同一个数、两个答案，这不是随手定的，是 R 自己分开的两条路
+ * （`as.character` 在 `coerce.c` 里走 `digits = 15`）。挑法都是 `r_num_str`
+ * 照 `src/main/format.c` 抄的那一条（定点与科学记数按哪个短挑）。
  *
  * 三态逻辑（`x > 2` 那种）走 `r_lgl_str`：`TRUE` / `FALSE` / `NA` 三档。
  * 这一问要**摆在实数前面** —— 它的 `kind` 也是 `real`。
  */
-const asStr = (x, types) => {
+const asStr = (x, types, dig = 7) => {
   const t = typeOfExpr(x, types);
   if (t.kind === 'string') return exprOf(x, types);
   if (isLgl1(t)) return lglCall('r_lgl_str', exprOf(x, types));
   if (t.kind === 'real') {
-    return { kind: 'call', fn: { kind: 'name', name: useFn(NUM_STR) }, args: [exprOf(x, types)] };
+    return {
+      kind: 'call',
+      fn: { kind: 'name', name: useFn(NUM_STR) },
+      args: [exprOf(x, types), { kind: 'int', value: dig }],
+    };
   }
   /* 布尔在 R 里印 `TRUE` / `FALSE`（不是 `true` / `false`）—— 那是这门语言的写法。 */
   if (t.kind === 'bool') {
@@ -1246,7 +1330,9 @@ function callOf(x, types, extra, want) {
           sep = leaf(kids(sepNode)[0]);
         }
         if (n === 0) return { kind: 'string', value: '' };
-        const parts = all.map((a, i) => (a === null ? call1('tostr', extra) : asStr(a, types)));
+        /* `paste` 的数走的是 **15 位有效数字**那一档（`as.character` 的口径），
+           不是 `cat` 的 7 位 —— `paste(1/3)` 在 R 里是 `0.333333333333333`。 */
+        const parts = all.map((a, i) => (a === null ? call1('tostr', extra) : asStr(a, types, 15)));
         return parts.reduce((acc, p) => b('+', sep === ''
           ? acc : b('+', acc, { kind: 'string', value: sep }), p));
       }
@@ -1438,7 +1524,29 @@ function callOf(x, types, extra, want) {
       }
       case 'as.integer': return call1('toint', ev(0));
       case 'as.numeric': return call1('toreal', ev(0));
-      case 'as.character': return call1('tostr', ev(0));
+      /* `as.character(x)` 与 `cat(x)` 是**两套位数**：前者 15 位有效数字
+         （`0.333333333333333`），后者 7 位（`0.3333333`）。所以这一格走 `asStr(…, 15)`，
+         不是 `tostr`（那一格是方言自己的浮点文本，与 R 的挑法无关）。 */
+      case 'as.character': {
+        if (n !== 1 || all[0] === null) return call1('tostr', ev(0));
+        return asStr(all[0], types, 15);
+      }
+      case 'toupper': {
+        if (n !== 1) throw new Error(`r->IR: toupper() 要一格实参（给了 ${n}）`);
+        return call1('supper', ev(0));
+      }
+      case 'substr': {
+        /* R 的 `substr(s, start, stop)` 是**1 起、两端都含**，而且越界是**截断**
+           （方言的 `(ssub S I N)` 是 0 起 + 长度，越界当场报）—— 所以走生成出来的那格函数。 */
+        if (n !== 3) throw new Error(`r->IR: substr() 要三格实参（给了 ${n}）—— \`substring\` 没接`);
+        return lglCall('r_substr', ev(0),
+          asIntE(ev(1), typeOfExpr(all[1], types)), asIntE(ev(2), typeOfExpr(all[2], types)));
+      }
+      case 'startsWith': case 'endsWith': {
+        if (n !== 2) throw new Error(`r->IR: ${fn}() 要两格实参（给了 ${n}）`);
+        return lglCall(fn === 'startsWith' ? 'r_starts' : 'r_ends', ev(0), ev(1));
+      }
+      case 'sprintf': return sprintfOf(x, types);
       case 'abs': {
         const t = all[0] === null ? INT : typeOfExpr(all[0], types);
         if (isVecTy(t)) return vecMap1(ev(0), (e) => call1('rmath', { kind: 'strlit', value: 'fabs' }, e));
@@ -1808,7 +1916,7 @@ function numStrDecl() {
   return {
     kind: 'fn',
     name: NUM_STR,
-    params: [{ name: 'x', type: REAL }],
+    params: [{ name: 'x', type: REAL }, { name: 'd', type: INT }],
     ret: STR,
     body: [
       /* `is.na` 对 NA 与 NaN 都真 —— 先问 `is.nan` 才分得开这两格 */
@@ -1838,6 +1946,75 @@ function numStrDecl() {
 }
 
 /**
+ * 串那几格生成出来的辅助函数。
+ *
+ * 为什么不摊在调用点：`substr` 要**先量长度再截**（R 越界是截断，方言的 `(ssub …)`
+ * 越界当场报），`startsWith` / `endsWith` 与那两格补空格的也都要把实参读两遍 ——
+ * 一次函数调用是纯表达式，摊开的临时量在条件位上没地方摆（见 `FN_DEPS` 那段账）。
+ */
+function strFnDecl(name) {
+  const nm = (n2) => ({ kind: 'name', name: n2 });
+  const I = (v) => ({ kind: 'int', value: v });
+  const S = (v) => ({ kind: 'string', value: v });
+  const letI = (n2, init) => ({ kind: 'let', name: n2, type: INT, init });
+  const set = (n2, v) => ({ kind: 'assign', target: nm(n2), value: v });
+  const iff = (cond, then, else_ = null) => ({ kind: 'if', cond, then, else_ });
+  const ret = (e) => ({ kind: 'return', values: [e] });
+  const s = nm('s');
+  const t = nm('t');
+  const P2 = [{ name: 's', type: STR }, { name: 't', type: STR }];
+
+  if (name === 'r_substr') {
+    /* R：1 起、两端都含、越界**截断**（`substr("abc", 2, 99)` 是 `"bc"`）。 */
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 's', type: STR }, { name: 'a', type: INT }, { name: 'z', type: INT }],
+      ret: STR,
+      body: [
+        letI('n', call1('slen', s)),
+        letI('i', nm('a')),
+        letI('j', nm('z')),
+        iff(b('<', nm('i'), I(1)), [set('i', I(1))]),
+        iff(b('>', nm('j'), nm('n')), [set('j', nm('n'))]),
+        iff(b('<', nm('j'), nm('i')), [ret(S(''))]),
+        ret(call1('ssub', s, b('-', nm('i'), I(1)), b('+', b('-', nm('j'), nm('i')), I(1)))),
+      ],
+    };
+  }
+  if (name === 'r_starts') {
+    /* `(sfind S T)` 回的是第一次出现的下标（没有是 -1），所以"开头"就是下标 0。 */
+    return {
+      kind: 'fn', name, params: P2, ret: BOOL, body: [ret(b('==', call1('sfind', s, t), I(0)))],
+    };
+  }
+  if (name === 'r_ends') {
+    return {
+      kind: 'fn',
+      name,
+      params: P2,
+      ret: BOOL,
+      body: [
+        letI('n', call1('slen', s)),
+        letI('m', call1('slen', t)),
+        iff(b('>', nm('m'), nm('n')), [ret({ kind: 'bool', value: false })]),
+        ret(b('==', call1('ssub', s, b('-', nm('n'), nm('m')), nm('m')), t)),
+      ],
+    };
+  }
+  /* `sprintf` 的宽度那一格：右对齐（`%5d`）与左对齐（`%-5s`）。
+     `(srep S N)` 在 N <= 0 时回空串（方言明说的），所以不用另外夹一下。 */
+  const fill = call1('srep', S(' '), b('-', nm('w'), call1('slen', s)));
+  return {
+    kind: 'fn',
+    name,
+    params: [{ name: 's', type: STR }, { name: 'w', type: INT }],
+    ret: STR,
+    body: [ret(name === 'r_padl' ? b('+', fill, s) : b('+', s, fill))],
+  };
+}
+
+/**
  * `scientific()` 那一半（`src/main/format.c`）—— 一格 double 要印成什么形状，
  * 三个数就够说：**符号**、**小数点左边几位**（`left`，已经把 `roundingwidens` 折进去了）、
  * **有效数字几位**（`nsig`）。写进 `p` 的 0 / 1 / 2 三格。
@@ -1855,7 +2032,6 @@ function numStrDecl() {
  *     （`nsig` 是 1、印 `1e+06`），离零舍入会给 `1000001`（`nsig` 是 7、印 `1000001`）。
  */
 function sciFnDecl() {
-  const DIG = 7;                 /* R_print.digits（`options(digits=)` 的默认值） */
   const KP_MAX = 22;             /* 那张幂次表在 double 上的上界（`format.c` 的 tbl） */
   const nm = (name) => ({ kind: 'name', name });
   const R = (value) => ({ kind: 'real', value });
@@ -1867,6 +2043,10 @@ function sciFnDecl() {
   const set = (name, value) => ({ kind: 'assign', target: nm(name), value });
   const iff = (cond, then, else_ = null) => ({ kind: 'if', cond, then, else_ });
   const x = nm('x');
+  /* **有效数字位数是实参**：`cat` / `print` 那一档是 7（`options(digits)`），
+     而 `as.character` / `paste` / `sprintf("%s")` 那一档是 **15** —— R 自己就是两套
+     （`as.character(1/3)` 是 `0.333333333333333`，`cat(1/3)` 是 `0.3333333`）。 */
+  const dig = nm('d');
   const slot = (i) => ({ kind: 'deref', expr: call1('padd', nm('p'), I(i)) });
   const put = (i, v) => ({ kind: 'assign', target: slot(i), value: call1('toreal', v) });
   const [r, kp, rp, fl, fr, al, nsig, kpw, rgtT, fuzz, left]
@@ -1874,7 +2054,7 @@ function sciFnDecl() {
   return {
     kind: 'fn',
     name: 'r_sci',
-    params: [{ name: 'x', type: REAL }, { name: 'p', type: PTR_REAL }],
+    params: [{ name: 'x', type: REAL }, { name: 'd', type: INT }, { name: 'p', type: PTR_REAL }],
     ret: { kind: 'void' },
     body: [
       /* 零那一格：`kpower = 0, nsig = 1`（`format.c` 开头那一支） */
@@ -1882,8 +2062,8 @@ function sciFnDecl() {
       letI('neg', I(0)),
       iff(b('<', x, R(0)), [set('neg', I(1))]),
       letR('r', rm('fabs', x)),
-      letI('kp', b('-', call1('toint', rm('floor', rm('log10', r))), I(DIG - 1))),
-      /* |x| = alpha * 10^kpower，把 alpha 缩到 [10^(DIG-1), 10^DIG) */
+      letI('kp', b('+', call1('toint', rm('floor', rm('log10', r))), b('-', I(1), dig))),
+      /* |x| = alpha * 10^kpower，把 alpha 缩到 [10^(d-1), 10^d) */
       letR('rp', r),
       iff(b('&&', b('>=', kp, I(-KP_MAX)), b('<=', kp, I(KP_MAX))),
         [iff(b('>=', kp, I(0)),
@@ -1893,7 +2073,7 @@ function sciFnDecl() {
         [iff(b('<=', kp, I(-308)),
           [set('rp', b('/', b('*', r, R(1e303)), p10(b('+', kp, I(303)))))],
           [set('rp', b('/', r, p10(kp)))])]),
-      iff(b('<', rp, R(Math.pow(10, DIG - 1))), [set('rp', b('*', rp, R(10))), set('kp', b('-', kp, I(1)))]),
+      iff(b('<', rp, p10(b('-', dig, I(1)))), [set('rp', b('*', rp, R(10))), set('kp', b('-', kp, I(1)))]),
       /* 就近取偶（`nearbyintl`）—— rp 在这儿一定是正的，所以只按 floor 那一侧写 */
       letR('fl', rm('floor', rp)),
       letR('fr', b('-', rp, fl)),
@@ -1903,11 +2083,11 @@ function sciFnDecl() {
         [iff(b('==', fr, R(0.5)),
           [iff(b('!=', rm('fmod', fl, R(2)), R(0)), [set('al', b('+', fl, R(1)))])])]),
       /* 尾随零数掉几个，就少几位有效数字 */
-      letI('nsig', I(DIG)),
+      letI('nsig', dig),
       {
         kind: 'for',
         init: letI('j', I(0)),
-        cond: b('<', nm('j'), I(DIG)),
+        cond: b('<', nm('j'), dig),
         post: set('j', b('+', nm('j'), I(1))),
         body: [
           set('al', b('/', al, R(10))),
@@ -1917,10 +2097,10 @@ function sciFnDecl() {
         ],
       },
       iff(b('==', nsig, I(0)), [set('nsig', I(1)), set('kp', b('+', kp, I(1)))]),
-      letI('kpw', b('+', kp, I(DIG - 1))),
+      letI('kpw', b('+', kp, b('-', dig, I(1)))),
       /* roundingwidens：科学记数那一支会把 x 舍到 10^kpower 上去（9996 按三位是 `1e+04`，
          反而比定点的 `9996` 宽），而定点不会 —— 那时左边的位数按舍入前算 */
-      letI('rgt_t', b('-', I(DIG), kpw)),
+      letI('rgt_t', b('-', dig, kpw)),
       iff(b('<', rgtT, I(0)), [set('rgt_t', I(0))]),
       iff(b('>', rgtT, I(KP_MAX)), [set('rgt_t', I(KP_MAX))]),
       letR('fuzz', b('/', R(0.5), p10(rgtT))),
@@ -1994,7 +2174,7 @@ function numFmtStmts() {
   };
   return [
     { kind: 'let', name: 'p', type: PTR_REAL, init: call1('pnew', tyArg(PTR_REAL), I(3)) },
-    { kind: 'expr-stmt', expr: lglCall('r_sci', x, nm('p')) },
+    { kind: 'expr-stmt', expr: lglCall('r_sci', x, nm('d'), nm('p')) },
     { kind: 'let', name: 'neg', type: INT, init: slot(0) },
     { kind: 'let', name: 'left', type: INT, init: slot(1) },
     { kind: 'let', name: 'nsig', type: INT, init: slot(2) },
@@ -2184,7 +2364,7 @@ function printFnDecl(name) {
                 [set('hasni', { kind: 'bool', value: true })])],
               [
                 set('fin', b('+', nm('fin'), I(1))),
-                { kind: 'expr-stmt', expr: lglCall('r_sci', el, nm('p')) },
+                { kind: 'expr-stmt', expr: lglCall('r_sci', el, I(7), nm('p')) },
                 letI('ng', call1('toint', { kind: 'deref', expr: call1('padd', nm('p'), I(0)) })),
                 letI('lf', call1('toint', { kind: 'deref', expr: call1('padd', nm('p'), I(1)) })),
                 letI('ns', call1('toint', { kind: 'deref', expr: call1('padd', nm('p'), I(2)) })),
@@ -2476,7 +2656,11 @@ function vecFnDecl(name) {
         {
           kind: 'builtin-stmt',
           name: 'write',
-          args: [{ kind: 'call', fn: { kind: 'name', name: NUM_STR }, args: [elem] }],
+          args: [{
+            kind: 'call',
+            fn: { kind: 'name', name: NUM_STR },
+            args: [elem, { kind: 'int', value: 7 }],
+          }],
         },
       ], 0)],
     };
@@ -3077,6 +3261,10 @@ function vecFnDecl(name) {
         { kind: 'return', values: [out] },
       ],
     };
+  }
+  if (name === 'r_substr' || name === 'r_starts' || name === 'r_ends'
+      || name === 'r_padl' || name === 'r_padr') {
+    return strFnDecl(name);
   }
   if (name === 'r_sci') return sciFnDecl();
   if (name === 'r_num_fmt' || name === 'r_print_num' || name === 'r_print_lgl') return printFnDecl(name);
