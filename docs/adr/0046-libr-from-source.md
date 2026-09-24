@@ -75,27 +75,38 @@ S7 / cpp11 / farver / isoband / …）一共 **135 523 行 R + 102 848 行 C/C++
    它自己建 `NSWindow`、不跑 `[NSApp run]`（靠 `ptr_R_ProcessEvents` 协作抽事件），
    所以要在主线程上调 —— 这一条与我们 host 那侧的线程安排得对齐。
 
-### 第三刀卡住的地方（量出来的，别再从头猜）
+### 第三刀那个坑：`dlsym` 的下划线约定（量出来的，已修）
 
-`library(stats)` 起不来，链条是这样的：
+`library(stats)` 起不来，链条追到底是这样的：
 
 1. tools 的 `R/zzz.R` 有一句**顶层**的
    `PS_sigs <- getDLLRegisteredRoutines("tools")[[c(".Call","ps_sigs")]]`，
    拿到 NULL 之后下一句 `.Call(PS_sigs, 1L)` 报"第一个参数得是字符串或本机符号"；
-2. 往上一层：`getDLLRegisteredRoutines(dll)` 回的三张表**全是空的**（`.Call` 0 个）；
-3. 再往上：`unclass(getLoadedDLLs()[["tools"]])$dynamicLookup` 是 **TRUE**，
-   而 `R_init_tools` 里明明有 `R_useDynamicSymbols(dll, FALSE)` —— 所以那个 init **没被调**；
-4. 根上：在 R 里 `getNativeSymbolInfo("R_init_tools", PACKAGE="tools")` 报"no such symbol"，
-   `.Call("ps_sigs", 1L, PACKAGE="tools")` 也报 not available ——
-   **`dlopen` 成功了，但这份 `.so` 里一个符号都 `dlsym` 不出来**。
-   而 `nm -gU tools.so` 明明列着 `T _R_init_tools` 与 `T _ps_sigs`。
+2. `getDLLRegisteredRoutines(dll)` 回的三张表**全是空的**；
+3. `unclass(getLoadedDLLs()[["tools"]])$dynamicLookup` 是 **TRUE**，而 `R_init_tools` 里
+   明明有 `R_useDynamicSymbols(dll, FALSE)` —— 所以那个 init **没被调**；
+4. 根上：`getNativeSymbolInfo("R_init_tools", PACKAGE="tools")` 报 no such symbol，
+   而 `nm -gU tools.so` 明明列着它 —— **`dlopen` 成功，但一个符号都 `dlsym` 不出来**。
 
-也就是说问题不在 R 那一侧，而在**我们怎么链这份 `.so`**。链接参数与 R 自己的一样
-（`configure.ac` 第 1539 行：`-dynamiclib -Wl,-headerpad_max_install_names -undefined dynamic_lookup`，
-本机装的 R 的 `Makeconf` 也是这一行），所以下一步该做的是把两份 `.so` 摆在一起比：
-`otool -hv` 看 filetype 与 flags（MH_DYLIB vs MH_BUNDLE、TWOLEVEL vs FLAT）、
-`otool -l` 看有没有 `LC_DYSYMTAB` 的导出项，再试 `-bundle` 与 `-Wl,-flat_namespace`。
-这一格的判据已经摆在 `pkgs.ok` 那条边上（默认目标不挂它，所以尺子还是绿的）。
+根因是 **`HAVE_NO_SYMBOL_UNDERSCORE` 定错**：`Rdynload.c` 第 892 行拿它决定查
+`R_init_<pkg>` 还是 `_R_init_<pkg>`，没定义就查带下划线那个 —— 而 macOS 的 `dlsym`
+要的是**不带**下划线的名字。我们的生成器把它当函数名去探（`no_symbol_underscore`），
+自然探不着，于是留空。
+
+修法不是往表里加一格，而是**真量一趟**（`gen-rconfig.js` 的 `noSymbolUnderscore`）：
+`dlopen(NULL)` 拿到自己这个进程，分别问 `dlsym(h,"main")` 与 `dlsym(h,"_main")`，
+看哪个给得出地址。这一类"约定"宏按名字猜一定会错，而错了的症状离根因有四层远。
+
+同一刀里还补齐两格 R_HOME 的东西：
+
+* **`modules/lapack.so`**（`src/modules/lapack/Lapack.c` + `src/main/flexiblas.c`，实现走
+  Accelerate）—— R 把 LAPACK 当**模块**动态加载，不在 libR 里。少了它连
+  `library(grDevices)` 都起不来（它的 `.onLoad` 会 `solve()` 一个 3×3 的 RGB 矩阵）。
+* `etc/repositories`（`install.packages` 要）。
+
+**现在的状态**：从空的 R_HOME 一路建到跑通是 **436 条边**，最后那条边验四件事 ——
+base 的算术、stats 的 `sd`、LAPACK（`lm` 的系数 1.05）、methods 的 S4
+（`initializing class and method definitions ... done`）。
 
 ### 第二刀量出来的三格
 
