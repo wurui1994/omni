@@ -676,11 +676,16 @@ export const CHAIN = ['7', '22', '1022', '1122', '111 222', '1455'];
  *    `a[7]`）；别的长度 -> 越界的下标**改成 0** 再读/写（所以 `b[m]=99` 写进了 `b[0]`）；
  * ③ `RND` 是 [0,1)、`NRND` 是正态、`srand(种)` 定种子 —— 落成**生成出来的** LCG +
  *    Box-Muller（算法照 `eval.c:497` / `:503`），所以"定了种子可复现"，三条腿同一串。
- *    `rnd:` 那两个数是我们这台机器的，**不是** eval.c 的位级复刻（那儿的 `krand` 要靠
- *    MSVC 32 位 long 的符号处理）—— 范围与分布照说明书。
+ *    `rnd:` 那两个数是**位级复刻**（2026-09-24 改对的）：`eval.c` 的 `krand` 是
+ *    `kholdrand = (unsigned long)((kholdrand*(214013*2) + 2531011*2) >> 1)` —— Win32 的
+ *    32 位 `unsigned long` 先绕回、再右移一位，合起来就是 **mod 2^31**，`rnd` 回
+ *    `kholdrand / 2^31`。把那一行抄成一份 `uint32_t` 的独立 C 程序、`srand(12345)` 之后
+ *    印头两个数，得的就是这儿写的 `0.231451 0.584851`（参考 `c_impl/src/eval/pd_interp.c:35`
+ *    也是照这一行写的）。从前我们是 `mod 2^32` 再读的时候 `>>1` —— 状态与回值都不是同一串，
+ *    随机那一族 7 份脚本的图全对不上（`ken/mipmap.pss` 那张 256² 噪声纹理最明显）。
  */
 export const EVALARR = ['a: 0 9 49', 'wrap: 0 49', 'clip: 1 1 1', 'clipw: 99 5',
-  'grid: 0 12 23', 'rnd: 0.615726 0.292426', 'range: 1', 'nrnd-mean-small: 1'];
+  'grid: 0 12 23', 'rnd: 0.231451 0.584851', 'range: 1', 'nrnd-mean-small: 1'];
 
 /**
  * **噪声那一族**（`ext/polydraw/examples/noise.pss`：`NOISE` 一/二/三参 + `NOISE3D`）。

@@ -1602,11 +1602,23 @@ function needRndSigs(C) {
 
 function rndDecls() {
   const st = nameRef('pd_rndst');
+  /**
+   * 一步 LCG。**照 `eval.c:497` 逐位**：
+   *
+   *     kholdrand = (unsigned long)((kholdrand * (214013*2) + 2531011*2) >> 1);
+   *
+   * 那一行的 32 位溢出 + `>>1` 合起来就是"**mod 2^31**"（`2A mod 2^32` 再右移一位
+   * = `A mod 2^31`），而 `rnd` 回的是 `kholdrand / 2^31`。
+   * 从前这儿是 `& 0xffffffff` 再在读的时候 `>>1` —— 那**既不是同一个状态、也不是同一个
+   * 回值**（`r ≥ 2^31` 时 `floor(r/2) ≠ r mod 2^31`），于是随机那一族（7 份脚本）
+   * 的序列整个对不上：`ken/mipmap.pss` 那张 256² 噪声纹理与参考完全不是一张图。
+   * 参考也是照这一行写的（`c_impl/src/eval/pd_interp.c:35`），所以这一格三方一致。
+   */
   const step = {
     kind: 'assign',
     target: st,
     value: bin('&', bin('+', bin('*', st, { kind: 'int', value: '214013' }),
-      { kind: 'int', value: '2531011' }), { kind: 'int', value: '4294967295' }),
+      { kind: 'int', value: '2531011' }), { kind: 'int', value: '2147483647' }),
   };
   return [
     { kind: 'global', name: 'pd_rndst', type: INT },
@@ -1634,7 +1646,7 @@ function rndDecls() {
         step,
         {
           kind: 'return',
-          values: [bin('/', { kind: 'builtin', name: 'toreal', args: [bin('>>', st, { kind: 'int', value: '1' })] },
+          values: [bin('/', { kind: 'builtin', name: 'toreal', args: [st] },
             num(2147483648))],
         },
       ],

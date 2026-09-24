@@ -29,6 +29,40 @@
  *
  * 已经是新式的（自带 `#version`）**原样回** —— 脚本自己写好了就不动它。
  */
+/**
+ * **`#ifdef GL_扩展名` 那一族就地判掉**（`#else` / `#endif`，不嵌套 —— 语料里只有一处）。
+ *
+ * 为什么不能靠编译器自己判：core profile 里那些扩展宏**不定义**（扩展早并进核心了），
+ * 而 `#define GL_…` 又是 GLSL 明令禁止的（`#define of reserved name`，试过）。
+ * 所以由这一层判：**我们真有的**（`textureLod`）算定义着、别的算没有。
+ *
+ * `ken/mipmap.pss` 是唯一一份这么写的：`#ifdef GL_ARB_shader_texture_lod` 里头用
+ * `texture2DLod(tex0,t.xy,dep)` 自己挑 mip 层、`#else` 是普通 `texture2D`。走错哪条
+ * 整张图都不一样（清清楚楚的棋盘地面 vs 糊成几条横带）。
+ *
+ * 切掉的行**换成空行**（行号不动 —— 编译器的诊断还要照着原文看）。
+ */
+const GLSL_HAVE = new Set(['GL_ARB_shader_texture_lod']);
+
+function glslIfdef(src) {
+  if (!/^[ \t]*#[ \t]*ifdef/m.test(src)) return src;
+  const out = [];
+  let keep = true;
+  let inIf = false;
+  for (const line of src.split('\n')) {
+    const m = /^[ \t]*#[ \t]*(ifdef|else|endif)[ \t]*([A-Za-z_0-9]*)/.exec(line);
+    if (m !== null) {
+      if (m[1] === 'ifdef') { inIf = true; keep = GLSL_HAVE.has(m[2]); }
+      else if (m[1] === 'else' && inIf) keep = !keep;
+      else if (m[1] === 'endif') { inIf = false; keep = true; }
+      out.push('');
+      continue;
+    }
+    out.push(keep ? line : '');
+  }
+  return out.join('\n');
+}
+
 export function glslAlign(kind, src) {
   if (src.includes('#version')) return src;
   /* **ARB 汇编原样留着**（`!!ARBvp1.0` / `!!ARBfp1.0`，`ken/` 有 5 份）：它不是 GLSL，
@@ -36,7 +70,7 @@ export function glslAlign(kind, src) {
      "这是 ARB" 了（它认的是段首那个 `!!ARB`），于是把汇编喂给 GLSL 编译器，
      报 `'!' : syntax error`（踩过）。设备收到 ARB 就退回内建那对，见 §19.2。 */
   if (/^\s*!!ARB/.test(src)) return src;
-  let s = src;
+  let s = glslIfdef(src);
   s = s.replace(/\bgl_TexCoord\s*\[\s*0\s*\]/g, 'v_tex0');
   s = s.replace(/\bgl_MultiTexCoord0\b/g, 'a_tex');
   s = s.replace(/\bftransform\s*\(\s*\)/g, '(u_mvp * a_pos)');

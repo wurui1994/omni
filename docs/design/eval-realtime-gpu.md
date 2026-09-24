@@ -1414,4 +1414,33 @@ allowed - whichever comes last in the file.」
 
 `rgb()` 造的纹理不会因此坏掉：那种脚本不开混合，alpha 没人看。
 
+## 25. 第十五刀：**两处"算出来的东西本身不一样"**
+
+### 25.1 `RND` 那台 LCG 是 mod 2^31，不是 mod 2^32
+
+`eval.c:497` 那一行：
+
+    kholdrand = (unsigned long)((kholdrand * (214013*2) + 2531011*2) >> 1);
+
+Win32 的 `unsigned long` 是 32 位 —— **先绕回 2^32、再右移一位**，合起来就是
+`h = (h*214013 + 2531011) mod 2^31`，而 `RND` 回的是 `h / 2^31`。
+我们从前是 `mod 2^32`、读的时候 `>>1`：**状态与回值都不是同一串**
+（`r ≥ 2^31` 时 `floor(r/2) ≠ r mod 2^31`）。7 份脚本用随机数，序列不同 = 图不同。
+
+判据：把那一行抄成一份 `uint32_t` 的独立 C 程序，`srand(12345)` 之后头两个数是
+`0.231451 0.584851` —— 与我们改完之后的输出逐位相同（期望写在 `tests/lib/cases.js`
+的 `EVALARR` 里）。参考也是照这一行写的（`c_impl/src/eval/pd_interp.c:35`）。
+账：`metaballs cube.pss` RMSE 28.41 → **0（逐像素相同）**。
+
+### 25.2 着色器里的 `#ifdef GL_扩展名` 由翻译这一层判
+
+core profile 里那些扩展宏**不定义**（扩展早并进核心了），而 `#define GL_…` 是 GLSL
+明令禁止的（`#define of reserved name`，试过）。所以在 `glslAlign` 里就地判掉：
+**我们真有的**算定义着、别的算没有，切掉的行换成空行（行号不动）。
+
+`ken/mipmap.pss` 是唯一一份这么写的：`#ifdef GL_ARB_shader_texture_lod` 里头用
+`texture2DLod(tex0,t.xy,dep)` 自己挑 mip 层、`#else` 是普通 `texture2D`。走错哪条
+整张图都不一样（清清楚楚的棋盘地面 vs 糊成几条横带）。RMSE 70.7 → 52.3
+（剩下的差还没定根因：两边都是 `glGenerateMipmap` + `LINEAR_MIPMAP_LINEAR`）。
+
 
