@@ -22,6 +22,7 @@
 //     (fuse ID "operator" "+" "-" "init")     ;; 「一个词 + 一个算符名」粘成一个 token
 //     (stop "#!eof" line-start)               ;; 扫到这儿就收工 —— 后面那些字不是源码
 //     (auto-semi ";" after NAME NUM ")" "]")  ;; 跨过换行时按上一个记号补一格（go 的 ASI）
+//     (auto-semi "\n" after NAME ")" (brackets "()" "[]"))  ;; …但括号里面一格都不补（R）
 //     (op "+" "-" "->" "(" ")"))              ;; = punct，类型就是字面量自己
 //
 // **「看上一个记号」那两格**（`(not-after …)` 与 `auto-semi`）是同一件事的两种用法：
@@ -65,6 +66,7 @@
 //   "字面量"           照原样比
 //   (set "abc")        属于这几个字符之一
 //   (not "abc")        不属于（但必须有一个字符）
+//   (until "关")       吞到**第一个** `关` 之前（`关` 自己不吃）—— 唯一的非贪心项
 //   (seq A B ...)      顺序，主要给 (or ...) 的分支用
 //   (or A B ...)       挨个试，第一个成的算
 //   (* A ...) (+ A ...) (? A ...)   贪心重复
@@ -83,6 +85,51 @@ export const litName = (s) => JSON.stringify(s);
 
 const CLASSES = new Set(['space', 'nl', 'digit', 'alpha', 'alnum', 'hex', 'any']);
 const REPEATS = new Set(['*', '+', '?']);
+
+/**
+ * 读一格 `(brackets "()" "[]" ("[[" "]" 2))`。**括号这件事**有两个主顾 ——
+ * `(indent …)`（括号里面的换行是续行）与 `(auto-semi … (brackets …))`（括号里面不补分号），
+ * 说的是同一件事，所以读法只有这一份。
+ *
+ * 三种写法：
+ *   `"()"`            两个字符的「开闭」
+ *   `("{." ".}")`     一对字符串（nim 的 pragma：`{.` 与 `.}` 是两个多字符记号）
+ *   `("[[" "]" 2)`    再多一个整数 = **这个开括号顶几层**。R 的 `[[` 就是这一格：
+ *                     它是一个记号，可闭合它的 `]]` 是**两个**记号，所以 R 自己也往
+ *                     contextstack 上推两格（gram.y:3990–3995）。不说这一句的话
+ *                     `f(x[[1]])` 数到 `]]` 就把栈弹穿了，后面整段都以为自己在括号外。
+ *
+ * `suppress` 不在写法里，是**哪个子形式**说的：`(brackets …)` 里的算"里面不补"，
+ * `(brackets-clear …)` 里的算"照旧补，但要盖住外面那一层"（见 readLexSpec 里那段账）。
+ */
+function readBrackets(node, diags, suppress) {
+  const out = [];
+  for (const b of node.items.slice(1)) {
+    if (isStr(b) && b.value.length === 2) {
+      out.push({
+        open: b.value.slice(0, 1), close: b.value.slice(1, 2), weight: 1, suppress,
+      });
+      continue;
+    }
+    if (isList(b) && (b.items.length === 2 || b.items.length === 3)
+        && isStr(b.items[0]) && isStr(b.items[1])) {
+      const w = b.items[2];
+      let weight = 1;
+      if (w !== undefined) {
+        const n = isAtom(w) ? Number.parseInt(w.value, 10) : Number.NaN;
+        if (!Number.isInteger(n) || n < 1) {
+          diags.error(w.span, 'the third item of a (brackets …) entry is how many levels this opener pushes (a positive integer)');
+        } else weight = n;
+      }
+      out.push({
+        open: b.items[0].value, close: b.items[1].value, weight, suppress,
+      });
+      continue;
+    }
+    diags.error(b === null || b === undefined ? node.span : b.span, 'each (brackets …) entry is a two-character "开闭" pair, or a ("开" "闭") / ("开" "闭" 层数) list');
+  }
+  return out;
+}
 
 /** 单个字符属不属于某个类。用码点比而不是字符串大小比 —— 后者不在封闭 ABI 里。 */
 function inClass(name, cc) {
@@ -130,6 +177,15 @@ function matchTerm(t, src, pos) {
     if (pos >= src.length) return -1;
     const hit = t.items[1].value.indexOf(src[pos]) >= 0;
     return hit === (h === 'set') ? pos + 1 : -1;
+  }
+  /* `(until "关")`：吞到**第一个** `关` 之前为止（`关` 自己不吃）。这是这套贪心不回溯的
+     匹配器里唯一的非贪心项 —— 也就是正则的 `[\s\S]*?关`。块注释早就是这么扫的
+     （`(block-comment 开 关)`），这一格只是把同一件事拿给 token 规则用：
+     R 的原始串 `r"{…}"` 里面真会出现单个 `}`（`(?:…){0,2}` 这种正则），
+     写成 `(* (not "}"))` 会停在那个 `}` 上，而"扫到第一个 `}\"`"是对的。 */
+  if (h === 'until') {
+    const at = src.indexOf(t.items[1].value, pos);
+    return at < 0 ? -1 : at;
   }
   if (h === 'seq') return matchSeq(t.items, 1, src, pos);
   if (h === 'or') {
@@ -198,6 +254,12 @@ function checkTerm(t, diags) {
     if (!isStr(t.items[1]) || t.items.length !== 2) diags.error(t.span, `(${h} "chars") takes exactly one string`);
     return;
   }
+  if (h === 'until') {
+    if (!isStr(t.items[1]) || t.items.length !== 2 || t.items[1].value.length === 0) {
+      diags.error(t.span, '(until "关") takes exactly one non-empty string');
+    }
+    return;
+  }
   if (h === 'seq' || h === 'or' || REPEATS.has(h)) {
     if (t.items.length < 2) diags.error(t.span, `(${h} ...) needs at least one term`);
     for (const x of t.items.slice(1)) checkTerm(x, diags);
@@ -251,7 +313,7 @@ function condOk(cond, prevType, prevEnd, at) {
  *   keywords : Map<tokenType, Set<text>>
  *   keywordsFold : Set<tokenType> —— 这几格记号类型的关键字不分大小写（basic 那一族）
  *   stops    : 扫到就收工的那几段文本（`#!eof` 一族）
- *   autoSemi : `{type, text, after:Set, unlessBefore:[string]}` 或 null —— 跨过换行时补的那一格
+ *   autoSemi : `{type, text, after:Set, unlessBefore:[string], brackets}` 或 null —— 跨过换行时补的那一格
  *              （go 的 ASI）。`unlessBefore` 里那几段文本挡住它：下一格文本以它们起头就不补。
  *   indent   : `{nl, indent, dedent, brackets}` 或 null —— 缩进即块结构那一族（python / nim）
  *   joinAfter: Set<tokenType> 或 null —— 落在这些记号后面的换行是**续行**（nim 的 optInd）
@@ -336,14 +398,7 @@ export function readLexSpec(node, diags) {
       for (const x of it.items.slice(1)) {
         if (isAtom(x)) { nm.push(x.value); continue; }
         if (head(x) === 'brackets') {
-          for (const b of x.items.slice(1)) {
-            if (isStr(b) && b.value.length === 2) { brackets.push({ open: b.value.slice(0, 1), close: b.value.slice(1, 2) }); continue; }
-            if (isList(b) && b.items.length === 2 && isStr(b.items[0]) && isStr(b.items[1])) {
-              brackets.push({ open: b.items[0].value, close: b.items[1].value });
-              continue;
-            }
-            diags.error(b === null || b === undefined ? x.span : b.span, 'each (brackets …) entry is a two-character "开闭" pair or a ("开" "闭") pair of strings');
-          }
+          brackets = readBrackets(x, diags, true);
           continue;
         }
         diags.error(x === null || x === undefined ? it.span : x.span, 'unknown item in (indent …)');
@@ -382,15 +437,30 @@ export function readLexSpec(node, diags) {
        * 判据只能是"往前看一眼"，而这一眼词法器出得起 —— 补分号这件事发生在跳过空白
        * **之后**、读下一格记号**之前**，光标正停在那儿。
        *
-       * 只收字面文本、不收记号类型：这一格要在"还没切出记号"的时候判，手上只有字符。 */
+       * 只收字面文本、不收记号类型：这一格要在"还没切出记号"的时候判，手上只有字符。
+       *
+       * 再跟一句 `(brackets "()" "[]")`：**括号里面一格都不补**。R 要这一格 ——
+       * 它的词法器为此专门有一个 `contextstack`（`gram.y:3828`：
+       * `if (EatLines || *contextp == '[' || *contextp == '(') goto again;`），
+       * 而"往前看一眼"顶不掉它：`structure(list` 换行再接 `(height = …)` 这种写法里，
+       * 下一格文本是 `(` —— 它**真能**起一个表达式，所以不敢放进 unless-before。
+       *
+       * 注意 R 那句判的是**栈顶**，不是"栈里有没有" —— 所以还要一句
+       * `(brackets-clear "{}")`：花括号照旧入栈（它得盖住外面那层 `(`），但它**里面**
+       * 换行仍然是分隔符。`f(function(x) {` 换行 `…` 换行 `})` 这种写法（R 的标准库里
+       * 到处是）就靠这一格：少了它，`{…}` 里的语句会全挤成一条。
+       * 深度按**记号文本**数（串里的括号早就收成一个记号了，不会算进来）。 */
       const s = it.items[1];
       if (!isStr(s) || s.value.length === 0) { diags.error(it.span, '(auto-semi ";" after T...) needs the text to insert'); continue; }
       const kw = it.items[2];
       if (!isAtom(kw) || kw.value !== 'after') { diags.error(it.span, "(auto-semi \";\" after T...) needs the word 'after'"); continue; }
       const after = new Set();
       const unlessBefore = [];
+      let asBrackets = [];
       let mode = 'after';
       for (const x of it.items.slice(3)) {
+        if (isList(x) && head(x) === 'brackets') { asBrackets = asBrackets.concat(readBrackets(x, diags, true)); continue; }
+        if (isList(x) && head(x) === 'brackets-clear') { asBrackets = asBrackets.concat(readBrackets(x, diags, false)); continue; }
         if (isAtom(x) && x.value === 'unless-before') { mode = 'unless'; continue; }
         if (mode === 'unless') {
           if (isStr(x) && x.value.length > 0) unlessBefore.push(x.value);
@@ -404,7 +474,9 @@ export function readLexSpec(node, diags) {
       if (after.size === 0) diags.error(it.span, '(auto-semi ...) needs at least one trigger token');
       if (mode === 'unless' && unlessBefore.length === 0) diags.error(it.span, '(auto-semi ... unless-before "…") needs at least one string');
       if (autoSemi !== null) diags.error(it.span, 'a lexer spec may have at most one (auto-semi ...) form');
-      autoSemi = { type: litName(s.value), text: s.value, after, unlessBefore };
+      autoSemi = {
+        type: litName(s.value), text: s.value, after, unlessBefore, brackets: asBrackets,
+      };
       continue;
     }
     if (h === 'token') {
@@ -663,9 +735,16 @@ export function lexText(spec, file, diags) {
   let prevType = null;
   /** 上一个记号的结束位置 —— 自动分号要知道"这中间有没有跨过换行" */
   let prevEnd = 0;
-  /** 缩进栈与括号深度：只有 `(indent …)` 那一族用得到 */
+  /** 缩进栈与**括号栈**：`(indent …)` 与 `(auto-semi … (brackets …))` 两族用得到 */
   const cols = [0];
-  let depth = 0;
+  /* 一层一格布尔（这一层要不要压住"补分号"）。**是栈不是计数** —— R 判的是
+     `*contextp == '['` 与 `== '('`，也就是**栈顶**：`f(function(x) { … })` 里面那几个换行
+     照旧是分隔符，因为栈顶是 `{`。计数版在这批语料上量过，962 份从 940 掉到 728。 */
+  const nest = [];
+  /* 括号表只有一份来源：谁声明了 `(brackets …)` 就用谁的（两族不会同时声明 —— 有缩进栈的
+     语言括号里本来就不出换行记号，不必再补分号）。 */
+  const depthBrackets = spec.indent !== null ? spec.indent.brackets
+    : (spec.autoSemi !== null ? spec.autoSemi.brackets : []);
 
   const push = (type, text, at, end) => {
     const span = mkSpan(file, at, end);
@@ -713,9 +792,9 @@ export function lexText(spec, file, diags) {
     // ---- 1a') 缩进（python / nim / mojo 那一族）。**只在括号外面算** ——
     //          括号里面换行是"续行"，那是这几门语言共同的规矩（隐式行连接）。
     //          空行与纯注释行不出记号：量完缩进再跳一遍 trivia，又停在换行上就说明这一行是空的。
-    if (spec.indent !== null && depth > 0) {
+    if (spec.indent !== null && nest.length > 0) {
       /* 括号里面：换行是**续行**，一个记号都不发 —— 吃掉它与后面那截缩进就行。
-         这一格与 depth === 0 那一格是同一件事的两面，所以摆在一起。 */
+         这一格与"栈空"那一格是同一件事的两面，所以摆在一起。 */
       for (;;) {
         const before = i;
         while (i < src.length) {
@@ -727,7 +806,7 @@ export function lexText(spec, file, diags) {
         if (i === before) break;
       }
     }
-    if (spec.indent !== null && depth === 0) {
+    if (spec.indent !== null && nest.length === 0) {
       let sawNL = false;
       let col = 0;
       for (;;) {
@@ -773,7 +852,9 @@ export function lexText(spec, file, diags) {
 
     // ---- 1a) 自动分号（go 的 ASI）。**在跳过之后判**：跳掉的注释里那些换行也算跨过了。
     //          文件尾也补一格 —— 不然最后一条语句收不了尾。
-    if (spec.autoSemi !== null && prevType !== null && spec.autoSemi.after.has(prevType)) {
+    //          声明了 `(brackets …)` 的话，**括号里面一格都不补**（R 的 contextstack）。
+    if (spec.autoSemi !== null && prevType !== null && spec.autoSemi.after.has(prevType)
+        && !(nest.length > 0 && nest[nest.length - 1])) {
       const gap = src.slice(prevEnd, i >= src.length ? src.length : i);
       let blocked = false;
       if (i < src.length) {
@@ -889,12 +970,10 @@ export function lexText(spec, file, diags) {
     }
     toks.push({ type, node: { kind: 'atom', value: text, span }, span });
     prevType = type;
-    /* 括号深度按**记号文本**数：串里的括号早就被收成一个记号了，不会算进来。 */
-    if (spec.indent !== null) {
-      for (const b of spec.indent.brackets) {
-        if (text === b.open) { depth++; break; }
-        if (text === b.close) { if (depth > 0) depth--; break; }
-      }
+    /* 括号栈按**记号文本**推：串里的括号早就被收成一个记号了，不会算进来。 */
+    for (const b of depthBrackets) {
+      if (text === b.open) { for (let k = 0; k < b.weight; k++) nest.push(b.suppress); break; }
+      if (text === b.close) { if (nest.length > 0) nest.pop(); break; }
     }
   }
 

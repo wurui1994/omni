@@ -1,0 +1,15 @@
+{
+  "grammar": "r.grammar",
+  "doc": "语料 = R 自己那棵树（`r-source`）里的 .R 与 .r：`src/library/*/R/` 是标准库的真源码（base / stats / utils / graphics …），`tests/` 是回归测试。树不在就跳过。语法的正本是同一棵树里的 src/main/gram.y。",
+  "corpus": [
+    { "tree": "r-source", "env": "R_SRC", "ext": ".R" },
+    { "tree": "r-source", "env": "R_SRC", "ext": ".r" }
+  ],
+  "invalid-doc": "四份**本来就不该读得下来**的（挑到具体文件，不按目录一刀切 —— 同目录的 f1.R 是好的）：前三份是为 PR#17859 造的包，`f2.R` 自带注释 `## parse error .... unexpected symbol`，`PR17859.2/R/f3.R` 把开头那个 `}` 的配对留在了上一个文件里（`## to be continued in next file`）；`tests/utf8-regex.R` 不是脚本而是一段**交互记录** —— 它 `readLines(n = 2)`，紧跟着两行是喂给标准输入的 Latin-1 数据，不是 R 代码（那棵树里这一族是 `R --vanilla < x.R` 跑的）。",
+  "invalid": [
+    "/tests/Pkgs/PR17859.1/R/f2.R",
+    "/tests/Pkgs/PR17859.2/R/f2.R",
+    "/tests/Pkgs/PR17859.2/R/f3.R",
+    "/tests/utf8-regex.R"
+  ]
+}

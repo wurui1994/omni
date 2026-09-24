@@ -1,0 +1,369 @@
+;; ext/r/r.grammar —— R（GNU R 4.7.0-devel），照 **R 自己那份 bison** 复刻
+;;
+;; 正本是参考树里的 `r-source/src/main/gram.y`：产生式逐条照抄它第 446–568 行那 78 条，
+;; 优先级表逐行照抄第 421–442 行。**不自己设计语法** —— R 的语法算这批语言里最小的一份
+;; （74 终结符 / 12 非终结符 / 93 条产生式 / 173 状态，比 chez 那 12 条多、比 lua 那 104 条少）。
+;;
+;; 那份 `.y` 我们**直接读得动**（ADR-0034 的导入器）：
+;;     omni glr y    <参考树>/src/main/gram.y     # 转成 (grammar …) 正文
+;;     omni glr table <参考树>/src/main/gram.y    # 建表，93 条产生式 173 状态
+;; 所以这一份不是"手抄一遍"，是**照着转出来的那段文本改三处**。三处都写在下面，各有根因。
+;; `tests/glr/y/run-r.js` 那一格盯着这件事：那份 `.y` 要一直转得出来、建得出来。
+;;
+;; ## 与那份 `.y` 的三处差别
+;;
+;; **一、一条候选式一个标签。** 转出来的文本里动作只留左部名字，于是
+;; `(-> (NUM_CONST) (expr $1))` 与 `(-> (SYMBOL) (expr $1))` 出的节点一模一样 —— 而 CST 里
+;; **没有记号类别**（`glr/driver.js:356` 移进时只留 `tk.node`，把 `tk.type` 丢掉了）。
+;; adapter 分不开"这是个数还是个名字"。所以照 `ext/chez/chez.grammar` 的规矩，一条候选式
+;; 一个标签：`(num …)` / `(str …)` / `(sym …)` / `(null)` / `(placeholder)`。
+;; 二元算符那一族**刻意共用一个 `bin` 标签**、算符文本由 `$2` 带上来 —— 这正是 R 自己的
+;; `xxbinary($2,$1,$3)`：`<-` / `<<-` / `:=` 三个写法都是 LEFT_ASSIGN，分开它们只能看文本。
+;;
+;; **二、词法要自己写。** R 的词法是那份 `.y` 第二个 `%%` 之后的手写 C（`token()` / `yylex()`
+;; / `NumericValue` / `SpecialValue` / `SymbolValue`），不是 `.l`。逐条落成 `(lex …)`，
+;; 唯一难的一格是**换行**，见下面 auto-semi 那段账。
+;;
+;; **三、顶层多一条 `program`。** R 的 `prog` 是"一次一条表达式"（`END_OF_INPUT` / `'\n'` /
+;; `';'` 各一条候选式，C 那侧 `R_ParseVector` 循环调用 parser）。读整份文件得有一条
+;; `program : exprlist` —— 这是唯一一处**结构性**增补，`prog` 那 5 条跟着删掉。
+
+(grammar r
+  ;; 照 gram.y:401–418。`COMMENT` / `LINE_DIRECTIVE` / `INCOMPLETE_STRING` / `ERROR` /
+  ;; `END_OF_INPUT` 不要：前两个是 `getParseData` 那一格用的（我们把注释当空白跳掉），
+  ;; 后三个是错误路径上的记号。`SYMBOL_FORMALS` / `EQ_FORMALS` / `EQ_SUB` / `SYMBOL_SUB` /
+  ;; `SYMBOL_FUNCTION_CALL` / `SYMBOL_PACKAGE` / `SLOT` 也不要 —— 它们**没有一条产生式用到**，
+  ;; 是 `modif_token()` 事后改记号类别用的（同样只服务 `getParseData`）。
+  (tokens NUM_CONST STR_CONST NULL_CONST SYMBOL PLACEHOLDER SPECIAL
+          FUNCTION FOR IN IF ELSE WHILE NEXT BREAK REPEAT
+          LEFT_ASSIGN RIGHT_ASSIGN EQ_ASSIGN LBB
+          GT GE LT LE EQ NE AND OR AND2 OR2
+          NS_GET NS_GET_INT PIPE PIPEBIND
+          ;; 只用来标 `%prec` 的伪终结符（gram.y:422–438）
+          LOW TILDE UNOT NOT UMINUS UPLUS)
+
+  ;; 优先级表，低到高 —— 逐行照抄 gram.y:421–442，一行不动、一行不加。
+  ;; 多出来的只有 `"**"`（见下面那条产生式）：R 在**词法层**把 `**` 换成 `^`，我们换不了
+  ;; 记号文本，只能在这儿与 `"^"` 同级。
+  (prec left "?")
+  (prec left LOW WHILE FOR REPEAT)
+  (prec right IF)
+  (prec left ELSE)
+  (prec right LEFT_ASSIGN)
+  (prec right EQ_ASSIGN)
+  (prec left RIGHT_ASSIGN)
+  (prec left "~" TILDE)
+  (prec left OR OR2)
+  (prec left AND AND2)
+  (prec left UNOT NOT)
+  (prec nonassoc GT GE LT LE EQ NE)
+  (prec left "+" "-")
+  (prec left "*" "/")
+  (prec left SPECIAL PIPE)
+  (prec left PIPEBIND)
+  (prec left ":")
+  (prec left UMINUS UPLUS)
+  (prec right "^" "**")
+  (prec left "$" "@")
+  (prec left NS_GET NS_GET_INT)
+  (prec nonassoc "(" "[" LBB)
+
+  (start program)
+  ;; ---- 词法。正本是 gram.y 第二个 `%%` 之后那段手写 C，一条一条对着落下来。
+  (lex
+    ;; `SkipSpace()`（gram.y）：空格 / 制表 / **换页**。`\f` 那一格不是凑数 ——
+    ;; `src/library/base/R/New-Internal.R` 里真有一个单独占一行的换页符（老式分页），
+    ;; 少了它那一份第一行就读不下去。
+    ;; **换行也在这儿跳掉** —— 它不是记号规则切出来的，是下面 auto-semi 在"跳过之后、
+    ;; 切下一格之前"照着跨过的那段空白补出来的（lex.js:733 那段）。
+    (skip (+ (or space (set "\u{c}"))))
+    ;; `SkipComment()`：`#` 到行尾。R 还认 `#line` 指令（LINE_DIRECTIVE），我们当普通注释。
+    (comment "#" (* (not "\n")))
+
+    ;; ---- 换行：这门语言唯一难的一格 ---------------------------------------------
+    ;;
+    ;; R 那侧是 `EatLines` 加一个 `contextstack`（gram.y:3826–3904）：换行先切出来，再问
+    ;; 三件事 ——「上一个记号是不是把表达式说完了」「现在在不在 `(` / `[` 里」「往下看一眼
+    ;; 是不是 `else`」。这三问一一对上 auto-semi 的三格：
+    ;;
+    ;;   * `after …` = **上一个记号能收尾**才补。就是 gram.y:3978–3986 那张 `EatLines = 0`
+    ;;     的名单（SYMBOL / PLACEHOLDER / STR_CONST / NUM_CONST / NULL_CONST / NEXT /
+    ;;     BREAK），加上 `)` `]` `}`（gram.y:4021–4037 那三格）。反过来说，算符与 `,`
+    ;;     `(` `[` `{` 之后的换行一个记号都不发 —— 那正是 gram.y:3914–3947 那张
+    ;;     `EatLines = 1` 的名单，**不必再列一遍**。
+    ;;   * `(brackets …)` = **在不在括号里**，就是 gram.y:3828 那句
+    ;;     `*contextp == '[' || *contextp == '('`。`[[` 要说"顶两层"：它是一个记号，
+    ;;     而闭合它的 `]]` 是两个 —— R 自己也往 contextstack 上推两格（gram.y:3990–3995）。
+    ;;     `{` 不在这张表里，与 R 一致（花括号里面换行**是**分隔符）。
+    ;;   * `unless-before …` = **往下看一眼**，顶的是 gram.y:3836–3898 那段"`if` 体后面
+    ;;     那个换行要看看下一个是不是 `else`"。`else` 后面跟的是空白或 `{` 或 `(` ——
+    ;;     **必须带上那一格**：`"else"` 光秃秃地写会按前缀撞上 `else.expr` 这个真名字
+    ;;     （`src/library/compiler/R/cmp.R` 里有），把两行粘成一行。
+    ;;
+    ;; 这三格齐了之后，R 那个 contextstack 里剩下的只有 `'i'`（if 体那一格），而它要干的
+    ;; 事在我们这边由 `(prec right IF)` / `(prec left ELSE)` 与上面那句 `unless-before`
+    ;; 一起承担。文件尾也补一格（lex.js:736 那段），不然最后一条语句收不了尾。
+    (auto-semi "\n" after SYMBOL NUM_CONST STR_CONST NULL_CONST PLACEHOLDER NEXT BREAK ")" "]" "}"
+      unless-before "else " "else\t" "else\n" "else\r" "else{" "else(" "else#"
+      (brackets "()" ("[[" "]" 2) "[]") (brackets-clear "{}"))
+
+    ;; ---- 数（`NumericValue`，gram.y:2588）。**摆在 SYMBOL 之前**：`.5` 两边都能匹配
+    ;; 2 个字符，同长时声明在前的赢，于是它是数而不是名字（R 靠 `typeofnext()` 分的同一件事）。
+    ;; `0x1.8p3` 那一支（十六进制带小数与二进制指数）要单列一条：进制前缀只许在开头。
+    ;; 尾巴上那个 `L`（整数）与 `i`（复数）照 R 收进记号文本里，值那一层由 adapter 认。
+    (token NUM_CONST "0" (set "xX") (+ hex) (? "." (* hex)) (? (set "pP") (? (set "+-")) (+ digit)) (? (set "Li")))
+    (token NUM_CONST (+ digit) (? "." (* digit)) (? (set "eE") (? (set "+-")) (+ digit)) (? (set "Li")))
+    (token NUM_CONST "." (+ digit) (? (set "eE") (? (set "+-")) (+ digit)) (? (set "Li")))
+
+    ;; ---- 原始串（`RawStringValue`，gram.y:3206）：`r"(…)"`，四种定界符 × 两种引号。
+    ;; **摆在 SYMBOL 之前**（它们以 `r` / `R` 起头）。收尾那一格用 `(until …)` ——
+    ;; 要扫到的是**两个字符**的 `)"`，不是一个 `)`：`src/library/tools/R/apitools.R` 里
+    ;; 那几条正则写成 `r"{…(?:…){0,2}…}"`，内容里就有单个 `}`，按单字符扫会在那儿断掉。
+    ;; R 还允许开定界符前后各若干个 `-` 来避开内容里的 `)"`——那要求"两侧个数相同"，
+    ;; 我们这套词法项表达不了，所以**不收**（那种会当成 `r` 与一个普通串，症状是报语法错）。
+    (token STR_CONST (set "rR") "\"(" (until ")\"") ")\"")
+    (token STR_CONST (set "rR") "\"[" (until "]\"") "]\"")
+    (token STR_CONST (set "rR") "\"{" (until "}\"") "}\"")
+    (token STR_CONST (set "rR") "\"|" (until "|\"") "|\"")
+    (token STR_CONST (set "rR") "'(" (until ")'") ")'")
+    (token STR_CONST (set "rR") "'[" (until "]'") "]'")
+    (token STR_CONST (set "rR") "'{" (until "}'") "}'")
+    (token STR_CONST (set "rR") "'|" (until "|'") "|'")
+
+    ;; ---- 串（`StringValue`，gram.y:2883）：两种引号同一个记号类别，R 也是这样。
+    (string STR_CONST "\"")
+    (string STR_CONST "'")
+    ;; 反引号是**名字**，不是串（R 那儿是 `StringValue(c, forSymbol=true)`，回 SYMBOL）——
+    ;; 所以类别写 SYMBOL，而形式用 `(string …)`：它认反斜杠转义，而 R 在反引号里**真的**
+    ;; 认（`tests/reg-tests-1c.R:303` 那一行就是 `` `\`` ``，PR#15621 的回归用例）。
+    ;; 写成普通 token（`"`" (* (not "`")) "`"`）的话那个转义的反引号会当成收尾，
+    ;; 从那儿起整份文件的引号奇偶性就反了 —— 症状出现在 167 行之后的一句注释里，
+    ;; 根因一点不明显。附带的好处：定界符与转义由词法层剥干净，adapter 拿到的就是名字本身。
+    ;; `(string …)` 那一支不过关键字表（lex.js:819 那个 continue），于是 `` `if` `` 仍是名字 ——
+    ;; 与 R 一致。
+    (string SYMBOL "`")
+
+    ;; ---- `%…%`（`SpecialValue`，gram.y:3345）。R 明写了中间不许有换行，照收。
+    (token SPECIAL "%" (* (not "%\n")) "%")
+
+    ;; ---- 名字（`SymbolValue` + `isValidName`，gram.y:3407 / 3365）：首字符是字母或 `.`，
+    ;; 往后是字母数字 / `.` / `_`。`_` 打头不是名字（R 那儿 `_` 单独是 PLACEHOLDER）。
+    ;; `...` 与 `..1` 走的就是这一条（R 的关键字表里 `...` 归 SYMBOL）。
+    ;; 明说的不足：R 在多字节 locale 下按 `iswalpha` 认名字，而我们的 `alpha` 只有 ASCII ——
+    ;; 于是带非 ASCII 字母的名字（参考树里有几份）读不了。
+    (token SYMBOL (or alpha ".") (* (or alnum "." "_")))
+
+    ;; ---- 关键字（`keywords[]`，gram.y:2174–2196），一格不多一格不少。
+    ;; `NA` / `TRUE` / `FALSE` / `Inf` / `NaN` / `NA_*` 在 R 那儿**都是 NUM_CONST** ——
+    ;; 不是"布尔"也不是"名字"，照它。
+    (keyword SYMBOL FUNCTION "function")
+    (keyword SYMBOL WHILE "while")
+    (keyword SYMBOL REPEAT "repeat")
+    (keyword SYMBOL FOR "for")
+    (keyword SYMBOL IF "if")
+    (keyword SYMBOL IN "in")
+    (keyword SYMBOL ELSE "else")
+    (keyword SYMBOL NEXT "next")
+    (keyword SYMBOL BREAK "break")
+    (keyword SYMBOL NULL_CONST "NULL")
+    (keyword SYMBOL NUM_CONST "NA" "TRUE" "FALSE" "Inf" "NaN"
+      "NA_integer_" "NA_real_" "NA_character_" "NA_complex_")
+
+    ;; ---- 算符（`token()` 那个 switch，gram.y:3517–3752）。最长匹配优先，所以
+    ;; `<<-` 赢 `<-` 赢 `<`、`:::` 赢 `::` 赢 `:` —— 不用另排一层。
+    ;; `:=` 在 R 那儿也回 LEFT_ASSIGN（gram.y:3665，注释说"no longer used"但词法还认）。
+    (punct PLACEHOLDER "_")
+    (punct LEFT_ASSIGN "<<-" "<-" ":=")
+    (punct RIGHT_ASSIGN "->>" "->")
+    (punct NS_GET_INT ":::")
+    (punct NS_GET "::")
+    (punct LBB "[[")
+    (punct AND2 "&&")
+    (punct OR2 "||")
+    (punct PIPE "|>")
+    (punct PIPEBIND "=>")
+    (punct EQ "==")
+    (punct NE "!=")
+    (punct LE "<=")
+    (punct GE ">=")
+    (punct LT "<")
+    (punct GT ">")
+    (punct AND "&")
+    (punct OR "|")
+    (punct EQ_ASSIGN "=")
+    (op "**" "^" "+" "-" "*" "/" ":" "?" "~" "$" "@" "!" "\\"
+        "(" ")" "[" "]" "{" "}" "," ";"))
+
+  ;; ---- 产生式。逐条对着 gram.y:446–568，顺序也照它 -----------------------------
+
+  ;; **差别三**：R 的 `prog` 是"一次一条"（`END_OF_INPUT` / `'\n'` / `';'` 各一条候选式），
+  ;; 读整份文件要有这一条。`exprlist` 直接借 `{…}` 那一格用的那条 —— R 的文件顶层与花括号
+  ;; 里面本来就是同一种东西（一串用 `;` 或换行隔开的表达式）。
+  (rule program
+    (-> (exprlist) (program $*1)))
+
+  ;; gram.y:453 `expr_or_assign_or_help`。名字缩成 eaoh（原名在下面每处都提一遍就太长了）。
+  ;;
+  ;; 那句 `(prec LOW)` **不在 R 的 `.y` 里**，是第四处差别，而且是必须的一处：
+  ;; `eaoh -> expr .` 与 `expr -> expr . 算符 expr` 撞出 28 处移进/归约冲突（`glr table` 里
+  ;; 那个 state 2），R 那份 `.y` 上同样撞 —— bison 的默认动作是**移进**，于是
+  ;; `\(q) q + 1` 的函数体是 `q + 1` 而不是 `(\(q) q) + 1`。我们这条路上"默认移进"不存在：
+  ;; 两支都活着，GLR 会老老实实报歧义（它就该报）。给这两条产生式挂上最低那一级
+  ;; （`LOW`，与 R 给 `function` 那条挂的是同一格）之后，28 处全部按"移进"定下来 ——
+  ;; **与 bison 的默认同解**，但是说出来的，不是默认出来的。
+  (rule eaoh
+    (-> (expr) (prec LOW) $1)
+    (-> (eaoh EQ_ASSIGN eaoh) (bin $2 $1 $3))
+    (-> (eaoh "?" eaoh) (bin $2 $1 $3)))
+
+  ;; gram.y:458 `expr_or_help`
+  (rule eoh
+    (-> (expr) (prec LOW) $1)
+    (-> (eoh "?" eoh) (bin $2 $1 $3)))
+
+  (rule expr
+    ;; gram.y:462–466。**一条一个标签**（差别一）：CST 里没有记号类别，
+    ;; 这五条要是都出 `(expr $1)`，adapter 就分不开数、串、名字。
+    (-> (NUM_CONST) (num $1))
+    (-> (STR_CONST) (str $1))
+    (-> (NULL_CONST) (null))
+    (-> (PLACEHOLDER) (placeholder))
+    (-> (SYMBOL) (sym $1))
+
+    (-> ("{" exprlist "}") (block $*2))
+    (-> ("(" eaoh ")") (paren $2))
+
+    ;; gram.y:471–475：`xxunary($1,$2)` —— 算符文本由 `$1` 带上来，五条共用一个标签，
+    ;; 与 R 自己那一条动作同形。
+    (-> ("-" expr) (prec UMINUS) (un $1 $2))
+    (-> ("+" expr) (prec UMINUS) (un $1 $2))
+    (-> ("!" expr) (prec UNOT) (un $1 $2))
+    (-> ("~" expr) (prec TILDE) (un $1 $2))
+    (-> ("?" eaoh) (un $1 $2))
+
+    ;; gram.y:477–498：`xxbinary($2,$1,$3)` —— 同一个标签、算符文本由 `$2` 带上来。
+    ;; 这一格不是省事：`<-` / `<<-` / `:=` 都是 LEFT_ASSIGN，`&&` 与 `&` 是两个记号但
+    ;; 语义差在"要不要向量化"上，分开它们只能看文本。R 自己也是这么干的。
+    (-> (expr ":" expr) (bin $2 $1 $3))
+    (-> (expr "+" expr) (bin $2 $1 $3))
+    (-> (expr "-" expr) (bin $2 $1 $3))
+    (-> (expr "*" expr) (bin $2 $1 $3))
+    (-> (expr "/" expr) (bin $2 $1 $3))
+    (-> (expr "^" expr) (bin $2 $1 $3))
+    ;; R 在**词法层**把 `**` 换成 `^`（gram.y:3714，1998 年留下来的 S 兼容）。我们换不了
+    ;; 记号文本，于是多这一条、算符文本写死成 `^` —— 出来的树与 R 的一模一样。
+    (-> (expr "**" expr) (prec "^") (bin "^" $1 $3))
+    (-> (expr SPECIAL expr) (bin $2 $1 $3))
+    (-> (expr "~" expr) (bin $2 $1 $3))
+    (-> (expr LT expr) (bin $2 $1 $3))
+    (-> (expr LE expr) (bin $2 $1 $3))
+    (-> (expr EQ expr) (bin $2 $1 $3))
+    (-> (expr NE expr) (bin $2 $1 $3))
+    (-> (expr GE expr) (bin $2 $1 $3))
+    (-> (expr GT expr) (bin $2 $1 $3))
+    (-> (expr AND expr) (bin $2 $1 $3))
+    (-> (expr OR expr) (bin $2 $1 $3))
+    (-> (expr AND2 expr) (bin $2 $1 $3))
+    (-> (expr OR2 expr) (bin $2 $1 $3))
+    ;; gram.y:495–496：管道那两格不是 `xxbinary` —— `|>` 是**语法糖**（`x |> f()` 展开成
+    ;; `f(x)`，展开在 `xxpipe` 里做），`=>` 要那个占位符。所以各给一个标签。
+    (-> (expr PIPE expr) (pipe $1 $3))
+    (-> (expr PIPEBIND expr) (pipebind $2 $1 $3))
+    (-> (expr LEFT_ASSIGN expr) (bin $2 $1 $3))
+    ;; gram.y:498 `xxbinary($2,$3,$1)` —— **实参反着摆**（`a -> b` 就是 `b <- a`），
+    ;; 而且 R 在词法层就把名字换成了 `<-` / `<<-`（`install_and_save2`，gram.y:3617）。
+    ;; 两件事我们都做不到，所以单给一个标签，让 adapter 去翻。
+    (-> (expr RIGHT_ASSIGN expr) (bin-rev $2 $1 $3))
+
+    ;; gram.y:499–501：`function(…)` 与 `\(…)` 是**同一个**东西（后者的函数名由
+    ;; `R_FunctionSymbol` 顶上），所以同一个标签。那个 `cr` 是 R 自己写在 `.y` 里的。
+    (-> (FUNCTION "(" formlist ")" cr eaoh) (prec LOW) (fn (formals $*3) $6))
+    (-> ("\\" "(" formlist ")" cr eaoh) (prec LOW) (fn (formals $*3) $6))
+
+    (-> (expr "(" sublist ")") (call $1 $*3))
+    ;; gram.y:503–504：悬挂 else 靠 `(prec right IF)` + `(prec left ELSE)` 定 —— 与 R 同一格。
+    ;; `ELSE` 后面那个 `cr`：R 在 `case ELSE: EatLines = 1`（gram.y:3962）。
+    (-> (IF ifcond eaoh) (if $2 $3))
+    (-> (IF ifcond eaoh ELSE cr eaoh) (if $2 $3 $6))
+    (-> (FOR forcond eaoh) (prec FOR) (for $2 $3))
+    (-> (WHILE cond eaoh) (while $2 $3))
+    ;; `REPEAT` 也置 EatLines（gram.y:3934），所以这儿也要一格 `cr`
+    (-> (REPEAT cr eaoh) (repeat $3))
+
+    ;; gram.y:508–509：`[[…]]` 与 `[…]` 是两种下标（前者取元素、后者取子集），
+    ;; 语义不同 —— 两个标签。`]` `]` 两格是 R 自己的写法（词法只把 `[[` 粘成一个记号）。
+    (-> (expr LBB sublist "]" "]") (sub2 $1 $*3))
+    (-> (expr "[" sublist "]") (sub1 $1 $*3))
+
+    ;; gram.y:510–521：`::` / `:::` / `$` / `@` 四族。R 这儿也是 `xxbinary`，但右边那格
+    ;; 是**裸记号**（SYMBOL 或 STR_CONST）。包一层 `(sym …)` / `(str …)` 让子节点与别处同形 ——
+    ;; 不包的话 adapter 在这四族上又要重新面对"这是名字还是串"。
+    (-> (SYMBOL NS_GET SYMBOL) (bin $2 (sym $1) (sym $3)))
+    (-> (SYMBOL NS_GET STR_CONST) (bin $2 (sym $1) (str $3)))
+    (-> (STR_CONST NS_GET SYMBOL) (bin $2 (str $1) (sym $3)))
+    (-> (STR_CONST NS_GET STR_CONST) (bin $2 (str $1) (str $3)))
+    (-> (SYMBOL NS_GET_INT SYMBOL) (bin $2 (sym $1) (sym $3)))
+    (-> (SYMBOL NS_GET_INT STR_CONST) (bin $2 (sym $1) (str $3)))
+    (-> (STR_CONST NS_GET_INT SYMBOL) (bin $2 (str $1) (sym $3)))
+    (-> (STR_CONST NS_GET_INT STR_CONST) (bin $2 (str $1) (str $3)))
+    (-> (expr "$" SYMBOL) (bin $2 $1 (sym $3)))
+    (-> (expr "$" STR_CONST) (bin $2 $1 (str $3)))
+    (-> (expr "@" SYMBOL) (bin $2 $1 (sym $3)))
+    (-> (expr "@" STR_CONST) (bin $2 $1 (str $3)))
+
+    (-> (NEXT) (next))
+    (-> (BREAK) (break)))
+
+  ;; gram.y:527–533。三条各自一格非终结符（R 也是三格：`xxcond` / `xxifcond` / `xxforcond`
+  ;; 三个动作不同）。尾巴上那个 `cr` 是那三个动作里的 `EatLines = 1`（gram.y:1031/1037/1069）——
+  ;; 它就是 `if (x)` 换行再写函数体那件事，R 靠**归约时置标志**做，我们只能写进语法。
+  (rule cond
+    (-> ("(" eoh ")" cr) $2))
+  (rule ifcond
+    (-> ("(" eoh ")" cr) $2))
+  (rule forcond
+    (-> ("(" SYMBOL IN eoh ")" cr) (forcond (sym $2) $4)))
+
+  ;; gram.y:537–543。列表按 `ext/awk/awk.grammar` 的规矩写成**无头的表**，上面用 `$*k` 摊开。
+  ;; 六条候选式一条不动：于是"最后一项可以不带收尾"「连着的 `;` 与换行都行」都是语法上的
+  ;; 事实。空的那一条让"整份文件只有注释"也读得下来。
+  (rule exprlist
+    (-> () ())
+    (-> (eaoh) ($1))
+    (-> (exprlist ";" eaoh) ($*1 $3))
+    (-> (exprlist ";") ($*1))
+    (-> (exprlist "\n" eaoh) ($*1 $3))
+    (-> (exprlist "\n") ($*1)))
+
+  ;; gram.y:545–557。`sub` 的空那一条是 R 的 `x[,1]` / `f(a,)` —— **不能删**。
+  ;; `名字 =` 与 `名字 = 值` 分两条（前者是 `f(x=)`，真有人写）。
+  (rule sublist
+    (-> (sub) ($1))
+    (-> (sublist cr "," sub) ($*1 $4)))
+
+  (rule sub
+    (-> () (arg))
+    (-> (eoh) (arg $1))
+    (-> (SYMBOL EQ_ASSIGN) (named-arg (sym $1)))
+    (-> (SYMBOL EQ_ASSIGN eoh) (named-arg (sym $1) $3))
+    (-> (STR_CONST EQ_ASSIGN) (named-arg (str $1)))
+    (-> (STR_CONST EQ_ASSIGN eoh) (named-arg (str $1) $3))
+    (-> (NULL_CONST EQ_ASSIGN) (named-arg (null)))
+    (-> (NULL_CONST EQ_ASSIGN eoh) (named-arg (null) $3)))
+
+  ;; gram.y:559–565。R 那儿是四条 `xxfirstformal*` / `xxaddformal*`，摊开成一张表更直接。
+  ;; 两处 `cr` 是加的（R 靠"在 `(` 里"吞掉换行），形状与 `sublist` 那条一致。
+  (rule formlist
+    (-> () ())
+    (-> (SYMBOL) ((formal (sym $1))))
+    (-> (SYMBOL EQ_ASSIGN eoh) ((formal (sym $1) $3)))
+    (-> (formlist cr "," SYMBOL) ($*1 (formal (sym $4))))
+    (-> (formlist cr "," SYMBOL EQ_ASSIGN eoh) ($*1 (formal (sym $4) $6))))
+
+  ;; gram.y:567 `cr : { EatLines = 1; }` —— R 那儿是一条**空**产生式，作用全在那句动作上。
+  ;; 我们没有"置标志"这回事，于是它变成"这儿允许若干个换行"。R 的 `.y` 里 `cr` 出现在
+  ;; `sublist` 与 `function` 头两处，上面另外三处（cond / ifcond / forcond 的尾、ELSE 后、
+  ;; REPEAT 后）对应的是 xx* 动作里的 `EatLines = 1`。
+  (rule cr
+    (-> () (cr))
+    (-> (cr "\n") (cr))))
