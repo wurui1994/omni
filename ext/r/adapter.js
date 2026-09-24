@@ -29,7 +29,8 @@
 //      而 `&&` / `||` 有三态参与时**不短路**（原因在 `FN_DEPS` 那段账上）。
 //   3. **不做懒求值**（promise / `missing()` / `substitute()`）、**不做属性**
 //      （`names` / `dim` / `class`）、**不做 S3 / S4 / R5 分派**、**不做环境**
-//      （`<<-` 当普通赋值）、**不做 `...`**。用户函数的形参与返回类型也不跟踪（都按 int 推）。
+//      （`<<-` 当普通赋值）、**不做 `...`**。用户函数的形参与返回类型是**从调用点推**的
+//      （`inferFns`）：同一个形参在不同调用点装不同**种**东西那一格没做（要运行期类型标签）。
 //   4. 内建只认下面 `BUILTINS` 那一张表，表外的名字当用户函数调（调不到就是链接期的错）。
 
 import { isList, tag, kids, leaf } from '../../src/core/lower/cst.js';
@@ -332,6 +333,21 @@ const NA_FNS = new Map([
 const needFn = new Set();
 const useFn = (name) => { needFn.add(name); return name; };
 
+/**
+ * **用户函数的形参与返回类型**（`ext/r/adapter.js` 文件头第 4 条那一格的第二半）。
+ *
+ * R 的函数没有类型标注，而方言那一层不推导只检查 —— 所以"`f` 的形参装什么、回什么"
+ * 必须在这儿答完。答案只能从**调用点**来：`half <- function(x) x / 2` 里 `x` 是什么，
+ * 要看 `half(3)` 传的是什么。于是这两张表由 `inferFns()` 扫一遍全程序填出来，
+ * 转两轮到不动点（`f` 调 `g`、`g` 又调 `f` 那种要第二轮才定得住）。
+ *
+ * 从前这一格是"形参一律 int、回值一律 int"，于是 `addone(c(1,2,3))` 当场报
+ * "第 1 个形参是 int，给的是 real*"，而 `f <- function(x) x > 2` 之后 `cat(f(1))`
+ * 印方言自己那套 `false`。
+ */
+const fnParams = new Map();
+const fnRets = new Map();
+
 /** 调一格生成出来的辅助函数（顺手把它记进 `needFn`）。 */
 const lglCall = (name, ...args) => ({ kind: 'call', fn: { kind: 'name', name: useFn(name) }, args });
 
@@ -578,7 +594,14 @@ function typeOfCall(x, types) {
       return t.kind === 'bool' || isLgl1(t) || isLglTy(t);
     }) ? RLGL : RVEC;
     case 'list': return dictOf(INT);
-    default: return INT;
+    default: {
+      /* 用户函数：`inferFns()` 扫调用点推出来的那张表（表外的名字才落 int）。
+         回 void 的那些（体尾是 `cat(…)` 那种）在这儿也按 int 报 —— 它们只该出现在
+         语句位上，而"顶层要不要自动印"那一问直接查 `fnRets`（见 `isAutoPrint`）。 */
+      if (fn === null) return INT;
+      const rt = fnRets.get(mangle(fn));
+      return rt === undefined || rt.kind === 'void' ? INT : rt;
+    }
   }
 }
 
@@ -589,9 +612,9 @@ function typeOfCall(x, types) {
  * 再定别的。同一个名字写过多次而类型不同时**后写的赢** —— 例子里不出现，
  * 真出现了那是这门语言要单独定的一条规矩，不该在这儿悄悄挑一个。
  */
-function inferTypes(body, params) {
+function inferTypes(body, params, seed) {
   const types = new Map();
-  for (const p of params) types.set(p, INT);
+  for (const p of params) types.set(p, seed?.get(p) ?? INT);
   const dicts = dictNames(body);
   for (const d of dicts) {
     const writes = [];
@@ -611,8 +634,83 @@ function inferTypes(body, params) {
   return types;
 }
 
-/** `inferTypes` 的一遍（见那边"两遍"的账）。 */
-function inferRound(body, params, types) {
+/**
+ * **两格类型合起来取宽的那一个**（形参要装得下所有调用点传进来的东西）。
+ *
+ * 次序是 `int < real < 向量`，串与表自己一档。这不是"类型格"上的正经 join ——
+ * R 里一个形参真的能一会儿收数、一会儿收串，那一层要运行期的类型标签（`SEXPTYPE`），
+ * 这一档没有。所以规矩是：**两边对不上就留先来的那个**，而不是挑一个"兼容"的假答案。
+ */
+function widenTy(a, c) {
+  if (a === undefined) return c;
+  if (c === undefined) return a;
+  if (isVecTy(a)) return isLglTy(a) && !isLglTy(c) && isVecTy(c) ? c : a;
+  if (isVecTy(c)) return c;
+  if (a.kind === c.kind) return isLgl1(a) && !isLgl1(c) ? c : a;
+  if (a.kind === 'string' || c.kind === 'string') return a.kind === 'string' ? a : c;
+  if (a.kind === 'map' || c.kind === 'map') return a.kind === 'map' ? a : c;
+  /* 剩下的是 int / real / bool 三格：real 最宽，bool 只在两边都是 bool 时留住 */
+  if (a.kind === 'real' || c.kind === 'real') return REAL;
+  if (a.kind === 'int' || c.kind === 'int') return INT;
+  return a;
+}
+
+/** 走遍一棵子树，每一格"名字 + 实参"的调用回调一次。 */
+function eachCall(x, fn) {
+  if (!isList(x)) return;
+  if (tag(x) === 'call' && tag(kids(x)[0]) === 'sym') fn(nameOf(kids(x)[0]), x);
+  for (const k of kids(x)) eachCall(k, fn);
+}
+
+/**
+ * **把用户函数的形参与返回类型推出来**（填 `fnParams` / `fnRets`）。
+ *
+ * 只有一处信息源：调用点。所以一轮是"按现在这份形参类型把每段的局部类型推一遍 →
+ * 扫所有调用点、把实参类型并进形参 → 重算每个函数的返回类型"。
+ *
+ * 转**三轮**：一轮定住"顶层直接调的那些"，二轮定住"函数里调函数"，三轮让返回类型跟上
+ * （`g` 的返回值当 `f` 的实参那种）。不动点在这一档一定存在 —— `widenTy` 只往宽走，
+ * 而宽度是有限的（int → real → 向量）。
+ */
+function inferFns(fns, rest) {
+  const formalsOf = (node) => kids(kids(node)[0]).map((f) => mangle(nameOf(kids(f)[0])));
+  const mainBlock = { kind: 'list', items: [{ kind: 'atom', value: 'block' }, ...rest] };
+  for (const f of fns) {
+    if (!fnParams.has(f.name)) fnParams.set(f.name, formalsOf(f.node).map(() => INT));
+    if (!fnRets.has(f.name)) fnRets.set(f.name, INT);
+  }
+  const byName = new Map(fns.map((f) => [f.name, f]));
+  for (let round = 0; round < 3; round++) {
+    /* 1) 每段按现在这份形参类型推一遍局部类型（顶层那段没有形参） */
+    const scopes = [{ body: mainBlock, types: inferTypes(mainBlock, []) }];
+    for (const f of fns) {
+      const ps = formalsOf(f.node);
+      const seed = new Map(ps.map((p, k) => [p, fnParams.get(f.name)[k]]));
+      scopes.push({ body: kids(f.node)[1], types: inferTypes(kids(f.node)[1], ps, seed) });
+    }
+    /* 2) 扫所有调用点，把实参类型并进形参 */
+    for (const sc of scopes) {
+      eachCall(sc.body, (name, node) => {
+        const target = byName.get(mangle(name));
+        if (target === undefined) return;
+        const cur = fnParams.get(target.name);
+        posArgs(node).forEach((a, k) => {
+          if (k >= cur.length) return;
+          cur[k] = widenTy(cur[k], typeOfExpr(a, sc.types));
+        });
+      });
+    }
+    /* 3) 返回类型（要在形参定住之后算，所以摆在这一轮的末尾） */
+    for (const f of fns) {
+      const ps = formalsOf(f.node);
+      const seed = new Map(ps.map((p, k) => [p, fnParams.get(f.name)[k]]));
+      const local = inferTypes(kids(f.node)[1], ps, seed);
+      fnRets.set(f.name, returnType(kids(f.node)[1], local) ?? { kind: 'void' });
+    }
+  }
+}
+
+/** `inferTypes` 的一遍（见那边"两遍"的账）。 */function inferRound(body, params, types) {
   forNames(body, types);
   /* 同一个名字写过多次：**串赢、其次实数赢**（`t <- 0` 之后 `t <- t + 2.5`，t 是 double）。
      R 那边这不是"类型"而是"这一刻装着什么"，而方言那侧一个名字只有一种类型 ——
@@ -1580,7 +1678,23 @@ function callOf(x, types, extra, want) {
     }
   }
   if (fn === null) throw new Error('r->IR: 只接"名字 + 实参"那种调用（函数值还没接）');
-  return { kind: 'call', fn: { kind: 'name', name: mangle(fn) }, args: all.map((a, i) => ev(i)) };
+  /* 用户函数：形参类型是 `inferFns()` 推出来的，所以实参这一侧要按它对齐
+     （`half(3)` 里 `x` 已经定成 real，那个 `3` 得先加宽 —— 方言那层不隐式转）。 */
+  const ptys = fnParams.get(mangle(fn));
+  return {
+    kind: 'call',
+    fn: { kind: 'name', name: mangle(fn) },
+    args: all.map((a, i) => {
+      const e = ev(i);
+      const pt = ptys === undefined ? undefined : ptys[i];
+      if (pt === undefined) return e;
+      const at = a === null ? undefined : typeOfExpr(a, types);
+      if (pt.kind === 'real' && at !== undefined && (at.kind === 'int' || at.kind === 'bool')) {
+        return asReal(e, at);
+      }
+      return e;
+    }),
+  };
 }
 
 /**
@@ -1624,10 +1738,9 @@ function printOf(x, types) {
  * R 在顶层（REPL 与 `Rscript`）对**可见的**值自动调 `print`：`x` 单独一行会印
  * `[1] 3`。赋值、`for` / `while`、`cat()`、`invisible()` 都是不可见的。
  *
- * 这儿只对**认得出类型**的那几种自动印：字面量、名字、下标、一元/二元算式、以及
- * `BUILTINS` 里那些回值类型明确的内建。**用户函数的调用刻意不印** —— 这一档不跟踪
- * 用户函数的回值类型（`f <- function(x) cat(x)` 是 void），照 int 猜着印会把
- * "本来好用的"那一格弄成编译期错误。明写在 SPEC。
+ * 用户函数的调用也印 —— 靠 `inferFns()` 推出来的返回类型分：**回 void 的不印**
+ * （`f <- function(x) cat(x)` 在 R 里交的是 `cat` 的 `NULL`，也不印）。
+ * 这一格从前是"一律不印"，那是因为那时还没有返回类型这张表。
  */
 const NO_AUTOPRINT = new Set(['cat', 'print', 'invisible', 'return', 'seq_len']);
 function isAutoPrint(k) {
@@ -1635,7 +1748,10 @@ function isAutoPrint(k) {
   if (t === 'bin') return !isAssign(k);
   if (t === 'call') {
     const f = tag(kids(k)[0]) === 'sym' ? nameOf(kids(k)[0]) : null;
-    return f !== null && BUILTINS.has(f) && !NO_AUTOPRINT.has(f);
+    if (f === null || NO_AUTOPRINT.has(f)) return false;
+    if (BUILTINS.has(f)) return true;
+    const rt = fnRets.get(mangle(f));
+    return rt !== undefined && rt.kind !== 'void';
   }
   return ['sym', 'num', 'str', 'un', 'sub1', 'sub2', 'pipe'].includes(t);
 }
@@ -3312,7 +3428,9 @@ function fnDecl(name, node, types) {
     }
   }
   const body = kids(node)[1];
-  const local = inferTypes(body, params);
+  /* 形参类型来自 `inferFns()` 扫出来的那张表（表外 —— 没人调过 —— 才落 int）。 */
+  const seed = new Map((fnParams.get(name) ?? []).map((t, k) => [params[k], t]));
+  const local = inferTypes(body, params, seed);
   const stmts = tailBody(body, local);
   const decls = [];
   for (const [n, t] of local) {
@@ -3322,7 +3440,7 @@ function fnDecl(name, node, types) {
   }
   const all = [...decls, ...stmts];
   /* 回什么：拿最后那一格带值的 `return` 里的表达式类型算（`local` 已经推完了）。 */
-  const ret = all.some((s) => hasValueReturn(s)) ? returnType(body, local) : { kind: 'void' };
+  const ret = all.some((s) => hasValueReturn(s)) ? (returnType(body, local) ?? INT) : { kind: 'void' };
   return {
     kind: 'fn',
     name,
@@ -3362,9 +3480,16 @@ function returnType(body, types) {
     for (const k of kids(x)) walkAll(k);
   };
   walkAll(body);
-  if (seen.length === 0) return INT;
+  /* 一处带值的尾位都没有 → `null`（"这个函数不交值"）。调用方各自决定那是 `void`
+     还是 int：`fnDecl` 那边已经按 `hasValueReturn` 判过一遍，`inferFns` 要的是 void
+     —— 顶层自动印靠它分"要不要印"（`f <- function(x) cat(x)` 印不出东西来）。 */
+  if (seen.length === 0) return null;
   if (seen.some((t) => t.kind === 'string')) return STR;
   if (seen.some((t) => isVecTy(t) || t.kind === 'map')) return seen.find((t) => isVecTy(t) || t.kind === 'map');
+  /* **三态逻辑要留住那个记号**：`f <- function(x) x > 2` 回的是逻辑，不是普通 double
+     （丢了它 `cat(f(1))` 会印 `1` / `0` 而不是 `TRUE` / `FALSE`）。
+     每一处尾位都是三态才算 —— 混着数出来的那种（一支 `x > 2`、一支 `0`）按数算。 */
+  if (seen.every((t) => isLgl1(t))) return RLGL1;
   if (seen.some((t) => t.kind === 'real')) return REAL;
   if (seen.every((t) => t.kind === 'bool')) return BOOL;
   return INT;
@@ -3382,6 +3507,8 @@ export function rToIR(tree) {
   tmpN = 0;
   cabiUsed.clear();
   needFn.clear();
+  fnParams.clear();
+  fnRets.clear();
   const items = kids(tree);
   const fns = [];
   const rest = [];
@@ -3395,8 +3522,10 @@ export function rToIR(tree) {
     }
     rest.push(item);
   }
-  const decls = fns.map((f) => fnDecl(f.name, f.node, new Map()));
-  /* 顶层剩下的那些：拼成一格假的 `(block …)` 交给同一条推断与同一条降级。 */
+  /* **先把用户函数的形参与返回类型推出来**（扫调用点，转三轮）—— 发之前必须定住，
+     不然 `half(3)` 里 `x` 还是 int，而函数体里 `x / 2` 已经按 real 发了。 */
+  inferFns(fns, rest);
+  const decls = fns.map((f) => fnDecl(f.name, f.node, new Map()));  /* 顶层剩下的那些：拼成一格假的 `(block …)` 交给同一条推断与同一条降级。 */
   const mainBlock = { kind: 'list', items: [{ kind: 'atom', value: 'block' }, ...rest] };
   const types = inferTypes(mainBlock, []);
   const stmts = rest.map((k) => topStmtOf(k, types));
