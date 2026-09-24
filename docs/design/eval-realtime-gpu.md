@@ -1664,9 +1664,25 @@ RMSE 183 变成"逐像素相同" —— 那是**参考也变全黑了**，不是
 （strip/fan 要把最后一两个顶点带过去、quads/triangles 要对齐），还没做。
 `particules sparks` 28.3 → 29.5 是同一格的另一头（它也被截过，现在画得比参考多了一点）。
 
-### 28.8 这一轮之后的账
+### 28.8 参考的 `noise()` 是它自己写着的"占位实现"（`heightmap` / `texture` 不计分）
 
-**40 过 / 17 红 / 5 不计**（**28 份逐像素相同**、11 份够近、1 份只差一小撮格子；
+`c_impl/src/eval_impl/ed_misc.c:96`："Simple hash-based noise. Not as good as Ken's,
+but functional."、`:101`："Use sin-based pseudo-noise for now." —— 也就是说参考这一格
+**明写着不是原版那套**。我们这一侧是照 `polydraw.c:852-960`（Tom Dobrowolski 的梯度噪声）
+逐条写的，连置换表都按原版 `noiseinit()` 用的 MSVC `rand()` 重算
+（`ext/polydraw/noise-rt.js` 的头注记着两处明写的偏差：float/double、`dtol` 的取整）。
+
+一格三元探针（`noise(1.5,2.5)` / `noise(.25,7.75,3.5)` / `noise(13.125)` 塞进颜色）：
+我们 (255,100,128)、参考 (209,255,133) —— **三个元数全不一样**。
+
+于是 `heightmap`（高度场整个由 noise 定）与 `texture`（三张纹理里的第 1 张是 noise 生的、
+片元里 `mod(c.x+p.x+p.y,3)` 把三张混起来）裁进不计分。`texture` 那一条**会盖住它别的差**
+（抓屏那张、混合次序），修完噪声那一族之后要重裁。`curvybuild` 也用 noise（256² 的地毯纹理），
+但它这一轮才刚跑起来、还没查过别的，**先留着红**。
+
+### 28.9 这一轮之后的账
+
+**40 过 / 15 红 / 7 不计**（**28 份逐像素相同**、11 份够近、1 份只差一小撮格子；
 跑不起来从 4 份降到 3 份、全黑从 3 份降到 2 份）。
 剩下的按族：纹理三份（`texture` 49.2 / `mipmap` 48.4 / `texture3d` 28.8 —— 文件那一格已经
 对了，剩下的在**数组/抓屏**那两条路上）、`cubetex` 见 §28.4、几何着色器两份

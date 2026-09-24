@@ -76,6 +76,19 @@ const CFG = {
  * 里头还有一类不是"参考错"而是**脚本自己是未定义行为**（`gears.pss`）：那种谁也对不上谁。
  */
 const REF_WRONG = new Map([
+  ['heightmap.pss',
+    '**参考的 `noise()` 是它自己写着的"占位实现"**：`c_impl/src/eval_impl/ed_misc.c:96`'
+    + '（"Simple hash-based noise. Not as good as Ken\'s, but functional."）与 `:101`'
+    + '（"Use sin-based pseudo-noise for now."）。我们这一侧是照 `polydraw.c:852-960`'
+    + '（Tom Dobrowolski 那套梯度噪声）逐条写的，连置换表都按原版 `noiseinit()` 用的'
+    + ' MSVC `rand()` 重算（`ext/polydraw/noise-rt.js` 的头注写了两处明写的偏差）。'
+    + '一格三元探针量出来：`noise(1.5,2.5)` / `noise(.25,7.75,3.5)` / `noise(13.125)`'
+    + ' 我们 (255,100,128)、参考 (209,255,133) —— 三个元数全不一样，对不上也不该对。'
+    + '这一份的高度场整个由 `noise` 定，所以不计分'],
+  ['texture.pss',
+    '同 `heightmap`：三张纹理里的第 1 张是 `noise` 在 CPU 上生的，而参考的 `noise` 是占位'
+    + '实现（见那一条）。片元里 `mod(c.x+p.x+p.y,3)` 把三张混起来 ⇒ 大半张图都带着它。'
+    + '**这一条会盖住这一份别的差**（抓屏那一张、混合次序），修完噪声那一族之后要重裁'],
   ['clock.pss',
     '**这一份的画面跟着墙上的钟走，两边对不上也没法对**：脚本头一句是 `klock(1)`，'
     + '照 `polydraw.c:1662` 的 `myklock` 那是**打包的本地日期时间**（`YYYYMMDDHHMMSS.sss×.001`），'
