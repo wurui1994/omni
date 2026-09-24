@@ -97,7 +97,25 @@ export function glGlobalDecls() {
  * 名字照 `polydraw.c:2070` 的 `myext[]`（那张表里是大写 + 形参个数，例如
  * `"GLVERTEX(,,)"` 就是三参那一版）—— 这门语言名字不分大小写，adapter 已经折成小写。
  */
-export const POLYDRAW_GL = new Map([
+/**
+ * 一张"名字/元数 -> 生成出来的函数"的表，**同一个键来两次就当场报**。
+ *
+ * 为什么要这么一格：`new Map([...])` 对重复键是**后来者胜、一声不响**。这张表里
+ * 从前同时有 `['glnormal/3','gl_normal3']`（真的那一格）与 `['glnormal/3','gl_nop3']`
+ * （早年那条"收下不管"），于是**整格法向静默地成了空操作** —— 20 份脚本的法向全丢，
+ * `ken/drawsph.pss` 那 1909 个球拿着默认法向 (0,0,1)，画出来是一个大球（查了很久）。
+ * `rgb/3` 也这么被盖过一次。判据放在这一层：加错了就起不来。
+ */
+function uniqMap(pairs) {
+  const m = new Map();
+  for (const [k, v] of pairs) {
+    if (m.has(k)) throw new Error(`gl-rt: 宿主表里 '${k}' 来了两次（'${m.get(k)}' 与 '${v}'）`);
+    m.set(k, v);
+  }
+  return m;
+}
+
+export const POLYDRAW_GL = uniqMap([
   ['glclear/1', 'gl_clear'],
   ['glbegin/1', 'gl_begin'],
   ['glend/0', 'gl_end'],
@@ -180,8 +198,11 @@ export const POLYDRAW_GL = new Map([
   ['glsettex/6', 'gl_settex6'],
   ['glbindtexture/1', 'gl_bindtex'],
   ['glactivetexture/1', 'gl_activetex'],
-  /* 收下但不管的那几格（这条腿上没有光照/混合/剔除）。 */
-  ['glnormal/3', 'gl_nop3'],
+  /* 收下但不管的那几格（这条腿上没有混合/剔除）。
+     **`glnormal/3` 不在这儿**：它上头有一格真的（`gl_normal3`，§18）—— 这张表是
+     `new Map([...])`，同一个键**后头那一条会盖住前头那一条**，从前这儿留着一条
+     `['glnormal/3','gl_nop3']`，于是整格法向（20 份脚本用它）静默地成了空操作：
+     `ken/drawsph.pss` 那 1909 个球全都拿默认法向 (0,0,1)，画出来是**一个**大球。 */
   ['glenable/1', 'gl_enable'],
   ['gldisable/1', 'gl_disable'],
   ['glcullface/1', 'gl_nop1'],
@@ -192,8 +213,8 @@ export const POLYDRAW_GL = new Map([
   ['glalphaenable/0', 'gl_nop0'],
   ['glalphadisable/0', 'gl_nop0'],
   ['glalphadisable/1', 'gl_nop1'],
-  /* `RGB(r,g,b)` 把三个分量打成一个 24 位的数 —— 设备里已经有那一格。 */
-  ['rgb/3', 'gfx_rgb'],
+  /* `RGB(r,g,b)` / `RGBA(...)` 那两格在上头（`gl_rgb`/`gl_rgba`，夹到 0..255 再打包）——
+     这儿**不许再来一条** `['rgb/3','gfx_rgb']`：同键后来者胜，那一条会把上头那格盖掉。 */
 ]);
 
 /**
