@@ -72,3 +72,19 @@ cat(paste0("#", 1:3, collapse = "+"), "\n")
 print(labels[c(1, 3)])
 print(words[nchar(words) > 2])
 print(labels[c(TRUE, FALSE)])
+
+# 切开一行文本：R 那边 `strsplit` 回的是一张**表**，这一层没有"表里装向量"，所以只接
+# 真代码里那两种形状 —— `strsplit(s, sep)[[1]]` 与 `unlist(strsplit(s, sep))`。
+# `split=` 在 R 里默认是**正则**，所以只收"没有正则元字符的串字面量"或明写 `fixed = TRUE`。
+row <- "alice,30,nyc"
+fld <- strsplit(row, ",")[[1]]
+print(fld)
+cat(fld[1], "住在", fld[3], "\n")
+stopifnot(length(fld) == 3)
+print(unlist(strsplit("a b c", " ")))
+print(strsplit("a,b,", ",")[[1]])      # 末尾那格空串 R 不给
+print(strsplit("a,,b", ",")[[1]])      # 中间的空串要
+print(strsplit("abc", "")[[1]])        # 空 sep 是"一格一个字符"
+print(strsplit("a.b", ".", fixed = TRUE)[[1]])
+for (w in strsplit("x y z", " ")[[1]]) cat("<", w, ">", sep = "")
+cat("\n")

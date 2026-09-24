@@ -244,6 +244,7 @@ const FN_DEPS = new Map([
   ['r_padr', []],
   ['r_pad0', []],
   ['r_trim', []],
+  ['r_split', []],
   ['r_lgl_str', ['r_is_na']],
   ['r_any', ['r_is_na', 'r_na']],
   ['r_all', ['r_is_na', 'r_na']],
@@ -560,6 +561,7 @@ const NAMED_OK = new Map([
   ['head', new Set(['n'])], ['tail', new Set(['n'])],
   ['rep', new Set(['times'])],
   ['seq', new Set(['by'])],
+  ['strsplit', new Set(['fixed'])],
   ['numeric', new Set(['length'])], ['double', new Set(['length'])],
   ['integer', new Set(['length'])], ['logical', new Set(['length'])],
   ['character', new Set(['length'])],
@@ -584,8 +586,13 @@ const BUILTINS = new Set([
   /* 串那一族。`tolower` 方言里没有算子（只有 `(supper …)`），由 `r_lower` 拿两张字母表
      查出来 —— **只管 ASCII**（见 SPEC 第四节第 12 条）。 */
   'toupper', 'tolower', 'substr', 'substring', 'trimws', 'sprintf', 'startsWith', 'endsWith',
+  /* `strsplit` 只接两种形状（见 `splitOf`）：`strsplit(s, sep)[[1]]` 与
+     `unlist(strsplit(s, sep))` —— R 那边它回的是一张**表**，而这一层没有"表里装向量"。 */
+  'strsplit', 'unlist',
   /* "这是什么东西"那三问 —— 类型在这一层是**推出来的**，所以答案是编译期常量。 */
   'is.character', 'is.numeric', 'is.logical',
+  /* 停下来那一档（落方言的 `(fail …)`，只能摆在语句位上）。 */
+  'stop', 'stopifnot',
   /* 造一条"空的/零的"向量：`numeric(n)` 那一族与不带实参的 `c()`。`character(n)` 是字符向量。 */
   'numeric', 'double', 'integer', 'logical', 'character',
   /* 随机数那一族（发生器是 R 自己那一条，见 `RRAND`）。 */
@@ -702,6 +709,8 @@ function typeOfExpr(x, types) {
       return isLglTy(a) ? RLGL1 : REAL;
     }
     case 'sub2': {
+      /* `strsplit(s, sep)[[1]]` —— 那一格是一条字符向量（见 `splitOf`）。 */
+      if (isSplitCall(kids(x)[0])) return RSTRV;
       const d = typeOfExpr(kids(x)[0], types);
       if (d !== undefined && d.kind === 'map') return d.value;
       if (isVecTy(d)) return REAL;
@@ -777,6 +786,9 @@ function typeOfCall(x, types) {
     case 'as.character': return STR;
     case 'substr': case 'sprintf': return STR;
     case 'substring': case 'trimws': return STR;
+    /* `strsplit(…)[[1]]` 在 `sub2` 那一格答；`unlist(strsplit(…))` 与它同解。 */
+    case 'unlist': return args.length === 1 && isSplitCall(args[0]) ? RSTRV : INT;
+    case 'strsplit': return RSTRV;
     case 'is.character': case 'is.numeric': case 'is.logical': return BOOL;
     case 'toupper': return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RSTRV : STR;
     case 'startsWith': case 'endsWith': return BOOL;
@@ -829,6 +841,7 @@ function typeOfCall(x, types) {
     /* 随机数那一族：R 的 `runif(n, …)` 出的是**长度 n 的向量**（`runif(1)` 也是向量）。 */
     case 'sample': return RVEC;
     case 'set.seed': return { kind: 'void' };
+    case 'stop': case 'stopifnot': return { kind: 'void' };
     case 'prod': case 'var': case 'sd': return REAL;
     /* 这一批第一格是向量就逐元素（`sqrt(xs)`），标量进标量出。 */
     case 'sqrt': case 'exp': case 'log': case 'log2': case 'log10':
@@ -1304,6 +1317,46 @@ function sprintfOf(x, types) {
 }
 
 /**
+ * `strsplit(s, sep)` —— 按一段**定串**切开，回一条字符向量。
+ *
+ * R 那边它回的是一张**表**（每格一条字符向量），而这一层没有"表里装向量"那一格。
+ * 所以只接真代码里那两种形状：`strsplit(s, sep)[[1]]` 与 `unlist(strsplit(s, sep))` ——
+ * 两者同解（只有一个输入串时那张表就一格）。裸着写当场报，不假装。
+ *
+ * `split` 在 R 里默认是**正则**。所以这儿只收"没有正则元字符的串字面量"，或者明写了
+ * `fixed = TRUE`（那时任意字面量都行）。不是字面量的当场报 —— 那时没法知道它是不是正则。
+ */
+const RE_META = /[.\\|()[\]{}^$*+?]/;
+function splitOf(callNode, types) {
+  const args = posArgs(callNode);
+  if (args.length !== 2) {
+    throw new Error(`r->IR: strsplit() 要两格实参（给了 ${args.length}）`);
+  }
+  const fixedNode = namedArg(callNode, 'fixed');
+  const fixed = fixedNode !== undefined
+    && tag(fixedNode) === 'num' && ['TRUE', 'T'].includes(String(leaf(kids(fixedNode)[0])));
+  if (tag(args[1]) !== 'str') {
+    throw new Error('r->IR: strsplit() 的 `split=` 只接串字面量 —— R 那边它默认是**正则**，'
+      + '不是字面量就没法知道它是不是一条正则（正则那一层没有）');
+  }
+  const sep = String(leaf(kids(args[1])[0]));
+  if (!fixed && RE_META.test(sep)) {
+    throw new Error(`r->IR: strsplit() 的 "${sep}" 里有正则元字符 —— R 默认按正则切，`
+      + ' 而正则那一层没有。真想按定串切就写 `fixed = TRUE`');
+  }
+  const st = typeOfExpr(args[0], types);
+  if (st.kind !== 'string') throw new Error(`r->IR: strsplit() 的第一格实参要是一格串（是 ${st.kind}）`);
+  return {
+    kind: 'call',
+    fn: { kind: 'name', name: useFn('r_split') },
+    args: [exprOf(args[0], types), { kind: 'string', value: sep }],
+  };
+}
+/** 这一格是不是 `strsplit(…)` 那一次调用（`[[1]]` 与 `unlist` 两处都要问）。 */
+const isSplitCall = (node) => isList(node) && tag(node) === 'call'
+  && tag(kids(node)[0]) === 'sym' && nameOf(kids(node)[0]) === 'strsplit';
+
+/**
  * `r*` 那一族（`runif(n, …)`）→ 一条长度 n 的向量。
  *
  * nmath 那侧的每个函数**只出一个数**（`runif(a, b)`），而 R 那侧第一个实参是"要几个"——
@@ -1440,6 +1493,13 @@ function asLgl(e, t) {
 /** `x[…]` / `x[[…]]` 的读：按对象的类型分数组还是字典（见文件头第 5 条）。 */
 function indexRead(x, types) {
   const obj = kids(x)[0];
+  /* `strsplit(s, sep)[[1]]` —— 只有这一格下标有意义（R 那张表只有一格）。 */
+  if (isSplitCall(obj)) {
+    const ks = kids(x).slice(1).map((a) => kids(a)[0]).filter((k) => k !== undefined);
+    const one = ks.length === 1 && tag(ks[0]) === 'num' && String(leaf(kids(ks[0])[0])) === '1';
+    if (!one) throw new Error('r->IR: strsplit(…) 上只接 `[[1]]`（R 那张表只有一格）');
+    return splitOf(obj, types);
+  }
   const keys = kids(x).slice(1).map((a) => kids(a)[0]).filter((k) => k !== undefined);
   if (keys.length !== 1) throw new Error(`r->IR: 多维下标（x[i, j]）还没接（这儿给了 ${keys.length} 格）`);
   const ot = typeOfExpr(obj, types);
@@ -2333,6 +2393,15 @@ function callOf(x, types, extra, want) {
         if (n !== 1) throw new Error(`r->IR: trimws() 要一格实参（给了 ${n}）—— \`which=\` 没接`);
         return lglCall('r_trim', ev(0));
       }
+      case 'unlist': {
+        /* `unlist(strsplit(s, sep))` —— 与 `strsplit(s, sep)[[1]]` 同解（那张表只有一格）。 */
+        if (n === 1 && all[0] !== null && isSplitCall(all[0])) return splitOf(all[0], types);
+        throw new Error('r->IR: unlist() 只接 `unlist(strsplit(s, sep))` 那一种形状'
+          + '（这一层没有"表里装向量"，见 ext/r/SPEC.md）');
+      }
+      case 'strsplit':
+        throw new Error('r->IR: strsplit(…) 要写成 `strsplit(s, sep)[[1]]` 或'
+          + ' `unlist(strsplit(s, sep))` —— R 那边它回的是一张**表**，而这一层没有"表里装向量"');
       case 'is.character': case 'is.numeric': case 'is.logical': {
         /* 类型在这一层是**推出来的**（方言那侧没有运行期的类型标签），所以这三问的答案是
            编译期常量。R 的口径：`is.numeric(TRUE)` 是 FALSE、`is.numeric(1L)` 是 TRUE。 */
@@ -2382,6 +2451,8 @@ function callOf(x, types, extra, want) {
           + ' 而这一档没有"可见性"这一层）');
       case 'set.seed':
         throw new Error('r->IR: `set.seed()` 只能摆在语句位上（它回的是"不可见的 NULL"）');
+      case 'stop': case 'stopifnot':
+        throw new Error(`r->IR: \`${fn}()\` 只能摆在语句位上（它落的是方言的 \`(fail …)\`，那是一条语句）`);
       case 'sample': {
         /* R 的 `sample`：**回的是下标**（`sample.int`），向量那一档就是拿下标去挑。
            不放回那一条照 `do_sample` 的算法（每次抽一格、把末尾那格填进空位）——
@@ -2501,7 +2572,7 @@ function printOf(x, types) {
  * （`f <- function(x) cat(x)` 在 R 里交的是 `cat` 的 `NULL`，也不印）。
  * 这一格从前是"一律不印"，那是因为那时还没有返回类型这张表。
  */
-const NO_AUTOPRINT = new Set(['cat', 'print', 'invisible', 'return', 'set.seed']);
+const NO_AUTOPRINT = new Set(['cat', 'print', 'invisible', 'return', 'set.seed', 'stop', 'stopifnot']);
 function isAutoPrint(k) {
   const t = tag(k);
   if (t === 'bin') return !isAssign(k);
@@ -2752,6 +2823,28 @@ function stmtOf(x, types) {
       if (fn === 'return') {
         const vs = posArgs(x);
         return { kind: 'return', values: vs.length === 0 ? [] : [retVal(vs[0], types)] };
+      }
+      /* `stop(…)` / `stopifnot(…)` —— 停下来那一档，落方言的 `(fail E)`（它是**语句**）。
+         与 R 的差别有两处，明写在 SPEC：R 印 `Error: …` 并退出 1，我们印
+         `omni: runtime error: …` 并退出 70（方言里 `(fail …)` 的口径）；
+         `stopifnot` 的那句话 R 里是把**表达式本身**反解出来（`x > 0 is not TRUE`），
+         这一层没有 deparse，所以给的是一句固定的。 */
+      if (fn === 'stop' || fn === 'stopifnot') {
+        const vs = posArgs(x);
+        if (vs.length === 0) throw new Error(`r->IR: ${fn}() 要至少一格实参`);
+        if (fn === 'stop') {
+          const msg = vs.map((a) => asStr(a, types, 15)).reduce((acc, p) => b('+', acc, p));
+          return { kind: 'builtin-stmt', name: 'fail', args: [msg] };
+        }
+        return {
+          kind: 'block',
+          stmts: vs.map((a) => ({
+            kind: 'if',
+            cond: { kind: 'unop', op: '!', operand: condOf(a, types) },
+            then: [{ kind: 'builtin-stmt', name: 'fail', args: [{ kind: 'string', value: 'stopifnot: 有一格条件不成立' }] }],
+            else_: null,
+          })),
+        };
       }
       return { kind: 'expr-stmt', expr: exprOf(x, types) };
     }
@@ -3056,7 +3149,7 @@ function strFnDecl(name) {
 /** 这一批由 `strvFnDecl` 发（形状都是"一条 `(arr string)` 进"）。 */
 const STRV_FNS = new Set([
   'r_cat_str', 'r_print_str', 'r_join_str', 'r_rev_str', 'r_nchar_v', 'r_upper_v', 'r_lower_v',
-  'r_pick_str', 'r_mask_str',
+  'r_pick_str', 'r_mask_str', 'r_split',
 ]);
 
 /** 这一批由 `setFnDecl` 发（集合与位置那一族，见 `FN_DEPS` 上那段账）。 */
@@ -3573,6 +3666,52 @@ function strvFnDecl(name) {
           else_: null,
         }], nm('n')),
         { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  if (name === 'r_split') {
+    /* `strsplit(s, sep)[[1]]` —— 按一段**定串**切开。R 的三条口径（量出来的）：
+       空串进 → 零长；`sep` 是空串 → 一格一个字符；**末尾那格空串不要**
+       （`strsplit("a,b,", ",")` 是 `"a" "b"`，不是 `"a" "b" ""`）。
+       R 那边 `split` 默认是**正则**，所以这儿只收"没有正则元字符的定串"或 `fixed = TRUE`
+       （那一问在 `callOf` 里编译期就判了）。 */
+    const s = nm('s');
+    const sep = nm('sep');
+    const o = nm('o');
+    const pos = nm('p');
+    const rest = call1('ssub', s, pos, b('-', nm('n'), pos));
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 's', type: STR }, { name: 'sep', type: STR }],
+      ret: RSTRV,
+      body: [
+        letI('n', call1('slen', s)),
+        letI('m', call1('slen', sep)),
+        { kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), I(0)) },
+        iff(b('==', nm('n'), I(0)), [{ kind: 'return', values: [o] }]),
+        iff(b('==', nm('m'), I(0)), [
+          loop([{ kind: 'builtin-stmt', name: 'apush', args: [o, call1('ssub', s, i, I(1))] }], nm('n')),
+          { kind: 'return', values: [o] },
+        ]),
+        letI('p', I(0)),
+        {
+          kind: 'while',
+          cond: { kind: 'bool', value: true },
+          body: [
+            { kind: 'let', name: 'r', type: STR, init: rest },
+            letI('k', call1('sfind', nm('r'), sep)),
+            iff(b('<', nm('k'), I(0)), [
+              { kind: 'builtin-stmt', name: 'apush', args: [o, nm('r')] },
+              { kind: 'break' },
+            ]),
+            { kind: 'builtin-stmt', name: 'apush', args: [o, call1('ssub', nm('r'), I(0), nm('k'))] },
+            set('p', b('+', b('+', pos, nm('k')), nm('m'))),
+            /* 末尾正好切在最后 —— R 不给那一格空串。 */
+            iff(b('>=', pos, nm('n')), [{ kind: 'break' }]),
+          ],
+        },
+        { kind: 'return', values: [o] },
       ],
     };
   }
