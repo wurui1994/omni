@@ -1823,11 +1823,58 @@ CPU 备选收下不管），量出来：
 `drawcone2_asm` / `particules morphing`）、`ribbons invasion` 我们全黑、`gpgpu` 参考全黑、
 再加 `disco blur` 84.3 / `disco ball` 67.2 / `balls` 26.1 / `heightmap` 14.9 / `tree` 8.3。
 
-`clock.pss` 裁进了不计分：它头一句是 `klock(1)`（打包的**本地日期时间**，
-`polydraw.c:1662`），参考**压根不看实参**（`pd_polyhost.c:88`）所以永远 00:00:00，
+`clock.pss` 裁进了不计分：它头一句是 `klock(1)`（打包的**本地日期时间**，`polydraw.c:1662`），参考**压根不看实参**（`pd_polyhost.c:88`）所以永远 00:00:00，
 而我们照正本给真日期 —— 于是**我们自己两趟都不一样**（隔 2 秒两张 `.rgba` 不同，
 参考两趟逐字节相同）。前面几刀让它 RMSE 一上一下，全是这一格噪声。
 顺带记着：哪天要给 `.pss` 做金标，render 模式下日期那几格也得定一个纪元。
+
+### 28.13 尺子的第四格偏差：**固定管线那条路上，矩阵一变、后面那一批就不见了**
+
+查 `disco ball` 的 67 时顺手量出来的，判据是一份三格探针（`tigrou/` 底下临时放、量完删）：
+同一个四边形画两次（红一次、绿一次），中间夹一句矩阵操作。
+
+```c
+()
+{
+   glClear(GL_COLOR_BUFFER_BIT);
+   gltranslate(0, 0, -4);
+   glcolor(1,0,0); glbegin(GL_QUADS);
+   glvertex(1.4,-0.2); glvertex(2.0,-0.2); glvertex(2.0,0.2); glvertex(1.4,0.2);
+   glend();
+   gltranslate(-3.4, 0, 0);          //<- 换成 glrotate(45,轴) / glscale(.5,.5,1) 都一样
+   glcolor(0,1,0); glbegin(GL_QUADS);
+   glvertex(1.4,-0.2); glvertex(2.0,-0.2); glvertex(2.0,0.2); glvertex(1.4,0.2);
+   glend();
+}
+```
+
+量出来（320×240、fovy 73.7398、第 0 帧）：
+
+* `gltranslate`：我们绿块落在 x80..103（**与"直接把四边形写在 -2.0..-1.4"那一份逐格相同**，
+  所以我们这一档有旁证）；**参考只有红块，绿块整个不见**；
+* `glrotate(45,轴)`（三个轴都试了）：我们绿块落在 x194..221 / y58..85 ——
+  中心 (207.5, 71.5) 与手算的 (208, 72) 对得上（`+x` 转到 `+y`，**真 GL 的逆时针**，
+  这也再一次证明 §27 那一刀改对了）；**参考三个轴都只有红块**；
+* `glscale(.5,.5,1)`：我们绿块变小；参考仍然只有红块；
+* **对照两份**：中间什么都不夹（两个四边形写在不同位置）两边**逐格相同**；
+  中间夹 `glpushmatrix(); glrotate(45,0,0,1); glpopmatrix()`（净变化为零）两边也相同。
+
+也就是说：**净变化为零就好，一变就丢** —— 丢的是"矩阵变了之后那一段批"。
+`PD_NO_MVP_BAKE=1` 与参考默认（bake 开着）**两档都这样**，所以不是 bake 那一格。
+机理在它那侧（`batch_append` 的 MVP 一变就 `flush_batch`，`gl_renderer.c:730`；
+默认 program 那条路上 `rd->u_mvp` 与 batch 的 MVP 对不上），不深追——
+**要紧的是这一族的判据不可信**：脚本**没有 `glsetshader`**（走内建那对）**而且矩阵与图元交错**时，
+参考那张图是缺东西的。已知落在这一族里的：`02-gl.pss` / `02_primitives_noshader.pss`
+（早就在 `REF_WRONG` 里，原因这回算是找着了）、`tigrou/ribbons invasion` 等几份。
+**不按名字一刀切**（同一族里 `town textured` / `sphere` / `examples/opengl/*` 大多是
+"每帧先摆好矩阵再画" ⇒ 只有一批 ⇒ 判据仍然有效，现在也确实逐像素相同）——
+要逐份拿证据再裁，规矩见 §28.11 末尾那条。
+
+顺带排掉的两条：`disco ball` 那 2924 格差**不是**剔除、**也不是** `glrotate` 转向
+（两份探针都逐格对上参考）。它剩下的形状是：同一档 `GL_FRONT` 下我们的覆盖是参考的
+**严格超集**（参考独有 0 格）、而 `GL_BACK` 那一档我们只剩 9583 格（参考 24976）——
+下一步得按批对照（glspy 那种手法，`reference_glspy_tool`）才看得清。
+
 
 
 
