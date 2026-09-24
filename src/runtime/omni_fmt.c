@@ -501,8 +501,90 @@ static void gfx_circ(double cx, double cy, double r, int64_t c) {
   }
 }
 
-static void gfx_cone(double x0, double y0, double r0, double x1, double y1, double r1, int64_t c) {
-  double dx = x1 - x0, dy = y1 - y0;
+/* ── 顶点批（`(gfxbatch 类 数 顶点)`）：**CPU 备选**那一档的落点 ──────────────
+ *
+ * 只有一个模型（`docs/design/eval-realtime-gpu.md` 第 9 节）：变换 / 拆 mode /
+ * 2D 图元变顶点 / 合批全在语言那一侧，交到设备手里的就是**一段顶点**。GPU 那两档是
+ * "上传 + 一次 draw"，这一档是软件光栅化同一段。
+ *
+ * 一格顶点 12 个 double：位置 x,y,z,w（**裁剪空间**）、颜色 r,g,b,a（0..1）、
+ * 纹理坐标 s,t,p,q（这一档还没有纹理，收下不用）。
+ * 类：0 = 线段（两个一组）、1 = 三角（三个一组）。
+ */
+#define GFX_VSTRIDE 12
+
+static void gfx_vxy(const double *v, double *sx, double *sy) {
+  double w = v[3] == 0.0 ? 1.0 : v[3];
+  *sx = (v[0] / w * 0.5 + 0.5) * (double)g_gw;
+  *sy = (0.5 - v[1] / w * 0.5) * (double)g_gh;
+}
+
+static int64_t gfx_vcol(const double *v) {
+  return gfx_rgb(v[4] * 255.0, v[5] * 255.0, v[6] * 255.0);
+}
+
+/* 一格三角：包围盒 + 边函数，颜色按重心插值（与 JS 那一份同一手）。 */
+static void gfx_tri(const double *a, const double *b, const double *c) {
+  double ax, ay, bx, by, cx, cy;
+  gfx_vxy(a, &ax, &ay);
+  gfx_vxy(b, &bx, &by);
+  gfx_vxy(c, &cx, &cy);
+  double area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+  if (area == 0.0) return;
+  int64_t x0 = (int64_t)floor(fmin(fmin(ax, bx), cx));
+  int64_t x1 = (int64_t)ceil(fmax(fmax(ax, bx), cx));
+  int64_t y0 = (int64_t)floor(fmin(fmin(ay, by), cy));
+  int64_t y1 = (int64_t)ceil(fmax(fmax(ay, by), cy));
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 > g_gw) x1 = g_gw;
+  if (y1 > g_gh) y1 = g_gh;
+  for (int64_t y = y0; y < y1; y++) {
+    for (int64_t x = x0; x < x1; x++) {
+      double px = (double)x + 0.5, py = (double)y + 0.5;
+      double w0 = ((bx - ax) * (py - ay) - (by - ay) * (px - ax)) / area;
+      double w1 = ((px - ax) * (cy - ay) - (py - ay) * (cx - ax)) / area;
+      if (w0 < 0.0 || w1 < 0.0 || w0 + w1 > 1.0) continue;
+      double u = 1.0 - w0 - w1;
+      double r = (u * a[4] + w1 * b[4] + w0 * c[4]) * 255.0;
+      double g = (u * a[5] + w1 * b[5] + w0 * c[5]) * 255.0;
+      double bl = (u * a[6] + w1 * b[6] + w0 * c[6]) * 255.0;
+      gfx_px((double)x, (double)y, gfx_rgb(r, g, bl));
+    }
+  }
+}
+
+double omni_gfx_batch(int64_t kind, int64_t n, struct omni_arr_f64_s *verts) {
+  if (gfx_rec()) { g_greccnt += 1; return (double)n; }
+  int64_t have = verts == NULL ? 0 : verts->len;
+  if (have < n * GFX_VSTRIDE) {
+    omni_errorf("gfxbatch: 顶点不够（%lld 格，要 %lld）", (long long)have,
+                (long long)(n * GFX_VSTRIDE));
+  }
+  gfx_need();
+  const double *v = verts->items;
+  if (kind == 0) {
+    for (int64_t i = 0; i + 1 < n; i += 2) {
+      const double *a = v + i * GFX_VSTRIDE, *b = a + GFX_VSTRIDE;
+      double ax, ay, bx, by;
+      gfx_vxy(a, &ax, &ay);
+      gfx_vxy(b, &bx, &by);
+      gfx_line(ax, ay, bx, by, gfx_vcol(a));
+    }
+    return (double)n;
+  }
+  if (kind == 1) {
+    for (int64_t i = 0; i + 2 < n; i += 3) {
+      const double *a = v + i * GFX_VSTRIDE;
+      gfx_tri(a, a + GFX_VSTRIDE, a + 2 * GFX_VSTRIDE);
+    }
+    return (double)n;
+  }
+  omni_errorf("gfxbatch: 不认识的类 %lld（0 = 线段、1 = 三角）", (long long)kind);
+  return 0.0;
+}
+
+static void gfx_cone(double x0, double y0, double r0, double x1, double y1, double r1, int64_t c) {  double dx = x1 - x0, dy = y1 - y0;
   int64_t n = (int64_t)floor(sqrt(dx * dx + dy * dy) + 1.0);
   for (int64_t i = 0; i <= n; i++) {
     double t = (double)i / (double)n;

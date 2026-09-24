@@ -2448,6 +2448,31 @@ class CoreLowerer {
       return this.err(n.items[4], '(gfxframe PATH W H FB) 的帧缓冲要是 (arr real) 或 (ptr int)，'
         + `这里是 ${coreTypeText(fb.type)}`);
     }
+    // `(gfxbatch 类 数 顶点)`：**一段顶点批交给设备**（回 real = 画了几个顶点）。
+    //
+    // 只有一个模型（`docs/design/eval-realtime-gpu.md` 第 9 节）：命令 -> 顶点 -> 合批 ->
+    // 几个 draw call。变换 / 拆 mode / 2D 图元变顶点 / 合批全在语言那一侧（生成出来的 IR，
+    // 四条腿共用一份）；设备只管"收一段就上传 + 一次 draw"。
+    // 一格顶点 **12 个 float**（位置 4 / 颜色 4 / 纹理坐标 4），所以 `顶点` 的长度 = 12×数。
+    // 为什么要一格数组：`gfxcall` 那一面只收 double —— 与 `gfxframe` 同一条先例。
+    if (h === 'gfxbatch') {
+      if (n.items.length !== 4) return this.err(n, '(gfxbatch 类 数 顶点)');
+      const kd = this.expr(n.items[1]);
+      const cnt = this.expr(n.items[2]);
+      const vs = this.expr(n.items[3]);
+      if (kd === null || cnt === null || vs === null) return null;
+      if (kd.type.k !== 'int') {
+        return this.err(n.items[1], `(gfxbatch 类 数 顶点) 的类要是 int，这里是 ${coreTypeText(kd.type)}`);
+      }
+      if (cnt.type.k !== 'int') {
+        return this.err(n.items[2], `(gfxbatch 类 数 顶点) 的数要是 int，这里是 ${coreTypeText(cnt.type)}`);
+      }
+      if (vs.type.k !== 'arr' || vs.type.elem.k !== 'real') {
+        return this.err(n.items[3], '(gfxbatch 类 数 顶点) 的顶点要是 (arr real)，'
+          + `这里是 ${coreTypeText(vs.type)}`);
+      }
+      return { kind: 'Builtin', name: 'gfx_batch', args: [kd, cnt, vs], argType: INT, type: REAL };
+    }
     // `(gfxcall "名字" 实参…)`：**图形设备的宿主面**（回 real）。EVAL 两门语言
     // （`.pss` / `.kc`）的宿主调用全从这一格过去 —— 画图、矩阵、着色器、纹理、输入。
     //

@@ -1000,6 +1000,16 @@ function $gfx_call(name, args) {
   }
   return d.call(name, args);
 }
+// (gfxbatch 类 数 顶点)：**一段顶点批**交给设备。只有一个模型 —— 变换 / 拆 mode /
+// 2D 图元变顶点 / 合批全在语言那一侧（生成出来的 IR），设备只管"上传 + 一次 draw"
+// （CPU 备选那一档软件光栅化同一批）。一格顶点 12 个 float（位置 4 / 颜色 4 / 纹理坐标 4）。
+function $gfx_batch(kind, n, verts) {
+  const d = globalThis.__OMNI_GFX;
+  if (d === undefined || d === null) {
+    $rt_error("这份产物里没有图形设备（宿主要装上 globalThis.__OMNI_GFX）：gfxbatch");
+  }
+  return d.batch(Number(kind), Number(n), verts);
+}
 // (gfxframefn …)：把每帧那一格函数交给设备。**浏览器那一档用它做 rAF 循环** ——
 // 那边产物是在主线程同步跑的，while 会把页面卡死；别的设备（CPU 备选 / 本机 OpenGL）
 // 自己有循环，这一格在它们那儿就是记下不用（没有 setFrame 就当没这回事）。

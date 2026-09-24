@@ -51,6 +51,13 @@ export const SX_ARITY = {
      设备有三档（浏览器 WebGL2 / 本机 OpenGL / CPU 备选），**默认是 GPU** ——
      口径在 `docs/design/eval-realtime-gpu.md`。 */
   gfxcall: [1, Infinity],
+  /* **一段顶点批交给设备**（`(gfxbatch 类 数 (arr real))` -> real）。
+     只有一个模型：命令 -> 顶点 -> 合批 -> 几个 draw call（`docs/design/eval-realtime-gpu.md`
+     第 9 节）。变换、拆 mode、2D 图元变顶点、合批**全在语言那一侧**（生成出来的 IR，
+     四条腿共用一份）；设备只管"收一段就上传 + 一次 draw"（CPU 备选那一档软件光栅化同一批）。
+     一格顶点 **12 个 float**（位置 4 / 颜色 4 / 纹理坐标 4），所以数组长度 = 12 × 数。
+     为什么要数组：`gfxcall` 那一格只收 double —— 与 `gfxframe` 同一条先例。 */
+  gfxbatch: 3,
   /* **把"每帧那一格函数"交给设备**（`(gfxframefn (str "名字"))`）：名字是**编译期的串**，
      发射那一侧直接把函数引用交出去（不走函数值/闭包那一层）。
      谁用它：浏览器那一档 —— 页面拿到帧函数之后用 `requestAnimationFrame` 反复调它

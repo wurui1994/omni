@@ -514,4 +514,80 @@ function present() {
   D.dirty = false;
 }
 
-export const GFX_CPU = { call: gfxCall, present, kind: 'cpu' };
+/* ── 顶点批（`(gfxbatch 类 数 顶点)`）：这一档的落点 ───────────────────────────
+ *
+ * 只有一个模型（`docs/design/eval-realtime-gpu.md` 第 9 节）：变换 / 拆 mode / 2D 图元
+ * 变顶点 / 合批全在**语言那一侧**，交到设备手里的就是一段顶点。GPU 那两档是"上传 +
+ * 一次 draw"，这一档软件光栅化同一段。
+ *
+ * 一格顶点 12 个数：位置 x,y,z,w（**裁剪空间**）、颜色 r,g,b,a（0..1）、纹理坐标 s,t,p,q
+ * （这一档还没有纹理，收下不用）。类：0 = 线段（两个一组）、1 = 三角（三个一组）。
+ * **与 `runtime/omni_fmt.c` 的 `omni_gfx_batch` 逐句相同** —— 三条腿逐字节相同是判据。
+ */
+const VSTRIDE = 12;
+
+const vxy = (v, i) => {
+  const w = v[i + 3] === 0 ? 1 : v[i + 3];
+  return [(v[i] / w * 0.5 + 0.5) * D.w, (0.5 - v[i + 1] / w * 0.5) * D.h];
+};
+
+const vcol = (v, i) => rgb(v[i + 4] * 255, v[i + 5] * 255, v[i + 6] * 255);
+
+/** 一格三角：包围盒 + 边函数，颜色按重心插值（与 C 那一份同一手）。 */
+function tri(v, ia, ib, ic) {
+  const [ax, ay] = vxy(v, ia);
+  const [bx, by] = vxy(v, ib);
+  const [cx, cy] = vxy(v, ic);
+  const area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+  if (area === 0) return;
+  let x0 = Math.floor(Math.min(ax, bx, cx));
+  let x1 = Math.ceil(Math.max(ax, bx, cx));
+  let y0 = Math.floor(Math.min(ay, by, cy));
+  let y1 = Math.ceil(Math.max(ay, by, cy));
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 > D.w) x1 = D.w;
+  if (y1 > D.h) y1 = D.h;
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const px2 = x + 0.5;
+      const py = y + 0.5;
+      const w0 = ((bx - ax) * (py - ay) - (by - ay) * (px2 - ax)) / area;
+      const w1 = ((px2 - ax) * (cy - ay) - (py - ay) * (cx - ax)) / area;
+      if (w0 < 0 || w1 < 0 || w0 + w1 > 1) continue;
+      const u = 1 - w0 - w1;
+      const r = (u * v[ia + 4] + w1 * v[ib + 4] + w0 * v[ic + 4]) * 255;
+      const g = (u * v[ia + 5] + w1 * v[ib + 5] + w0 * v[ic + 5]) * 255;
+      const b = (u * v[ia + 6] + w1 * v[ib + 6] + w0 * v[ic + 6]) * 255;
+      px(x, y, rgb(r, g, b));
+    }
+  }
+}
+
+function batch(kind, n, verts) {
+  if (recOn()) { REC.set('gfxbatch', (REC.get('gfxbatch') ?? 0) + 1); return n; }
+  const have = verts === undefined || verts === null ? 0 : verts.length;
+  if (have < n * VSTRIDE) {
+    throw new Error(`gfxbatch: 顶点不够（${have} 格，要 ${n * VSTRIDE}）`);
+  }
+  need(320, 240);
+  if (kind === 0) {
+    for (let i = 0; i + 1 < n; i += 2) {
+      const ia = i * VSTRIDE;
+      const [ax, ay] = vxy(verts, ia);
+      const [bx, by] = vxy(verts, ia + VSTRIDE);
+      line(ax, ay, bx, by, vcol(verts, ia));
+    }
+    return n;
+  }
+  if (kind === 1) {
+    for (let i = 0; i + 2 < n; i += 3) {
+      const ia = i * VSTRIDE;
+      tri(verts, ia, ia + VSTRIDE, ia + 2 * VSTRIDE);
+    }
+    return n;
+  }
+  throw new Error(`gfxbatch: 不认识的类 ${kind}（0 = 线段、1 = 三角）`);
+}
+
+export const GFX_CPU = { call: gfxCall, batch, present, kind: 'cpu' };

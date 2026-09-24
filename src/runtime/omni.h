@@ -363,6 +363,10 @@ int64_t omni_gfx_framep(omni_str path, int64_t w, int64_t h, int64_t *fb);
 double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a2,
                      double a3, double a4, double a5, double a6, double a7, double a8,
                      double a9, double a10, double a11);
+/* `(gfxbatch 类 数 顶点)`：**一段顶点批**交给设备。只有一个模型 —— 变换与合批在语言
+   那一侧（生成出来的 IR），这一格是"上传 + 一次 draw"的入口；CPU 备选那一档软件光栅化
+   同一段。一格顶点 12 个 double（位置 4 裁剪空间 / 颜色 4 / 纹理坐标 4）。 */
+double omni_gfx_batch(int64_t kind, int64_t n, struct omni_arr_f64_s *verts);
 /* `(gfxframefn …)`：把每帧那一格函数交给设备（平签名：一格 `void *`）。
    这条腿上**记下不用** —— CPU 备选与本机 OpenGL 那两档自己有帧循环；要"页面驱动"的
    只有浏览器那一档。 */

@@ -1091,11 +1091,34 @@ function reset() {
  * `canvas` 由调用方给（Studio 里是预览区那一格）—— 这一层不碰 DOM 布局，
  * 只认"给我一格 canvas"。
  */
+/**
+ * **收一段顶点批**（`(gfxbatch 类 数 顶点)`）：只有一个模型 —— 变换 / 拆 mode /
+ * 2D 图元变顶点 / 合批全在语言那一侧，这一层只把那一段攒进当前段里，`flush` 时
+ * 一次上传 + 一次 `drawArrays`（`docs/design/eval-realtime-gpu.md` 第 9 节）。
+ *
+ * 进来的位置是**裁剪空间**（x,y,z,w），而内建那对着色器收的是**屏幕坐标** ——
+ * 所以这儿按 `x/w*0.5+0.5` 换一次（与 CPU 备选那一档、本机 OpenGL 那一档同一道算式，
+ * 三档设备的口径必须是同一个）。
+ */
+function batchIn(kind, n, verts) {
+  const b = batch(kind === 0 ? 'line' : 'tri');
+  for (let i = 0; i < n; i++) {
+    const o = i * 12;
+    const w = verts[o + 3] === 0 ? 1 : verts[o + 3];
+    b.v.push((verts[o] / w * 0.5 + 0.5) * D.w, (0.5 - verts[o + 1] / w * 0.5) * D.h,
+      verts[o + 2] / w, 1,
+      verts[o + 4], verts[o + 5], verts[o + 6], verts[o + 7],
+      verts[o + 8], verts[o + 9], verts[o + 10], verts[o + 11]);
+  }
+  return n;
+}
+
 export function installGlDevice(canvas, w = 320, h = 240) {
   open(canvas, w, h);
   const dev = {
     kind: 'webgl2',
     call,
+    batch: batchIn,
     present: flush,
     snapshot,
     setFrame,

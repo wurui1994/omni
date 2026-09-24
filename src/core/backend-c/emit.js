@@ -2829,6 +2829,9 @@ class CEmitter {
       // `(gfxframe PATH W H FB)`：把一帧交出去（表面文件，runtime/omni_fmt.c 里
       // omni_write_text 旁边那一格）。
       case 'gfx_frame': return `omni_gfx_frame(${a[0]}, ${a[1]}, ${a[2]}, ${a[3]})`;
+      /* `(gfxbatch 类 数 顶点)`：一段顶点批交给设备。只有一个模型 —— 合批在语言那一侧，
+         这一格是"上传 + 一次 draw"的入口（本机 GL 那一档转给插件，CPU 备选自己光栅化）。 */
+      case 'gfx_batch': return `omni_gfx_batch(${a[0]}, ${a[1]}, ${a[2]})`;
       /* 指针那一档（jnc/C 那一侧的 `int fb[N]`）。运行时的**真符号一律是平的**
          （omni.h 那段头注：不按值收发 omni_ptr），所以这儿先过一次解引用检查拿地址 ——
          那一句顺带把"空指针 / 第一格越界"挡掉。**后面几格的范围它查不到**：裸地址上

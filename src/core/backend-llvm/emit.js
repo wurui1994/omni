@@ -135,6 +135,9 @@ const RT_OPS = new Map([
     params: ['[2 x i64]', 'i64', 'double', 'double', 'double', 'double', 'double',
       'double', 'double', 'double', 'double', 'double', 'double', 'double'],
   }],
+  /* `(gfxbatch 类 数 顶点)`：一段顶点批交给设备（数组按 `(arr real)` 的指针过去 —— 与
+     `gfx_frame` 同一手）。 */
+  ['gfx_batch.int', { sym: 'omni_gfx_batch', ret: 'double', params: ['i64', 'i64', 'ptr'] }],
   /* `(gfxframefn …)`：把每帧那一格函数交给设备（一格函数指针 = `ptr`）。 */
   ['gfx_frame_fn.int', { sym: 'omni_gfx_frame_fn', ret: 'double', params: ['ptr'] }],
   /* `(gfxdef 种类 名字 内容)`：往设备上登记一格有名字的串（三格 `omni_str`）。 */

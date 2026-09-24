@@ -1200,6 +1200,16 @@ export function applyBuiltin(I, e, a) {
       }
       return dev.call(a[0], a.slice(1));
     }
+    /* `(gfxbatch 类 数 顶点)`：**一段顶点批**交给同一格设备。只有一个模型 ——
+       变换与合批在语言那一侧做完了，设备只管"上传 + 一次 draw"
+       （`docs/design/eval-realtime-gpu.md` 第 9 节）。 */
+    case 'gfx_batch': {
+      const dev = globalThis.__OMNI_GFX;
+      if (dev === undefined || dev === null) {
+        rtError('这一趟里没有图形设备（宿主要装上 globalThis.__OMNI_GFX）：gfxbatch');
+      }
+      return dev.batch(Number(a[0]), Number(a[1]), a[2]);
+    }
     /* `(gfxframefn …)`：把每帧那一格函数交给设备。**这条腿上是记下不用** ——
        解释器这边帧循环靠 `(gfxcall "nextframe")` 自己驱动（那一格设备说画几帧）；
        要 rAF 那种"页面驱动"的只有浏览器那一档，而那一档跑的是 backend-js 的产物。 */

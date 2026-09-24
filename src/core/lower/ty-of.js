@@ -122,6 +122,8 @@ function builtinType(e, ctx) {
     case 'chr': return STR;
     /* `(gfxcall "名字" …)`：图形设备的宿主面 —— 回的是 real（那一面只有 double）。 */
     case 'gfxcall': return REAL;
+    /* `(gfxbatch 类 数 顶点)`：一段顶点批交给设备 —— 回画了几个顶点（real，与上一格同）。 */
+    case 'gfxbatch': return REAL;
     case 'anew': return e.args[0].type ?? arrOf(INT);
     case 'dnew': return e.args[0].type ?? dictOf(INT);
     case 'cnew': case 'new': return e.args[0].type ?? INT;
