@@ -65,12 +65,37 @@ S7 / cpp11 / farver / isoband / …）一共 **135 523 行 R + 102 848 行 C/C++
 3. base 那几个包：**base 已落**（按 `share/make/basepkg.mk` 的 `mkRbase` + `mkRsimple`
    装成源码：`library/base/R/base` 就是 `all.R`，22 700 行）。`.Library` 在系统 profile 里定
    （`src/library/profile/Common.R` + `Rprofile.unix` 接起来），少了它 R 起不来。
-   **还差** methods / utils / stats / graphics / grDevices / datasets / tools / grid ——
-   那几个有 NAMESPACE，要 `tools:::.install_package_*` 那一路。
+   **别的十一个包也已经编好装好**（tools / compiler / utils / methods / stats / graphics /
+   grDevices / grid / datasets / splines / stats4：R 代码按 `LC_COLLATE=C` 接起来、
+   `NAMESPACE` 与 `DESCRIPTION` 就位、`src/` 的 146 份 C/Fortran/Objective-C 编出了八份
+   `<pkg>.so`，名单都从**那个包自己的 `src/Makefile.in`** 里读）。
+   **卡在一格上**：见下面"第三刀卡住的地方"。
 4. `install.packages` 装那 17 个包 → `library(ggplot2)` → `ggsave` 出一张图。
 5. quartz 那一格：`devQuartz.c` + `qdCocoa.m` 编进来，`plot()` 开一个真窗口。
    它自己建 `NSWindow`、不跑 `[NSApp run]`（靠 `ptr_R_ProcessEvents` 协作抽事件），
    所以要在主线程上调 —— 这一条与我们 host 那侧的线程安排得对齐。
+
+### 第三刀卡住的地方（量出来的，别再从头猜）
+
+`library(stats)` 起不来，链条是这样的：
+
+1. tools 的 `R/zzz.R` 有一句**顶层**的
+   `PS_sigs <- getDLLRegisteredRoutines("tools")[[c(".Call","ps_sigs")]]`，
+   拿到 NULL 之后下一句 `.Call(PS_sigs, 1L)` 报"第一个参数得是字符串或本机符号"；
+2. 往上一层：`getDLLRegisteredRoutines(dll)` 回的三张表**全是空的**（`.Call` 0 个）；
+3. 再往上：`unclass(getLoadedDLLs()[["tools"]])$dynamicLookup` 是 **TRUE**，
+   而 `R_init_tools` 里明明有 `R_useDynamicSymbols(dll, FALSE)` —— 所以那个 init **没被调**；
+4. 根上：在 R 里 `getNativeSymbolInfo("R_init_tools", PACKAGE="tools")` 报"no such symbol"，
+   `.Call("ps_sigs", 1L, PACKAGE="tools")` 也报 not available ——
+   **`dlopen` 成功了，但这份 `.so` 里一个符号都 `dlsym` 不出来**。
+   而 `nm -gU tools.so` 明明列着 `T _R_init_tools` 与 `T _ps_sigs`。
+
+也就是说问题不在 R 那一侧，而在**我们怎么链这份 `.so`**。链接参数与 R 自己的一样
+（`configure.ac` 第 1539 行：`-dynamiclib -Wl,-headerpad_max_install_names -undefined dynamic_lookup`，
+本机装的 R 的 `Makeconf` 也是这一行），所以下一步该做的是把两份 `.so` 摆在一起比：
+`otool -hv` 看 filetype 与 flags（MH_DYLIB vs MH_BUNDLE、TWOLEVEL vs FLAT）、
+`otool -l` 看有没有 `LC_DYSYMTAB` 的导出项，再试 `-bundle` 与 `-Wl,-flat_namespace`。
+这一格的判据已经摆在 `pkgs.ok` 那条边上（默认目标不挂它，所以尺子还是绿的）。
 
 ### 第二刀量出来的三格
 

@@ -51,11 +51,15 @@ if (!existsSync(join(RSRC, 'src/main/Makefile.in'))) {
 
 /* ─── 名单从 R 的 Makefile.in 里读 ─────────────────────────────────────── */
 
-/** 读一格 make 变量（续行接起来），回文件名数组。读不到就报 —— 那说明那份 Makefile 变了形状。 */
-function mkVar(path, name, ext) {
+/** 读一格 make 变量（续行接起来），回文件名数组。`opt` 为真时"没有这一格"回空数组
+    —— `SOURCES_M` 只有 grDevices 有，`SOURCES_F` 也不是每个包都写。 */
+function mkVar(path, name, ext, opt = false) {
   const text = readFileSync(path, 'utf8');
   const m = new RegExp(`^${name}\\s*=([\\s\\S]*?)\\n[A-Za-z_@]`, 'm').exec(text);
-  if (m === null) throw new Error(`build-libR: ${path} 里读不到 ${name}`);
+  if (m === null) {
+    if (opt) return [];
+    throw new Error(`build-libR: ${path} 里读不到 ${name}`);
+  }
   return m[1].replace(/\\\n/g, ' ').trim().split(/\s+/).filter((s) => s.endsWith(ext));
 }
 
@@ -234,20 +238,140 @@ b.build(BASE_PROFILE, 'mkprofile', [], { implicit: [join(PROFDIR, 'Common.R'), j
 b.build(BASE_DESC, 'mkdesc', join(BASEDIR, 'DESCRIPTION.in'));
 b.build(RENVIRON, 'mkrenviron', join(RSRC, 'etc/Renviron.in'));
 
-/* ─── 验一趟 ───────────────────────────────────────────────────────────── */
+/* ─── 别的基础包（tools / methods / stats / grid / …） ──────────────────── */
+
+/**
+ * 这一批与 base 不同：它们有 `NAMESPACE`、多半还有 `src/`（要编一份 `<pkg>.so`）。
+ * 装法照 R 自己的两条路子：
+ *   * R 代码：`R/*.R` + `R/unix/*.R` 按 `LC_COLLATE=C` 接成 `library/<pkg>/R/<pkg>`
+ *     （与 base 的 `mkRbase` 同一条，只是不字节码编译）；
+ *   * C / Fortran / Objective-C：名单从**那个包自己的 `src/Makefile.in`** 里读
+ *     （`SOURCES_C` / `SOURCES_F` / `SOURCES_M`）—— 不这么读就会把
+ *     `par-common.c`（只被 include 的）与 `devWindows.c`（Windows 的）也编进去；
+ *   * `Meta/*.rds` 得**用 R 自己生成**（下面那两条 `tools:::.vinstall_*_as_RDS`）。
+ *
+ * `compiler` 这个包我们装、但**永不开**（`R_ENABLE_JIT=0`）：装它是因为别的包会
+ * `compiler::cmpfun`，不开它是 ADR-0046 那条 —— 编译这件事是我们的活。
+ */
+const PKGS = ['tools', 'compiler', 'utils', 'methods', 'stats', 'graphics', 'grDevices',
+  'grid', 'datasets', 'splines', 'stats4'];
+/** 每个包额外要的链接参数（照它自己 `src/Makefile.in` 的 `PKG_LIBS`）。 */
+const PKG_LIBS = {
+  stats: '-framework Accelerate -L/opt/homebrew/lib/gcc/current -lgfortran',
+  grDevices: '-framework AppKit -lz',
+};
+
+b.rule('ccpkg', { command: `${CC} ${CFLAGS} -I${join(RSRC, 'src/main')} $extra -c $in -o $out`, description: 'CC $out' });
+b.rule('so', {
+  command: `${CC} -dynamiclib -undefined dynamic_lookup -o $out $in $libs`,
+  description: 'SO $out',
+});
+b.rule('mkpkgR', {
+  command: 'cd $dir && LC_COLLATE=C ls $globs | xargs cat > $out',
+  description: '$pkg 的 R 代码 -> $out',
+});
+b.rule('cp', { command: 'cp $in $out', description: 'CP $out' });
+b.rule('mkpkgdesc', {
+  command: `sed -e "s/@VERSION@/${SHORT_VER}/" $in > $out && echo "Built: R ${SHORT_VER}; ; ; unix" >> $out`,
+  description: 'DESCRIPTION -> $out',
+});
+
+const pkgStamps = [];
+for (const p of PKGS) {
+  const S = join(RSRC, 'src/library', p);
+  const D = join(HOME, 'library', p);
+  for (const d of [join(D, 'R'), join(D, 'Meta'), join(D, 'libs')]) mkdirSync(d, { recursive: true });
+  /* R 代码 */
+  const rOut = join(D, 'R', p);
+  const globs = existsSync(join(S, 'R/unix')) ? 'R/*.R R/unix/*.R' : 'R/*.R';
+  if (existsSync(join(S, 'R'))) {
+    b.build(rOut, 'mkpkgR', [], { vars: { dir: S, globs, pkg: p } });
+    pkgStamps.push(rOut);
+  }
+  /* DESCRIPTION / NAMESPACE */
+  const desc = join(D, 'DESCRIPTION');
+  b.build(desc, 'mkpkgdesc', join(S, 'DESCRIPTION.in'));
+  pkgStamps.push(desc);
+  if (existsSync(join(S, 'NAMESPACE'))) {
+    const ns = join(D, 'NAMESPACE');
+    b.build(ns, 'cp', join(S, 'NAMESPACE'));
+    pkgStamps.push(ns);
+  }
+  /* `<pkg>.so` */
+  const mk = join(S, 'src/Makefile.in');
+  if (!existsSync(mk)) continue;
+  const objDir = join(OBJ, `pkg_${p}`);
+  mkdirSync(objDir, { recursive: true });
+  const pobjs = [];
+  const add = (name, rule, extra) => {
+    const o = join(objDir, `${name.replace(/\.[cfm]$/, '')}.o`);
+    pobjs.push(o);
+    b.build(o, rule, join(S, 'src', name), {
+      implicit: HEADERS,
+      vars: rule === 'ccpkg' ? { extra } : undefined,
+    });
+  };
+  for (const n of mkVar(mk, 'SOURCES_C', '.c')) add(n, 'ccpkg', `-I${join(S, 'src')}`);
+  for (const n of mkVar(mk, 'SOURCES_M', '.m', true)) add(n, 'ccpkg', `-I${join(S, 'src')}`);
+  const fs2 = mkVar(mk, 'SOURCES_F', '.f', true);
+  for (const n of fs2) add(n, 'fc');
+  if (pobjs.length > 0) {
+    const so = join(D, 'libs', `${p}.so`);
+    b.build(so, 'so', pobjs, { vars: { libs: PKG_LIBS[p] ?? '' } });
+    pkgStamps.push(so);
+  }
+}
+
+/* `Meta/package.rds` / `features.rds` / `nsInfo.rds`：**第一轮我们自己写**
+   （`rt/bootstrap-meta.R`，只用 base 的 `read.dcf` / `saveRDS` / `parseNamespaceFile`）。
+   为什么不直接跑 R 自己的 `tools:::.vinstall_*_as_RDS`：那两个函数在 tools 包里，
+   而加载 tools 又要先有它的 `package.rds` —— R 的 `src/library/Makefile.in` 自己把这一格
+   叫 "bootstrapping problem here: tools uses tools to dump its namespace"。 */
+const META = join(OUT, 'meta.ok');
+/* `share/` 里有 tools 一加载就要读的东西（`encodings/Adobe-glyphlist`）。 */
+const SHARE = join(HOME, 'share/encodings/Adobe-glyphlist');
+b.rule('cpshare', {
+  command: `mkdir -p ${join(HOME, 'share')} && cp -R ${join(RSRC, 'share')}/. ${join(HOME, 'share')}/`,
+  description: 'share/ -> R_HOME',
+});
+b.build(SHARE, 'cpshare', [], { implicit: [join(RSRC, 'share/encodings/Adobe-glyphlist')] });
+b.rule('mkmeta', {
+  command: `TZDIR=/usr/share/zoneinfo R_ENABLE_JIT=0 R_DEFAULT_PACKAGES=NULL R_HOME=${HOME} `
+    + `${RBIN} --vanilla --no-echo -f ${join(HERE, 'rt/bootstrap-meta.R')} `
+    + `--args ${join(HOME, 'library')} ${PKGS.join(' ')} base > ${join(OUT, 'meta.txt')} 2>&1 && date > $out`,
+  description: '自举 Meta/*.rds（只用 base）',
+});
+b.build(META, 'mkmeta', [RBIN, BASE_R, BASE_PROFILE, BASE_DESC, RENVIRON, SHARE, ...pkgStamps],
+  { implicit: [join(HERE, 'rt/bootstrap-meta.R')] });
+
 
 /* 编出来不等于跑得起来，所以最后一条边是**真跑一趟**：起 R、求一段、对答案。
-   `R_ENABLE_JIT=0` 是 ADR-0046 那一条（R 自己那个用 R 写的字节码编译器我们不要）；
-   `R_DEFAULT_PACKAGES=NULL` 是因为 methods / utils / stats 那几个包还没装（下一刀）。 */
+   `R_ENABLE_JIT=0` 是 ADR-0046 那一条（R 自己那个用 R 写的字节码编译器我们不要）。
+   这一格**只验 base**：那几个带 `NAMESPACE` 的包已经编好装好了，但它们的 `.so` 现在
+   还加载不动（见下面 `pkgs.ok` 那一条与 ADR-0046 里那段账），所以默认目标不挂它们
+   —— 尺子要么绿要么红，不能半绿。 */
 const STAMP = join(OUT, 'smoke.ok');
 const SMOKE_LOG = join(OUT, 'smoke.txt');
 b.rule('smoke', {
   command: `TZDIR=/usr/share/zoneinfo R_ENABLE_JIT=0 R_DEFAULT_PACKAGES=NULL R_HOME=${HOME} `
     + `${RBIN} --vanilla --no-echo -e 'cat(sum(1:10), sqrt(2), "\\n")' > ${SMOKE_LOG} 2>&1 `
     + `&& grep -qx "55 1.414214 " ${SMOKE_LOG} && date > $out`,
-  description: '起一趟我们自己的 R，对答案',
+  description: '起一趟我们自己的 R（只 base），对答案',
 });
 b.build(STAMP, 'smoke', [RBIN, BASE_R, BASE_PROFILE, BASE_DESC, RENVIRON]);
+
+/* 下一刀的那一格：带 stats / grid 起来。现在会红（`.so` 里的符号 `dlsym` 找不着），
+   所以**不进默认目标**，要量它就显式说：`node ext/r/build-libR.js .../pkgs.ok`。 */
+const PKGS_OK = join(OUT, 'pkgs.ok');
+const PKGS_LOG = join(OUT, 'pkgs.txt');
+b.rule('pkgsmoke', {
+  command: `TZDIR=/usr/share/zoneinfo R_ENABLE_JIT=0 R_HOME=${HOME} `
+    + `${RBIN} --vanilla --no-echo -e 'library(stats); library(grid); `
+    + `cat(sum(1:10), round(sd(c(1,2,3,4)), 6), "\\n")' > ${PKGS_LOG} 2>&1 `
+    + `&& grep -qx "55 1.290994 " ${PKGS_LOG} && date > $out`,
+  description: '起一趟带 stats / grid 的（还没通）',
+});
+b.build(PKGS_OK, 'pkgsmoke', [META]);
 
 b.default(STAMP);
 b.run(process.argv.slice(2));
