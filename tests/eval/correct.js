@@ -42,6 +42,15 @@ const CFG = {
   frame: val('--frame', '0'),
   /* RMSE 的线：**0 是"逐像素相同"**，这个数是"还算同一张图"的上界（两个渲染器）。 */
   rmse: Number(val('--rmse', '8')),
+  /**
+   * 第二条放行线：**有差的格子占比**。RMSE 是全图平均，一小撮亮格子差满 255 就能把它
+   * 顶过线 —— 而"一小撮"恰好是两个渲染器必然分家的那一类：近乎侧看的薄片（几个像素
+   * 的边缘覆盖）。`05_explicit_main_and_funcs.pss` 是标本：468 格（0.46%）有差、
+   * 全是那 145 个树梢小方块的顶面，其余 99.54% 逐位相同 —— 根因是**MVP 乘在哪儿**
+   * （我们按一份模型在语言侧用 double 乘进顶点；参考关掉 bake 之后是 GPU 上 float
+   * 乘 uniform），不是画错。所以给一条"占比"的放行线，并且把占比印出来。
+   */
+  pxdiff: Number(val('--pxdiff', '0.005')),
   only: val('--only', ''),
   budget: Number(val('--budget', '100')) * 1000,
 };
@@ -115,11 +124,28 @@ function ours(src, out) {
   return { px: b.subarray(b.indexOf(10) + 1), why: null };
 }
 
-/** 参考那一趟：PNG -> PPM -> 像素（RGB）。**fovy 按分辨率算**（见文件头）。 */
+/**
+ * 参考那一趟：PNG -> PPM -> 像素（RGB）。**fovy 按分辨率算**（见文件头）。
+ *
+ * **`PD_NO_MVP_BAKE=1` 是有意给的**（口径在 `docs/design/eval-realtime-gpu.md` §26）：
+ * 参考默认开着一格叫 `mvp_bake` 的优化（`c_impl/src/render/gl_renderer.c:1148`）——
+ * 顶点着色器没提过 `gl_Vertex` 时把 MVP 在 CPU 上乘进顶点。那一步与它自己的 uniform
+ * 那条路**对不上**：同一份脚本，`town textured` 开着它铺满 60%、关掉它全黑，
+ * `menger sponge` / `funky` / `tree` / `clock` 也各差一截（量过 8 份，5 份不一致）。
+ * 谁对：**关掉那一格的那条路**才是走真 GL 管线（与原版的固定管线同形）——
+ * 一份控制探针（`gltranslate(0,0,-10); glrotate(90,0,0,1)` 的四边形）量出我们的裁剪坐标
+ * 与它**逐位相同**（`(0,-1,9.802,10)`），而开着 bake 时它那张 MVP 的 z/w 两行是反号的
+ * （拿负的 w 去除 —— 等于把镜头背后的东西画出来）。
+ * 所以尺子取"关掉 bake"那一档；`REF_WRONG` 里那几条也照这一格重新裁。
+ * 想量另一档（回到参考的默认）：`OMNI_PD_BAKE=1 node tests/eval/correct.js`。
+ */
 function ref(src, png, ppm) {
+  const env = { ...process.env };
+  if (process.env.OMNI_PD_BAKE === '1') delete env.PD_NO_MVP_BAKE;
+  else env.PD_NO_MVP_BAKE = '1';
   const r = spawnSync(REF, [src, '--frame', CFG.frame, '--w', String(CFG.w),
     '--h', String(CFG.h), '--fovy', fovyOf(CFG.w, CFG.h).toFixed(4), '-o', png],
-  { encoding: 'utf8', timeout: 120000 });
+  { encoding: 'utf8', timeout: 120000, env });
   if (r.status !== 0 || !existsSync(png)) {
     return { px: null, why: `参考也跑不出来：${(r.stderr ?? '').trim().slice(0, 120)}` };
   }
@@ -201,20 +227,34 @@ for (const src of cases()) {
     P(`  --   ${name} 参考错，不计（RMSE ${d.rmse.toFixed(2)}）\n       ${verdict}\n`);
     continue;
   }
-  /* 三档判定：**黑图**（参考有东西、我们几乎全黑）、**大差异**（RMSE 过线）、其余算过。 */
-  if (d.nzb > CFG.w * CFG.h * 0.01 && d.nza < d.nzb * 0.1) {
+  /**
+   * 四档判定。第一档是 2026-09-25 补的**防洗白**那一格：**两边都不画**（各自非黑都
+   * 几乎为 0）—— 以前它落在"逐像素相同"里白得一分，可"两张全黑图相同"什么都没证明，
+   * 只证明参考也画不出来。换 bake 档的那一趟就是被它骗了：`town textured` 从
+   * RMSE 183 变成"逐像素相同"，其实是**参考变黑了**，不是我们画对了。所以单独一档、
+   * 计红，要放行必须进 `REF_WRONG` 并写清"这一帧本来就没东西"。
+   */
+  const blank = CFG.w * CFG.h * 0.002;
+  if (d.nza < blank && d.nzb < blank) {
+    fail++;
+    rows.push({ name, cls: '都不画', ...d });
+    P(`  FAIL ${name} 两边都不画（我们非黑 ${d.nza}、参考 ${d.nzb}）—— 这一格什么都没证明\n`);
+  } else if (d.nzb > CFG.w * CFG.h * 0.01 && d.nza < d.nzb * 0.1) {
     fail++;
     rows.push({ name, cls: '黑图', ...d });
     P(`  FAIL ${name} 不是黑图\n       我们非黑 ${d.nza}、参考 ${d.nzb}\n`);
-  } else if (d.rmse > CFG.rmse) {
+  } else if (d.rmse > CFG.rmse && d.cnt > CFG.w * CFG.h * CFG.pxdiff) {
     fail++;
     rows.push({ name, cls: '差异大', ...d });
     P(`  FAIL ${name} RMSE ≤ ${CFG.rmse}\n       RMSE ${d.rmse.toFixed(2)}`
-      + `（非黑 ${d.nza} vs ${d.nzb}、有差 ${d.cnt} 格、最大差 ${d.mx}）\n`);
+      + `（非黑 ${d.nza} vs ${d.nzb}、有差 ${d.cnt} 格 = `
+      + `${((d.cnt / (CFG.w * CFG.h)) * 100).toFixed(2)}%、最大差 ${d.mx}）\n`);
   } else {
     pass++;
-    rows.push({ name, cls: d.rmse === 0 ? '逐像素相同' : '够近', ...d });
-    P(`  ok   ${name} ${d.rmse === 0 ? '逐像素相同' : `RMSE ${d.rmse.toFixed(2)}`}\n`);
+    const cls = d.rmse === 0 ? '逐像素相同' : (d.rmse > CFG.rmse ? '一小撮格子' : '够近');
+    rows.push({ name, cls, ...d });
+    P(`  ok   ${name} ${d.rmse === 0 ? '逐像素相同'
+      : `RMSE ${d.rmse.toFixed(2)}、有差 ${((d.cnt / (CFG.w * CFG.h)) * 100).toFixed(2)}%`}\n`);
   }
 }
 

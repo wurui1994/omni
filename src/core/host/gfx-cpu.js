@@ -843,6 +843,26 @@ function tri(v, ia, ib, ic) {
   }
 }
 
+/**
+ * **`OMNI_GFX_TRACE=n`：把前 n 段批的顶点印到 stderr**（与参考那侧的 `PD_TRACE` 同一个
+ * 用途 —— 对账要比的是**裁剪坐标**，不是像素；像素差只说明"哪儿不一样"，裁剪坐标说明
+ * "谁算错了"）。一行一个顶点：`#trace 类 批号 顶点号 x y z w r g b a`。
+ * 三档设备都从这一格过，所以 `--gfx gl` 也照印。
+ */
+let TRACED = 0;
+function traceV(kind, n, verts) {
+  const lim = intEnv('OMNI_GFX_TRACE', 0);
+  if (!(TRACED < lim)) return;
+  const id = TRACED;
+  TRACED++;
+  for (let i = 0; i < n; i++) {
+    const o = i * VSTRIDE;
+    process.stderr.write(`#trace ${kind} ${id} ${i} ${verts[o]} ${verts[o + 1]} `
+      + `${verts[o + 2]} ${verts[o + 3]} ${verts[o + 4]} ${verts[o + 5]} `
+      + `${verts[o + 6]} ${verts[o + 7]}\n`);
+  }
+}
+
 function batch(kind, n, verts) {
   if (recOn()) { REC.set('gfxbatch', (REC.get('gfxbatch') ?? 0) + 1); return n; }
   const have = verts === undefined || verts === null ? 0 : verts.length;
@@ -850,6 +870,7 @@ function batch(kind, n, verts) {
     throw new Error(`gfxbatch: 顶点不够（${have} 格，要 ${n * VSTRIDE}）`);
   }
   need(320, 240);
+  traceV(kind, n, verts);
   /* GL 那一档：一段批直接上传 + 一次 draw（软件光栅化那一摊一格都不走）。 */
   if (G.on) { G.m.batch(kind, n, verts); D.dirty = true; return n; }
   if (kind === 0) {

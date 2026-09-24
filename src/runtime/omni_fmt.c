@@ -721,6 +721,24 @@ static void gfx_tri(const double *a, const double *b, const double *c) {
   }
 }
 
+/* **`OMNI_GFX_TRACE=n`：把前 n 段批的顶点印到 stderr** —— 与 `host/gfx-cpu.js` 的
+   `traceV` 逐句相同，也与参考那侧的 `PD_TRACE` 同一个用途：对账要比的是**裁剪坐标**，
+   不是像素（像素差只说明"哪儿不一样"，裁剪坐标说明"谁算错了"）。
+   一行一个顶点：`#trace 类 批号 顶点号 x y z w r g b a`。 */
+static long g_gtraced = 0;
+static void gfx_tracev(int64_t kind, int64_t n, const double *v) {
+  const char *e = getenv("OMNI_GFX_TRACE");
+  long lim = (e == NULL || *e == 0) ? 0 : strtol(e, NULL, 10);
+  if (g_gtraced >= lim) return;
+  long id = g_gtraced++;
+  for (int64_t i = 0; i < n; i++) {
+    const double *p = v + i * GFX_VSTRIDE;
+    fprintf(stderr, "#trace %lld %ld %lld %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g\n",
+            (long long)kind, id, (long long)i, p[0], p[1], p[2], p[3],
+            p[4], p[5], p[6], p[7]);
+  }
+}
+
 double omni_gfx_batch(int64_t kind, int64_t n, struct omni_arr_f64_s *verts) {
   if (gfx_rec()) { g_greccnt += 1; return (double)n; }
   int64_t have = verts == NULL ? 0 : verts->len;
@@ -730,6 +748,7 @@ double omni_gfx_batch(int64_t kind, int64_t n, struct omni_arr_f64_s *verts) {
   }
   gfx_need();
   const double *v = verts->items;
+  gfx_tracev(kind, n, v);
   /* GL 那一档：一段批直接上传 + 一次 draw（软件光栅化那一摊一格都不走）。 */
   if (g_gl.on) {
     g_gl.batch((int)kind, (long)n, v);
