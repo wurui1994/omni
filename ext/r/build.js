@@ -64,18 +64,25 @@ function nmathSources() {
 }
 
 const srcs = nmathSources().map((n) => ({ name: n, path: join(RSRC, 'src/nmath', n) }));
-/* `std_unif.c` 是 standalone 那一档的随机数发生器（树里叫 `sunif.c`，Makefile 里
-   `SOURCES = $(SOURCES_NMATH) std_unif.c`，靠一条 cp 改名）。它给 `unif_rand` /
-   `norm_rand` / `exp_rand` —— 少了它 `r*` 那一族全部链不上。 */
-srcs.push({ name: 'std_unif.c', path: join(RSRC, 'src/nmath/standalone/sunif.c') });
+/* **`std_unif.c`（树里的 `sunif.c`）刻意不编。** 那一格是 standalone 自己的
+   Marsaglia-MultiCarry 发生器，而 R 默认用 Mersenne-Twister、播种法也不同 ——
+   于是 `set.seed(42); runif(1)` 两边不是同一条流。我们自己那份 `omni_rng.c` 顶它，
+   照 `src/main/RNG.c` 公开的算法写（账在 `rt/omni_rng.h` 头上）。
+   换掉之后 nmath 那一族 `r*` 是**R 自己的代码**跑在**R 自己的流**上，数逐位相同。 */
 
 /**
  * **我们自己那几格**，与上面那张 R 的名单分开列（一眼能看出哪些代码是谁的）。
- * 今天只有一份：`NA` / `NaN` / `Inf` 三格真值 —— 它们在 R 那边属于解释器
- * （`src/main/arithmetic.c` 的 `R_NaReal`），standalone 的 nmath 里没有，
- * 所以按 *R Internals* §1.3 公开的表示自己写（账在 `rt/omni_rna.h` 头上）。
+ *
+ *   `omni_rna.c` —— `NA` / `NaN` / `Inf` 三格真值。它们在 R 那边属于解释器
+ *     （`src/main/arithmetic.c` 的 `R_NaReal`），standalone 的 nmath 里没有，
+ *     所以按 *R Internals* §1.3 公开的表示自己写（账在 `rt/omni_rna.h` 头上）。
+ *   `omni_rng.c` —— R 的 Mersenne-Twister 与它的播种法，顶掉 standalone 那份
+ *     Marsaglia-MultiCarry（账在 `rt/omni_rng.h` 头上）。
  */
-const OURS = [{ name: 'omni_rna.c', path: join(HERE, 'rt/omni_rna.c'), hdr: join(HERE, 'rt/omni_rna.h') }];
+const OURS = [
+  { name: 'omni_rna.c', path: join(HERE, 'rt/omni_rna.c'), hdr: join(HERE, 'rt/omni_rna.h') },
+  { name: 'omni_rng.c', path: join(HERE, 'rt/omni_rng.c'), hdr: join(HERE, 'rt/omni_rng.h') },
+];
 
 for (const d of [GEN, OBJ]) mkdirSync(d, { recursive: true });
 

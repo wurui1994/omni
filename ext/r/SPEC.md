@@ -210,8 +210,29 @@ R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不�
 **`NA_integer_` / `NA_character_` 还没接** —— 它们在 R 那边是另外两种表示
 （`INT_MIN` 与一格特殊的 CHARSXP），要"带缺失的整数/串"那一层。
 
-**随机数那一族（`r*`）刻意没接**：它们要 `set.seed` 那套状态，而 R 的发生器在解释器里，
-standalone 这一份的流不一样 —— 接上去是"看着像对、每个数都不一样"。
+### 随机数：与 R 同一条流
+
+`r*` 那一族**接了**，而且数与 R **逐位相同** —— 判据是 `ext/r/examples/rng.R`
+（`set.seed(42); runif(3)` / `rnorm` / `rexp` / `rpois` / `rbinom` / `sample` 两边一样）。
+
+这一格原来刻意空着，理由是真的：standalone 的 nmath 自带的发生器
+（`src/nmath/standalone/sunif.c`）是 **Marsaglia-MultiCarry**，而 R 默认是
+**Mersenne-Twister**、播种法也不同 —— 接上去只会得到"看着像随机、每个数都不一样"。
+
+所以这一刀不是"接上调用"，是**把发生器换成 R 那一条**：`ext/r/rt/omni_rng.c`
+（**我们自己的代码**，照 `src/main/RNG.c` 公开的算法写）给出 MT19937 + R 的
+`RNG_Init`（先把种子过 50 遍 `69069 * s + 1`，再用同一个 LCG 填满 625 格状态，
+第 0 格摆 624）+ `fixup`（挡掉 0 与 1）+ `R_unif_index`（R ≥ 3.6 的拒绝采样）。
+`ext/r/build.js` 里那份 `sunif.c` 因此**不编**了。
+
+换掉之后 `runif` / `rnorm` / `rbinom` / `rpois` … 全是**R 自己的代码**（nmath 里那些
+`r*.c`）跑在**R 自己的流**上；`norm_rand` 的算法由 `snorm.c` 的 `N01_kind` 决定，
+默认是 `INVERSION`，与 R 一致。`sample()` 照 `do_sample` 的不放回算法（抽一格、
+把末尾那格填进空位）。
+
+没接的：`replace=` / `prob=`（Walker 别名法那一套）、`RNGkind()` 换发生器、
+`rgamma` / `rweibull` 那几个"R 那侧先换算参数"的（要按 `stats/R/distn.R` 一条条核对；
+`rexp` 那一格已经核过 —— R 传给 C 的是 `1/rate`）。
 
 `%%` 与 `%/%` 是**按 R 文档的定义自己写的**（`x - floor(x/y)*y` / `floor(x/y)`）：
 R 的 `myfmod` 在解释器那半边（`src/main/arith.c`），不在 nmath 里。写出来的口径与 R 一致
@@ -340,7 +361,9 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
    R 印 `1e+05`。写成 `1e5` / `100000.0` 就走上面那条路。
    那份 C 在 macOS 上用 **long double** 缩放，这儿只有 double：|kp| ≤ 22 上缩放因子是精确的
    （R 自己再往外也退回 `pow()`），量过的 132 格没有一处分叉。
-10. 随机数那一族（`r*` / `set.seed`）没接 —— 见第二节。
+10. 随机数那一族（`r*` / `set.seed` / `sample`）**接了**，数与 R 逐位相同（发生器换成了
+    R 那一条，见第二节）。没接的是 `replace=` / `prob=`、`RNGkind()`、以及 `rgamma` /
+    `rweibull` 那几个要先换算参数的。
 11. `NA_integer_` / `NA_character_` 没接（实数的 `NA` 已经立住了）—— 见第二节那一小节。
 
 ## 五、另一档：libR（ADR-0046）

@@ -70,8 +70,8 @@ const RMATH = new Map([
   ['log1p', { sym: 'log1p', fill: [null] }],
   ['expm1', { sym: 'expm1', fill: [null] }],
   /* 分布那一族。`lower.tail = TRUE` → 1、`log = FALSE` → 0，照 R 的默认值补。
-     **随机数那一族（`r*`）刻意不在这张表里**：它们要 `set.seed` 那套状态，而 R 的发生器在
-     解释器里，standalone 这一份的流不一样 —— 接上去是"看着像对、每个数都不一样"。 */
+     **随机数那一族（`r*`）在另一张表**（`RRAND`）：它们的第一个实参是"要几个"，
+     出来的是一条向量，形状与这张表不同。 */
   ['dnorm', { sym: 'dnorm4', fill: [null, 0, 1, 0] }],
   ['pnorm', { sym: 'pnorm5', fill: [null, 0, 1, 1, 0] }],
   ['qnorm', { sym: 'qnorm5', fill: [null, 0, 1, 1, 0] }],
@@ -105,6 +105,33 @@ const PRED = new Map([
   /* 这两格**没有**载荷问题（`Inf` 就是 `Inf`），所以照旧按值过。 */
   ['is.infinite', 'omni_r_is_infinite'],
   ['is.finite', 'R_finite'],
+]);
+
+/**
+ * **随机数那一族**（`r*`）—— 现在接了，因为发生器换成了 R 自己那一条。
+ *
+ * 从前这一格刻意空着：standalone 的 nmath 自带的是 Marsaglia-MultiCarry，而 R 默认是
+ * Mersenne-Twister，播种法也不同 —— 接上去只会得到"看着像随机、每个数都不一样"。
+ * 现在 `rt/omni_rng.c` 按 `src/main/RNG.c` 公开的算法把 MT 与 R 的播种法写出来、顶掉了
+ * 那一份，于是 nmath 里这一族（**R 自己的代码**）跑在**R 自己的流**上，数与 R 逐位相同。
+ *
+ *   sym   —— `Rmath.h` 里的名字（**只收一格值**：`runif(a, b)` 出一个数，不是一条向量）
+ *   fill  —— R 那侧除了第一个 `n` 之外的实参：`null` 是必填，别的是缺省值
+ *   inv   —— R 那侧给的是 `rate`，而 C 那侧收 `scale`（`rexp(n, rate)` → `rexp(1/rate)`，
+ *            这是 R 自己在 `stats/R/distn.R` 里做的换算）
+ */
+const RRAND = new Map([
+  ['runif', { sym: 'runif', fill: [0, 1] }],
+  ['rnorm', { sym: 'rnorm', fill: [0, 1] }],
+  ['rexp', { sym: 'rexp', fill: [1], inv: true }],
+  ['rpois', { sym: 'rpois', fill: [null] }],
+  ['rbinom', { sym: 'rbinom', fill: [null, null] }],
+  ['rgeom', { sym: 'rgeom', fill: [null] }],
+  ['rchisq', { sym: 'rchisq', fill: [null] }],
+  ['rcauchy', { sym: 'rcauchy', fill: [0, 1] }],
+  ['rlnorm', { sym: 'rlnorm', fill: [0, 1] }],
+  ['rt', { sym: 'rt', fill: [null] }],
+  ['rbeta', { sym: 'rbeta', fill: [null, null] }],
 ]);
 
 const NUM_STR = 'r_num_str';
@@ -160,6 +187,7 @@ const FN_DEPS = new Map([
   ['r_rep_s', []],
   ['r_rep_v', []],
   ['r_seq_by', []],
+  ['r_sample_i', []],
   /* 三态逻辑那一族（`RLGL1` 那段账）。比较那六格各发一个函数 —— 不摊在调用点上是
      因为"两边各读两遍"要临时量，而临时量在**条件位**上没地方摆（`while` 的条件被降级到
      循环外头，摊开的 `let` 会变成"只算一次"）。一次函数调用是纯表达式，哪儿都放得下。 */
@@ -396,6 +424,8 @@ const BUILTINS = new Set([
   /* 串那一族。`tolower` **没接** —— 方言里只有 `(supper …)`，没有反过来的那一格，
      补它要给核心方言加一格算子（五条腿都要动），不在 R 这一刀里。 */
   'toupper', 'substr', 'sprintf', 'startsWith', 'endsWith',
+  /* 随机数那一族（发生器是 R 自己那一条，见 `RRAND`）。 */
+  'set.seed', 'sample', ...RRAND.keys(),
   /* libm 那一族：R 自己这几个也是直接调 libm（不在 nmath 里），所以落方言的 `rmath`。
      一格实参、回 double —— `log(x, base)` 那种两格的**当场报**（R 那一档是 `log(x)/log(b)`，
      而"替它算"与"照它算"是两件事）。 */
@@ -543,6 +573,8 @@ function typeOfCall(x, types) {
   if (fn !== null && RMATH.has(fn)) {
     return args.length > 0 && isVecTy(typeOfExpr(args[0], types)) ? RVEC : REAL;
   }
+  /* `r*` 那一族出的是**长度 n 的向量**（R 里 `rnorm(1)` 也是一格长度 1 的向量）。 */
+  if (fn !== null && RRAND.has(fn)) return RVEC;
   if (fn !== null && PRED.has(fn)) return BOOL;
   if (fn === 'is.na' || fn === 'is.nan') return BOOL;
   switch (fn) {
@@ -576,6 +608,9 @@ function typeOfCall(x, types) {
       return isVecTy(t) ? t : RVEC;
     }
     case 'cumsum': case 'diff': case 'range': case 'seq': return RVEC;
+    /* 随机数那一族：R 的 `runif(n, …)` 出的是**长度 n 的向量**（`runif(1)` 也是向量）。 */
+    case 'sample': return RVEC;
+    case 'set.seed': return { kind: 'void' };
     case 'prod': case 'var': case 'sd': return REAL;
     /* 这一批第一格是向量就逐元素（`sqrt(xs)`），标量进标量出。 */
     case 'sqrt': case 'exp': case 'log': case 'log2': case 'log10':
@@ -923,6 +958,65 @@ function sprintfOf(x, types) {
   if (lit !== '') pieces.push(S(lit));
   if (pieces.length === 0) return S('');
   return pieces.reduce((acc, p) => b('+', acc, p));
+}
+
+/**
+ * `r*` 那一族（`runif(n, …)`）→ 一条长度 n 的向量。
+ *
+ * nmath 那侧的每个函数**只出一个数**（`runif(a, b)`），而 R 那侧第一个实参是"要几个"——
+ * 所以这儿开一格向量、转 n 圈，每圈调一次那个 ccall。分布的参数先存进临时量
+ * （循环里每圈都要读，不能求好多遍），**次序要紧**：R 是先算参数再抽数。
+ */
+function randVecOf(fn, x, types) {
+  const spec = RRAND.get(fn);
+  cabiUsed.add(spec.sym);
+  rmathSig(spec.sym);
+  const args = posArgs(x);
+  if (args.length === 0) throw new Error(`r->IR: ${fn}() 至少要一格实参（"要几个"）`);
+  const pre = [];
+  const nNm = fresh('rn');
+  pre.push({
+    kind: 'let',
+    name: nNm,
+    type: INT,
+    init: asIntE(exprOf(args[0], types), typeOfExpr(args[0], types)),
+  });
+  /* 分布参数：R 那侧给了就用、没给就用缺省值（`null` 是必填 —— 没给当场报）。 */
+  const ps = spec.fill.map((def, k) => {
+    const node = args[k + 1];
+    if (node === undefined) {
+      if (def === null) throw new Error(`r->IR: ${fn}() 第 ${k + 2} 格实参是必填的（R 那边没有缺省值）`);
+      return { kind: 'real', value: spec.inv ? 1 / def : def };
+    }
+    const t = typeOfExpr(node, types);
+    if (isVecTy(t)) {
+      throw new Error(`r->IR: ${fn}() 的分布参数是向量 —— R 那一格是多头回收（每个数各用一套`
+        + ' 参数），这一层没做，所以当场报');
+    }
+    const e = asReal(exprOf(node, types), t);
+    const v = spec.inv ? b('/', { kind: 'real', value: 1 }, e) : e;
+    const nm2 = fresh('rp');
+    pre.push({ kind: 'let', name: nm2, type: REAL, init: v });
+    return { kind: 'name', name: nm2 };
+  });
+  const out = fresh('ro');
+  const i = fresh('ri');
+  const vr = (n2) => ({ kind: 'name', name: n2 });
+  return {
+    kind: 'block-expr',
+    stmts: [
+      ...pre,
+      ...vecNewAs(out, vr(nNm)),
+      {
+        kind: 'for',
+        init: { kind: 'let', name: i, type: INT, init: { kind: 'int', value: 0 } },
+        cond: b('<', vr(i), vr(nNm)),
+        post: { kind: 'assign', target: vr(i), value: b('+', vr(i), { kind: 'int', value: 1 }) },
+        body: [vecSet(vr(out), vr(i), { kind: 'ccall', sym: spec.sym, args: ps })],
+      },
+    ],
+    value: vr(out),
+  };
 }
 
 /** 下标从 1 起 → 从 0 起。字面量当场折掉（`x[1]` 出 `aget(x, 0)` 而不是 `1-1`）。 */function zeroBased(e) {
@@ -1384,6 +1478,7 @@ function callOf(x, types, extra, want) {
   }
 
   /* **R 自己的 C 先问一遍**（摆在 BUILTINS 之前）：这一族的答案不由我们给。 */
+  if (fn !== null && RRAND.has(fn)) return randVecOf(fn, x, types);
   if (fn !== null && RMATH.has(fn)) {
     const tys = all.map((a) => (a === null ? REAL : typeOfExpr(a, types)));
     const args = all.map((a, i) => ev(i));
@@ -1666,6 +1761,33 @@ function callOf(x, types, extra, want) {
       case 'print':
         throw new Error('r->IR: `print()` 只能摆在语句位上（R 里它回的是"不可见的那格值"，'
           + ' 而这一档没有"可见性"这一层）');
+      case 'set.seed':
+        throw new Error('r->IR: `set.seed()` 只能摆在语句位上（它回的是"不可见的 NULL"）');
+      case 'sample': {
+        /* R 的 `sample`：**回的是下标**（`sample.int`），向量那一档就是拿下标去挑。
+           不放回那一条照 `do_sample` 的算法（每次抽一格、把末尾那格填进空位）——
+           于是与 R 逐位相同（R >= 3.6 的 `R_unif_index` 是拒绝采样）。
+           `replace=` / `prob=` 没接：那是另外两个算法（Walker 别名法那一套）。 */
+        if (namedArg(x, 'replace') !== undefined || namedArg(x, 'prob') !== undefined) {
+          throw new Error('r->IR: sample() 的 `replace=` / `prob=` 没接 —— 那是另外两条算法');
+        }
+        if (n < 1 || n > 2) throw new Error(`r->IR: sample() 接一格或两格实参（给了 ${n}）`);
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        if (!isVecTy(t)) {
+          const nOf = asIntE(ev(0), t);
+          const k = n === 2 ? asIntE(ev(1), typeOfExpr(all[1], types)) : nOf;
+          return lglCall('r_sample_i', nOf, k);
+        }
+        /* 向量那一档要把它存进临时量（长度与取值各读一次） */
+        const vn = fresh('sv');
+        const vr = { kind: 'name', name: vn };
+        const k2 = n === 2 ? asIntE(ev(1), typeOfExpr(all[1], types)) : vecLen(vr);
+        return {
+          kind: 'block-expr',
+          stmts: [{ kind: 'let', name: vn, type: t, init: ev(0) }],
+          value: lglCall('r_vec_pick', vr, lglCall('r_sample_i', vecLen(vr), k2)),
+        };
+      }
       /* `invisible(x)` 就是 x 本身 —— 差别只在"顶层要不要印"，而那一问在 `topStmtOf` 里。 */
       case 'invisible': {
         if (n !== 1) throw new Error(`r->IR: invisible() 要正好一格实参（给了 ${n}）`);
@@ -1742,7 +1864,7 @@ function printOf(x, types) {
  * （`f <- function(x) cat(x)` 在 R 里交的是 `cat` 的 `NULL`，也不印）。
  * 这一格从前是"一律不印"，那是因为那时还没有返回类型这张表。
  */
-const NO_AUTOPRINT = new Set(['cat', 'print', 'invisible', 'return', 'seq_len']);
+const NO_AUTOPRINT = new Set(['cat', 'print', 'invisible', 'return', 'seq_len', 'set.seed']);
 function isAutoPrint(k) {
   const t = tag(k);
   if (t === 'bin') return !isAssign(k);
@@ -1922,6 +2044,21 @@ function stmtOf(x, types) {
       /* `cat()` 与 `return()` 在 R 里都是**调用**，落到的却是语句（见文件头第 2 条）。 */
       if (fn === 'cat') return catOf(x, types);
       if (fn === 'print') return printOf(x, types);
+      /* `set.seed(n)` 落成一格 ccall（R 那边它也是"做事不给值"的那一类）。 */
+      if (fn === 'set.seed') {
+        const vs = posArgs(x);
+        if (vs.length !== 1) throw new Error(`r->IR: set.seed() 要一格实参（给了 ${vs.length}）`);
+        cabiUsed.add('omni_r_set_seed');
+        rmathSig('omni_r_set_seed');
+        return {
+          kind: 'expr-stmt',
+          expr: {
+            kind: 'ccall',
+            sym: 'omni_r_set_seed',
+            args: [asIntE(exprOf(vs[0], types), typeOfExpr(vs[0], types))],
+          },
+        };
+      }
       if (fn === 'return') {
         const vs = posArgs(x);
         return { kind: 'return', values: vs.length === 0 ? [] : [exprOf(vs[0], types)] };
@@ -3322,6 +3459,59 @@ function vecFnDecl(name) {
           cond: b('<', i, m),
           post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
           body: [vecSet(out, i, b('+', from, b('*', call1('toreal', i), by)))],
+        },
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_sample_i') {
+    /* `sample.int(n, k)` —— 照 `do_sample`（不放回那一支）：手里一条 0..n-1 的牌，
+       每次用 `R_unif_index` 抽一格、记下来（+1 变成 R 的下标）、再把**末尾那格**填进空位。
+       与 R 逐位相同，因为抽数那一格就是 R 的 `R_unif_index`（拒绝采样）。 */
+    cabiUsed.add('omni_r_unif_index');
+    rmathSig('omni_r_unif_index');
+    const nn = { kind: 'name', name: 'n0' };
+    const kk = { kind: 'name', name: 'k' };
+    const xs = { kind: 'name', name: 'x' };
+    const out = { kind: 'name', name: 'o' };
+    const m = { kind: 'name', name: 'm' };
+    const j = { kind: 'name', name: 'j' };
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'n0', type: INT }, { name: 'k', type: INT }],
+      ret: RVEC,
+      body: [
+        ...vecNewAs('x', nn),
+        {
+          kind: 'for',
+          init: { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
+          cond: b('<', i, nn),
+          post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
+          body: [vecSet(xs, i, call1('toreal', i))],
+        },
+        ...vecNewAs('o', kk),
+        { kind: 'let', name: 'm', type: INT, init: nn },
+        {
+          kind: 'for',
+          init: { kind: 'let', name: 'i2', type: INT, init: { kind: 'int', value: 0 } },
+          cond: b('<', { kind: 'name', name: 'i2' }, kk),
+          post: {
+            kind: 'assign',
+            target: { kind: 'name', name: 'i2' },
+            value: b('+', { kind: 'name', name: 'i2' }, { kind: 'int', value: 1 }),
+          },
+          body: [
+            {
+              kind: 'let',
+              name: 'j',
+              type: INT,
+              init: call1('toint', { kind: 'ccall', sym: 'omni_r_unif_index', args: [call1('toreal', m)] }),
+            },
+            vecSet(out, { kind: 'name', name: 'i2' }, b('+', vecGet(xs, j), { kind: 'real', value: 1 })),
+            { kind: 'assign', target: m, value: b('-', m, { kind: 'int', value: 1 }) },
+            vecSet(xs, j, vecGet(xs, m)),
+          ],
         },
         { kind: 'return', values: [out] },
       ],
