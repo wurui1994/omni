@@ -554,9 +554,15 @@ static int ev_tex_params(int fmt) { return ev_tex_params_t(GL_TEXTURE_2D, fmt); 
  * **一张图 -> 一块 RGBA8**（宽高写回 `*w`/`*h`，回 NULL = 读不到/解不开；调用方 `free`）。
  *
  * 用这台机器的 ImageIO（`CGImageSource`）—— 与上下文用 CGL 同一条道理：平台给的直接用。
- * 画进 `CGBitmapContext` 那一步顺手把方向摆正：CG 的原点在左下、GL 的纹理坐标原点也在
- * 左下，但 `CGContextDrawImage` 出来的行序与我们要的相反，所以**按行倒着抄一趟**
- * （与 `omni_ev_gl_read` 里翻正那一手同一个理）。
+ *
+ * **行序照原版：不翻。** `kglsettex2`（`polydraw.c:1279`）把解出来的像素用
+ * `kprender(..., tex.sizx*4, ...)`（**正的 pitch**）写进 `gbmp`，再整块
+ * `glTexSubImage2D` 上去 —— 于是**图像的第 0 行落在 `t=0`**（GL 那一侧的"下边"）。
+ * 也就是说原版的文件纹理在采样时本来就是上下颠倒的，脚本里的纹理坐标是照着这个写的。
+ * 这一格从前按"CG 原点在左下"的想法倒着抄了一趟行 —— 于是 `earth.jpg` 那一族整个翻过来：
+ * 量出来 `ken/texture.pss` 的探针原样 RMSE 60.78、**竖翻之后 0.45**（剩下的是解码器差）；
+ * 拿图像自己的上下两带对过账：`t≈0` 那一带应当是图像**第 0 行**那一头（161），
+ * 参考给 162.3、我们从前给 214.5（图像最后一行那一头）。
  */
 static unsigned char *ev_img_load(const char *path, int *w, int *h) {
   CFStringRef sp = CFStringCreateWithCString(NULL, path, kCFStringEncodingUTF8);
@@ -574,28 +580,20 @@ static unsigned char *ev_img_load(const char *path, int *w, int *h) {
   int ih = (int)CGImageGetHeight(img);
   if (iw <= 0 || ih <= 0) { CGImageRelease(img); return NULL; }
   unsigned char *buf = (unsigned char *)malloc((size_t)4 * (size_t)iw * (size_t)ih);
-  unsigned char *out = (unsigned char *)malloc((size_t)4 * (size_t)iw * (size_t)ih);
-  if (buf == NULL || out == NULL) {
-    free(buf); free(out); CGImageRelease(img); return NULL;
-  }
+  if (buf == NULL) { CGImageRelease(img); return NULL; }
   CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
   CGContextRef ctx = CGBitmapContextCreate(buf, (size_t)iw, (size_t)ih, 8, (size_t)4 * (size_t)iw,
                                            cs, kCGImageAlphaPremultipliedLast);
   CGColorSpaceRelease(cs);
-  if (ctx == NULL) { free(buf); free(out); CGImageRelease(img); return NULL; }
+  if (ctx == NULL) { free(buf); CGImageRelease(img); return NULL; }
   CGRect r;
   r.origin.x = 0; r.origin.y = 0; r.size.width = iw; r.size.height = ih;
   CGContextDrawImage(ctx, r, img);
   CGContextRelease(ctx);
   CGImageRelease(img);
-  for (int y = 0; y < ih; y++) {
-    memcpy(out + (size_t)4 * (size_t)iw * (size_t)y,
-           buf + (size_t)4 * (size_t)iw * (size_t)(ih - 1 - y), (size_t)4 * (size_t)iw);
-  }
-  free(buf);
   *w = iw;
   *h = ih;
-  return out;
+  return buf;
 }
 
 int omni_ev_gl_tex(int slot, int w, int h, int d, int fmt, const double *px) {
@@ -724,10 +722,14 @@ int omni_ev_gl_texfile(int slot, const char *path, int colmode) {
       GL_TEXTURE_CUBE_MAP_POSITIVE_Y, GL_TEXTURE_CUBE_MAP_NEGATIVE_Y,
       GL_TEXTURE_CUBE_MAP_POSITIVE_Z, GL_TEXTURE_CUBE_MAP_NEGATIVE_Z,
     };
+    /* **一竖条 6 格里哪一格是哪一面：照原版那张 `cubemapindex`**
+       （`polydraw.c:1093` = `{1,3,4,5,0,2}`，文件那条路在 1338 行用它）——
+       不是顺着来的。 */
+    static const int order[6] = { 1, 3, 4, 5, 0, 2 };
     int fh = h / 6;
     for (int f = 0; f < 6; f++) {
       glTexImage2D(faces[f], 0, GL_RGBA8, w, fh, 0, GL_RGBA, GL_UNSIGNED_BYTE,
-                   px + (size_t)4 * (size_t)w * (size_t)fh * (size_t)f);
+                   px + (size_t)4 * (size_t)w * (size_t)fh * (size_t)order[f]);
     }
   } else {
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
