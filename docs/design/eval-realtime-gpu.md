@@ -1707,7 +1707,7 @@ but functional."、`:101`："Use sin-based pseudo-noise for now." —— 也就�
 正事是在**语言那一侧**把宽线摊成三角带（与 asy 那条腿"线是管子"同一个道理）——
 一格设计活，不是一行。
 
-### 28.11 下一格：**面剔除整格没接**（`disco ball` 67.2 的来源）
+### 28.11 **面剔除**那一族（接上了；`disco ball` 67.2 **不是**它）
 
 `glEnable(GL_CULL_FACE)` 在 `gl_enable` 里只认 `GL_DEPTH_TEST`、别的 cap "收下不管"，
 而 `glcullface/1` 在名字表里直接是 `gl_nop1`（`ext/polydraw/gl-rt.js:225`）——
@@ -1742,30 +1742,76 @@ GL 定的是 k 为奇数时**前两个顶点换位**（`(k+1, k, k+2)`），为�
 （`ribbons invasion` / `snake tube` / `sphere ellipsis` / `sphere` 重量过，照旧 0.00）——
 **只有剔除会让它现形**。这一格已经照 GL 改了。
 
-**可是剔除还是不能接**，因为尺子自己在这一格上又加了一条原版没有的：
-`c_impl/src/render/gl_renderer.c:1339` 的 `GLCMD_CULLFACE` 除了 `glEnable(GL_CULL_FACE)`
-还**把正面钉成 CW**（`glFrontFace(GL_CW)`，它自己的注释说"原版也钉了" —— 可
-`polydraw.c:1598` 的 `kglCullFace` 只有 `glEnable` + `glCullFace`，正面是 GL 默认的 CCW）。
-于是两边剔掉的是**互补的那一半**：我们照原版（CCW）之后 `disco ball` 我们留 9583 格、
-参考留 23309 格（RMSE 118），而不剔是 26448 格（67.2）。
-按 `polydraw_src` 我们那一档才是对的 —— 要量得动这一族，得像 `glrotate`/`setfov` 那样
-**在 fork 里把那句 `glFrontFace(GL_CW)` 去掉**再比。这一趟仍然把剔除退回去了
-（只留绕向那一格），免得账被一把钉了 CW 的尺子带着跑。
+**（2026-09-25 再续，这一族接上了）先纠一条我自己记错的**：上面那句"`polydraw.c:1598` 的
+`kglCullFace` 只有 `glEnable` + `glCullFace`、正面是 GL 默认的 CCW"是**错的** ——
+正本第 1605 行明明白白就是 `glFrontFace(GL_CW);`：
 
-**（再续）把 fork 里那句 `glFrontFace(GL_CW)` 去掉之后量了第三趟**，四个数摆在一起看：
+```c
+double kglCullFace (double mode)
+{
+	int imode; imode = (int)mode;
+	if (imode == GL_NONE) { glDisable(GL_CULL_FACE); return(0.0); }
+	glEnable(GL_CULL_FACE);
+	glCullFace(imode);
+	glFrontFace(GL_CW);                 /* polydraw.c:1605 —— 正面是顺时针 */
+	return(0.0);
+}
+```
 
-* `curvybuild`：85.55 → 11.78，可**两边的非黑都掉到 1606 格**（1.6% 覆盖）——
-  不是对上了，是**两边一起几乎剔空了**；
-* `texture`（不计分）：49.18 → 9.39；
-* `disco ball`：67.24 → **122.41**（我们留 9583 格、参考留 24976 格）；
-* 那两侧的 QUADS 拆法与 `GL_FRONT`/`GL_BACK` 的枚举值**都逐字相同**（参考在
-  `gl_renderer.c:544` 也是 `(k,k+1,k+2)+(k,k+2,k+3)`），所以差不在这两格。
+也就是说**这门语言的正面约定是 CW，不是 GL 默认的 CCW**；参考 `c_impl` 在这一格上是**忠实的**
+（它那句注释也没说错），第三趟"把 fork 里的 CW 去掉"本身就是照着我记错的那条去量的 ——
+量出来两边一起剔空，恰恰是因为**两边都被我改错了**。
 
-也就是说：钉 CW 是参考**为了让这些例子显示出来**加的经验补丁，去掉之后它自己也把
-`curvybuild` 剔空了。两档都对不上原版应有的样子 ⇒ **这一族现在没有可信的判据**
-（原版的输出我们拿不到）。所以第三格 fork 补丁也退回去了，尺子照旧只补两格。
-下一轮要么找到原版的截图/能跑的原版，要么先把"脚本发出来的四边形到底是 CW 还是 CCW"
-在一份最小探针上量清楚（一个朝向已知的四边形 + `glcullface` 两档），再决定。
+**判据用一份最小探针立起来了**（照抄就能再跑一趟 —— 三份只差 `glcullface` 那一句：
+`GL_NONE` / `GL_FRONT` / `GL_BACK`）：
+
+```c
+()
+{
+   glClear(GL_COLOR_BUFFER_BIT);
+   glcullface(GL_FRONT);
+   gltranslate(0, 0, -2);
+      //左：红，屏幕上逆时针（y 朝上）
+   glcolor(1,0,0); glbegin(GL_QUADS);
+   glvertex(-1.0,-0.5); glvertex(-0.1,-0.5); glvertex(-0.1,0.5); glvertex(-1.0,0.5);
+   glend();
+      //右：绿，屏幕上顺时针
+   glcolor(0,1,0); glbegin(GL_QUADS);
+   glvertex(0.1,-0.5); glvertex(0.1,0.5); glvertex(1.0,0.5); glvertex(1.0,-0.5);
+   glend();
+}
+```
+
+（参考：`PD_NO_MVP_BAKE=1 polydraw-render x.pss --frame 0 --w 320 --h 240 --fovy 73.7398 -o x.png`；
+我们：`node src/cli.js run x.pss --gfx gl --frame 0 --w 320 --h 240 -o x.rgba`。）两边各跑一趟：
+
+* `glcullface(GL_FRONT)`：**红（CCW）留、绿（CW）剔** —— 两边都是，位置逐格相同（x 80..151）；
+* `glcullface(GL_BACK)`：**绿留、红剔** —— 两边都是（x 168..239）；
+* `glcullface(GL_NONE)`：**我们两个都留**（照 `polydraw.c:1602` 关掉剔除），
+  **参考只留绿的** —— 它那格 `GLCMD_CULLFACE`（`gl_renderer.c:1339`）**压根没判 mode 0**，
+  于是 `glEnable(GL_CULL_FACE)` + `glCullFace(0)`（非法值，状态照旧 `GL_BACK`）。
+  这是参考的一格偏差；语料里**没有一份用 `GL_NONE`**（4 份用它的全是 `GL_FRONT`/`GL_BACK`），
+  所以不影响账。
+
+于是六处照口径接上（`gl_cullface` -> `(gfxcall "glcull" 0|1|2)`、本机 GL 与 WebGL 两台设备
+各自 `glEnable(GL_CULL_FACE)+glFrontFace(GL_CW)+glCullFace(…)`、C 腿转发表、napi、
+CPU 备选收下不管），量出来：
+
+* `ken/texture.pss`（不计分）：**49.18 → 8.20**（那一份最大的一块就是这个）；
+* `tigrou/disco ball.pss`：67.24 → **67.05**（我们非黑 26448 → 26233、参考 23309）——
+  **这一份的差不是剔除**：两边在探针上逐格一致，可同一个模式下我们只剔掉 215 格、
+  参考剔掉 3000 多格 ⇒ 差在**发出去的几何**（那些镜片的顶点次序/朝向），得另查；
+* `ken/curvybuild.pss` 85.55、`ken/heightmap.pss` 14.92：**都没动**（各自另有根因）。
+
+判据：`tests/lower/run.js polydraw evaldraw` 44/44、`tests/gl/run.js` 11/11 照旧。
+
+**上面第二、三趟那两段结论作废**（留着当记录）：第二趟说"尺子多钉了一句原版没有的
+`glFrontFace(GL_CW)`"、第三趟照那条把 fork 里的 CW 去掉之后量到"`curvybuild` 两边一起剔空、
+`disco ball` 122.41"，**根子都是我把正本第 1605 行看漏了**。尺子在这一格上没错，
+第三格 fork 补丁不该加（已退回，尺子照旧只补 `mat4_rotate` / `setfov` 两格）。
+
+留下的教训一条：**"参考错"这个判断要指到源码的行号上**，指不到就先当自己错 ——
+这一族为此白绕了两趟。
 
 ### 28.12 这一轮之后的账
 

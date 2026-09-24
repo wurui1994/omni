@@ -487,7 +487,7 @@ static struct {
   gfx_gl_uni_fn uni;
   gfx_gl_uni1i_fn uni1i;
   gfx_gl_attr_fn attr;
-  gfx_gl_int_fn prog, blend, bindtex, activetex;
+  gfx_gl_int_fn prog, blend, bindtex, activetex, cull;
   gfx_gl_mvp_fn mvp, mv;
   gfx_gl_tex_fn tex;
   gfx_gl_texfile_fn texfile;
@@ -550,6 +550,7 @@ static int gfx_gl_need(void) {
     g_gl.open = (gfx_gl_open_fn)dlsym(h, "omni_ev_gl_open");
     g_gl.cls = (gfx_gl_cls_fn)dlsym(h, "omni_ev_gl_cls");
     g_gl.depth = (gfx_gl_depth_fn)dlsym(h, "omni_ev_gl_depth");
+    g_gl.cull = (gfx_gl_int_fn)dlsym(h, "omni_ev_gl_cull");
     g_gl.batch = (gfx_gl_batch_fn)dlsym(h, "omni_ev_gl_batch");
     g_gl.read = (gfx_gl_read_fn)dlsym(h, "omni_ev_gl_read");
     g_gl.err = (gfx_gl_err_fn)dlsym(h, "omni_ev_gl_error");
@@ -1099,6 +1100,12 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
      z 缓冲，收下记着不用 —— 与 `host/gfx-cpu.js` 那一份同一句话。 */
   if (!strcmp(nm, "gldepth") && argc == 1) {
     if (g_gl.on && g_gl.depth != NULL) g_gl.depth((int)a0 != 0 ? 1 : 0);
+    return 0.0;
+  }
+  /* **面剔除**（语言那一侧的 `glcullface` 转过来的，0 关 / 1 剔背面 / 2 剔正面）：
+     这一档没有真管线，收下不管 —— 与 `host/gfx-cpu.js` 那一份同一句话。 */
+  if (!strcmp(nm, "glcull") && argc == 1) {
+    if (g_gl.on && g_gl.cull != NULL) g_gl.cull((int)a0);
     return 0.0;
   }
   /* ── **批上带的那点状态**（第四刀，与 `host/gfx-cpu.js` 逐句相同）：这一档没有

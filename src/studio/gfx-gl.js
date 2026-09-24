@@ -200,9 +200,11 @@ function batch(kind, prog = null, mvp = null) {
   const last = D.batches[D.batches.length - 1];
   if (last !== undefined && last.kind === kind && last.depth === G.depth
     && last.prog === prog && last.attrVer === G.attrVer
-    && last.mvpVer === B.mvpVer && last.blend === B.blend) return last;
+    && last.mvpVer === B.mvpVer && last.blend === B.blend
+    && last.cull === G.cull) return last;
   const b = {
-    kind, depth: G.depth, prog, mvp, attrVer: G.attrVer, mvpVer: B.mvpVer, blend: B.blend, v: [],
+    kind, depth: G.depth, prog, mvp, attrVer: G.attrVer, mvpVer: B.mvpVer, blend: B.blend,
+    cull: G.cull, v: [],
   };
   D.batches.push(b);
   return b;
@@ -313,6 +315,15 @@ function flush() {
     }
     if (b.depth) gl.enable(gl.DEPTH_TEST);
     else gl.disable(gl.DEPTH_TEST);
+    /* 面剔除（语言那一侧的 `glcull`）：**正面是 CW** —— 照正本
+       `polydraw_src/polydraw.c:1605` 的 `kglCullFace`（不是 GL 默认的 CCW）。 */
+    if (b.cull === 1 || b.cull === 2) {
+      gl.enable(gl.CULL_FACE);
+      gl.frontFace(gl.CW);
+      gl.cullFace(b.cull === 2 ? gl.FRONT : gl.BACK);
+    } else {
+      gl.disable(gl.CULL_FACE);
+    }
     /* 混合：`glquad(0)` 那一档要 alpha 混合（语言那一侧发的 `batchblend`）。 */
     if (b.blend === 0) {
       gl.enable(gl.BLEND);
@@ -339,6 +350,7 @@ function flush() {
  */
 const G = {
   depth: false,                   /* 深度测试开着没有（语言那一侧的 `gldepth` 转过来的） */
+  cull: 0,                        /* 面剔除：0 关 / 1 剔背面 / 2 剔正面（`glcull`） */
   /* `glVertexAttrib*` 设的那几格**常量属性**：位置 -> 四个数。`attrVer` 是它的版本号 ——
      值一变就把顶点断成另一段（常量属性是**按 draw call** 摆的，段里不能变）。 */
   attrs: new Map(), attrVer: 0,
@@ -763,6 +775,11 @@ function call(name, args) {
     /* **深度测试那一格设备状态**（语言那一侧的 `gl_enable(GL_DEPTH_TEST)` 转过来的 ——
        GL 的状态机在语言那一侧，"开不开 z 缓冲"这件事只有设备做得到）。 */
     case 'gldepth/1': G.depth = Math.trunc(a(0)) !== 0; return 0;
+    case 'glcull/1': {
+      const m = Math.trunc(a(0));
+      G.cull = (m === 1 || m === 2) ? m : 0;
+      return 0;
+    }
     /* ── **批上带的那点状态**（第四刀，见 `B` 的头注）。 */
     case 'batchprog/1':
       B.prog = Math.trunc(a(0));
@@ -935,6 +952,7 @@ function reset() {
   D.pfps = 0;
   D.pt0 = 0;
   G.depth = false;
+  G.cull = 0;
   G.attrs.clear();
   G.attrVer = 0;
   /* 批上带的那点状态也归零（`batchprog`/`batchmvp`/`batchblend`）—— 上一份脚本挑的

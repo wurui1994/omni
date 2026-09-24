@@ -492,6 +492,12 @@ export function gfxCall(name, args) {
     case 'gldepth/1':
       if (G.on) G.m.depth(Math.trunc(a(0)) !== 0 ? 1 : 0);
       return 0;
+    /* **面剔除**（语言那一侧的 `glcullface` 转过来的，0 关 / 1 剔背面 / 2 剔正面）：
+       CPU 备选这一档没有真管线（三角是按扫描线填的，没有绕向那一格），收下不管；
+       GL 那一档转过去。 */
+    case 'glcull/1':
+      if (G.on && typeof G.m.cull === 'function') G.m.cull(Math.trunc(a(0)));
+      return 0;
     case 'setcol/1': need(320, 240); D.col = Math.trunc(a(0)) & 0xffffff; return 0;
     case 'setpix/2': need(320, 240); px(a(0), a(1), D.col); return 0;
     case 'moveto/2': need(320, 240); D.x = a(0); D.y = a(1); return 0;

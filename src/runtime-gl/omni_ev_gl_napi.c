@@ -29,6 +29,7 @@
 int omni_ev_gl_open(int w, int h);
 void omni_ev_gl_cls(unsigned int rgb);
 void omni_ev_gl_depth(int on);
+void omni_ev_gl_cull(int mode);
 void omni_ev_gl_batch(int kind, long n, const double *verts);
 int omni_ev_gl_read(unsigned char *out);
 int omni_ev_gl_ready(void);
@@ -123,6 +124,12 @@ static napi_value jsCls(napi_env env, napi_callback_info info) {
 static napi_value jsDepth(napi_env env, napi_callback_info info) {
   ARGS(1);
   omni_ev_gl_depth((int)num(env, a[0]) != 0);
+  return mknum(env, 0);
+}
+
+static napi_value jsCull(napi_env env, napi_callback_info info) {
+  ARGS(1);
+  omni_ev_gl_cull((int)num(env, a[0]));
   return mknum(env, 0);
 }
 
@@ -362,6 +369,7 @@ napi_value napi_register_module_v1(napi_env env, napi_value exports) {
   PUT("open", jsOpen);
   PUT("cls", jsCls);
   PUT("depth", jsDepth);
+  PUT("cull", jsCull);
   PUT("batch", jsBatch);
   PUT("readInto", jsReadInto);
   PUT("def", jsDef);

@@ -63,6 +63,8 @@ static int g_vpw, g_vph;
 static int g_capw, g_caph;
 static int g_on;
 static int g_depth_test;
+/** 面剔除（语言那一侧的 `glcull` 转过来的）：0 关 / 1 剔背面 / 2 剔正面。 */
+static int g_cull;
 
 /* ── 可编程管线那一摊（与 `src/studio/gfx-gl.js` 的 `SH`/`UNI`/`TX` 一一对应）─────────
  *
@@ -212,6 +214,7 @@ int omni_ev_gl_open(int w, int h) {
   g_vph = h;
   g_on = 1;
   g_depth_test = 0;
+  g_cull = 0;
   return 0;
 }
 
@@ -228,6 +231,19 @@ void omni_ev_gl_cls(unsigned int rgb) {
 void omni_ev_gl_depth(int on) {
   if (!g_on) return;
   g_depth_test = on ? 1 : 0;
+}
+
+/**
+ * 面剔除（语言那一侧的 `glcull` 转过来的）：0 关 / 1 剔背面 / 2 剔正面。
+ *
+ * **正面钉成 CW 是照正本**：`polydraw_src/polydraw.c:1605` 的 `kglCullFace` 除了
+ * `glEnable(GL_CULL_FACE)` + `glCullFace(mode)` 还发一句 `glFrontFace(GL_CW)`
+ * （参考 `c_impl` 也照抄了，见 `gl_renderer.c:1339`）—— 也就是**这门语言的正面是顺时针**，
+ * 不是 GL 默认的 CCW。三份用它的脚本（`disco ball` / `texture` / `curvybuild`）都按这一格写。
+ */
+void omni_ev_gl_cull(int mode) {
+  if (!g_on) return;
+  g_cull = (mode == 1 || mode == 2) ? mode : 0;
 }
 
 /* ── 登记那两张表（`(gfxdef 种类 名字 内容)`）──────────────────────────────────────
@@ -923,6 +939,14 @@ void omni_ev_gl_batch(int kind, long n, const double *verts) {
   glViewport(0, 0, g_vpw, g_vph);
   if (g_depth_test) glEnable(GL_DEPTH_TEST);
   else glDisable(GL_DEPTH_TEST);
+  /* 面剔除（`glcull` 那一格；正面是 CW —— 照正本，见 `omni_ev_gl_cull`）。 */
+  if (g_cull != 0) {
+    glEnable(GL_CULL_FACE);
+    glFrontFace(GL_CW);
+    glCullFace(g_cull == 2 ? GL_FRONT : GL_BACK);
+  } else {
+    glDisable(GL_CULL_FACE);
+  }
   /* 这一段用哪格 program 由 `batchprog` 说：0 是内建那对（位置**已是裁剪空间** ⇒
      `u_mvp` 单位矩阵），≠0 是脚本 `glsetshader` 挑的那格（位置是**物体坐标**，
      `u_mvp` 由语言那一侧发的四句 `batchmvp` 给）。 */

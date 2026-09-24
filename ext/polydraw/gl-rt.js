@@ -222,7 +222,7 @@ export const POLYDRAW_GL = uniqMap([
      `ken/drawsph.pss` 那 1909 个球全都拿默认法向 (0,0,1)，画出来是**一个**大球。 */
   ['glenable/1', 'gl_enable'],
   ['gldisable/1', 'gl_disable'],
-  ['glcullface/1', 'gl_nop1'],
+  ['glcullface/1', 'gl_cullface'],
   ['gllinewidth/1', 'gl_nop1'],
   ['glswapinterval/1', 'gl_nop1'],
   ['glblendfunc/2', 'gl_nop2'],
@@ -590,6 +590,29 @@ function glSetupDecls() {
         ex(call('gl_flush', [])),
         ex(dev('gldepth', [num(0)])),
       ]),
+      ret(num(0)),
+    ]),
+    /**
+     * **`glCullFace(mode)`**（`polydraw.c:1598` 的 `kglCullFace`）——
+     * `GL_NONE`(0) 关剔除，别的（`GL_FRONT`=0x0404 / `GL_BACK`=0x0405）开剔除并剔那一面。
+     *
+     * **正面是顺时针**：正本除了 `glEnable(GL_CULL_FACE)` + `glCullFace(mode)` 还发一句
+     * `glFrontFace(GL_CW)`（`polydraw.c:1605`，参考 `c_impl` 也照抄了）—— 也就是说
+     * 这门语言的正面约定与 GL 默认的 CCW **反过来**，那一句钉在设备那一层
+     * （`runtime-gl/omni_ev_gl.c` 的 `omni_ev_gl_cull`、`studio/gfx-gl.js` 的 flush）。
+     *
+     * 剔除是**设备状态**：一变就断一段批，所以先 `gl_flush`（与 `gldepth` 那一格同一手）。
+     * 语料里 4 份用它：`tigrou/disco ball`（`GL_FRONT`）、`ken/texture`（两趟交替）、
+     * `ken/curvybuild`、`ken/heightmap`。
+     */
+    fn('gl_cullface', ['mode'], [
+      ex(call('gl_need', [])),
+      ex(call('gl_flush', [])),
+      iff(bin('==', nm('mode'), num(0x0404)),
+        [ex(dev('glcull', [num(2)]))],
+        [iff(bin('==', nm('mode'), num(0)),
+          [ex(dev('glcull', [num(0)]))],
+          [ex(dev('glcull', [num(1)]))])]),
       ret(num(0)),
     ]),
     fn('gl_nop2', ['a', 'b'], [ret(num(0))]),
