@@ -322,6 +322,30 @@ for (const p of PKGS) {
   }
 }
 
+/* ─── `modules/lapack.so`：R 把 LAPACK 当**模块**动态加载 ────────────────── */
+
+/* `solve()` / `lm()` 走的是 `R_HOME/modules/lapack.so`（`src/modules/lapack/`），
+   不在 libR 里。少了它 `library(grDevices)` 都起不来 —— 它的 `.onLoad` 会 `solve()` 一个
+   3×3 的 RGB 矩阵。名单照 `src/modules/lapack/Makefile.in` 第 18..23 行：
+   `Lapack.c` + `flexiblas.o`（后者在 `src/main` 里，libR 里也有一份，这儿要它自己那份符号）。
+   实现由 Accelerate 提供（configure 在 macOS 上也是这么挑的）。 */
+const LAPACK_SO = join(HOME, 'modules/lapack.so');
+mkdirSync(join(OBJ, 'mod'), { recursive: true });
+const lapackObjs = [];
+for (const [dir, name] of [['src/modules/lapack', 'Lapack.c'], ['src/main', 'flexiblas.c']]) {
+  const o = join(OBJ, 'mod', `${name.replace(/\.c$/, '')}.o`);
+  lapackObjs.push(o);
+  b.build(o, 'ccpkg', join(RSRC, dir, name), {
+    implicit: HEADERS,
+    vars: { extra: `-I${join(RSRC, 'src/modules/lapack')}` },
+  });
+}
+b.build(LAPACK_SO, 'so', lapackObjs, { vars: { libs: '-framework Accelerate' } });
+
+/* `etc/repositories`：`install.packages` 要它（树里是现成的一份，直接抄）。 */
+const REPOS = join(HOME, 'etc/repositories');
+b.build(REPOS, 'cp', join(RSRC, 'etc/repositories'));
+
 /* `Meta/package.rds` / `features.rds` / `nsInfo.rds`：**第一轮我们自己写**
    （`rt/bootstrap-meta.R`，只用 base 的 `read.dcf` / `saveRDS` / `parseNamespaceFile`）。
    为什么不直接跑 R 自己的 `tools:::.vinstall_*_as_RDS`：那两个函数在 tools 包里，
@@ -341,37 +365,25 @@ b.rule('mkmeta', {
     + `--args ${join(HOME, 'library')} ${PKGS.join(' ')} base > ${join(OUT, 'meta.txt')} 2>&1 && date > $out`,
   description: '自举 Meta/*.rds（只用 base）',
 });
-b.build(META, 'mkmeta', [RBIN, BASE_R, BASE_PROFILE, BASE_DESC, RENVIRON, SHARE, ...pkgStamps],
+b.build(META, 'mkmeta', [RBIN, BASE_R, BASE_PROFILE, BASE_DESC, RENVIRON, SHARE, LAPACK_SO, REPOS, ...pkgStamps],
   { implicit: [join(HERE, 'rt/bootstrap-meta.R')] });
 
 
 /* 编出来不等于跑得起来，所以最后一条边是**真跑一趟**：起 R、求一段、对答案。
    `R_ENABLE_JIT=0` 是 ADR-0046 那一条（R 自己那个用 R 写的字节码编译器我们不要）。
-   这一格**只验 base**：那几个带 `NAMESPACE` 的包已经编好装好了，但它们的 `.so` 现在
-   还加载不动（见下面 `pkgs.ok` 那一条与 ADR-0046 里那段账），所以默认目标不挂它们
-   —— 尺子要么绿要么红，不能半绿。 */
+   量的是四件事：base 的算术、stats 的 `sd`、**LAPACK**（`lm` 的系数，走 Accelerate）、
+   以及 methods 的 S4 起不起来（`library(grid)` 会把它拉起来）。 */
 const STAMP = join(OUT, 'smoke.ok');
 const SMOKE_LOG = join(OUT, 'smoke.txt');
 b.rule('smoke', {
-  command: `TZDIR=/usr/share/zoneinfo R_ENABLE_JIT=0 R_DEFAULT_PACKAGES=NULL R_HOME=${HOME} `
-    + `${RBIN} --vanilla --no-echo -e 'cat(sum(1:10), sqrt(2), "\\n")' > ${SMOKE_LOG} 2>&1 `
-    + `&& grep -qx "55 1.414214 " ${SMOKE_LOG} && date > $out`,
-  description: '起一趟我们自己的 R（只 base），对答案',
-});
-b.build(STAMP, 'smoke', [RBIN, BASE_R, BASE_PROFILE, BASE_DESC, RENVIRON]);
-
-/* 下一刀的那一格：带 stats / grid 起来。现在会红（`.so` 里的符号 `dlsym` 找不着），
-   所以**不进默认目标**，要量它就显式说：`node ext/r/build-libR.js .../pkgs.ok`。 */
-const PKGS_OK = join(OUT, 'pkgs.ok');
-const PKGS_LOG = join(OUT, 'pkgs.txt');
-b.rule('pkgsmoke', {
   command: `TZDIR=/usr/share/zoneinfo R_ENABLE_JIT=0 R_HOME=${HOME} `
     + `${RBIN} --vanilla --no-echo -e 'library(stats); library(grid); `
-    + `cat(sum(1:10), round(sd(c(1,2,3,4)), 6), "\\n")' > ${PKGS_LOG} 2>&1 `
-    + `&& grep -qx "55 1.290994 " ${PKGS_LOG} && date > $out`,
-  description: '起一趟带 stats / grid 的（还没通）',
+    + `fit <- lm(c(1,2,3.1) ~ c(1,2,3)); `
+    + `cat(sum(1:10), round(sd(c(1,2,3,4)), 6), round(coef(fit)[2], 4), nrow(data.frame(a=1:3)), "\\n")' `
+    + `> ${SMOKE_LOG} 2>&1 && grep -qx "55 1.290994 1.05 3 " ${SMOKE_LOG} && date > $out`,
+  description: '起一趟我们自己的 R（stats / grid / methods / LAPACK），对答案',
 });
-b.build(PKGS_OK, 'pkgsmoke', [META]);
+b.build(STAMP, 'smoke', [META]);
 
 b.default(STAMP);
 b.run(process.argv.slice(2));

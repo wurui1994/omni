@@ -83,6 +83,30 @@ function sizeOf(type) {
   return run.status === 0 ? Number(run.stdout.trim()) : null;
 }
 
+/**
+ * `dlsym` 要的名字带不带前导下划线 —— **真量一趟**：`dlopen(NULL)` 拿到自己这个进程，
+ * 再分别问 `dlsym(h, "main")` 与 `dlsym(h, "_main")`，看哪个给得出地址。
+ *
+ * 这一格值钱：它定的是 `HAVE_NO_SYMBOL_UNDERSCORE`，而 R 在 `Rdynload.c` 第 892 行拿它
+ * 决定查 `R_init_<pkg>` 还是 `_R_init_<pkg>`。定错的症状**不是编不过**，而是
+ * 每个包的 `.so` 都 `dlopen` 得动、却一个符号都 `dlsym` 不出来 —— 于是
+ * `R_init_<pkg>` 不被调、注册表全空、tools 的 `zzz.R` 在
+ * `.Call(PS_sigs, 1L)` 上炸。这一条是这么查出来的（ADR-0046）。
+ */
+function noSymbolUnderscore() {
+  const r = tryCc(`#include <dlfcn.h>\n#include <stdio.h>\nint main(void){\n`
+    + '  void *h = dlopen(NULL, RTLD_LAZY);\n'
+    + '  if (h == NULL) return 2;\n'
+    + '  int plain = dlsym(h, "main") != NULL;\n'
+    + '  int under = dlsym(h, "_main") != NULL;\n'
+    + '  printf("%d%d", plain, under);\n  return 0;\n}\n', true);
+  if (!r.ok) return null;
+  const run = spawnSync(r.bin, [], { encoding: 'utf8' });
+  if (run.status !== 0) return null;
+  /* "10" = 不带下划线那个能查到（macOS / Linux 都是这一档）→ 定义 HAVE_NO_SYMBOL_UNDERSCORE */
+  return run.stdout.trim()[0] === '1';
+}
+
 /* ─── 那张显式的表 ─────────────────────────────────────────────────────── */
 
 /**
@@ -307,6 +331,12 @@ for (const line of lines) {
   if (TABLE.has(name)) {
     nTable += 1;
     emit(TABLE.get(name));
+  } else if (name === 'HAVE_NO_SYMBOL_UNDERSCORE') {
+    /* 这一格按函数探会答错（没有叫 `no_symbol_underscore` 的函数），所以单独量。 */
+    nProbe += 1;
+    const v = noSymbolUnderscore();
+    if (v === null) throw new Error('gen-rconfig：dlsym 的下划线约定量不出来（那格探针编不过）');
+    emit(v ? '1' : null);
   } else if (SIZEOF_TYPE.has(name)) {
     nProbe += 1;
     const n = sizeOf(SIZEOF_TYPE.get(name));
