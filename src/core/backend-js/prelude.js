@@ -1022,6 +1022,18 @@ function $gfx_tex(slot, w, h, d3, fmt, px) {
   }
   return d.tex(Number(slot), Number(w), Number(h), Number(d3), Number(fmt), px);
 }
+// (gfxarr "名字" a0 a1 a2 a3 数组)：**带一整块数组的宿主调用**（§19.1）——
+// gluniform*v / glgettex 那一族。设备那一格叫 arr(名字, 四格实参, 数组)。
+function $gfx_arr(name, args, blk) {
+  const d = globalThis.__OMNI_GFX;
+  if (d === undefined || d === null) {
+    $rt_error("这份产物里没有图形设备（宿主要装上 globalThis.__OMNI_GFX）：gfxarr");
+  }
+  if (typeof d.arr !== "function") {
+    $rt_error("这格设备没有带数组的宿主调用那一格（gfxarr）");
+  }
+  return d.arr(String(name), args, blk);
+}
 // (gfxframefn …)：把每帧那一格函数交给设备。**浏览器那一档用它做 rAF 循环** ——
 // 那边产物是在主线程同步跑的，while 会把页面卡死；别的设备（CPU 备选 / 本机 OpenGL）
 // 自己有循环，这一格在它们那儿就是记下不用（没有 setFrame 就当没这回事）。

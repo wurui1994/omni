@@ -897,6 +897,40 @@ function gfxTex(slot, w, h, d, fmt, pxs) {
 }
 
 /**
+ * `(gfxarr "名字" [a0 a1 a2 a3] 数组)`：**带一整块数组的宿主调用**（§19.1）。
+ *
+ * 只有两族：`gluniform{1..4}{f,i}v(句柄, 个数, 数组)` 与 `glgettex(槽, 宽, 高, 分量, 出数组)`
+ * （后者是**往里写**的那一档）。两族都只有可编程管线才有 ⇒ CPU 备选收下不管，
+ * GL 那一档转给设备。**与 `runtime/omni_fmt.c` 的 `omni_gfx_arr` 逐句相同**。
+ */
+function gfxArr(name, args, blk) {
+  if (recOn()) { REC.set('gfxarr', (REC.get('gfxarr') ?? 0) + 1); return 0; }
+  const nm = String(name);
+  const a0 = Number(args[0]);
+  const a1 = Number(args[1]);
+  const a2 = Number(args[2]);
+  const n = blk === undefined || blk === null ? 0 : blk.length;
+  if (glWant()) need(320, 240);
+  /* `gluniform<N><f|i>v`：名字里第 10 个字符是分量数、第 11 个是 f/i。 */
+  if (nm.startsWith('gluniform') && nm.length === 12 && nm[11] === 'v'
+      && nm[9] >= '1' && nm[9] <= '4' && (nm[10] === 'f' || nm[10] === 'i')) {
+    if (!G.on) return 0;
+    const comps = nm.charCodeAt(9) - 48;
+    let cnt = Math.trunc(a1);
+    if (cnt < 0) cnt = 0;
+    if (cnt * comps > n) cnt = Math.trunc(n / comps);
+    return G.m.univ(a0, comps, nm[10] === 'i' ? 1 : 0, cnt, blk);
+  }
+  /* `glgettex(槽, &数组, 宽, 高, 格)`：**写回几格由设备说**（一像素几个 double 只有
+     它知道 —— 那一槽自己的格）。这一层把数组本身递过去，设备写回，回 -1 = 没读到。 */
+  if (nm === 'glgettex') {
+    if (!G.on) return 0;
+    return G.m.gettex(Math.trunc(a0), Math.trunc(a1), Math.trunc(a2), blk);
+  }
+  throw new Error(`gfxarr: 不认识 '${nm}'（有的是 gluniform{1..4}{f,i}v / glgettex）`);
+}
+
+/**
  * `(gfxdef 种类 名字 内容)`：往设备上登记一格有名字的串（着色器原文 / 名字表）。
  *
  * CPU 备选用不上，但**GL 那一档要** —— 而这几句在设备开起来之前就到了（产物开头那一摊
@@ -929,7 +963,7 @@ function texPath(idx) {
 }
 
 export const GFX_CPU = {
-  call: gfxCall, batch, tex: gfxTex, def: gfxDef, present,
+  call: gfxCall, batch, tex: gfxTex, arr: gfxArr, def: gfxDef, present,
   /* `kind` 是给判据看的一格记号：GL 那一档挂上之后 `glNeed` 把它改成 `native-gl`
      （不然判据分不出"真走了 GPU"与"悄悄回落了 CPU 备选" —— 那是自己判自己）。
      **是可变字段而不是 getter**：这一份要过 `check:self` 那道门，取值器不在那个子集里。 */

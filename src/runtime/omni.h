@@ -372,6 +372,11 @@ double omni_gfx_batch(int64_t kind, int64_t n, struct omni_arr_f64_s *verts);
    CPU 备选那一档**收下存着**（没有着色器，采样那一半在 batchprog 那格就报了）。 */
 double omni_gfx_tex(int64_t slot, int64_t w, int64_t h, int64_t d, int64_t fmt,
                     struct omni_arr_f64_s *px);
+/* `(gfxarr "名字" a0 a1 a2 a3 数组)`：**带一整块数组的宿主调用**（§19.1）——
+   `gluniform*v` / `glgettex` 那一族。四格 double 定死，用不满的递 0；
+   数组那一格**两个方向都用它**（`glgettex` 是往里写）。 */
+double omni_gfx_arr(omni_str name, double a0, double a1, double a2, double a3,
+                    struct omni_arr_f64_s *blk);
 /* `(gfxframefn …)`：把每帧那一格函数交给设备（平签名：一格 `void *`）。
    这条腿上**记下不用** —— CPU 备选与本机 OpenGL 那两档自己有帧循环；要"页面驱动"的
    只有浏览器那一档。 */

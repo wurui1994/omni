@@ -1036,6 +1036,36 @@ function batchIn(kind, n, verts) {
   return n;
 }
 
+/**
+ * `(gfxarr "名字" [a0 a1 a2 a3] 数组)`：**带一整块数组的宿主调用**（§19.1）。
+ *
+ * 这一档有的是 `gluniform{1..4}{f,i}v`；`glgettex`（把纹理读回来）在 WebGL2 上没有
+ * `glGetTexImage`，要另走一趟离屏 `readPixels` —— 还没做，**当场报**不静默。
+ */
+function arrIn(name, args, blk) {
+  const nm = String(name);
+  if (nm.startsWith('gluniform') && nm.length === 12 && nm[11] === 'v'
+      && nm[9] >= '1' && nm[9] <= '4' && (nm[10] === 'f' || nm[10] === 'i')) {
+    const comps = nm.charCodeAt(9) - 48;
+    const e = UNI.list[Math.trunc(Number(args[0]))];
+    if (e === undefined) throw new Error(`gluniform*v：没有这格句柄 ${args[0]}`);
+    if (e.loc === null) return 0;
+    let cnt = Math.trunc(Number(args[1]));
+    if (cnt < 0) cnt = 0;
+    if (cnt * comps > blk.length) cnt = Math.trunc(blk.length / comps);
+    const v = nm[10] === 'i' ? new Int32Array(cnt * comps) : new Float32Array(cnt * comps);
+    for (let i = 0; i < cnt * comps; i++) v[i] = blk[i];
+    const gl = D.gl;
+    gl.useProgram(e.prog);
+    const f = nm[10] === 'i'
+      ? [gl.uniform1iv, gl.uniform2iv, gl.uniform3iv, gl.uniform4iv][comps - 1]
+      : [gl.uniform1fv, gl.uniform2fv, gl.uniform3fv, gl.uniform4fv][comps - 1];
+    f.call(gl, e.loc, v);
+    return 0;
+  }
+  throw new Error(`这格设备（WebGL2）上没有 '${nm}'（有的是 gluniform{1..4}{f,i}v）`);
+}
+
 export function installGlDevice(canvas, w = 320, h = 240) {
   open(canvas, w, h);
   const dev = {
@@ -1043,6 +1073,7 @@ export function installGlDevice(canvas, w = 320, h = 240) {
     call,
     batch: batchIn,
     tex: texIn,
+    arr: arrIn,
     present: flush,
     snapshot,
     setFrame,

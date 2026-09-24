@@ -1221,6 +1221,18 @@ export function applyBuiltin(I, e, a) {
       }
       return dev.tex(Number(a[0]), Number(a[1]), Number(a[2]), Number(a[3]), Number(a[4]), a[5]);
     }
+    /* `(gfxarr "名字" a0 a1 a2 a3 数组)`：**带一整块数组的宿主调用**（§19.1）。 */
+    case 'gfx_arr': {
+      const dev = globalThis.__OMNI_GFX;
+      if (dev === undefined || dev === null) {
+        rtError('这一趟里没有图形设备（宿主要装上 globalThis.__OMNI_GFX）：gfxarr');
+      }
+      if (typeof dev.arr !== 'function') {
+        rtError(`这格设备（${dev.kind ?? '?'}）没有带数组的宿主调用那一格（gfxarr）`);
+      }
+      return dev.arr(String(a[0]),
+        [Number(a[1]), Number(a[2]), Number(a[3]), Number(a[4])], a[5]);
+    }
     /* `(gfxframefn …)`：把每帧那一格函数交给设备。**这条腿上是记下不用** ——
        解释器这边帧循环靠 `(gfxcall "nextframe")` 自己驱动（那一格设备说画几帧）；
        要 rAF 那种"页面驱动"的只有浏览器那一档，而那一档跑的是 backend-js 的产物。 */

@@ -144,6 +144,17 @@ export const POLYDRAW_GL = new Map([
   ['gluniform2f/3', 'gl_uni2'],
   ['gluniform3f/4', 'gl_uni3'],
   ['gluniform4f/5', 'gl_uni4'],
+  /* **带一整块数组的那两族**（§19.1）：`gluniform{1..4}{f,i}v(句柄,格数,&数组)` 与
+     `glgettex(槽,&数组,宽,高,格)` —— 宿主面只收 double，所以走 `(gfxarr …)` 那格 op。 */
+  ['gluniform1fv/3', 'gl_univ1f'],
+  ['gluniform2fv/3', 'gl_univ2f'],
+  ['gluniform3fv/3', 'gl_univ3f'],
+  ['gluniform4fv/3', 'gl_univ4f'],
+  ['gluniform1iv/3', 'gl_univ1i'],
+  ['gluniform2iv/3', 'gl_univ2i'],
+  ['gluniform3iv/3', 'gl_univ3i'],
+  ['gluniform4iv/3', 'gl_univ4i'],
+  ['glgettex/5', 'gl_gettex5'],
   ['glgetattribloc/1', 'gl_attrloc'],
   ['glvertexattrib1f/2', 'gl_attr1'],
   ['glvertexattrib2f/3', 'gl_attr2'],
@@ -365,6 +376,22 @@ function glShaderDecls() {
     stateFn('gl_uni3', 'gluniform3f', ['h', 'x', 'y', 'z']),
     stateFn('gl_uni4', 'gluniform4f', ['h', 'x', 'y', 'z', 'w']),
     stateFn('gl_attrloc', 'glgetattribloc', ['a']),
+    /* **带一整块数组的那两族**（§19.1）：`(gfxarr "名字" a0 a1 a2 a3 数组)`。
+       与 `gluniform*f` 一样是"按 draw call 生效"的状态 ⇒ 先断批。
+       `glgettex` 的最后那格 coltype **不看**（照 `kglgettexarray2`：一像素几个 double
+       由那一槽自己的格说），所以原样递过去、设备自己判。 */
+    ...[1, 2, 3, 4].flatMap((k) => ['f', 'i'].map((t) => fnT(`gl_univ${k}${t}`,
+      [['h'], ['n'], ['v', ARR]], [
+        ex(call('gl_need', [])),
+        ex(call('gl_flush', [])),
+        ret(bi('gfxarr', [str(`gluniform${k}${t}v`), nm('h'), nm('n'), num(0), num(0),
+          nm('v')])),
+      ]))),
+    fnT('gl_gettex5', [['t'], ['p', ARR], ['xs'], ['ys'], ['ct']], [
+      ex(call('gl_need', [])),
+      ex(call('gl_flush', [])),
+      ret(bi('gfxarr', [str('glgettex'), nm('t'), nm('xs'), nm('ys'), nm('ct'), nm('p')])),
+    ]),
     stateFn('gl_attr1', 'glvertexattrib1f', ['h', 'x']),
     stateFn('gl_attr2', 'glvertexattrib2f', ['h', 'x', 'y']),
     stateFn('gl_attr3', 'glvertexattrib3f', ['h', 'x', 'y', 'z']),

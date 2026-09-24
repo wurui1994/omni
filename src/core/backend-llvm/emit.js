@@ -142,6 +142,12 @@ const RT_OPS = new Map([
   ['gfx_tex.int', {
     sym: 'omni_gfx_tex', ret: 'double', params: ['i64', 'i64', 'i64', 'i64', 'i64', 'ptr'],
   }],
+  /* `(gfxarr "名字" a0 a1 a2 a3 数组)`：带一整块数组的宿主调用（§19.1）——
+     名字是 `omni_str`（那两格 i64）、四格 double、数组按指针过去。 */
+  ['gfx_arr.string', {
+    sym: 'omni_gfx_arr', ret: 'double',
+    params: ['[2 x i64]', 'double', 'double', 'double', 'double', 'ptr'],
+  }],
   /* `(gfxframefn …)`：把每帧那一格函数交给设备（一格函数指针 = `ptr`）。 */
   ['gfx_frame_fn.int', { sym: 'omni_gfx_frame_fn', ret: 'double', params: ['ptr'] }],
   /* `(gfxdef 种类 名字 内容)`：往设备上登记一格有名字的串（三格 `omni_str`）。 */

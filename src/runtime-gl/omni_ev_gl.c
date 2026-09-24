@@ -730,6 +730,92 @@ int omni_ev_gl_texfile(int slot, const char *path, int colmode) {
   return 0;
 }
 
+/**
+ * **`gluniform{1..4}{f,i}v(句柄, 个数, 数组)`**（§19.1）：一次喂一整排 uniform。
+ * `comps` 是每格几个分量、`isint` 说走 `glUniform*iv` 还是 `*fv`、`n` 是几格。
+ */
+int omni_ev_gl_univ(double h, int comps, int isint, long n, const double *v) {
+  if (!g_on || v == NULL || n <= 0 || comps < 1 || comps > 4) return 1;
+  CGLSetCurrentContext(g_ctx);
+  int i = (int)h;
+  if (i < 0 || i >= g_nuni) return 1;
+  if (g_uni[i].loc < 0) return 0;
+  GLint loc = g_uni[i].loc;
+  glUseProgram(g_uni[i].prog);
+  long total = n * comps;
+  if (isint) {
+    GLint *b = (GLint *)malloc(sizeof(GLint) * (size_t)total);
+    if (b == NULL) return 1;
+    for (long i = 0; i < total; i++) b[i] = (GLint)v[i];
+    if (comps == 1) glUniform1iv(loc, (GLsizei)n, b);
+    else if (comps == 2) glUniform2iv(loc, (GLsizei)n, b);
+    else if (comps == 3) glUniform3iv(loc, (GLsizei)n, b);
+    else glUniform4iv(loc, (GLsizei)n, b);
+    free(b);
+    return 0;
+  }
+  float *b = (float *)malloc(sizeof(float) * (size_t)total);
+  if (b == NULL) return 1;
+  for (long i = 0; i < total; i++) b[i] = (float)v[i];
+  if (comps == 1) glUniform1fv(loc, (GLsizei)n, b);
+  else if (comps == 2) glUniform2fv(loc, (GLsizei)n, b);
+  else if (comps == 3) glUniform3fv(loc, (GLsizei)n, b);
+  else glUniform4fv(loc, (GLsizei)n, b);
+  free(b);
+  return 0;
+}
+
+/**
+ * **`glgettex(槽, &数组, 宽, 高, 格)`**（§19.1，**往里写**的那一档）。
+ *
+ * 口径照原版 `kglgettexarray2`（`polydraw.c:1348`），两条要紧的：
+ *
+ * 1. **最后那格 `coltype` 是不看的** —— 一格几个 double 由**这一槽自己的格**说
+ *    （`tex[itex].coltype`）：`KGL_VEC4` 一像素 4 个 float，别的都是一像素一格。
+ *    所以脚本写 `glgettex(2,buf,XT,YT,KGL_VEC4)` 而那一槽是 `KGL_FLOAT` 时，
+ *    出来的就是一像素一格 —— 跟着纹理走，不跟着实参走。
+ * 2. **写回几格由这一层算**（回值就是它，出错回 -1）：宿主那一侧（N-API / omni_fmt）
+ *    只有数组长度，算不出这个数。
+ */
+int omni_ev_gl_gettex(int slot, int w, int h, long cap, double *out) {
+  if (!g_on || out == NULL || w < 1 || h < 1) return -1;
+  CGLSetCurrentContext(g_ctx);
+  int i = -1;
+  for (int k = 0; k < g_ntex; k++) if (g_tex[k].slot == slot) i = k;
+  if (i < 0) return -1;
+  long n = (long)w * (long)h;
+  if (n > (long)g_tex[i].w * (long)g_tex[i].h) return -1;
+  int kind = g_tex[i].fmt & 15;
+  long per = kind == 5 ? 4 : 1;
+  if (n * per > cap) return -1;
+  GLenum efmt = GL_BGRA;
+  GLenum type = GL_UNSIGNED_BYTE;
+  long bpp = 4;
+  if (kind == 1) { efmt = GL_RED; type = GL_UNSIGNED_BYTE; bpp = 1; }
+  else if (kind == 4) { efmt = GL_RED; type = GL_FLOAT; bpp = 4; }
+  else if (kind == 5) { efmt = GL_RGBA; type = GL_FLOAT; bpp = 16; }
+  else if (kind != 0) {
+    ev_err("glgettex：这一档没接 KGL 格式（有的是 BGRA32(0)/CHAR(1)/FLOAT(4)/VEC4(5)）", NULL);
+    return -1;
+  }
+  unsigned char *b = (unsigned char *)malloc((size_t)(n * bpp));
+  if (b == NULL) return -1;
+  glActiveTexture(GL_TEXTURE0 + g_texunit);
+  glBindTexture(g_tex[i].tar, g_tex[i].id);
+  glGetTexImage(g_tex[i].tar, 0, efmt, type, b);
+  if (kind == 0) {
+    /* `GL_BGRA` + 小端 ⇒ 一格 uint 正好是 0xAARRGGBB（与参考那一行逐字相同）。 */
+    for (long k = 0; k < n; k++) out[k] = (double)*(unsigned int *)(b + k * 4);
+  } else if (kind == 1) {
+    for (long k = 0; k < n; k++) out[k] = (double)b[k];
+  } else {
+    for (long k = 0; k < n * per; k++) out[k] = (double)*(float *)(b + k * 4);
+  }
+  free(b);
+  return (int)(n * per);
+
+}
+
 /** `glbindtexture(槽)` / `glactivetexture(单元)`：把那一槽挂到现在这格单元上。 */
 void omni_ev_gl_bindtex(int slot) {
   if (!g_on) return;

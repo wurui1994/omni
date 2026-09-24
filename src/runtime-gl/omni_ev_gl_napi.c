@@ -46,6 +46,8 @@ void omni_ev_gl_mv(int col, double m0, double m1, double m2, double m3);
 void omni_ev_gl_blend(int mode);
 int omni_ev_gl_tex(int slot, int w, int h, int d, int fmt, const double *px);
 int omni_ev_gl_texfile(int slot, const char *path, int colmode);
+int omni_ev_gl_univ(double h, int comps, int isint, long n, const double *v);
+int omni_ev_gl_gettex(int slot, int w, int h, long cap, double *out);
 void omni_ev_gl_bindtex(int slot);
 void omni_ev_gl_activetex(int unit);
 
@@ -192,6 +194,53 @@ static napi_value jsTexfile(napi_env env, napi_callback_info info) {
   return mknum(env, r);
 }
 
+/**
+ * `univ(句柄, 分量数, 是整数, 格数, 值[])` —— `gluniform{1..4}{f,i}v`（§19.1）。
+ *
+ * **只抄用得着的那一段**（`格数 × 分量数`）：那几格数组是按上限开的（`gpgpu` 那一份
+ * 是 XT*YT），整块抄就是每帧几万次 `napi_get_element` —— 与 `jsBatch` 同一条道理。
+ */
+static napi_value jsUniv(napi_env env, napi_callback_info info) {
+  ARGS(5);
+  int comps = (int)num(env, a[1]);
+  if (comps < 1 || comps > 4) return mknum(env, 1);
+  long want = (long)num(env, a[3]) * (long)comps;
+  long n = 0;
+  double *v = arrN(env, a[4], want, &n);
+  if (v == NULL) return mknum(env, 1);
+  int r = omni_ev_gl_univ(num(env, a[0]), comps, (int)num(env, a[2]) != 0, n / comps, v);
+  free(v);
+  return mknum(env, r);
+}
+
+/**
+ * `gettex(槽, w, h, 数组)` —— 把纹理读回来（§19.1）。
+ *
+ * 与 `readInto` 一样是**写回 JS 数组**那条路：一格一个 `napi_set_element`。
+ * **写回几格由设备说**（回值）：一像素几个 double 只有它知道（那一槽自己的格）。
+ */
+static napi_value jsGettex(napi_env env, napi_callback_info info) {
+  ARGS(4);
+  int slot = (int)num(env, a[0]);
+  int w = (int)num(env, a[1]);
+  int h = (int)num(env, a[2]);
+  uint32_t cap = 0;
+  if (napi_get_array_length(env, a[3], &cap) != omni_napi_ok) return mknum(env, -1);
+  if (w <= 0 || h <= 0 || cap == 0) return mknum(env, -1);
+  double *out = (double *)malloc(sizeof(double) * (size_t)cap);
+  if (out == NULL) return mknum(env, -1);
+  int got = omni_ev_gl_gettex(slot, w, h, (long)cap, out);
+  if (got > 0) {
+    for (long i = 0; i < (long)got; i++) {
+      napi_value e;
+      napi_create_double(env, out[i], &e);
+      napi_set_element(env, a[3], (uint32_t)i, e);
+    }
+  }
+  free(out);
+  return mknum(env, got < 0 ? -1 : 0);
+}
+
 static napi_value jsUniloc(napi_env env, napi_callback_info info) {
   ARGS(1);
   return mknum(env, omni_ev_gl_uniloc(num(env, a[0])));
@@ -315,6 +364,8 @@ napi_value napi_register_module_v1(napi_env env, napi_value exports) {
   PUT("blend", jsBlend);
   PUT("tex", jsTex);
   PUT("texfile", jsTexfile);
+  PUT("univ", jsUniv);
+  PUT("gettex", jsGettex);
   PUT("bindtex", jsBindtex);
   PUT("activetex", jsActivetex);
   PUT("error", jsError);

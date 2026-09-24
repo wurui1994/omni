@@ -2496,6 +2496,44 @@ class CoreLowerer {
       }
       return { kind: 'Builtin', name: 'gfx_tex', args: as, argType: INT, type: REAL };
     }
+    // `(gfxarr "名字" a0 a1 a2 a3 (arr real))`：**带一整块数组的宿主调用**（回 real）。
+    //
+    // `(gfxcall …)` 只收 double，而宿主面里有一族要"一整块"（`polydraw.c:2070` 那张表里带
+    // `&` 的那几个）：`gluniform{1,2,3,4}{f,i}v(句柄,个数,&数组)`、`glgettex(槽,&数组,宽,高,分量)`、
+    // `glmultmatrix(&数组)`。形状都是"恰好一格数组 + 几格 double"，所以只加这一格 op。
+    //
+    // **四格 double 定死**（用不满的递 0）：每一层只写一条固定形状的判断，与 `gfxtex` 一个味道
+    // —— 变长那一套要在七处各写一遍"最后一格是数组、前头随便几格"。
+    // `glgettex` 是**往里写**的那一档，同一格 op 够用（设备按名字知道方向）。
+    // 口径：`docs/design/eval-realtime-gpu.md` §19.1。
+    if (h === 'gfxarr') {
+      if (n.items.length !== 7) return this.err(n, '(gfxarr "名字" a0 a1 a2 a3 (arr real))');
+      const nm3 = this.expr(n.items[1]);
+      if (nm3 === null) return null;
+      if (nm3.type.k !== 'string') {
+        return this.err(n.items[1], '(gfxarr "名字" …) 的名字要是 string，'
+          + `这里是 ${coreTypeText(nm3.type)}`);
+      }
+      const sc = [];
+      for (let i = 2; i <= 5; i++) {
+        const v = this.expr(n.items[i]);
+        if (v === null) return null;
+        if (v.type.k !== 'real') {
+          return this.err(n.items[i], '(gfxarr "名字" a0 a1 a2 a3 数组) 的四格实参要是 real，'
+            + `这里是 ${coreTypeText(v.type)}`);
+        }
+        sc.push(v);
+      }
+      const blk = this.expr(n.items[6]);
+      if (blk === null) return null;
+      if (blk.type.k !== 'arr' || blk.type.elem.k !== 'real') {
+        return this.err(n.items[6], '(gfxarr "名字" a0 a1 a2 a3 数组) 的数组要是 (arr real)，'
+          + `这里是 ${coreTypeText(blk.type)}`);
+      }
+      return {
+        kind: 'Builtin', name: 'gfx_arr', args: [nm3, ...sc, blk], argType: STRING, type: REAL,
+      };
+    }
     // `(gfxcall "名字" 实参…)`：**图形设备的宿主面**（回 real）。EVAL 两门语言
     // （`.pss` / `.kc`）的宿主调用全从这一格过去 —— 画图、矩阵、着色器、纹理、输入。
     //

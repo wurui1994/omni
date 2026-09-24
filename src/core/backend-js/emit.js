@@ -1052,6 +1052,8 @@ class JsEmitter {
       case 'gfx_batch': return `$gfx_batch(${a[0]}, ${a[1]}, ${a[2]})`;
       /* `(gfxtex 槽 宽 高 层 格 数组)`：一张纹理交给设备（第 11 节）。 */
       case 'gfx_tex': return `$gfx_tex(${a.join(', ')})`;
+      /* `(gfxarr "名字" a0 a1 a2 a3 数组)`：带一整块数组的宿主调用（§19.1）。 */
+      case 'gfx_arr': return `$gfx_arr(${a[0]}, [${a.slice(1, 5).join(', ')}], ${a[5]})`;
       /* `(gfxframefn …)`：把每帧那一格函数交给设备（`e.func` 已经是最终的 JS 标识符）。
          浏览器那一档用它做 rAF 循环；别的设备记下不用。 */
       case 'gfx_frame_fn': return `$gfx_frame_fn(${e.func})`;

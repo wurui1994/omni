@@ -126,6 +126,8 @@ function builtinType(e, ctx) {
     case 'gfxbatch': return REAL;
     /* `(gfxtex 槽 宽 高 层 格 数组)`：一张纹理交给设备 —— 回 0（real，与上一格同）。 */
     case 'gfxtex': return REAL;
+    /* `(gfxarr "名字" a0 a1 a2 a3 数组)`：带数组的宿主调用 —— 回 real（§19.1）。 */
+    case 'gfxarr': return REAL;
     case 'anew': return e.args[0].type ?? arrOf(INT);
     case 'dnew': return e.args[0].type ?? dictOf(INT);
     case 'cnew': case 'new': return e.args[0].type ?? INT;

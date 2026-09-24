@@ -2834,6 +2834,8 @@ class CEmitter {
       case 'gfx_batch': return `omni_gfx_batch(${a[0]}, ${a[1]}, ${a[2]})`;
       /* `(gfxtex 槽 宽 高 层 格 数组)`：一张纹理交给设备（第 11 节）。 */
       case 'gfx_tex': return `omni_gfx_tex(${a.join(', ')})`;
+      /* `(gfxarr "名字" a0 a1 a2 a3 数组)`：带一整块数组的宿主调用（§19.1）。 */
+      case 'gfx_arr': return `omni_gfx_arr(${a.join(', ')})`;
       /* 指针那一档（jnc/C 那一侧的 `int fb[N]`）。运行时的**真符号一律是平的**
          （omni.h 那段头注：不按值收发 omni_ptr），所以这儿先过一次解引用检查拿地址 ——
          那一句顺带把"空指针 / 第一格越界"挡掉。**后面几格的范围它查不到**：裸地址上

@@ -117,6 +117,17 @@ const SHADER_FNS = new Map([
   ['gluniform2f/3', []],
   ['gluniform3f/4', []],
   ['gluniform4f/5', []],
+  /* **带一整块数组的那两族**（§19.1）：实参里没有串（数组是光秃秃的名字，`exprOf`
+     照旧给一格 `(var 名字)`），登记在这儿只为走 `gl-rt.js` 那条路。 */
+  ['gluniform1fv/3', []],
+  ['gluniform2fv/3', []],
+  ['gluniform3fv/3', []],
+  ['gluniform4fv/3', []],
+  ['gluniform1iv/3', []],
+  ['gluniform2iv/3', []],
+  ['gluniform3iv/3', []],
+  ['gluniform4iv/3', []],
+  ['glgettex/5', []],
   /* 纹理坐标与顶点属性那几格（**串只在 `glgetattribloc` 那一格**）。 */
   ['gltexcoord/2', []],
   ['gltexcoord/3', []],

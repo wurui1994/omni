@@ -467,6 +467,9 @@ typedef void (*gfx_gl_int_fn)(int);
 typedef void (*gfx_gl_mvp_fn)(int, double, double, double, double);
 typedef int (*gfx_gl_tex_fn)(int, int, int, int, int, const double *);
 typedef int (*gfx_gl_texfile_fn)(int, const char *, int);
+/* `gluniform*v`（句柄, 分量数, 整数吗, 个数, 数组）与 `glgettex`（槽, 宽, 高, 上限, 出）。 */
+typedef int (*gfx_gl_univ_fn)(double, int, int, long, const double *);
+typedef int (*gfx_gl_gettex_fn)(int, int, int, long, double *);
 
 static struct {
   int tried, on;
@@ -486,6 +489,8 @@ static struct {
   gfx_gl_mvp_fn mvp, mv;
   gfx_gl_tex_fn tex;
   gfx_gl_texfile_fn texfile;
+  gfx_gl_univ_fn univ;
+  gfx_gl_gettex_fn gettex;
 } g_gl;
 
 /* `(gfxdef …)` 登记进来的那几份串（着色器原文与名字表）。它们**在设备开起来之前**就来了
@@ -561,6 +566,8 @@ static int gfx_gl_need(void) {
     g_gl.mv = (gfx_gl_mvp_fn)dlsym(h, "omni_ev_gl_mv");
     g_gl.tex = (gfx_gl_tex_fn)dlsym(h, "omni_ev_gl_tex");
     g_gl.texfile = (gfx_gl_texfile_fn)dlsym(h, "omni_ev_gl_texfile");
+    g_gl.univ = (gfx_gl_univ_fn)dlsym(h, "omni_ev_gl_univ");
+    g_gl.gettex = (gfx_gl_gettex_fn)dlsym(h, "omni_ev_gl_gettex");
     if (g_gl.open == NULL || g_gl.batch == NULL || g_gl.read == NULL) continue;
     if (g_gl.open((int)g_gw, (int)g_gh) != 0) {
       fprintf(stderr, "#gfx gl 开不出来（%s）—— 这一趟走 CPU 备选\n",
@@ -797,6 +804,45 @@ double omni_gfx_tex(int64_t slot, int64_t w, int64_t h, int64_t d, int64_t fmt,
   g_gtex[slot].d = d;
   g_gtex[slot].fmt = fmt;
   g_gtex[slot].n = want;
+  return 0.0;
+}
+
+/**
+ * `(gfxarr "名字" a0 a1 a2 a3 数组)`：**带一整块数组的宿主调用**（§19.1）。
+ *
+ * 认两族（`polydraw.c:2070` 那张表里带 `&` 的那几个，语料里用到的就这些）：
+ *   * `gluniform{1,2,3,4}{f,i}v(句柄, 个数, &数组)` -> `(… 句柄 个数 0 0 数组)`
+ *   * `glgettex(槽, &数组, 宽, 高, 分量)`           -> `(… 槽 宽 高 分量 数组)`（**往里写**）
+ *
+ * CPU 备选那一档**收下不管** —— 与纹理那一族同一句话（这一层是平面帧缓冲，
+ * 没有可编程管线；真去 `glsetshader` 那一格才报）。
+ */
+double omni_gfx_arr(omni_str name, double a0, double a1, double a2, double a3,
+                    struct omni_arr_f64_s *blk) {
+  const char *nm = omni_cstr(name);
+  if (gfx_rec()) { g_greccnt += 1; return 0.0; }
+  if (gfx_gl_want()) gfx_need();
+  long n = blk == NULL ? 0 : (long)blk->len;
+  double *items = blk == NULL ? NULL : blk->items;
+  /* `gluniform<N><f|i>v`：名字里第 10 个字符是分量数、第 11 个是 f/i。 */
+  if (strncmp(nm, "gluniform", 9) == 0 && nm[9] >= '1' && nm[9] <= '4'
+      && (nm[10] == 'f' || nm[10] == 'i') && nm[11] == 'v') {
+    if (!g_gl.on || g_gl.univ == NULL) return 0.0;
+    long cnt = (long)a1;
+    if (cnt < 0) cnt = 0;
+    if (cnt * (nm[9] - '0') > n) cnt = n / (nm[9] - '0');
+    return (double)g_gl.univ(a0, nm[9] - '0', nm[10] == 'i' ? 1 : 0, cnt, items);
+  }
+  /* `glgettex(槽, &数组, 宽, 高, 格)`：**写回几格由设备说**（一像素几个 double 只有
+     它知道 —— 那一槽自己的格，见 `omni_ev_gl_gettex` 的头注）。这一层只把数组长度
+     当上限递过去；设备回 -1 就是"没读到"，与原版一样。 */
+  if (strcmp(nm, "glgettex") == 0) {
+    if (!g_gl.on || g_gl.gettex == NULL) return 0.0;
+    int got = g_gl.gettex((int)a0, (int)a1, (int)a2, n, items);
+    return got < 0 ? -1.0 : 0.0;
+  }
+  /* 别的名字：这一层不认 —— 与 `(gfxcall …)` 那条路同一句话，说清这一档有的是哪几族。 */
+  omni_errorf("gfxarr: 不认识 '%s'（有的是 gluniform{1..4}{f,i}v / glgettex）", nm);
   return 0.0;
 }
 
