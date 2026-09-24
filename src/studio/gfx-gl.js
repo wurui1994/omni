@@ -380,45 +380,18 @@ function firstOf(kind) {
 }
 
 /**
- * **旧式 GLSL -> GLSL ES 300**（只翻明白的那几格）。
+ * **只补那一两行头**（`#version 300 es` + precision）。
  *
- * * `attribute` -> `in`；`varying` -> 顶点里 `out`、片元里 `in`；
- * * `gl_Vertex` -> `a_pos`（我们喂的顶点属性，vec4）、`gl_MultiTexCoord0` -> `a_tex`；
- * * `ftransform()` -> `u_mvp * a_pos`（固定管线那两个矩阵的积，由设备喂 uniform）；
- * * `gl_TexCoord[0]` -> 一格我们自己声明的 `v_tex0`（两段各自 out/in）；
- * * `gl_FragColor` -> 自己声明的 `o_col`；`texture2D` -> `texture`；
- * * `gl_ModelViewProjectionMatrix` -> `u_mvp`。
+ * 翻译**不在这儿**：旧式 GLSL 在**编译期**就翻成对齐后的主体了（`ext/polydraw/glsl.js`
+ * 的 `glslAlign`，adapter 在 `(gfxdef …)` 发出去之前调它）—— 于是这一档与本机那一档
+ * 收到的是**同一份文本**，差的只有这一两行头（本机那一档补 `#version 410 core`）。
+ * 口径：`docs/design/eval-realtime-gpu.md` 13.2（**必须与 WebGL 对齐，不许两种模型**）。
+ *
+ * 脚本自带 `#version` 的就原样递下去（它自己写好了新式的，不动它）。
  */
 function toEs300(kind, src) {
-  if (src.includes('#version 300 es')) return src;
-  let s = src;
-  const usesTex0 = /gl_TexCoord\s*\[\s*0\s*\]/.test(s);
-  s = s.replace(/\bgl_TexCoord\s*\[\s*0\s*\]/g, 'v_tex0');
-  s = s.replace(/\bgl_MultiTexCoord0\b/g, 'a_tex');
-  s = s.replace(/\bftransform\s*\(\s*\)/g, '(u_mvp * a_pos)');
-  s = s.replace(/\bgl_ModelViewProjectionMatrix\b/g, 'u_mvp');
-  s = s.replace(/\bgl_Vertex\b/g, 'a_pos');
-  s = s.replace(/\btexture2D\s*\(/g, 'texture(');
-  s = s.replace(/\battribute\b/g, 'in');
-  const head = ['#version 300 es', 'precision highp float;'];
-  if (kind === 'vert') {
-    s = s.replace(/\bgl_Color\b/g, 'a_col');
-    s = s.replace(/\bvarying\b/g, 'out');
-    head.push('in vec4 a_pos;', 'in vec4 a_tex;', 'in vec4 a_col;', 'uniform mat4 u_mvp;',
-      'out vec4 v_col0;');
-    if (usesTex0) head.push('out vec4 v_tex0;');
-    /* 顶点色要跨段传：`gl_Color` 在片元里是**插值过的**那一格，所以顶点这边总是把
-       `a_col` 抄进 `v_col0`（没人读也无害）。注入点是 main 的那个左花括号。 */
-    s = s.replace(/void\s+main\s*\(\s*\)\s*\{/, 'void main() { v_col0 = a_col;');
-  } else {
-    s = s.replace(/\bgl_Color\b/g, 'v_col0');
-    s = s.replace(/\bvarying\b/g, 'in');
-    s = s.replace(/\bgl_FragColor\b/g, 'o_col');
-    head.push('out vec4 o_col;', 'uniform mat4 u_mvp;');
-    if (usesTex0) head.push('in vec4 v_tex0;');
-    if (/\bv_col0\b/.test(s)) head.push('in vec4 v_col0;');
-  }
-  return `${head.join('\n')}\n${s}`;
+  if (src.includes('#version')) return src;
+  return `#version 300 es\nprecision highp float;\n${src}`;
 }
 
 /** 挑一对着色器、编好链好（编一次）。 */

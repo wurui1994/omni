@@ -218,11 +218,22 @@ const CASES = [
   'ext/jnc/examples/03-compute.jnc',
 ];
 
+/**
+ * **这一节显式走 `OMNI_GFX=ir`**（生成出来那一份设备 + 方言的 `(gfxframe …)`）。
+ *
+ * 判据判的本来就是那条路：`.kc` / `.pss` 的像素由**产物自带的光栅器**画、一行 `#gfx` 指针
+ * 交出去。默认设备 2026-09-24 换成 `host` 之后（设备在宿主那一侧），这条路要显式说 ——
+ * 从前它是"默认恰好是 ir"才绿的，现在写明白。
+ * 宿主设备那一档在后头真浏览器那一节判（那儿装 WebGL2 并打 `OMNI_GFX=host`）。
+ */
+const IR_ENV = { ...process.env, OMNI_GFX: 'ir' };
+
 const WANT = new Map();
 for (const c of CASES) {
   const refArgv = [join(root, 'src', 'cli.js'), 'run', c];
   try {
-    WANT.set(c, execFileSync('node', refArgv, { cwd: root, encoding: 'utf8', timeout: 120000 }));
+    WANT.set(c, execFileSync('node', refArgv,
+      { cwd: root, encoding: 'utf8', timeout: 120000, env: IR_ENV }));
   } catch (e) {
     ok(`${c}（本地那一趟先得通）`, false, String(e.message).slice(0, 200));
   }
@@ -233,7 +244,8 @@ for (const c of CASES) {
   if (want === undefined) continue;
   let got = null;
   try {
-    const r = await execFile('node', [shell, c], { cwd: root, encoding: 'utf8', timeout: 180000 });
+    const r = await execFile('node', [shell, c],
+      { cwd: root, encoding: 'utf8', timeout: 180000, env: IR_ENV });
     got = r.stdout;
   } catch (e) {
     ok(`${c} 在浏览器那条腿上逐字节相同`, false,
@@ -288,7 +300,10 @@ for (const c of CASES) {
       await pw([S, 'goto', url]);
       const con = await pw([S, 'console', 'error']);
       ok('真浏览器里控制台一条错都没有', /Errors: 0/.test(con), con.trim().slice(0, 200));
-      const probe = `async () => { const out = {}; for (const c of ${JSON.stringify(CASES)}) {`
+      /* 与上一节同一条口径：这十八门里的图形那几格判的是**生成出来那一份设备**
+         （`IR_ENV`），所以浏览器这一趟也要显式打成 `ir` —— 宿主设备那一档在下一节判。 */
+      const probe = 'async () => { globalThis.process.env.OMNI_GFX = "ir";'
+        + ` const out = {}; for (const c of ${JSON.stringify(CASES)}) {`
         + ' const r = await window.__OMNI_LOCAL("/api/run",'
         + ' { body: JSON.stringify({ argv: ["run", c] }) });'
         + ' out[c] = { o: r.stdout, e: r.stderr, code: r.code }; } return out; }';
@@ -315,7 +330,8 @@ for (const c of CASES) {
        */
       for (const [f, why] of [['ext/js/examples/01-shapes.js', 'js 的 ege 库'],
         ['ext/evaldraw/examples/draw2d.kc', '方言的 gfxframe']]) {
-        const gp = 'async () => { const r = await window.__OMNI_LOCAL("/api/run",'
+        const gp = 'async () => { globalThis.process.env.OMNI_GFX = "ir";'
+          + ' const r = await window.__OMNI_LOCAL("/api/run",'
           + ` { body: JSON.stringify({ argv: ["run", ${JSON.stringify(f)}] }) });`
           + ' const m = /#gfx (png|rgba) (\\S+) (\\d+) (\\d+)/.exec(r.stdout || "");'
           + ' if (m === null) return { err: (r.stderr || "没印指针").slice(0, 200) };'

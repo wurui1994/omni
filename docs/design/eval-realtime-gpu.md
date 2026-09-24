@@ -652,7 +652,7 @@ program 与 uniform —— 全是"只有设备做得到"的东西。`glquad` 的
 
     收批      (gfxbatch 类 数 顶点) -> VBO + 一次 glDrawArrays（core profile，不碰立即模式）
     批的状态  batchprog / batchmvp / batchblend / gldepth
-    program   glsetshader（**GLSL 原文直接交给驱动** —— 真 GL 认旧式，不必翻 ES 300）
+    program   glsetshader（**收到的已是编译期翻好的对齐 GLSL**，这一档只补 `#version 410 core`）
     uniform   glgetuniformloc / gluniform{1,2,3,4}f / glgetattribloc / glvertexattrib*f
     纹理      (gfxtex 槽 宽 高 层 格 数组)（BGRA 真有，不必摊成 RGBA）+ glbindtexture/glactivetexture
     2D 那一族 cls/setcol/setpix/moveto/lineto/drawsph/drawcone（**已经在语言侧变顶点了**，
@@ -691,3 +691,37 @@ program 与 uniform —— 全是"只有设备做得到"的东西。`glquad` 的
 下一步（第五刀的后半）：`cli.js` 的 `glPlugin()` 把这一份也编进 `libomnigl.dylib`、
 `omni_fmt.c` 在 `OMNI_GFX=gl` 时把 cls/gldepth/批/读回转过去、翻译挪到公共位置、
 program 与纹理接上（那时着色器那 22 份就出得来图了）。
+
+### 13.7 已落地（2026-09-24）：**GLSL 翻译挪到编译期**（13.2 那条口径的落实）
+
+翻译那一份从 `gfx-gl.js` 私有的 `toEs300` 挪到 **`ext/polydraw/glsl.js`** 的
+`glslAlign(kind, src)`，在 **adapter 里、`(gfxdef …)` 发出去之前**就翻好：
+
+    attribute            -> in
+    varying              -> out（顶点）/ in（片元）
+    gl_Vertex            -> a_pos          gl_MultiTexCoord0 -> a_tex
+    gl_Color             -> a_col / v_col0 ftransform()      -> (u_mvp * a_pos)
+    gl_TexCoord[0]       -> v_tex0         gl_FragColor      -> o_col
+    texture2D(           -> texture(       用到的名字在头部补声明
+
+两档设备于是收到**同一份文本**，各自只补一行：浏览器 `#version 300 es` + precision、
+本机 `#version 410 core`。脚本自带 `#version` 的原样放过（作者自己对齐了）。
+
+**连带的一格判据口径**：`tests/studio/run.js` 里三处显式 `OMNI_GFX=ir`
+（本地参照、浏览器腿、第 3 节那个 probe）—— 那几条判的是"产物自带光栅器"那一档，
+从前靠"默认恰好是 ir"，默认换成 host 之后就假红了。默认值不是判据，写明才是。
+
+### 13.8 转发那一层（第五刀的后半，正在做）
+
+    cli.js glPlugin()      两份源码一起编进 libomnigl.dylib（omni_r3_gl.c + omni_ev_gl.c）
+    omni_fmt.c  OMNI_GFX=gl  dlopen 那一份 -> 拿到六格函数指针 -> 开 w×h 的离屏设备
+                 cls/gldepth/batch  转发；别的名字照旧走 CPU 备选那一摊（查询/帧循环/输入）
+                 present            _read(rgba) -> 摊成 0xRRGGBB 的 int64 帧缓冲 -> 走同一个 PNG 出口
+
+三条定下来的：
+* **挂不上就回落**（与 `omni_r3.c` 那侧同一手）：没有 `OpenGL.framework`、编不过、
+  `open` 回非 0 —— 一律退回 CPU 备选，`OMNI_GFX=gl` 只是"想要"，不是"必须"；
+* **帧缓冲仍然是宿主这一侧那一格**：`gfx_px` 那一族（`setpix`/文字/以后的字模）与 GPU
+  画的东西要能叠在同一帧上 —— 所以 present 时先读回 GPU 那一层、再让 CPU 那一层盖上去；
+* **一帧一次读回**：`_read` 是同步的（`glFinish`），每帧只许一次。
+

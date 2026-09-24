@@ -32,6 +32,7 @@ import { cUnescape, fmtToStmts } from '../../src/core/lower/fmt.js';
 import { gfxGlobalDecls, gfxFnDecls, gfxPresentDecl } from './gfx-rt.js';
 import { POLYDRAW_GL, GL_CONSTS, glGlobalDecls, glFnDecls } from './gl-rt.js';
 import { gfx3FnDecls, gfx3GlobalDecls } from './gfx3-rt.js';
+import { glslAlign } from './glsl.js';
 import { NOISE_FNS, noiseGlobalDecls, noiseFnDecls } from './noise-rt.js';
 import { env } from '../../src/core/host/native.js';
 
@@ -2229,7 +2230,11 @@ export function evalToIR(cst, host, src = '') {
          以及内部到的名字（着色器名 / uniform 名）—— 运行期的调用照旧全是 double。 */
       const regs = [];
       for (const s of C.shaders) {
-        regs.push({ kind: 'expr-stmt', expr: gfxDefIR(s.kind, s.name, s.text) });
+        /* **着色器原文在这儿（编译期）就翻成对齐后的主体**（`glsl.js`）——
+           两档 GPU 设备收到的是同一份文本，各自只补 `#version` 那一行。
+           在设备里各翻一遍就是两份实现（口径：`docs/design/eval-realtime-gpu.md` 13.2）。 */
+        const text = s.kind === 'name' ? s.text : glslAlign(s.kind, s.text);
+        regs.push({ kind: 'expr-stmt', expr: gfxDefIR(s.kind, s.name, text) });
       }
       for (const [s, i] of C.strs) {
         regs.push({ kind: 'expr-stmt', expr: gfxDefIR('name', i, s) });
