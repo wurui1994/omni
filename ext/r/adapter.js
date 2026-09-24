@@ -1405,9 +1405,11 @@ function zeroStmts(name, t) {
  * 那格"数怎么印"的辅助函数，**用到了才发**。
  *
  * R 印 double 有三处特例：`NA` 印 `NA`、`NaN` 印 `NaN`、无穷印 `Inf` / `-Inf`，
- * 剩下的才是 7 位有效数字。这三格判在 C 那侧（`is.na` 对 NaN 也真，所以要先问
+ * 剩下的才是有效数字那一套。这三格判在 C 那侧（`is.na` 对 NaN 也真，所以要先问
  * `is.nan` 才分得开 NA 与 NaN），而"印法"这件事是**每个 cat 都要做一遍**的 ——
  * 所以落成一个函数发一次，而不是在每个调用点摊开一串三元（那样 `.sx` 读不动）。
+ *
+ * 剩下那一段是 `numFmtStmts()`：**照 `src/main/format.c` 抄的**，不是 `%.7g`。
  */
 function numStrDecl() {
   cabiUsed.add('omni_r_is_infinite');
@@ -1444,9 +1446,127 @@ function numStrDecl() {
         ],
         else_: null,
       },
-      { kind: 'return', values: [call1('sgen', x, { kind: 'int', value: 7 })] },
+      ...numFmtStmts(),
     ],
   };
+}
+
+/**
+ * R 的"定点还是科学记数"那条挑法 —— **照 `src/main/format.c` 抄**，不是 `%.7g`。
+ *
+ * 从前这儿是 `(sgen x 7)`，也就是 C 的 `%.7g`。那一格是**按指数**挑的（`-4 <= X < P`
+ * 才用定点），而 R 是**按哪个短**挑的（`formatReal` 里那句 `if (wF <= *w + scipen)`）。
+ * 两条规矩在 `1e5` 上就分道：`%g` 印 `100000`（六位，指数 5 < 7 所以走定点），
+ * R 印 `1e+05` —— 它算出定点要 6 格、科学记数要 5 格，于是挑短的那个。
+ *
+ * 所以这一段是两步，与那份 C 一一对应：
+ *
+ *   1. `scientific()`：把 |x| 缩到 `[10^6, 10^7)`、就近取偶舍成整数 `alpha`，
+ *      数掉几个尾随零就得到 `nsig`（有效数字位数），`kpower` 是十的幂次。
+ *      `roundingwidens` 那一格是 R 自己的补丁：`9996` 按三位科学记数是 `1e+04`
+ *      （宽 5）但定点是 `9996`（宽 4）—— 舍入让科学记数那一支**变宽**，
+ *      所以左边的位数要先减回去，不然会挑错。
+ *   2. `formatReal()`：算定点宽 `wF` 与科学记数宽 `w`，`wF <= w` 用定点
+ *      （`scipen` 是 0，平手偏定点），位数分别是 `rgt` 与 `nsig-1`。
+ *
+ * 落地的两处口径差别，都量过（132 个值逐字节对 `Rscript`，含 `.Machine$double.xmax`
+ * 与 5e-324）：
+ *
+ *   * 那份 C 在 macOS 上走 **long double** 那一支（80 位）缩放，这儿只有 double。
+ *     缩放因子 `10^kp` 在 |kp| <= 22 上是精确值，所以那两支同结果；再往外 R 自己
+ *     也退回 `pow()`。量的那 132 格没有一处分叉。
+ *   * `nearbyintl` 是**就近取偶**，方言里没有这一格（`rmath "round"` 是 C 的离零舍入），
+ *     所以这儿按 `floor` + 小数部分手写一遍 —— `1000000.5` 就压在这一格上：
+ *     取偶给 `1000000`（于是 `nsig` 是 1、印 `1e+06`），离零舍入会给 `1000001`
+ *     （于是 `nsig` 是 7、印 `1000001`）。
+ *
+ * 排版本身不自己写：`(sfix x n)` / `(ssci x n)` 就是 C 的 `%.nf` / `%.ne`
+ * （两条腿上都是按位算的十进制，就近取偶、指数至少两位），正是 `EncodeReal0` 用的那两格。
+ */
+function numFmtStmts() {
+  const DIG = 7;                 /* R_print.digits（`options(digits=)` 的默认值） */
+  const KP_MAX = 22;             /* 那张幂次表在 double 上的上界（`format.c` 的 tbl） */
+  const nm = (name) => ({ kind: 'name', name });
+  const R = (value) => ({ kind: 'real', value });
+  const I = (value) => ({ kind: 'int', value });
+  const rm = (fn, ...args) => call1('rmath', { kind: 'strlit', value: fn }, ...args);
+  const p10 = (e) => rm('pow', R(10), call1('toreal', e));
+  const letR = (name, init) => ({ kind: 'let', name, type: REAL, init });
+  const letI = (name, init) => ({ kind: 'let', name, type: INT, init });
+  const set = (name, value) => ({ kind: 'assign', target: nm(name), value });
+  const iff = (cond, then, else_ = null) => ({ kind: 'if', cond, then, else_ });
+  const x = nm('x');
+  const [r, kp, rp, fl, fr, al, nsig, kpw, rgtT, fuzz, left, sleft, rgt, wf, ee, dd, w]
+    = ['r', 'kp', 'rp', 'fl', 'fr', 'al', 'nsig', 'kpw', 'rgt_t', 'fuzz', 'left', 'sleft',
+      'rgt', 'wf', 'ee', 'dd', 'w'].map(nm);
+  return [
+    /* 零那一格：`kpower=0, nsig=1` 一路走下来就是 `%1.0f`，直接给答案省一串算 */
+    iff(b('==', x, R(0)), [{ kind: 'return', values: [{ kind: 'string', value: '0' }] }]),
+    letI('neg', I(0)),
+    iff(b('<', x, R(0)), [set('neg', I(1))]),
+    letR('r', rm('fabs', x)),
+    letI('kp', b('-', call1('toint', rm('floor', rm('log10', r))), I(DIG - 1))),
+    /* |x| = alpha * 10^kpower，把 alpha 缩到 [10^(DIG-1), 10^DIG) */
+    letR('rp', r),
+    iff(b('&&', b('>=', kp, I(-KP_MAX)), b('<=', kp, I(KP_MAX))),
+      [iff(b('>=', kp, I(0)),
+        [set('rp', b('/', r, p10(kp)))],
+        [set('rp', b('*', r, p10(b('-', I(0), kp))))])],
+      /* 1e-308 往下只有渐进下溢能表示，所以先乘 1e+303 挪进正常数再缩（`format.c` 原话） */
+      [iff(b('<=', kp, I(-308)),
+        [set('rp', b('/', b('*', r, R(1e303)), p10(b('+', kp, I(303)))))],
+        [set('rp', b('/', r, p10(kp)))])]),
+    iff(b('<', rp, R(Math.pow(10, DIG - 1))), [set('rp', b('*', rp, R(10))), set('kp', b('-', kp, I(1)))]),
+    /* 就近取偶（`nearbyintl`）—— rp 在这儿一定是正的，所以只按 floor 那一侧写 */
+    letR('fl', rm('floor', rp)),
+    letR('fr', b('-', rp, fl)),
+    letR('al', fl),
+    iff(b('>', fr, R(0.5)),
+      [set('al', b('+', fl, R(1)))],
+      [iff(b('==', fr, R(0.5)),
+        [iff(b('!=', rm('fmod', fl, R(2)), R(0)), [set('al', b('+', fl, R(1)))])])]),
+    /* 尾随零数掉几个，就少几位有效数字 */
+    letI('nsig', I(DIG)),
+    {
+      kind: 'for',
+      init: letI('j', I(0)),
+      cond: b('<', nm('j'), I(DIG)),
+      post: set('j', b('+', nm('j'), I(1))),
+      body: [
+        set('al', b('/', al, R(10))),
+        iff(b('==', al, rm('floor', al)),
+          [set('nsig', b('-', nsig, I(1)))],
+          [{ kind: 'break', label: null }]),
+      ],
+    },
+    iff(b('==', nsig, I(0)), [set('nsig', I(1)), set('kp', b('+', kp, I(1)))]),
+    letI('kpw', b('+', kp, I(DIG - 1))),
+    /* roundingwidens：科学记数那一支会把 x 舍到 10^kpower 上去（9996 → 1e+04），
+       而定点不会 —— 那时左边的位数按舍入前算 */
+    letI('rgt_t', b('-', I(DIG), kpw)),
+    iff(b('<', rgtT, I(0)), [set('rgt_t', I(0))]),
+    iff(b('>', rgtT, I(KP_MAX)), [set('rgt_t', I(KP_MAX))]),
+    letR('fuzz', b('/', R(0.5), p10(rgtT))),
+    letI('left', b('+', kpw, I(1))),
+    iff(b('&&', b('&&', b('>', kpw, I(0)), b('<=', kpw, I(KP_MAX))),
+      b('<', r, b('-', p10(kpw), fuzz))), [set('left', b('-', left, I(1)))]),
+    /* 定点那一支的宽：符号 + 点左边（至多一位 0）+ 点 + 点右边 */
+    letI('sleft', b('+', nm('neg'), I(1))),
+    iff(b('>', left, I(0)), [set('sleft', b('+', nm('neg'), left))]),
+    letI('rgt', b('-', nsig, left)),
+    iff(b('<', rgt, I(0)), [set('rgt', I(0))]),
+    letI('wf', b('+', sleft, rgt)),
+    iff(b('!=', rgt, I(0)), [set('wf', b('+', wf, I(1)))]),
+    /* 科学记数那一支的宽：符号 + 首位 + 点 + nsig-1 位 + `e+XX`（指数三位时多一格） */
+    letI('ee', I(1)),
+    iff(b('||', b('>', left, I(100)), b('<=', left, I(-99))), [set('ee', I(2))]),
+    letI('dd', b('-', nsig, I(1))),
+    letI('w', b('+', b('+', b('+', nm('neg'), dd), I(4)), ee)),
+    iff(b('>', dd, I(0)), [set('w', b('+', w, I(1)))]),
+    /* `scipen` 是 0，平手偏定点 —— 这正是 `wF <= *w + R_print.scipen` 那一句 */
+    iff(b('<=', wf, w), [{ kind: 'return', values: [call1('sfix', x, rgt)] }]),
+    { kind: 'return', values: [call1('ssci', x, dd)] },
+  ];
 }
 
 /**
