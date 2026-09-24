@@ -16,6 +16,43 @@ import {
   readText, stderr, exists, readDir,
 } from '../host/native.js';
 import { pickLang, treeRoot, LANGS } from './langs.js';
+
+/**
+ * **换行当分号**（登记处那一行的 `asi`，EVAL 那两门要）。
+ *
+ * 正本的解析器不是文法驱动的：它按 `;` 把一块块切开、一块一块 `parsefunc`
+ * （`polydraw_src/eval.c`），于是"少一个分号"那种写法它照样认 ——
+ * `tigrou/particules morphing.pss:49` 的 `glscale(3,3,3)` 后头就漏了一个。
+ *
+ * 我们是 GLR，硬往文法里加"分号可省"会把语句串成一片歧义。所以只在**卡住的那一刻**补：
+ * 分析失败、而且卡住那一格记号与上一格之间**有换行**，就在那儿插一格 `;` 再来一趟
+ * （最多 `ASI_MAX` 次）。**本来能过的程序一个字都不会变**（只有失败才走到这儿），
+ * 这是这条口径最要紧的一点。
+ *
+ * 还是过不去：拿**原文那一趟**的诊断报（不是插过分号那一趟的 —— 那会把人引到错的行上）。
+ */
+const ASI_MAX = 16;
+
+function asiParse(tb, toks0, text, diags) {
+  let toks = toks0;
+  for (let n = 0; n <= ASI_MAX; n++) {
+    const probe = new Diagnostics();
+    const hint = {};
+    const t = glrParse(tb, toks, probe, hint);
+    if (t !== null && !probe.hasErrors()) return t;
+    const at = hint.failAt;
+    if (n === ASI_MAX || at === undefined || at <= 0 || at > toks.length) break;
+    const prev = toks[at - 1];
+    if (prev.type === '";"' || prev.type === '"{"' || prev.type === '"}"') break;
+    const to = at < toks.length ? toks[at].span.start : text.length;
+    if (!text.slice(prev.span.end, to).includes('\n')) break;
+    const span = { file: prev.span.file, start: prev.span.end, end: prev.span.end };
+    const semi = { type: '";"', node: { kind: 'atom', value: ';', span }, span };
+    toks = [...toks.slice(0, at), semi, ...toks.slice(at)];
+  }
+  glrParse(tb, toks0, diags);
+  return null;
+}
 import { lower } from './lower.js';
 /* **图形设备**：`GFX_CPU` 这一格一被引用，`host/gfx-cpu.js` 就把 **CPU 备选**那一档装在
    `globalThis.__OMNI_GFX` 上。浏览器那边页面会把它换成 **WebGL2** 那一档 —— 同一格全局、
@@ -73,7 +110,9 @@ export function sxTextOf(path, argv = []) {
     const lexed = lang.pre === undefined ? text : lang.pre(text, p);
     const toks = lexText(g.lex, new SourceFile(p, lexed), diags);
     if (toks === null || diags.hasErrors()) return null;
-    const t = glrParse(tb, toks, diags);
+    const t = lang.asi === true
+      ? asiParse(tb, toks, lexed, diags)
+      : glrParse(tb, toks, diags);
     return t === null || diags.hasErrors() ? null : t;
   };
   const tree = treeOf(path);

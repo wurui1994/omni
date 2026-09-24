@@ -186,8 +186,11 @@ function nameIn(v) {
  * @param {any} tb buildTable 的输出
  * @param {{type: string, node: any, span: any}[]} toks 末尾不用自己加 $end
  * @param {import('../source/diag.js').Diagnostics} diags
+ * @param {{failAt?: number}} [hint] 卡住的那一格记号的下标写回这儿（**只给调用方看，
+ *   不影响分析**）—— EVAL 那两门的"换行当分号"要知道是在哪一格卡住的，见
+ *   `src/core/lower/drive.js` 的 `asi`。
  */
-export function glrParse(tb, toks, diags) {
+export function glrParse(tb, toks, diags, hint = {}) {
   const { states, rules } = tb;
   let nextId = 0;
   const mk = (state, pred, value, pref, types) => ({ id: nextId++, state, pred, value, pref, types });
@@ -324,6 +327,7 @@ export function glrParse(tb, toks, diags) {
     // ---- 2) 接受
     if (tk.type === '$end') {
       if (liveAccepted.length === 0) {
+        hint.failAt = i;
         diags.error(tk.span, 'unexpected end of input');
         return null;
       }
@@ -349,6 +353,7 @@ export function glrParse(tb, toks, diags) {
 
     // ---- 3) 移进
     if (live.length === 0) {
+      hint.failAt = i;
       const expected = expectedAt(tb, tops);
       diags.error(tk.span, `unexpected ${describeToken(tk)}${expected === '' ? '' : `; expected ${expected}`}`);
       return null;

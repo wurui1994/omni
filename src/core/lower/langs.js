@@ -130,12 +130,14 @@ export const LANGS = new Map([
      `pre` 是**预处理**那一格（`#define` / `#if` 那一族，语料里真在用）—— 词法之前跑。 */
   ['polydraw', {
     grammar: 'ext/polydraw/polydraw.grammar', toIR: polydrawToIR, pre: preprocess, exts: ['pss'],
+    asi: true,
   }],
   /* EvalDraw（Ken 的另一个程序，**同一门语言**）—— 指的就是上面那份语法：
      它不改一条规则读下了 141/142 份 `.kc`。差别只有那张宿主表（`ext/evaldraw/adapter.js`）。
      那棵树里**没有源码**（只有 .exe），所以口径是 `evaldraw.txt` / `evaldraw_ref.md`。 */
   ['evaldraw', {
     grammar: 'ext/polydraw/polydraw.grammar', toIR: evaldrawToIR, pre: preprocess, exts: ['kc'],
+    asi: true,
   }],
 ]);
 
