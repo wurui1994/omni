@@ -822,19 +822,26 @@ function glMatrixDecls() {
       letR('c', rm('cos', [nm('t')])),
       letR('s', rm('sin', [nm('t')])),
       letR('d', bin('-', num(1), nm('c'))),
-      /* **这一格的符号是"行向量 × 矩阵"那套约定的**（我们这一侧顶点是行向量、矩阵按
-         `m[12..14]` 放平移 —— `gl_translate` 与 `gl_vertex4` 都按这一套），所以填的是
-         GL 那张 `R` 的**转置**：sin 那几项符号与 OpenGL 规范里的相反。
-         量出来的证据：填 GL 原样的 `R` 时 `glRotate(60,1,0,0)` 与参考差 2 像素、
-         而我们 `glRotate(-60)` 与参考 `glRotate(+60)` **逐像素相同**（转向反了）。 */
+      /* **照 OpenGL 规范原样填**（列主序：第 (r,c) 格在 `c*4+r`）—— 这一格从前填的是
+         那张 `R` 的**转置**（= 按 `-角度` 转），理由写的是"我们这一侧顶点是行向量"：
+         那句话是错的，`gl_mvmul`（`gl_mv · gl_tm`）、`gl_xf`（`gl_mv · v`）、
+         `gl_translate`（平移放 `m[12..14]`）整条路都是 GL 的列向量那一套，只有这一格反着。
+         当时的"证据"是拿参考对的（`glRotate(60,1,0,0)` 差 2 像素），可**参考自己这一格
+         就是转置的**：`c_impl/src/render/gl_renderer.c:98` 那张 `t[16]` 的字面量按行写、
+         数组按列用（它的 `mat4_mul` / `mat4_translate` 与我们逐句相同，只有它错）。
+         **正本是真 OpenGL**：原版 `glrotate` 就是 `glRotated`（`polydraw.c:2141` 的
+         `qglRotated`），本机拿 CGL 问过固定管线 ——
+         `glRotated(45,0,1,0); glTranslated(0,0,-10)` 之后 `(2,2,0)` 落在
+         `(-5.6569, 2, -8.4853)`，与这一版逐位相同（转置那一版给 `(8.4853,2,5.4580)`）。
+         把参考那一格照同样的改法补上再跑，`town textured` 从全黑变成铺满 80.5% 的城市。 */
       aset('gl_tm', num(0), bin('+', bin('*', bin('*', nm('x'), nm('x')), nm('d')), nm('c'))),
-      aset('gl_tm', num(1), bin('-', bin('*', bin('*', nm('y'), nm('x')), nm('d')), bin('*', nm('z'), nm('s')))),
-      aset('gl_tm', num(2), bin('+', bin('*', bin('*', nm('x'), nm('z')), nm('d')), bin('*', nm('y'), nm('s')))),
-      aset('gl_tm', num(4), bin('+', bin('*', bin('*', nm('x'), nm('y')), nm('d')), bin('*', nm('z'), nm('s')))),
+      aset('gl_tm', num(1), bin('+', bin('*', bin('*', nm('y'), nm('x')), nm('d')), bin('*', nm('z'), nm('s')))),
+      aset('gl_tm', num(2), bin('-', bin('*', bin('*', nm('x'), nm('z')), nm('d')), bin('*', nm('y'), nm('s')))),
+      aset('gl_tm', num(4), bin('-', bin('*', bin('*', nm('x'), nm('y')), nm('d')), bin('*', nm('z'), nm('s')))),
       aset('gl_tm', num(5), bin('+', bin('*', bin('*', nm('y'), nm('y')), nm('d')), nm('c'))),
-      aset('gl_tm', num(6), bin('-', bin('*', bin('*', nm('y'), nm('z')), nm('d')), bin('*', nm('x'), nm('s')))),
-      aset('gl_tm', num(8), bin('-', bin('*', bin('*', nm('x'), nm('z')), nm('d')), bin('*', nm('y'), nm('s')))),
-      aset('gl_tm', num(9), bin('+', bin('*', bin('*', nm('y'), nm('z')), nm('d')), bin('*', nm('x'), nm('s')))),
+      aset('gl_tm', num(6), bin('+', bin('*', bin('*', nm('y'), nm('z')), nm('d')), bin('*', nm('x'), nm('s')))),
+      aset('gl_tm', num(8), bin('+', bin('*', bin('*', nm('x'), nm('z')), nm('d')), bin('*', nm('y'), nm('s')))),
+      aset('gl_tm', num(9), bin('-', bin('*', bin('*', nm('y'), nm('z')), nm('d')), bin('*', nm('x'), nm('s')))),
       aset('gl_tm', num(10), bin('+', bin('*', bin('*', nm('z'), nm('z')), nm('d')), nm('c'))),
       ex(call('gl_mvmul', [])),
       ret(num(0)),

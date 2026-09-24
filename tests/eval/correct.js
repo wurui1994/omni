@@ -28,8 +28,22 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
 const CLI = join(ROOT, 'src/cli.js');
 const OUT = join(ROOT, '.omni-cache', 'evalcorrect');
 const PSS = process.env.OMNI_PSS_DIR ?? '/Users/wurui/Documents/polydraw';
-const REF = `${PSS}/c_impl/build/polydraw-render`;
-const DEC = `${PSS}/c_impl/build/pd-imgdecode`;
+/**
+ * 参考那两个程序在哪儿。三档：**`OMNI_PD_REF`** > `.omni-cache/pdref`（`mkref.js` 补过的
+ * 那一份）> 用户那棵 `c_impl/build`（原样）。
+ *
+ * 为什么要补一份：`c_impl` 有一处错的是**一整类** —— `mat4_rotate`
+ * （`src/render/gl_renderer.c`）那张 `t[16]` 的字面量按**行**写、数组按**列**用，
+ * 于是它的 `glrotate` 是真 GL 那张 `R` 的转置（= 按 `-角度` 转）。正本是真 OpenGL
+ * （原版 `glrotate` 就是 `glRotated`，`polydraw.c:2141`），本机拿 CGL 问过固定管线。
+ * 逐个 `REF_WRONG` 装不下一整类，放宽阈值等于自己判自己 —— 所以
+ * **`node tests/eval/mkref.js` 补一份 fork 当尺子**（理由抄在那儿）。
+ */
+const PATCHED = join(ROOT, '.omni-cache', 'pdref', 'c_impl', 'build');
+const REFDIR = process.env.OMNI_PD_REF
+  ?? (existsSync(join(PATCHED, 'polydraw-render')) ? PATCHED : `${PSS}/c_impl/build`);
+const REF = `${REFDIR}/polydraw-render`;
+const DEC = `${REFDIR}/pd-imgdecode`;
 
 const argv = process.argv.slice(2);
 const val = (n, d) => {
@@ -88,6 +102,19 @@ const REF_WRONG = new Map([
 const fovyOf = (w, h) => (Math.atan(h / w) * 360) / Math.PI;
 
 /**
+ * **第 0 帧本来就没东西的那几份**：`t = klock()` 给 0 ⇒ 粒子一个都没生、蛇缩成一个点。
+ * 在第 0 帧量它们等于"两张全黑图相同"，什么都没证明（那五份从前就是这么白拿了一分的）。
+ * 所以按名字把帧挪到**有东西的那一帧**（两边同一帧，照旧公平）。
+ */
+const FRAME_OF = new Map([
+  ['dominos.pss', '30'],
+  ['particules sparks.pss', '30'],
+  ['ribbons invasion.pss', '30'],
+  ['snake tube.pss', '30'],
+]);
+const frameOf = (name) => (argv.includes('--frame') ? CFG.frame : (FRAME_OF.get(name) ?? CFG.frame));
+
+/**
  * 例子集：**`polydraw/` 底下全部 `.pss`**（`examples/` + `ken/` + `tigrou/`）+ 我们自己那几份。
  * `--dir` 只跑某一棵（`--dir ken`），`--only` 按名字过滤（**逗号分隔、取并集** ——
  * 按根因分组修的时候一趟就能把那一族都量上：`--only fractal,cubes,tree`）。
@@ -110,9 +137,9 @@ function cases() {
 }
 
 /** 我们那一趟：`--gfx gl` 出一张裸表面。回像素（RGBA）或 null + 原因。 */
-function ours(src, out) {
+function ours(src, out, frame) {
   const r = spawnSync(process.execPath,
-    [CLI, 'run', src, '--gfx', 'gl', '--frame', CFG.frame,
+    [CLI, 'run', src, '--gfx', 'gl', '--frame', frame,
       '--w', String(CFG.w), '--h', String(CFG.h), '-o', out],
     { encoding: 'utf8', cwd: ROOT, timeout: 120000 });
   if (r.status !== 0 || !existsSync(out)) {
@@ -139,11 +166,11 @@ function ours(src, out) {
  * 所以尺子取"关掉 bake"那一档；`REF_WRONG` 里那几条也照这一格重新裁。
  * 想量另一档（回到参考的默认）：`OMNI_PD_BAKE=1 node tests/eval/correct.js`。
  */
-function ref(src, png, ppm) {
+function ref(src, png, ppm, frame) {
   const env = { ...process.env };
   if (process.env.OMNI_PD_BAKE === '1') delete env.PD_NO_MVP_BAKE;
   else env.PD_NO_MVP_BAKE = '1';
-  const r = spawnSync(REF, [src, '--frame', CFG.frame, '--w', String(CFG.w),
+  const r = spawnSync(REF, [src, '--frame', frame, '--w', String(CFG.w),
     '--h', String(CFG.h), '--fovy', fovyOf(CFG.w, CFG.h).toFixed(4), '-o', png],
   { encoding: 'utf8', timeout: 120000, env });
   if (r.status !== 0 || !existsSync(png)) {
@@ -194,6 +221,8 @@ const t0 = Date.now();
 
 P(`出图正确性（与 c_impl 逐像素对照，${CFG.w}×${CFG.h}，第 ${CFG.frame} 帧，`
   + `fovy ${fovyOf(CFG.w, CFG.h).toFixed(2)}°）：\n`);
+P(`  尺子：${REFDIR}${REFDIR === PATCHED ? '（补过 mat4_rotate 那一格）'
+  : '（**原样** —— `glrotate` 是转置的，转角那一族量不准；跑一趟 tests/eval/mkref.js）'}\n`);
 if (!existsSync(REF) || !existsSync(DEC)) {
   P(`  --   这台机器上没有那份参考（${REF}）—— 整份跳过\n`);
   P('\n0 passed, 0 failed（出图正确性）\n');
@@ -204,8 +233,9 @@ for (const src of cases()) {
   if (Date.now() - t0 > CFG.budget) { skip++; continue; }
   const name = basename(src);
   const tag = name.replace(/[^\w.-]/g, '_');
-  const o = ours(src, join(OUT, `${tag}.ours.rgba`));
-  const r = ref(src, join(OUT, `${tag}.ref.png`), join(OUT, `${tag}.ref.ppm`));
+  const fr = frameOf(name);
+  const o = ours(src, join(OUT, `${tag}.ours.rgba`), fr);
+  const r = ref(src, join(OUT, `${tag}.ref.png`), join(OUT, `${tag}.ref.ppm`), fr);
   if (r.px === null) {
     /* 参考自己也画不出来 —— 那一份不算我们的红（c_impl 只有 ~80% 正确）。 */
     skip++;
