@@ -130,6 +130,9 @@ const FN_DEPS = new Map([
   ['r_min', []],
   ['r_vec_pick', []],
   ['r_vec_mask', ['r_is_na', 'r_na']],
+  ['r_rev', []],
+  ['r_seq_along', []],
+  ['r_which', ['r_is_na']],
 ]);
 
 /* ─── 类型（标准 IR 的类型描述，§1.2） ─────────────────────────────────── */
@@ -284,7 +287,7 @@ function numLit(text) {
 const BUILTINS = new Set([
   'cat', 'paste', 'paste0', 'c', 'list', 'length', 'nchar', 'return', 'is.null',
   'as.integer', 'as.numeric', 'as.character', 'abs', 'seq_len', 'is.na', 'is.nan',
-  'sum', 'mean', 'max', 'min',
+  'sum', 'mean', 'max', 'min', 'rev', 'seq_along', 'which',
   /* libm 那一族：R 自己这几个也是直接调 libm（不在 nmath 里），所以落方言的 `rmath`。
      一格实参、回 double —— `log(x, base)` 那种两格的**当场报**（R 那一档是 `log(x)/log(b)`，
      而"替它算"与"照它算"是两件事）。 */
@@ -398,8 +401,11 @@ function typeOfExpr(x, types) {
 function typeOfCall(x, types) {
   const fn = tag(kids(x)[0]) === 'sym' ? nameOf(kids(x)[0]) : null;
   const args = argsOf(x).map((a) => a.value).filter((v) => v !== null);
-  /* R 自己的 C 那一族回的都是 `double` —— 这是 nmath 的形状，不是我们的选择。 */
-  if (fn !== null && RMATH.has(fn)) return REAL;
+  /* R 自己的 C 那一族回的都是 `double` —— 这是 nmath 的形状，不是我们的选择。
+     第一格实参是向量时逐元素，于是回的是一格向量（`sqrt(xs)` / `round(xs, 1)`）。 */
+  if (fn !== null && RMATH.has(fn)) {
+    return args.length > 0 && isVecTy(typeOfExpr(args[0], types)) ? RVEC : REAL;
+  }
   if (fn !== null && PRED.has(fn)) return BOOL;
   if (fn === 'is.na' || fn === 'is.nan') return BOOL;
   switch (fn) {
@@ -407,11 +413,15 @@ function typeOfCall(x, types) {
     case 'length': case 'nchar': case 'as.integer': return INT;
     case 'as.numeric': return REAL;
     case 'is.null': return BOOL;
-    case 'sum': case 'mean': case 'max': case 'min':
+    case 'sum': case 'mean': case 'max': case 'min': return REAL;
+    /* 这三格进出都是向量（`which` 回的是位置，所以是数值向量，不是逻辑向量）。 */
+    case 'rev': case 'seq_along': case 'which': return RVEC;
+    /* 这一批第一格是向量就逐元素（`sqrt(xs)`），标量进标量出。 */
     case 'sqrt': case 'exp': case 'log': case 'log2': case 'log10':
     case 'floor': case 'ceiling':
     case 'sin': case 'cos': case 'tan': case 'asin': case 'acos': case 'atan':
-    case 'sinh': case 'cosh': case 'tanh': return REAL;
+    case 'sinh': case 'cosh': case 'tanh':
+      return args.length > 0 && isVecTy(typeOfExpr(args[0], types)) ? RVEC : REAL;
     case 'abs': return args.length === 0 ? INT : typeOfExpr(args[0], types);
     case 'return': return args.length === 0 ? INT : typeOfExpr(args[0], types);
     /* `c(TRUE, FALSE)` 在 R 里是**逻辑**向量（印 `TRUE` / `FALSE`），`c(1, 2)` 是数值向量。
@@ -671,7 +681,14 @@ function exprOf(x, types, want) {
       const op = String(leaf(kids(x)[0]));
       const operand = kids(x)[1];
       if (op === '!') return { kind: 'unop', op: '!', operand: condOf(operand, types) };
-      if (op === '-' || op === '+') return { kind: 'unop', op, operand: exprOf(operand, types) };
+      if (op === '-' || op === '+') {
+        /* 向量上的一元 `-` 逐元素（`-xs`）—— 方言的 `un` 只吃 int / real。 */
+        if (isVecTy(typeOfExpr(operand, types))) {
+          return op === '+' ? exprOf(operand, types)
+            : vecMap1(exprOf(operand, types), (e) => ({ kind: 'unop', op: '-', operand: e }));
+        }
+        return { kind: 'unop', op, operand: exprOf(operand, types) };
+      }
       throw new Error(`r->IR: 一元 \`${op}\` 还没接`);
     }
     case 'if': {
@@ -761,6 +778,38 @@ const numBin = (op, x, y) => {
   if (op === '%%' || op === '%/%') return modOf(op, x, y);
   return b(op, x, y);
 };
+
+/**
+ * **逐元素映射**：一格向量进、一格向量出（`sqrt(xs)` / `-xs` / `abs(xs)` / `round(xs, 1)`）。
+ *
+ * `mk(elem)` 给"一格 double 上怎么算" —— 与标量那条路**用同一处算法**（`numBin` 那条规矩
+ * 在一元这边也管）。`pre` 是要摆在循环前面的语句（比如把 `round(xs, d)` 的 `d` 存进临时量：
+ * 循环里要读好多遍，不能求好多遍）。
+ */
+function vecMap1(vecE, mk, pre = []) {
+  const src = fresh('mv');
+  const nm = fresh('mn');
+  const out = fresh('mo');
+  const i = fresh('mi');
+  const vr = (x) => ({ kind: 'name', name: x });
+  return {
+    kind: 'block-expr',
+    stmts: [
+      ...pre,
+      { kind: 'let', name: src, type: RVEC, init: vecE },
+      { kind: 'let', name: nm, type: INT, init: vecLen(vr(src)) },
+      ...vecNewAs(out, vr(nm)),
+      {
+        kind: 'for',
+        init: { kind: 'let', name: i, type: INT, init: { kind: 'int', value: 0 } },
+        cond: b('<', vr(i), vr(nm)),
+        post: { kind: 'assign', target: vr(i), value: b('+', vr(i), { kind: 'int', value: 1 }) },
+        body: [vecSet(vr(out), vr(i), mk(vecGet(vr(src), vr(i))))],
+      },
+    ],
+    value: vr(out),
+  };
+}
 
 /**
  * **向量化**：一边是向量就逐元素算。回 `null` 表示"两边都是标量，不是我的活"。
@@ -928,8 +977,24 @@ function callOf(x, types, extra, want) {
 
   /* **R 自己的 C 先问一遍**（摆在 BUILTINS 之前）：这一族的答案不由我们给。 */
   if (fn !== null && RMATH.has(fn)) {
-    return rmathCall(fn, RMATH.get(fn), all.map((a, i) => ev(i)),
-      all.map((a) => (a === null ? REAL : typeOfExpr(a, types))));
+    const tys = all.map((a) => (a === null ? REAL : typeOfExpr(a, types)));
+    const args = all.map((a, i) => ev(i));
+    /* 第一格是向量就逐元素（`round(xs, 1)` / `dnorm(xs)`）：别的实参先存进临时量 ——
+       循环里每一圈都要读，不能求好多遍。**只在第一格上逐元素** —— R 这一族其实是多头回收的
+       （`round(xs, c(1,2))`），那要再摆一层，所以别的格也是向量时当场报，不假装。 */
+    if (isVecTy(tys[0])) {
+      const pre = [];
+      const rest = args.slice(1).map((e, k) => {
+        if (isVecTy(tys[k + 1])) {
+          throw new Error(`r->IR: ${fn}() 只在第一格实参上逐元素（第 ${k + 2} 格也是向量 —— 多头回收还没接）`);
+        }
+        const nm = fresh('ma');
+        pre.push({ kind: 'let', name: nm, type: REAL, init: asReal(e, tys[k + 1]) });
+        return { kind: 'name', name: nm };
+      });
+      return vecMap1(args[0], (el) => rmathCall(fn, RMATH.get(fn), [el, ...rest], [REAL, ...rest.map(() => REAL)]), pre);
+    }
+    return rmathCall(fn, RMATH.get(fn), args, tys);
   }
 
   if (fn !== null && BUILTINS.has(fn)) {
@@ -1034,7 +1099,9 @@ function callOf(x, types, extra, want) {
             + ' 两格那一档（`log(x, base)`）要我们替它算，而"替它算"与"照它算"是两件事');
         }
         const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
-        return call1('rmath', { kind: 'strlit', value: LIBM.get(fn) }, asReal(ev(0), t));
+        const sym = { kind: 'strlit', value: LIBM.get(fn) };
+        if (isVecTy(t)) return vecMap1(ev(0), (e) => call1('rmath', sym, e));
+        return call1('rmath', sym, asReal(ev(0), t));
       }
       case 'sum': case 'mean': case 'max': case 'min': {
         /* 向量那一档走生成出来的函数；标量那一档（`max(a, b)`）归 `pmax`/`pmin` 那张表。 */
@@ -1054,9 +1121,19 @@ function callOf(x, types, extra, want) {
       case 'as.character': return call1('tostr', ev(0));
       case 'abs': {
         const t = all[0] === null ? INT : typeOfExpr(all[0], types);
+        if (isVecTy(t)) return vecMap1(ev(0), (e) => call1('rmath', { kind: 'strlit', value: 'fabs' }, e));
         if (t.kind === 'real') return call1('rmath', { kind: 'strlit', value: 'fabs' }, ev(0));
         /* 整数上的 `abs`：方言里没有这一格算子，落成一格三元 */
         return { kind: 'ternary', cond: b('<', ev(0), { kind: 'int', value: 0 }), then: { kind: 'unop', op: '-', operand: ev(0) }, else_: ev(0) };
+      }
+      case 'rev': case 'seq_along': case 'which': {
+        if (n !== 1) throw new Error(`r->IR: ${fn}() 要一格实参（给了 ${n}）`);
+        const t = all[0] === null ? INT : typeOfExpr(all[0], types);
+        if (!isVecTy(t)) throw new Error(`r->IR: ${fn}() 的实参不是向量（是 ${t.kind}）`);
+        if (fn === 'which' && !isLglTy(t)) {
+          throw new Error('r->IR: which() 的实参要是逻辑向量（R 里它就是"哪几格为真"）');
+        }
+        return { kind: 'call', fn: { kind: 'name', name: useFn(`r_${fn}`) }, args: [ev(0)] };
       }
       case 'cat':
         throw new Error('r->IR: `cat()` 只能摆在语句位上（这儿在表达式里）');
@@ -1486,6 +1563,71 @@ function vecFnDecl(name) {
           args: [{ kind: 'call', fn: { kind: 'name', name: NUM_STR }, args: [elem] }],
         },
       ], 0)],
+    };
+  }
+  if (name === 'r_rev') {
+    /* `rev(xs)` —— 倒着抄一遍。 */
+    const out = { kind: 'name', name: 'o' };
+    return {
+      kind: 'fn',
+      name,
+      params: P,
+      ret: RVEC,
+      body: [
+        ...vecNewAs('o', len),
+        loop([vecSet(out, i, vecGet(v, b('-', b('-', len, i), { kind: 'int', value: 1 })))], 0),
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_seq_along') {
+    /* `seq_along(xs)` 是 `1:length(xs)`（但 `length` 为 0 时 R 回零长向量 —— 见 SPEC）。 */
+    const out = { kind: 'name', name: 'o' };
+    return {
+      kind: 'fn',
+      name,
+      params: P,
+      ret: RVEC,
+      body: [
+        ...vecNewAs('o', len),
+        loop([vecSet(out, i, asReal(b('+', i, { kind: 'int', value: 1 }), INT))], 0),
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_which') {
+    /* `which(m)` —— 为真的那几格的**位置**（从 1 起）。R 里 `NA` 不算（直接丢），
+       与 `xs[m]` 不同 —— 那边 `NA` 会挑出一格 `NA`。两趟：先数几格，再填。 */
+    const out = { kind: 'name', name: 'o' };
+    const k = { kind: 'name', name: 'k' };
+    const c = { kind: 'name', name: 'c' };
+    const hit = b('&&', { kind: 'unop', op: '!', operand: naQ(vecGet(v, i)) }, b('!=', vecGet(v, i), { kind: 'real', value: 0 }));
+    const loopA = (body, init) => ({
+      kind: 'for', init, cond: b('<', i, len), post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) }, body,
+    });
+    return {
+      kind: 'fn',
+      name,
+      params: P,
+      ret: RVEC,
+      body: [
+        { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
+        { kind: 'let', name: 'c', type: INT, init: { kind: 'int', value: 0 } },
+        loopA([{ kind: 'if', cond: hit, then: [{ kind: 'assign', target: c, value: b('+', c, { kind: 'int', value: 1 }) }], else_: null }],
+          { kind: 'assign', target: i, value: { kind: 'int', value: 0 } }),
+        ...vecNewAs('o', c),
+        { kind: 'let', name: 'k', type: INT, init: { kind: 'int', value: 0 } },
+        loopA([{
+          kind: 'if',
+          cond: hit,
+          then: [
+            vecSet(out, k, asReal(b('+', i, { kind: 'int', value: 1 }), INT)),
+            { kind: 'assign', target: k, value: b('+', k, { kind: 'int', value: 1 }) },
+          ],
+          else_: null,
+        }], { kind: 'assign', target: i, value: { kind: 'int', value: 0 } }),
+        { kind: 'return', values: [out] },
+      ],
     };
   }
   if (name === 'r_vec_pick') {

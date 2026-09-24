@@ -70,3 +70,19 @@ cat(length(xs[xs > 2]), "\n")
 cat(sum(xs[xs %% 2 == 1]), "\n")
 cat(c(TRUE, FALSE, TRUE), "\n")
 cat(sum(c(TRUE, TRUE, FALSE)), "\n")
+
+# 一元 `-` 与 R 的那一族数学函数在向量上逐元素（第一格实参是向量就映一趟）
+cat(-xs, "\n")
+cat(sqrt(c(1, 4, 9)), "\n")
+cat(abs(c(-1, 2, -3)), "\n")
+cat(exp(c(0, 1)), "\n")
+cat(floor(c(1.7, -1.7)), "\n")
+cat(round(c(1.234, 5.678), 1), "\n")
+cat(signif(c(123456, 0.001234), 3), "\n")
+
+# 进出都是向量的那三格
+cat(rev(xs), "\n")
+cat(seq_along(xs), "\n")
+cat(which(xs > 2), "\n")
+cat(which(ys > 1), "\n")
+cat(xs[rev(seq_along(xs))], "\n")
