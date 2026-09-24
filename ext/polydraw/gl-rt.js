@@ -595,14 +595,19 @@ function glMatrixDecls() {
       letR('c', rm('cos', [nm('t')])),
       letR('s', rm('sin', [nm('t')])),
       letR('d', bin('-', num(1), nm('c'))),
+      /* **这一格的符号是"行向量 × 矩阵"那套约定的**（我们这一侧顶点是行向量、矩阵按
+         `m[12..14]` 放平移 —— `gl_translate` 与 `gl_vertex4` 都按这一套），所以填的是
+         GL 那张 `R` 的**转置**：sin 那几项符号与 OpenGL 规范里的相反。
+         量出来的证据：填 GL 原样的 `R` 时 `glRotate(60,1,0,0)` 与参考差 2 像素、
+         而我们 `glRotate(-60)` 与参考 `glRotate(+60)` **逐像素相同**（转向反了）。 */
       aset('gl_tm', num(0), bin('+', bin('*', bin('*', nm('x'), nm('x')), nm('d')), nm('c'))),
-      aset('gl_tm', num(1), bin('+', bin('*', bin('*', nm('y'), nm('x')), nm('d')), bin('*', nm('z'), nm('s')))),
-      aset('gl_tm', num(2), bin('-', bin('*', bin('*', nm('x'), nm('z')), nm('d')), bin('*', nm('y'), nm('s')))),
-      aset('gl_tm', num(4), bin('-', bin('*', bin('*', nm('x'), nm('y')), nm('d')), bin('*', nm('z'), nm('s')))),
+      aset('gl_tm', num(1), bin('-', bin('*', bin('*', nm('y'), nm('x')), nm('d')), bin('*', nm('z'), nm('s')))),
+      aset('gl_tm', num(2), bin('+', bin('*', bin('*', nm('x'), nm('z')), nm('d')), bin('*', nm('y'), nm('s')))),
+      aset('gl_tm', num(4), bin('+', bin('*', bin('*', nm('x'), nm('y')), nm('d')), bin('*', nm('z'), nm('s')))),
       aset('gl_tm', num(5), bin('+', bin('*', bin('*', nm('y'), nm('y')), nm('d')), nm('c'))),
-      aset('gl_tm', num(6), bin('+', bin('*', bin('*', nm('y'), nm('z')), nm('d')), bin('*', nm('x'), nm('s')))),
-      aset('gl_tm', num(8), bin('+', bin('*', bin('*', nm('x'), nm('z')), nm('d')), bin('*', nm('y'), nm('s')))),
-      aset('gl_tm', num(9), bin('-', bin('*', bin('*', nm('y'), nm('z')), nm('d')), bin('*', nm('x'), nm('s')))),
+      aset('gl_tm', num(6), bin('-', bin('*', bin('*', nm('y'), nm('z')), nm('d')), bin('*', nm('x'), nm('s')))),
+      aset('gl_tm', num(8), bin('-', bin('*', bin('*', nm('x'), nm('z')), nm('d')), bin('*', nm('y'), nm('s')))),
+      aset('gl_tm', num(9), bin('+', bin('*', bin('*', nm('y'), nm('z')), nm('d')), bin('*', nm('x'), nm('s')))),
       aset('gl_tm', num(10), bin('+', bin('*', bin('*', nm('z'), nm('z')), nm('d')), nm('c'))),
       ex(call('gl_mvmul', [])),
       ret(num(0)),
