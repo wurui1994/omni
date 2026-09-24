@@ -605,3 +605,48 @@ program 与 uniform —— 全是"只有设备做得到"的东西。`glquad` 的
 * **画布文字**（`setfont`/`printg`，178 次）：一份 8×8 字模就能让那一族真出字；
 * **z 缓冲**（`clz` + `drawsph`/`drawcone` 的深度）：CPU 备选加一块 z 缓冲，3D 的遮挡才对；
 * **文件纹理**（`glsettex("x.png")`）：要解码器 + "帧函数之前先备好资源"那一层（见 11.3）。
+
+## 13. 第五刀的设计：**本机 OpenGL 设备**（命令行那一档的 GPU）
+
+### 13.1 为什么必须做
+
+出图那把尺子上最后一块大的是**着色器那一族 22 份**（`glsetshader` 13 / `glgetuniformloc` 5 /
+`glquad` 4）。它与贴图、文字不同 —— 它**就是整幅图本身**，缺了它画面是错的，所以 CPU 备选
+那一档只能当场报（第 12 节那张表的最后一行）。浏览器那一档早就通了
+（`tests/studio/run.js` 74/74），**只有命令行没有 GPU**。
+
+`--gfx browser`（借 headless 浏览器出图）评估过：要外部 `playwright-cli`、每趟起浏览器
+几十秒、还得把产物塞进页面 —— 不划算，不做。
+
+### 13.2 形状：**一份 `.dylib`，dlopen 挂上去**
+
+    src/runtime-gl/omni_evgl.c     ->  libomnigl_ev.dylib
+    宿主面：omni_gfx_call / omni_gfx_batch / omni_gfx_tex 三格转发给它
+
+复用 asy 那条腿已经踩平的三件事（`project_gl_backend_live.md`）：
+* **上下文用 CGL 不用 GLFW**（我们跑在大栈线程上，`glfwInit` 会 SIGTRAP）；
+* 画到 **FBO**（离屏）再 `glReadPixels` 回来 —— 命令行那一档要的是一帧 PNG，不是窗口；
+* `.dylib` 用 `dlopen` 挂：主二进制不链 OpenGL，**没有 GPU 的机器照旧跑 CPU 备选**。
+
+### 13.3 设备那一侧要实现的（**与 WebGL2 那一档同一套名字**）
+
+    收批      (gfxbatch 类 数 顶点) -> VBO + 一次 glDrawArrays（core profile，不碰立即模式）
+    批的状态  batchprog / batchmvp / batchblend / gldepth
+    program   glsetshader（**GLSL 原文直接交给驱动** —— 真 GL 认旧式，不必翻 ES 300）
+    uniform   glgetuniformloc / gluniform{1,2,3,4}f / glgetattribloc / glvertexattrib*f
+    纹理      (gfxtex 槽 宽 高 层 格 数组)（BGRA 真有，不必摊成 RGBA）+ glbindtexture/glactivetexture
+    2D 那一族 cls/setcol/setpix/moveto/lineto/drawsph/drawcone（**已经在语言侧变顶点了**，
+              所以这一档只要收批 —— 一个字都不用另写）
+    查询与输入 xres/yres/klock/numframes/mousx/mousy/bstatus/keystatus（离屏那一档输入照
+              CPU 备选那一手：环境变量）
+
+**一个字都不许有的东西**：立即模式转发、第二份变换/合批、只有这一档才有的语义。
+
+### 13.4 判据（**跨渲染器不逐字节**）
+
+1. `tests/build` 那一层：`.dylib` 编得出来、`dlopen` 挂得上（没有 GPU 的机器跳过）；
+2. `02-gl.pss` / `draw2d.kc` 用 `--gfx gl` 出的 PNG 与 CPU 备选那一档**结构一致**
+   （非黑格数 ±5%、几个探针像素 ±40）—— 口径与 WebGL2 那一档那条判据一样；
+3. **着色器那三份**（`04-shader.pss` / `05-shader-geom.pss` / `06-texture.pss`）在这一档
+   真编真画：判的是"铺满 + 片元真在算 + uniform 真喂进去"那三条（与浏览器那条同一套探针）；
+4. 语料尺子：`node tests/eval/scan.js --gfx gl` 的份数 **要比 `--gfx host` 多 20 份以上**。
