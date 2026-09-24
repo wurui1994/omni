@@ -1,0 +1,256 @@
+#!/usr/bin/env node
+// ext/r/build-libR.js —— **libR**：把 r-source 的 C / Fortran 编成一份我们自己的 `libR.dylib`，
+// 再搭一个能跑的 `R_HOME`（base 按**源码**装，不字节码编译 —— 见 ADR-0046）。
+//
+//   node ext/r/build-libR.js          # 或 omni ninja -f ext/r/build-libR.js
+//   node ext/r/build-libR.js -t dirty
+//
+// 与 `ext/r/build.js` 的分工：那一份编 `libomniRmath`（编译器那一档要的数值库），
+// 这一份编 libR（能装 CRAN、能画图那一档）。两档的判据不同，所以分两个文件。
+//
+// ## 三条纪律（与 build.js 同一条，只是规模大了十倍）
+//
+//   1. **输入只有那棵源码树 + clang + gfortran。** 本机装的那个 R 一格都不借。
+//   2. **要编哪些文件从 R 自己的 Makefile.in 里读**（`SOURCES_C` / `SOURCES_F` / …），
+//      不在这儿抄名单 —— 抄的那份会与树分叉，而症状是"链接时少一个符号"。
+//   3. configure 的活分三格自己做：`config.h` 探本机（`rt/gen-rconfig.js`）、
+//      `Rconfig.h` / `Rversion.h` 跑 R 自己的 `tools/GETCONFIG` 与 `tools/GETVERSION`、
+//      `Rmath.h` 替模板（`rt/gen-rmath.js`）。
+//
+// ## macOS 上这一版的口径（都写在 gen-rconfig.js 那张表里）
+//
+//   * BLAS / LAPACK 走 **Accelerate.framework**；tre / tzone 用树里自带的那份
+//   * quartz（AppKit）留着，X11 / cairo / ICU / NLS / OpenMP 不开
+//   * base 装成**源码**（`library/base/R/base` 就是 all.R）—— R 自己那个用 R 写的
+//     字节码编译器我们不要，所以跑的时候 `R_ENABLE_JIT=0`
+
+import { mkdirSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { Build } from '../../src/core/build/api.js';
+import { refDir } from '../../tests/lib/refsrc.js';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const ROOT = join(HERE, '..', '..');
+const RSRC = refDir('r-source', 'R_SRC');
+const CC = process.env.OMNI_CLANG ?? process.env.CC ?? 'clang';
+const FC = process.env.OMNI_GFORTRAN ?? process.env.FC ?? 'gfortran';
+
+const OUT = join(ROOT, '.omni-cache', 'r-rt', 'libR');
+const GEN = OUT;                       // 生成出来的头就摆在根上（`-I` 排最前）
+const OBJ = join(OUT, 'o');
+const HOME = join(OUT, 'home');        // 我们自己的 R_HOME
+export const LIBR = join(OUT, `libR${process.platform === 'darwin' ? '.dylib' : '.so'}`);
+export const RBIN = join(OUT, 'R.bin');
+export const R_HOME = HOME;
+
+if (!existsSync(join(RSRC, 'src/main/Makefile.in'))) {
+  process.stderr.write(`ext/r/build-libR.js: 参考树不在：${RSRC}\n`);
+  process.exit(1);
+}
+
+/* ─── 名单从 R 的 Makefile.in 里读 ─────────────────────────────────────── */
+
+/** 读一格 make 变量（续行接起来），回文件名数组。读不到就报 —— 那说明那份 Makefile 变了形状。 */
+function mkVar(path, name, ext) {
+  const text = readFileSync(path, 'utf8');
+  const m = new RegExp(`^${name}\\s*=([\\s\\S]*?)\\n[A-Za-z_@]`, 'm').exec(text);
+  if (m === null) throw new Error(`build-libR: ${path} 里读不到 ${name}`);
+  return m[1].replace(/\\\n/g, ' ').trim().split(/\s+/).filter((s) => s.endsWith(ext));
+}
+
+/* src/main：`SOURCES_C` 那 105 份。**四份只被 include 的不在里头**（`machar.c` /
+   `qsort-body.c` / `split-incl.c` / `xspline.c` 本来就没进 SOURCES_C），
+   而 `EXTRA_SOURCES_C`（alloca / mkdtemp / strdup / strncasecmp）是 `@LIBOBJS@` 那一格 ——
+   macOS 上这四个函数都有，所以一份都不编（configure.ac 第 2292 行的 AC_REPLACE_FUNCS）。 */
+const mainC = mkVar(join(RSRC, 'src/main/Makefile.in'), 'SOURCES_C', '.c');
+const mainF = mkVar(join(RSRC, 'src/main/Makefile.in'), 'SOURCES_F', '.f');
+const applC = mkVar(join(RSRC, 'src/appl/Makefile.in'), 'SOURCES_C', '.c');
+const applF = mkVar(join(RSRC, 'src/appl/Makefile.in'), 'SOURCES_F', '.f');
+const unixC = mkVar(join(RSRC, 'src/unix/Makefile.in'), 'SOURCES_C_BASE', '.c');
+const nmathC = mkVar(join(RSRC, 'src/nmath/Makefile.in'), 'SOURCES', '.c');
+const treC = mkVar(join(RSRC, 'src/extra/tre/Makefile.in'), 'SOURCES', '.c');
+/* tzone：只有这两份（`registryTZ.c` 是 Windows 的）。 */
+const tzC = ['localtime.c', 'strftime.c'];
+
+/* 名单以那份 Makefile 为准（这一版读出 99 份）。阈值只是"形状没变"的哨兵：
+   读成个位数那一定是正则跟那份 Makefile 走散了。 */
+if (mainC.length < 90) throw new Error(`build-libR: src/main 只读出 ${mainC.length} 份，不像话`);
+
+/* ─── 目录 ─────────────────────────────────────────────────────────────── */
+
+for (const d of [GEN, OBJ, join(GEN, 'src/include'), join(HOME, 'lib'), join(HOME, 'etc'),
+  join(HOME, 'library/base/R'), join(HOME, 'modules')]) mkdirSync(d, { recursive: true });
+/* GETVERSION 认的是 `../../SVN-REVISION`（相对 CWD），所以它得在 <GEN>/src/include 里跑，
+   而这一份文件摆在 <GEN> 上。参考树是个 git 检出、没有那份文件，所以我们自己写一份。 */
+writeFileSync(join(GEN, 'SVN-REVISION'), 'Revision: 99999\nLast Changed Date: 2026-01-01\n');
+
+const b = new Build();
+
+/* ─── 四份生成出来的头 ─────────────────────────────────────────────────── */
+
+const CONFIG_H = join(GEN, 'config.h');
+const RCONFIG_H = join(GEN, 'Rconfig.h');
+const RVERSION_H = join(GEN, 'Rversion.h');
+const RMATH_H = join(GEN, 'Rmath.h');
+
+b.rule('genrconfig', {
+  command: `node ${join(HERE, 'rt/gen-rconfig.js')} --src ${RSRC} --out $out --cc ${CC}`,
+  description: '探本机 -> 整份 config.h',
+  restat: 'true',
+});
+b.rule('getconfig', {
+  command: `cd ${GEN} && sh ${join(RSRC, 'tools/GETCONFIG')} > $out`,
+  description: 'R 的 GETCONFIG -> Rconfig.h',
+  restat: 'true',
+});
+b.rule('getversion', {
+  command: `cd ${join(GEN, 'src/include')} && sh ${join(RSRC, 'tools/GETVERSION')} > $out`,
+  description: 'R 的 GETVERSION -> Rversion.h',
+  restat: 'true',
+});
+b.rule('genrmath', {
+  command: `node ${join(HERE, 'rt/gen-rmath.js')} --src ${RSRC} --out $out`,
+  description: 'Rmath.h0.in -> Rmath.h',
+  restat: 'true',
+});
+
+b.build(CONFIG_H, 'genrconfig', [], {
+  implicit: [join(HERE, 'rt/gen-rconfig.js'), join(RSRC, 'src/include/config.h.in')],
+});
+b.build(RCONFIG_H, 'getconfig', [CONFIG_H], { implicit: [join(RSRC, 'tools/GETCONFIG')] });
+b.build(RVERSION_H, 'getversion', [join(RSRC, 'VERSION')], {
+  implicit: [join(RSRC, 'tools/GETVERSION'), join(GEN, 'SVN-REVISION')],
+});
+b.build(RMATH_H, 'genrmath', [join(RSRC, 'src/include/Rmath.h0.in')], {
+  implicit: [join(HERE, 'rt/gen-rmath.js')],
+});
+const HEADERS = [CONFIG_H, RCONFIG_H, RVERSION_H, RMATH_H];
+
+/* ─── 编译 ─────────────────────────────────────────────────────────────── */
+
+const INC = [GEN, join(RSRC, 'src/include'), join(RSRC, 'src/nmath'), join(RSRC, 'src/extra'),
+  '/opt/homebrew/include'].map((p) => `-I${p}`).join(' ');
+const CFLAGS = `-O2 -w -std=gnu17 -fPIC -DHAVE_CONFIG_H ${INC}`;
+
+b.rule('cc', { command: `${CC} ${CFLAGS} $extra -c $in -o $out`, description: 'CC $out' });
+b.rule('fc', { command: `${FC} -O2 -fPIC -c $in -o $out`, description: 'FC $out' });
+
+const objs = [];
+/** 一格 C：`extra` 给那几处要额外 `-I` 的（tre / tzone / unix）。 */
+const cc = (dir, name, prefix, extra = '') => {
+  const o = join(OBJ, `${prefix}${name.replace(/\.c$/, '')}.o`);
+  objs.push(o);
+  b.build(o, 'cc', join(RSRC, dir, name), { implicit: HEADERS, vars: extra === '' ? undefined : { extra } });
+};
+const fc = (dir, name, prefix) => {
+  const o = join(OBJ, `${prefix}${name.replace(/\.f$/, '')}.o`);
+  objs.push(o);
+  b.build(o, 'fc', join(RSRC, dir, name));
+};
+
+for (const n of mainC) cc('src/main', n, 'main_');
+for (const n of applC) cc('src/appl', n, 'appl_');
+for (const n of nmathC) cc('src/nmath', n, 'nm_');
+for (const n of treC) cc('src/extra/tre', n, 'tre_', `-I${join(RSRC, 'src/extra/tre')}`);
+/* tzone 的两份要 `src/main` 上的 `datetime.h`（R 自己的 tzone/Makefile.in 第 21 行也是这么加的）。 */
+for (const n of tzC) cc('src/extra/tzone', n, 'tz_', `-I${join(RSRC, 'src/extra/tzone')} -I${join(RSRC, 'src/main')}`);
+for (const n of unixC) cc('src/unix', n, 'unix_', `-I${join(RSRC, 'src/unix')}`);
+for (const n of mainF) fc('src/main', n, 'f_');
+for (const n of applF) fc('src/appl', n, 'f_');
+
+/* ─── 链接 ─────────────────────────────────────────────────────────────── */
+
+/* BLAS / LAPACK 走 Accelerate（macOS 自带，所以树里那份 reference BLAS 与
+   `src/modules/lapack` 都不编）。别的库都是这台机器上量到的（pcre2 / zlib / lzma /
+   bz2 / curl / iconv / readline）。 */
+const gfDir = process.platform === 'darwin' ? '-L/opt/homebrew/lib/gcc/current' : '';
+const LIBS = `-framework Accelerate -L/opt/homebrew/lib ${gfDir} `
+  + '-lpcre2-8 -lz -llzma -lbz2 -lcurl -liconv -lreadline -lgfortran -lm';
+b.rule('dylib', {
+  command: process.platform === 'darwin'
+    ? `${CC} -dynamiclib -install_name $out -o $out $in ${LIBS}`
+    : `${CC} -shared -o $out $in ${LIBS}`,
+  description: 'LINK $out',
+});
+b.build(LIBR, 'dylib', objs);
+
+/* `R.bin`：R 自己的入口（`src/main/Rmain.c`，它不在 SOURCES_C 里 —— 只链进 R.bin）。 */
+b.rule('rbin', {
+  command: `${CC} ${CFLAGS} $in -o $out ${LIBR} -framework Accelerate`,
+  description: 'LINK $out',
+});
+b.build(RBIN, 'rbin', join(RSRC, 'src/main/Rmain.c'), { implicit: [LIBR, ...HEADERS] });
+
+/* ─── R_HOME：base 按源码装 ─────────────────────────────────────────────── */
+
+const BASE_R = join(HOME, 'library/base/R/base');
+const BASE_PROFILE = join(HOME, 'library/base/R/Rprofile');
+const BASE_DESC = join(HOME, 'library/base/DESCRIPTION');
+const RENVIRON = join(HOME, 'etc/Renviron');
+const BASEDIR = join(RSRC, 'src/library/base');
+const PROFDIR = join(RSRC, 'src/library/profile');
+
+/* `all.R`：按 `LC_COLLATE=C ls R/*.R R/unix/*.R` 的次序接起来，再替 `@WHICH@`
+   （R 自己的 `share/make/basepkg.mk` 第 63..78 行 `mkRbase` 干的就是这两件事）。
+   **次序要紧** —— base 里有些定义依赖前面已经存在的东西。 */
+b.rule('mkbase', {
+  /* `xargs cat` 而不是 shell 的 for 循环：这条命令要过一遍 ninja 的模板展开，
+     而那一层看见 `$f` 会当成变量名（展成空）。这儿一格 `$` 都不留。 */
+  command: `cd ${BASEDIR} && LC_COLLATE=C ls R/*.R R/unix/*.R | xargs cat `
+    + '| sed -e "s:@WHICH@:/usr/bin/which:" > $out',
+  description: 'base 的 all.R -> $out',
+});
+/* 系统 profile：`Common.R` + `Rprofile.unix` 接起来（`src/library/profile/Makefile.in` 第 19 行）。
+   `.Library` 就是在这儿定的 —— 少了它 R 起不来。 */
+b.rule('mkprofile', {
+  command: `cat ${join(PROFDIR, 'Common.R')} ${join(PROFDIR, 'Rprofile.unix')} > $out`,
+  description: 'Rprofile -> $out',
+});
+const SHORT_VER = readFileSync(join(RSRC, 'VERSION'), 'utf8').trim().split(' ')[0];
+const PLATFORM = `${process.arch === 'arm64' ? 'aarch64' : process.arch}-apple-darwin`;
+b.rule('mkdesc', {
+  command: `sed -e "s/@VERSION@/${SHORT_VER}/" $in > $out && echo "Built: R ${SHORT_VER}; ; ; unix" >> $out`,
+  description: 'base 的 DESCRIPTION -> $out',
+});
+/* `etc/Renviron`：模板里那些 `@…@` 是外部命令的路径。少了这一份 R 会印一句
+   "cannot find system Renviron" 然后继续 —— 但那句话会混进每一趟输出里，
+   而判据是"逐字节相同"，所以它得有。 */
+const RENV_SED = [
+  ['@R_GZIPCMD@', 'gzip'], ['@R_UNZIPCMD@', 'unzip'], ['@R_ZIPCMD@', 'zip'],
+  ['@R_BZIPCMD@', 'bzip2'], ['@TAR@', 'tar'], ['@LN_S@', 'ln -s'], ['@MAKE@', 'make'],
+  ['@SED@', 'sed'], ['@PAGER@', 'less'], ['@R_BROWSER@', 'open'], ['@R_PDFVIEWER@', 'open'],
+  ['@R_PRINTCMD@', 'lpr'], ['@R_PAPERSIZE@', 'a4'], ['@R_RD4PDF@', 'times,inconsolata,hyper'],
+  ['@TEXI2DVICMD@', 'texi2dvi'], ['@STRIP_SHARED_LIB@', 'strip -x'], ['@STRIP_STATIC_LIB@', 'strip -S'],
+  ['@R_PLATFORM@', PLATFORM], ['@configure_input@', 'omni ext/r/build-libR.js'],
+].map(([k, v]) => `-e "s:${k}:${v}:"`).join(' ');
+b.rule('mkrenviron', {
+  command: `sed ${RENV_SED} $in > $out`,
+  description: 'Renviron -> $out',
+});
+
+b.build(BASE_R, 'mkbase', [], { implicit: [join(BASEDIR, 'R/zzz.R')] });
+b.build(BASE_PROFILE, 'mkprofile', [], { implicit: [join(PROFDIR, 'Common.R'), join(PROFDIR, 'Rprofile.unix')] });
+b.build(BASE_DESC, 'mkdesc', join(BASEDIR, 'DESCRIPTION.in'));
+b.build(RENVIRON, 'mkrenviron', join(RSRC, 'etc/Renviron.in'));
+
+/* ─── 验一趟 ───────────────────────────────────────────────────────────── */
+
+/* 编出来不等于跑得起来，所以最后一条边是**真跑一趟**：起 R、求一段、对答案。
+   `R_ENABLE_JIT=0` 是 ADR-0046 那一条（R 自己那个用 R 写的字节码编译器我们不要）；
+   `R_DEFAULT_PACKAGES=NULL` 是因为 methods / utils / stats 那几个包还没装（下一刀）。 */
+const STAMP = join(OUT, 'smoke.ok');
+const SMOKE_LOG = join(OUT, 'smoke.txt');
+b.rule('smoke', {
+  command: `TZDIR=/usr/share/zoneinfo R_ENABLE_JIT=0 R_DEFAULT_PACKAGES=NULL R_HOME=${HOME} `
+    + `${RBIN} --vanilla --no-echo -e 'cat(sum(1:10), sqrt(2), "\\n")' > ${SMOKE_LOG} 2>&1 `
+    + `&& grep -qx "55 1.414214 " ${SMOKE_LOG} && date > $out`,
+  description: '起一趟我们自己的 R，对答案',
+});
+b.build(STAMP, 'smoke', [RBIN, BASE_R, BASE_PROFILE, BASE_DESC, RENVIRON]);
+
+b.default(STAMP);
+b.run(process.argv.slice(2));
+
+
+

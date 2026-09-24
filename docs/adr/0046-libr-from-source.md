@@ -57,16 +57,31 @@ S7 / cpp11 / farver / isoband / …）一共 **135 523 行 R + 102 848 行 C/C++
 
 ## 接下来（按刀排）
 
-1. `src/appl`（6 C + 14 Fortran）、`src/unix`（6 C）、`src/extra/tre`、`src/extra/tzone`，
-   连 `src/main` 一起链成 `libR.dylib`（R 自己也是拿一堆散 `.o` 链的，见
-   `src/main/Makefile.in` 第 97 行）。gfortran 在这台机器上有（Homebrew GCC 16.2）。
-2. 一个 `Rscript` 形状的驱动（`src/unix/Rembedded.c` + `Rf_initialize_R` /
-   `setup_Rmainloop`），能从 C 求值一段 R。
-3. base / stats / grid 那几个包：**不字节码编译**地装出 `.rdb`/`.rdx`。
+1. ~~`src/appl`（6 C + 14 Fortran）、`src/unix`（6 C）、`src/extra/tre`、`src/extra/tzone`，
+   连 `src/main` 一起链成 `libR.dylib`~~ —— **已落**（`ext/r/build-libR.js`，249 条边）。
+   BLAS / LAPACK 走 Accelerate；gfortran 是 Homebrew GCC 16.2。
+2. ~~一个 `Rscript` 形状的驱动~~ —— **已落**：`R.bin` 就是 R 自己的 `src/main/Rmain.c`
+   链我们的 libR（`Rmain.c` 不在 `SOURCES_C` 里，R 自己也是只把它链进 `R.bin`）。
+3. base 那几个包：**base 已落**（按 `share/make/basepkg.mk` 的 `mkRbase` + `mkRsimple`
+   装成源码：`library/base/R/base` 就是 `all.R`，22 700 行）。`.Library` 在系统 profile 里定
+   （`src/library/profile/Common.R` + `Rprofile.unix` 接起来），少了它 R 起不来。
+   **还差** methods / utils / stats / graphics / grDevices / datasets / tools / grid ——
+   那几个有 NAMESPACE，要 `tools:::.install_package_*` 那一路。
 4. `install.packages` 装那 17 个包 → `library(ggplot2)` → `ggsave` 出一张图。
 5. quartz 那一格：`devQuartz.c` + `qdCocoa.m` 编进来，`plot()` 开一个真窗口。
    它自己建 `NSWindow`、不跑 `[NSApp run]`（靠 `ptr_R_ProcessEvents` 协作抽事件），
    所以要在主线程上调 —— 这一条与我们 host 那侧的线程安排得对齐。
+
+### 第二刀量出来的三格
+
+* **`R_ENABLE_JIT=0` 是硬要求，不是偏好**：不关的话 R 起来就去加载 `compiler` 包，
+  而那个包我们不装 —— 报的是 `package 'compiler' does not have a namespace`。
+* base 的 `all.R` **次序要紧**（`LC_COLLATE=C ls R/*.R R/unix/*.R`），
+  而拼它的那条命令里一格 `$` 都不能留：它要过一遍 ninja 的模板展开，`$f` 会被当成变量展成空。
+  所以用 `xargs cat`，不用 shell 的 for。
+* `tools/GETVERSION` 认的是 **`../../SVN-REVISION`**（相对 CWD），所以它得在
+  `<gen>/src/include` 里跑；参考树是 git 检出、没有那份文件，我们自己写一份。
+
 
 ## 后果
 
