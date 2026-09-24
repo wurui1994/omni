@@ -189,6 +189,7 @@ const FN_DEPS = new Map([
   ['r_rep_v', []],
   ['r_seq_by', []],
   ['r_sample_i', []],
+  ['r_zeros', []],
   /* 三态逻辑那一族（`RLGL1` 那段账）。比较那六格各发一个函数 —— 不摊在调用点上是
      因为"两边各读两遍"要临时量，而临时量在**条件位**上没地方摆（`while` 的条件被降级到
      循环外头，摊开的 `let` 会变成"只算一次"）。一次函数调用是纯表达式，哪儿都放得下。 */
@@ -476,6 +477,8 @@ const BUILTINS = new Set([
   /* 串那一族。`tolower` **没接** —— 方言里只有 `(supper …)`，没有反过来的那一格，
      补它要给核心方言加一格算子（五条腿都要动），不在 R 这一刀里。 */
   'toupper', 'substr', 'sprintf', 'startsWith', 'endsWith',
+  /* 造一条"空的/零的"向量：`numeric(n)` 那一族与不带实参的 `c()`。 */
+  'numeric', 'double', 'integer', 'logical',
   /* 随机数那一族（发生器是 R 自己那一条，见 `RRAND`）。 */
   'set.seed', 'sample', ...RRAND.keys(),
   /* libm 那一族：R 自己这几个也是直接调 libm（不在 nmath 里），所以落方言的 `rmath`。
@@ -566,7 +569,9 @@ function typeOfExpr(x, types) {
       return t.kind === 'real' ? RLGL1 : BOOL;
     }
     case 'sub1': {
-      const a = types.get(mangle(nameOf(kids(x)[0])));
+      /* **被下标的那一格不一定是名字**：`sort(z)[250]` / `c(1,2)[1]` 都是常见写法，
+         所以这儿问的是"那个表达式的类型"，不是"那个名字装什么"（`indexRead` 也是这么问的）。 */
+      const a = typeOfExpr(kids(x)[0], types);
       if (!isVecTy(a)) return INT;
       /* 下标是向量 → 挑出来的还是一格向量（逻辑/数值随被挑的那个走）。 */
       const ks = kids(x).slice(1).map((k) => kids(k)[0]).filter((k) => k !== undefined);
@@ -576,7 +581,7 @@ function typeOfExpr(x, types) {
       return isLglTy(a) ? RLGL1 : REAL;
     }
     case 'sub2': {
-      const d = types.get(mangle(nameOf(kids(x)[0])));
+      const d = typeOfExpr(kids(x)[0], types);
       if (d !== undefined && d.kind === 'map') return d.value;
       if (isVecTy(d)) return REAL;
       return INT;
@@ -660,6 +665,9 @@ function typeOfCall(x, types) {
       return isVecTy(t) ? t : RVEC;
     }
     case 'cumsum': case 'diff': case 'range': case 'seq': return RVEC;
+    /* `numeric(n)` 那一族：出一条零向量（`logical(n)` 是一条 FALSE 的逻辑向量）。 */
+    case 'numeric': case 'double': case 'integer': return RVEC;
+    case 'logical': return RLGL;
     /* 随机数那一族：R 的 `runif(n, …)` 出的是**长度 n 的向量**（`runif(1)` 也是向量）。 */
     case 'sample': return RVEC;
     case 'set.seed': return { kind: 'void' };
@@ -1617,7 +1625,11 @@ function callOf(x, types, extra, want) {
 
            长度是**运行期**才知道的（向量那几格要问槽 0），所以先把向量实参存进临时量
            （一次求值），长度按"标量算 1、向量算它的长度"加起来，再拿一格写指针 `k` 填。 */
-        if (n === 0) throw new Error('r->IR: `c()` 不带实参（空向量）还没接');
+        /* `c()` 不带实参在 R 里是 `NULL`，而这一档没有 `NULL` —— 落成**零长向量**。
+           这两者在最常用的那个写法上同解：`out <- c(); out <- c(out, i)` 那种攒结果的
+           循环（`c(NULL, 1)` 与 `c(零长, 1)` 都是 `1`）。差别是 `is.null()`：
+           R 对 `c()` 回 TRUE，我们这儿它是一条零长向量（明写在 SPEC）。 */
+        if (n === 0) return lglCall('r_zeros', { kind: 'int', value: 0 });
         /* **一律 double** —— R 的 `c(10, 20, 30)` 是 double 向量（要 integer 得写 `10L`）。
            这一格原来按实参推 int/real，于是 `c(1, 2) + 0.5` 会在元素类型上打架。 */
         const vr = (nm) => ({ kind: 'name', name: nm });
@@ -1688,6 +1700,15 @@ function callOf(x, types, extra, want) {
         const sym = { kind: 'strlit', value: LIBM.get(fn) };
         if (isVecTy(t)) return vecMap1(ev(0), (e) => call1('rmath', sym, e));
         return call1('rmath', sym, asReal(ev(0), t));
+      }
+      case 'numeric': case 'double': case 'integer': case 'logical': {
+        /* `numeric(n)` —— 一条 n 格的零向量（`numeric()` 是零长）。R 那边也认
+           `numeric(length = n)`，所以那个名字也收。逻辑那一档零就是 FALSE，同一份内存。 */
+        const named = namedArg(x, 'length');
+        let cnt = { kind: 'int', value: 0 };
+        if (named !== undefined) cnt = asIntE(exprOf(named, types), typeOfExpr(named, types));
+        else if (n >= 1) cnt = asIntE(ev(0), typeOfExpr(all[0], types));
+        return lglCall('r_zeros', cnt);
       }
       case 'sort': case 'cumsum': case 'prod': case 'range': case 'diff':
       case 'var': case 'sd': {
@@ -3600,6 +3621,28 @@ function vecFnDecl(name) {
             { kind: 'assign', target: m, value: b('-', m, { kind: 'int', value: 1 }) },
             vecSet(xs, j, vecGet(xs, m)),
           ],
+        },
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_zeros') {
+    /* `numeric(n)` / `logical(n)`：n 格零（`vecNewAs` 开出来的内存不保证是零，所以要写一遍）。 */
+    const out = { kind: 'name', name: 'o' };
+    const kk = { kind: 'name', name: 'k' };
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'k', type: INT }],
+      ret: RVEC,
+      body: [
+        ...vecNewAs('o', kk),
+        {
+          kind: 'for',
+          init: { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
+          cond: b('<', i, kk),
+          post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
+          body: [vecSet(out, i, { kind: 'real', value: 0 })],
         },
         { kind: 'return', values: [out] },
       ],
