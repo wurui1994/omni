@@ -175,8 +175,22 @@ R 往数值那边收，所以"每一格都是逻辑"才算逻辑。
 nmath 那一族**只在第一格实参上**逐元素，别的格先存进临时量（循环里要读好多遍）——
 R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不假装。
 
-进出都是向量的三格：`rev` / `seq_along` / `which`。`which` 回的是**位置**（数值向量），
-`NA` 直接丢 —— 与 `xs[m]` 不同（那边 `NA` 挑出一格 `NA`），这两条口径是 R 自己分开的。
+进出都是向量的几格：`rev` / `seq_along` / `which` / `sort` / `cumsum` / `diff` / `range` /
+`head` / `tail` / `rep` / `seq`；出一格数的几格：`sum` / `mean` / `max` / `min` / `prod` /
+`var` / `sd`。`which` 回的是**位置**（数值向量），`NA` 直接丢 —— 与 `xs[m]` 不同
+（那边 `NA` 挑出一格 `NA`），这两条口径是 R 自己分开的。
+
+**缺失那一格每个函数的口径都不一样**，照 R 的文档办（判据是 `ext/r/examples/vecfn.R`）：
+`sort` 把 `NA` **丢掉**（`na.last = NA` 是默认）、`max` / `min` / `range` **传下去**
+（`max(c(1, NA))` 是 `NA` —— 按 `>` 比是躲不过去的：`NaN > x` 恒假会把 NA 悄悄跳过，
+所以那一格每元素先问一句 `is.na`）、`cumsum` / `prod` / `var` / `sd` 按浮点自然传播。
+`sort` 用的是 Shell 排序（Knuth 的 gap 序列）；R 自己用快排/基数排序，但**全排序的结果
+是唯一的**（double 上相等的元素分不出来），所以两边逐字节一致。
+
+`sort` / `head` / `tail` / `rep` 出来的**元素类型跟着进去的那条走**（逻辑向量排完还是逻辑）。
+`xor` / `isTRUE` / `isFALSE` / `ifelse` 也接了：`xor` 逐元素三态、`isTRUE` / `isFALSE`
+回的是**两态**（`isTRUE(NA)` 在 R 里是 `FALSE`，不是 `NA`）、`ifelse` 的形状随 `test`
+（`yes` / `no` 按回收取）。
 
 比较回的是**逻辑向量** —— 同一段线性内存，只在 adapter 这一侧的类型上多带一个记号
 （`RLGL`，`typeToSx` 看不见它），差别只在印法：`TRUE` / `FALSE` / `NA`。
@@ -285,6 +299,9 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
 6. `print` 那一层只接**一格实参**（`digits=` / `quote=` 那几个命名实参没接），
    串里的引号与反斜杠**不转义**（R 印 `"a\"b"`，我们印 `"a"b"`），
    `list` 的 `print` 没接（那要 `$名字` 那一层）。
+   base 那一族向量函数的命名实参也只认要紧的那几个（`head`/`tail` 的 `n=`、`rep` 的
+   `times=`、`seq` 的 `by=`）—— `na.rm=` / `decreasing=` / `each=` / `length.out=` /
+   `seq(n)` 那几种写法**当场报**，不猜。
 7. 语法层两处：带 `-` 的原始串（`r"---(…)---"`，两侧个数要相同，这套词法项表达不了）、
    非 ASCII 字母的名字（`alpha` 只有 ASCII）。
 8. `c()` 不带实参（空向量）没接 —— 这一层的长度至少是 1，"零长向量"要另一格表示

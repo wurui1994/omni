@@ -114,7 +114,8 @@ const CMP_FNS = new Map([
 ]);
 /** 这一批由 `lglFnDecl` 发（形状都是"几格 real 进、一格 real 出"）。 */
 const LGL_FNS = new Set([
-  'r_lgl', 'r_and', 'r_or', 'r_not', 'r_cond', 'r_lgl_str', ...CMP_FNS.values(),
+  'r_lgl', 'r_and', 'r_or', 'r_xor', 'r_not', 'r_cond', 'r_lgl_str',
+  'r_is_true', 'r_is_false', 'r_ifelse1', ...CMP_FNS.values(),
 ]);
 
 /**
@@ -145,14 +146,33 @@ const FN_DEPS = new Map([
   ['r_rev', []],
   ['r_seq_along', []],
   ['r_which', ['r_is_na']],
+  /* base 里"向量进向量出"那一族。`sort` 要问缺失（丢掉），`range` 要造 `NA`。 */
+  ['r_sort', ['r_is_na']],
+  ['r_cumsum', []],
+  ['r_prod', []],
+  ['r_range', ['r_is_na', 'r_na']],
+  ['r_diff', []],
+  ['r_head', []],
+  ['r_tail', []],
+  ['r_var', ['r_mean']],
+  ['r_sd', ['r_var', 'r_mean']],
+  ['r_rep_s', []],
+  ['r_rep_v', []],
+  ['r_seq_by', []],
   /* 三态逻辑那一族（`RLGL1` 那段账）。比较那六格各发一个函数 —— 不摊在调用点上是
      因为"两边各读两遍"要临时量，而临时量在**条件位**上没地方摆（`while` 的条件被降级到
      循环外头，摊开的 `let` 会变成"只算一次"）。一次函数调用是纯表达式，哪儿都放得下。 */
   ['r_lgl', ['r_is_na', 'r_na']],
   ['r_and', ['r_is_na', 'r_na']],
   ['r_or', ['r_is_na', 'r_na']],
+  ['r_xor', ['r_is_na', 'r_na']],
   ['r_not', ['r_is_na', 'r_na']],
   ['r_cond', ['r_is_na']],
+  ['r_is_true', ['r_is_na']],
+  ['r_is_false', ['r_is_na']],
+  ['r_ifelse1', ['r_is_na', 'r_na']],
+  ['r_ifelse', ['r_is_na', 'r_na']],
+  ['r_vec1', []],
   ['r_lgl_str', ['r_is_na']],
   ['r_any', ['r_is_na', 'r_na']],
   ['r_all', ['r_is_na', 'r_na']],
@@ -348,7 +368,9 @@ const BUILTINS = new Set([
   'cat', 'paste', 'paste0', 'c', 'list', 'length', 'nchar', 'return', 'is.null',
   'as.integer', 'as.numeric', 'as.character', 'abs', 'seq_len', 'is.na', 'is.nan',
   'sum', 'mean', 'max', 'min', 'rev', 'seq_along', 'which', 'any', 'all',
-  'print', 'invisible',
+  'print', 'invisible', 'xor', 'isTRUE', 'isFALSE', 'ifelse',
+  /* base 里"向量进向量出"那一族 + 两格统计量。`seq` 与 `rep` 是造向量的。 */
+  'sort', 'cumsum', 'prod', 'range', 'diff', 'head', 'tail', 'var', 'sd', 'rep', 'seq',
   /* libm 那一族：R 自己这几个也是直接调 libm（不在 nmath 里），所以落方言的 `rmath`。
      一格实参、回 double —— `log(x, base)` 那种两格的**当场报**（R 那一档是 `log(x)/log(b)`，
      而"替它算"与"照它算"是两件事）。 */
@@ -506,8 +528,28 @@ function typeOfCall(x, types) {
     case 'sum': case 'mean': case 'max': case 'min': return REAL;
     /* `any` / `all` 回的是**带 NA 的标量逻辑**（`any(c(FALSE, NA))` 是 `NA`）。 */
     case 'any': case 'all': return RLGL1;
+    /* `xor` 逐元素；`isTRUE` / `isFALSE` 回两态；`ifelse` 的形状随 test。 */
+    case 'xor': return args.some((a) => isVecTy(typeOfExpr(a, types))) ? RLGL : RLGL1;
+    case 'isTRUE': case 'isFALSE': return BOOL;
+    case 'ifelse': {
+      const lgl = args.length === 3
+        && [1, 2].every((k) => {
+          const t = typeOfExpr(args[k], types);
+          return t.kind === 'bool' || isLgl1(t) || isLglTy(t);
+        });
+      if (args.length > 0 && isVecTy(typeOfExpr(args[0], types))) return lgl ? RLGL : RVEC;
+      return lgl ? RLGL1 : REAL;
+    }
     /* 这三格进出都是向量（`which` 回的是位置，所以是数值向量，不是逻辑向量）。 */
     case 'rev': case 'seq_along': case 'which': return RVEC;
+    /* `sort` / `head` / `tail` / `rep` 出来的**元素类型跟着进去的那条走**
+       （逻辑向量排完还是逻辑）；`cumsum` / `diff` / `range` / `seq` 一律数值。 */
+    case 'sort': case 'head': case 'tail': case 'rep': {
+      const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
+      return isVecTy(t) ? t : RVEC;
+    }
+    case 'cumsum': case 'diff': case 'range': case 'seq': return RVEC;
+    case 'prod': case 'var': case 'sd': return REAL;
     /* 这一批第一格是向量就逐元素（`sqrt(xs)`），标量进标量出。 */
     case 'sqrt': case 'exp': case 'log': case 'log2': case 'log10':
     case 'floor': case 'ceiling':
@@ -643,6 +685,16 @@ const fresh = (p) => `r_${p}${tmpN++}`;
  * 已经是实数的**不包 `toreal`** —— 包了照样对，但 `.sx` 里会多出一层
  * `(toreal (real 0.5))` 这种明显的废话，而那种废话读的人会当成有意思的东西。
  */
+/**
+ * 一格数当"取几格"用（`head(v, 3)` / `rep(x, 4)` 的第二格）→ int。
+ * R 那边这几个位置写小数是合法的（会截断），所以 real 那一档走 `toint` 而不是当场报。
+ */
+const asIntE = (e, ty) => {
+  if (e.kind === 'int') return e;
+  if (e.kind === 'real') return { kind: 'int', value: Math.trunc(e.value) };
+  return ty !== undefined && ty.kind === 'int' ? e : call1('toint', e);
+};
+
 const asReal = (e, ty) => {
   if (e.kind === 'real') return e;
   if (e.kind === 'int') return { kind: 'real', value: e.value };
@@ -699,8 +751,7 @@ function rmathCall(rname, spec, args, argTys) {
 }
 
 
-/** 下标从 1 起 → 从 0 起。字面量当场折掉（`x[1]` 出 `aget(x, 0)` 而不是 `1-1`）。 */
-function zeroBased(e) {
+/** 下标从 1 起 → 从 0 起。字面量当场折掉（`x[1]` 出 `aget(x, 0)` 而不是 `1-1`）。 */function zeroBased(e) {
   if (e.kind === 'int') return { kind: 'int', value: e.value - 1 };
   return b('-', e, { kind: 'int', value: 1 });
 }
@@ -910,9 +961,9 @@ function exprOf(x, types, want) {
  * `&` / `|` 在里头，而 `&&` / `||` **刻意不在**：R 的 `&&` 只收长度 1 的东西
  * （长向量那一档在新版 R 里是个错误），逐元素的那一对就是 `&` / `|`。
  */
-const VEC_OPS = new Set(['+', '-', '*', '/', '<', '<=', '>', '>=', '==', '!=', '^', '**', '%%', '%/%', '&', '|']);
-/** 逐元素的逻辑那两格（结果是逻辑向量，每一格按三态表算）。 */
-const LGL_OPS = new Set(['&', '|']);
+const VEC_OPS = new Set(['+', '-', '*', '/', '<', '<=', '>', '>=', '==', '!=', '^', '**', '%%', '%/%', '&', '|', 'xor']);
+/** 逐元素的逻辑那几格（结果是逻辑向量，每一格按三态表算）。`xor` 是函数，不是算符。 */
+const LGL_OPS = new Set(['&', '|', 'xor']);
 
 /**
  * 一格算符在**两个已经是 double 的值**上怎么算。标量那条路与 `vecBin` 里逐元素那条路
@@ -1083,7 +1134,9 @@ function vecBin(op, l, r, types) {
            而 `is.na` 对这两格都真，所以一问就够。
            `&` / `|` 那两格走三态表（`r_and` / `r_or`）—— 与标量那一侧是同一个函数。 */
         body: [LGL_OPS.has(op)
-          ? vecSet(vr(out), vr(i), lglCall(op === '&' ? 'r_and' : 'r_or', at(a), at(c)))
+          ? vecSet(vr(out), vr(i), lglCall(
+            op === '&' ? 'r_and' : (op === '|' ? 'r_or' : 'r_xor'), at(a), at(c),
+          ))
           : (VEC_CMP.has(op) ? {
             kind: 'if',
             cond: b('||', naQ(at(a)), naQ(at(c))),
@@ -1275,6 +1328,87 @@ function callOf(x, types, extra, want) {
         const sym = { kind: 'strlit', value: LIBM.get(fn) };
         if (isVecTy(t)) return vecMap1(ev(0), (e) => call1('rmath', sym, e));
         return call1('rmath', sym, asReal(ev(0), t));
+      }
+      case 'sort': case 'cumsum': case 'prod': case 'range': case 'diff':
+      case 'var': case 'sd': {
+        if (n !== 1) {
+          throw new Error(`r->IR: ${fn}() 这一批只接一格向量实参（给了 ${n}）——`
+            + ' `decreasing=` / `na.rm=` 那几个命名实参没接');
+        }
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        if (!isVecTy(t)) throw new Error(`r->IR: ${fn}() 的实参不是向量（是 ${t.kind}）`);
+        return lglCall(`r_${fn}`, ev(0));
+      }
+      case 'head': case 'tail': {
+        /* 第二格是"取几格"，缺省 6（R 的文档）；也认 `n=`。 */
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        if (!isVecTy(t)) throw new Error(`r->IR: ${fn}() 的第一格实参不是向量（是 ${t.kind}）`);
+        const named = namedArg(x, 'n');
+        let cnt = { kind: 'int', value: 6 };
+        if (named !== undefined) cnt = asIntE(exprOf(named, types), typeOfExpr(named, types));
+        else if (n >= 2) cnt = asIntE(ev(1), typeOfExpr(all[1], types));
+        return lglCall(`r_${fn}`, ev(0), cnt);
+      }
+      case 'rep': {
+        /* `rep(x, times)`：标量与向量两条路（R 还有 `each=` / `length.out=`，没接）。 */
+        const named = namedArg(x, 'times');
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        let cnt = null;
+        if (named !== undefined) cnt = asIntE(exprOf(named, types), typeOfExpr(named, types));
+        else if (n >= 2) cnt = asIntE(ev(1), typeOfExpr(all[1], types));
+        if (cnt === null) throw new Error('r->IR: rep() 要两格实参（`each=` / `length.out=` 没接）');
+        if (isVecTy(t)) return lglCall('r_rep_v', ev(0), cnt);
+        return lglCall('r_rep_s', asReal(ev(0), t), cnt);
+      }
+      case 'seq': {
+        /* `seq(a, b)` 就是 `a:b`；带 `by` 的走那格生成出来的函数。
+           `seq(n)`（一格实参 = `1:n`）与 `length.out=` 没接 —— 当场报，不猜。 */
+        const byNode = namedArg(x, 'by');
+        const tys = all.map((a) => (a === null ? REAL : typeOfExpr(a, types)));
+        if (byNode === undefined && n === 2) {
+          return vecSeq(ev(0), tys[0], ev(1), tys[1]);
+        }
+        const byE = byNode !== undefined
+          ? asReal(exprOf(byNode, types), typeOfExpr(byNode, types))
+          : (n === 3 ? asReal(ev(2), tys[2]) : null);
+        if (byE === null || n < 2) {
+          throw new Error(`r->IR: seq() 只接 \`seq(a, b)\` 与 \`seq(a, b, by)\`（给了 ${n} 格）`
+            + ' —— `seq(n)` 与 `length.out=` 没接');
+        }
+        return lglCall('r_seq_by', asReal(ev(0), tys[0]), asReal(ev(1), tys[1]), byE);
+      }
+      case 'xor': {
+        /* `xor` 是**逐元素**的（向量进向量出），所以一边是向量就走 `vecBin` 那一层。 */
+        if (n !== 2) throw new Error(`r->IR: xor() 要两格实参（给了 ${n}）`);
+        if (all[0] !== null && all[1] !== null) {
+          const vx = vecBin('xor', all[0], all[1], types);
+          if (vx !== null) return vx;
+        }
+        const t0 = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        const t1 = all[1] === null ? REAL : typeOfExpr(all[1], types);
+        return lglCall('r_xor', asLgl(ev(0), t0), asLgl(ev(1), t1));
+      }
+      case 'isTRUE': case 'isFALSE': {
+        /* 回的是**两态**：`isTRUE(NA)` 在 R 里是 `FALSE`（不是 `NA`）。 */
+        if (n !== 1) throw new Error(`r->IR: ${fn}() 要一格实参（给了 ${n}）`);
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        if (isVecTy(t)) {
+          throw new Error(`r->IR: ${fn}() 收一格向量 —— R 那一格回 FALSE（"长度不是 1"），`
+            + ' 这一层还没有"问长度再定"的路，所以当场报');
+        }
+        return lglCall(fn === 'isTRUE' ? 'r_is_true' : 'r_is_false', asLgl(ev(0), t));
+      }
+      case 'ifelse': {
+        /* `ifelse(test, yes, no)`：**结果的形状随 test**。test 是向量就逐格挑
+           （`yes` / `no` 按回收取，标量先用 `r_vec1` 摆成长度 1 的向量）。 */
+        if (n !== 3) throw new Error(`r->IR: ifelse() 要三格实参（给了 ${n}）`);
+        const tys = all.map((a, k) => (a === null ? REAL : typeOfExpr(a, types)));
+        if (!isVecTy(tys[0])) {
+          return lglCall('r_ifelse1', asLgl(ev(0), tys[0]),
+            asReal(ev(1), tys[1]), asReal(ev(2), tys[2]));
+        }
+        const asVec = (k) => (isVecTy(tys[k]) ? ev(k) : lglCall('r_vec1', asReal(ev(k), tys[k])));
+        return lglCall('r_ifelse', ev(0), asVec(1), asVec(2));
       }
       case 'any': case 'all': {
         /* `any` / `all` 收一格逻辑向量、回**三态标量**：
@@ -1986,6 +2120,8 @@ function printFnDecl(name) {
       ret: { kind: 'void' },
       body: [
         letI('n', vecLen(v)),
+        /* 零长向量 R 印的是类型名（`logical(0)`）—— 那一格走不到下面的标号那一圈。 */
+        iff(b('==', nm('n'), I(0)), [wr(S('logical(0)\n')), { kind: 'return', values: [] }]),
         letI('w', I(1)),
         {
           kind: 'for',
@@ -2018,6 +2154,8 @@ function printFnDecl(name) {
     ret: { kind: 'void' },
     body: [
       letI('n', vecLen(v)),
+      /* 零长向量印类型名（`diff(c(1))` 在 R 里就是 `numeric(0)`） */
+      iff(b('==', nm('n'), I(0)), [wr(S('numeric(0)\n')), { kind: 'return', values: [] }]),
       { kind: 'let', name: 'p', type: PTR_REAL, init: call1('pnew', tyArg(PTR_REAL), I(3)) },
       letI('neg', I(0)),
       letI('mxl', I(-BIG)),
@@ -2179,6 +2317,39 @@ function lglFnDecl(name) {
       ret({ kind: 'ternary', cond: isF(x), then: T, else_: F }),
     ]);
   }
+  if (name === 'r_xor') {
+    /* `xor(a, b)` 就是 `(a | b) & !(a & b)`：两边都不缺失时看"是不是一真一假"。 */
+    return fn2([
+      { kind: 'if', cond: b('||', isNa(x), isNa(y)), then: [ret(na())], else_: null },
+      ret({
+        kind: 'ternary',
+        cond: b('!=', b('!=', x, F), b('!=', y, F)),
+        then: T,
+        else_: F,
+      }),
+    ]);
+  }
+  if (name === 'r_is_true' || name === 'r_is_false') {
+    /* `isTRUE` / `isFALSE` 回的是**两态**（R 的文档：`isTRUE(NA)` 是 `FALSE`，不是 `NA`）。 */
+    const want = name === 'r_is_true' ? b('!=', x, F) : b('==', x, F);
+    return fn1(BOOL, [
+      { kind: 'if', cond: isNa(x), then: [ret({ kind: 'bool', value: false })], else_: null },
+      ret(want),
+    ]);
+  }
+  if (name === 'r_ifelse1') {
+    /* 一格的 `ifelse`：判断缺失就交缺失（R 的 `ifelse(NA, 1, 2)` 是 `NA`）。 */
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'x', type: REAL }, { name: 'y', type: REAL }, { name: 'z', type: REAL }],
+      ret: REAL,
+      body: [
+        { kind: 'if', cond: isNa(x), then: [ret(na())], else_: null },
+        ret({ kind: 'ternary', cond: b('!=', x, F), then: y, else_: { kind: 'name', name: 'z' } }),
+      ],
+    };
+  }
   if (name === 'r_cond') {
     /* `if (NA)` 在 R 里是一条**错误**，不是"当假"。`(fail …)` 是方言里停下来的那一格。 */
     return fn1(BOOL, [
@@ -2268,16 +2439,23 @@ function vecFnDecl(name) {
     return {
       kind: 'fn', name, params: P, ret: REAL,
       /* 空向量在 R 里回 `-Inf` / `Inf` 并且**发一句警告**；这一版没有警告那条通道，
-         所以空向量这一格当场报（在 `r_sum` 之外唯一与 R 不同的地方，明写在 SPEC）。 */
+         所以空向量这一格当场报（在 `r_sum` 之外唯一与 R 不同的地方，明写在 SPEC）。
+         **缺失要传下去**：R 的 `max(c(1, NA))` 是 `NA`，而按 `>` 比是躲不过去的
+         （`NaN > x` 恒假，于是 NA 会被"跳过"、答成 1）—— 所以每格先问一句。 */
       body: [
         declLen(),
         { kind: 'let', name: 's', type: REAL, init: vecGet(v, { kind: 'int', value: 0 }) },
         loop([{
           kind: 'if',
-          cond: b(op, elem, acc),
-          then: [{ kind: 'assign', target: acc, value: elem }],
-          else_: null,
-        }], 1),
+          cond: naQ(elem),
+          then: [{ kind: 'return', values: [{ kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] }] }],
+          else_: [{
+            kind: 'if',
+            cond: b(op, elem, acc),
+            then: [{ kind: 'assign', target: acc, value: elem }],
+            else_: null,
+          }],
+        }], 0),
         { kind: 'return', values: [acc] },
       ],
     };
@@ -2513,6 +2691,390 @@ function vecFnDecl(name) {
           else_: null,
         },
         { kind: 'return', values: [{ kind: 'real', value: isAny ? 0 : 1 }] },
+      ],
+    };
+  }
+  /* ── base 里那一族"向量进向量出"的（`sort` / `cumsum` / `diff` / …）───────
+     缺失那一格各有各的口径，照 R 的文档办：`sort` **把 NA 丢掉**（`na.last = NA`），
+     `cumsum` / `prod` / `var` / `sd` 按浮点自然传播，`range` 有一格 NA 就整个 `NA NA`。 */
+  if (name === 'r_sort') {
+    /* Shell 排序（Knuth 的 gap 序列 1, 4, 13, 40…）。R 自己用的是快排/基数排序
+       （`src/main/sort.c`，那半边在解释器里、不在 nmath），而"全排序"的结果是唯一的
+       —— double 上相等的元素分不出来，所以哪种算法都逐字节一致。
+       为什么不是插入排序：那一格是 O(n²)，`sort(1:10000)` 会当场趴下。 */
+    const out = { kind: 'name', name: 'o' };
+    const c = { kind: 'name', name: 'c' };
+    const k = { kind: 'name', name: 'k' };
+    const g = { kind: 'name', name: 'g' };
+    const j = { kind: 'name', name: 'j' };
+    const t = { kind: 'name', name: 't' };
+    const oAt = (e) => vecGet(out, e);
+    return {
+      kind: 'fn', name, params: P, ret: RVEC,
+      body: [
+        declLen(),
+        { kind: 'let', name: 'c', type: INT, init: { kind: 'int', value: 0 } },
+        {
+          kind: 'for',
+          init: { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
+          cond: b('<', i, len),
+          post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
+          body: [{
+            kind: 'if',
+            cond: { kind: 'unop', op: '!', operand: naQ(elem) },
+            then: [{ kind: 'assign', target: c, value: b('+', c, { kind: 'int', value: 1 }) }],
+            else_: null,
+          }],
+        },
+        ...vecNewAs('o', c),
+        { kind: 'let', name: 'k', type: INT, init: { kind: 'int', value: 0 } },
+        {
+          kind: 'for',
+          init: { kind: 'let', name: 'i2', type: INT, init: { kind: 'int', value: 0 } },
+          cond: b('<', { kind: 'name', name: 'i2' }, len),
+          post: {
+            kind: 'assign',
+            target: { kind: 'name', name: 'i2' },
+            value: b('+', { kind: 'name', name: 'i2' }, { kind: 'int', value: 1 }),
+          },
+          body: [{
+            kind: 'if',
+            cond: { kind: 'unop', op: '!', operand: naQ(vecGet(v, { kind: 'name', name: 'i2' })) },
+            then: [
+              vecSet(out, k, vecGet(v, { kind: 'name', name: 'i2' })),
+              { kind: 'assign', target: k, value: b('+', k, { kind: 'int', value: 1 }) },
+            ],
+            else_: null,
+          }],
+        },
+        /* gap 先涨到最大的那一格（`g*3 < c` 而不是 `g < c/3` —— 不碰整除这一问） */
+        { kind: 'let', name: 'g', type: INT, init: { kind: 'int', value: 1 } },
+        {
+          kind: 'while',
+          cond: b('<', b('*', g, { kind: 'int', value: 3 }), c),
+          body: [{ kind: 'assign', target: g, value: b('+', b('*', g, { kind: 'int', value: 3 }), { kind: 'int', value: 1 }) }],
+        },
+        {
+          kind: 'while',
+          cond: b('>=', g, { kind: 'int', value: 1 }),
+          body: [
+            {
+              kind: 'for',
+              init: { kind: 'let', name: 'i3', type: INT, init: g },
+              cond: b('<', { kind: 'name', name: 'i3' }, c),
+              post: {
+                kind: 'assign',
+                target: { kind: 'name', name: 'i3' },
+                value: b('+', { kind: 'name', name: 'i3' }, { kind: 'int', value: 1 }),
+              },
+              body: [
+                { kind: 'let', name: 't', type: REAL, init: oAt({ kind: 'name', name: 'i3' }) },
+                { kind: 'let', name: 'j', type: INT, init: { kind: 'name', name: 'i3' } },
+                {
+                  kind: 'while',
+                  cond: b('&&', b('>=', j, g), b('>', oAt(b('-', j, g)), t)),
+                  body: [
+                    vecSet(out, j, oAt(b('-', j, g))),
+                    { kind: 'assign', target: j, value: b('-', j, g) },
+                  ],
+                },
+                vecSet(out, j, t),
+              ],
+            },
+            /* 1, 4, 13, 40… 倒着走就是 `(g-1)/3`（这个序列上是整的，按实数算再取整） */
+            {
+              kind: 'assign',
+              target: g,
+              value: call1('toint', call1('rmath', { kind: 'strlit', value: 'floor' },
+                b('/', call1('toreal', b('-', g, { kind: 'int', value: 1 })), { kind: 'real', value: 3 }))),
+            },
+          ],
+        },
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_cumsum') {
+    const out = { kind: 'name', name: 'o' };
+    return {
+      kind: 'fn', name, params: P, ret: RVEC,
+      body: [
+        declLen(),
+        ...vecNewAs('o', len),
+        { kind: 'let', name: 's', type: REAL, init: { kind: 'real', value: 0 } },
+        loop([
+          { kind: 'assign', target: acc, value: b('+', acc, elem) },
+          vecSet(out, i, acc),
+        ], 0),
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_prod') {
+    return {
+      kind: 'fn', name, params: P, ret: REAL,
+      body: [
+        declLen(),
+        { kind: 'let', name: 's', type: REAL, init: { kind: 'real', value: 1 } },
+        loop([{ kind: 'assign', target: acc, value: b('*', acc, elem) }], 0),
+        { kind: 'return', values: [acc] },
+      ],
+    };
+  }
+  if (name === 'r_range') {
+    /* 有一格缺失就整个 `NA NA`（R 的 `range(c(1, NA))`）—— 与 `max` / `min` 同一条。 */
+    const out = { kind: 'name', name: 'o' };
+    const mn = { kind: 'name', name: 'mn' };
+    const mx = { kind: 'name', name: 'mx' };
+    const na = () => ({ kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] });
+    return {
+      kind: 'fn', name, params: P, ret: RVEC,
+      body: [
+        declLen(),
+        { kind: 'let', name: 'mn', type: REAL, init: vecGet(v, { kind: 'int', value: 0 }) },
+        { kind: 'let', name: 'mx', type: REAL, init: vecGet(v, { kind: 'int', value: 0 }) },
+        { kind: 'let', name: 'bad', type: BOOL, init: { kind: 'bool', value: false } },
+        loop([{
+          kind: 'if',
+          cond: naQ(elem),
+          then: [{ kind: 'assign', target: { kind: 'name', name: 'bad' }, value: { kind: 'bool', value: true } }],
+          else_: [
+            { kind: 'if', cond: b('<', elem, mn), then: [{ kind: 'assign', target: mn, value: elem }], else_: null },
+            { kind: 'if', cond: b('>', elem, mx), then: [{ kind: 'assign', target: mx, value: elem }], else_: null },
+          ],
+        }], 0),
+        ...vecNewAs('o', { kind: 'int', value: 2 }),
+        {
+          kind: 'if',
+          cond: { kind: 'name', name: 'bad' },
+          then: [
+            vecSet(out, { kind: 'int', value: 0 }, na()),
+            vecSet(out, { kind: 'int', value: 1 }, na()),
+          ],
+          else_: [
+            vecSet(out, { kind: 'int', value: 0 }, mn),
+            vecSet(out, { kind: 'int', value: 1 }, mx),
+          ],
+        },
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_diff') {
+    /* `diff(v)` 的长度是 n-1（长度 1 的向量给零长 —— R 那边是 `numeric(0)`）。 */
+    const out = { kind: 'name', name: 'o' };
+    const m = { kind: 'name', name: 'm' };
+    return {
+      kind: 'fn', name, params: P, ret: RVEC,
+      body: [
+        declLen(),
+        { kind: 'let', name: 'm', type: INT, init: b('-', len, { kind: 'int', value: 1 }) },
+        { kind: 'if', cond: b('<', m, { kind: 'int', value: 0 }), then: [{ kind: 'assign', target: m, value: { kind: 'int', value: 0 } }], else_: null },
+        ...vecNewAs('o', m),
+        {
+          kind: 'for',
+          init: { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
+          cond: b('<', i, m),
+          post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
+          body: [vecSet(out, i, b('-', vecGet(v, b('+', i, { kind: 'int', value: 1 })), vecGet(v, i)))],
+        },
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_head' || name === 'r_tail') {
+    /* `head(v, k)` / `tail(v, k)`：`k` 是负数时 R 的意思是"去掉那么多格"。 */
+    const out = { kind: 'name', name: 'o' };
+    const kk = { kind: 'name', name: 'k' };
+    const off = { kind: 'name', name: 'off' };
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RVEC }, { name: 'k0', type: INT }],
+      ret: RVEC,
+      body: [
+        declLen(),
+        { kind: 'let', name: 'k', type: INT, init: { kind: 'name', name: 'k0' } },
+        { kind: 'if', cond: b('<', kk, { kind: 'int', value: 0 }), then: [{ kind: 'assign', target: kk, value: b('+', len, kk) }], else_: null },
+        { kind: 'if', cond: b('<', kk, { kind: 'int', value: 0 }), then: [{ kind: 'assign', target: kk, value: { kind: 'int', value: 0 } }], else_: null },
+        { kind: 'if', cond: b('>', kk, len), then: [{ kind: 'assign', target: kk, value: len }], else_: null },
+        ...vecNewAs('o', kk),
+        {
+          kind: 'let',
+          name: 'off',
+          type: INT,
+          init: name === 'r_head' ? { kind: 'int', value: 0 } : b('-', len, kk),
+        },
+        {
+          kind: 'for',
+          init: { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
+          cond: b('<', i, kk),
+          post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
+          body: [vecSet(out, i, vecGet(v, b('+', i, off)))],
+        },
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_var' || name === 'r_sd') {
+    /* `var` 是**样本**方差（除 n-1），`sd` 是它的平方根。缺失按浮点自然传播。 */
+    const mu = { kind: 'name', name: 'mu' };
+    const call = (fnName, ...as) => ({ kind: 'call', fn: { kind: 'name', name: useFn(fnName) }, args: as });
+    if (name === 'r_sd') {
+      return {
+        kind: 'fn', name, params: P, ret: REAL,
+        body: [{ kind: 'return', values: [call1('rmath', { kind: 'strlit', value: 'sqrt' }, call('r_var', v))] }],
+      };
+    }
+    return {
+      kind: 'fn', name, params: P, ret: REAL,
+      body: [
+        declLen(),
+        { kind: 'let', name: 'mu', type: REAL, init: call('r_mean', v) },
+        { kind: 'let', name: 's', type: REAL, init: { kind: 'real', value: 0 } },
+        loop([{
+          kind: 'assign',
+          target: acc,
+          value: b('+', acc, b('*', b('-', elem, mu), b('-', elem, mu))),
+        }], 0),
+        {
+          kind: 'return',
+          values: [b('/', acc, call1('toreal', b('-', len, { kind: 'int', value: 1 })))],
+        },
+      ],
+    };
+  }
+  if (name === 'r_rep_s' || name === 'r_rep_v') {
+    /* `rep(x, k)`：标量那一档出 k 格，向量那一档把整条重复 k 遍。 */
+    const out = { kind: 'name', name: 'o' };
+    const kk = { kind: 'name', name: 'k' };
+    if (name === 'r_rep_s') {
+      return {
+        kind: 'fn',
+        name,
+        params: [{ name: 'x', type: REAL }, { name: 'k', type: INT }],
+        ret: RVEC,
+        body: [
+          ...vecNewAs('o', kk),
+          {
+            kind: 'for',
+            init: { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
+            cond: b('<', i, kk),
+            post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
+            body: [vecSet(out, i, { kind: 'name', name: 'x' })],
+          },
+          { kind: 'return', values: [out] },
+        ],
+      };
+    }
+    const m = { kind: 'name', name: 'm' };
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RVEC }, { name: 'k', type: INT }],
+      ret: RVEC,
+      body: [
+        declLen(),
+        { kind: 'let', name: 'm', type: INT, init: b('*', len, kk) },
+        ...vecNewAs('o', m),
+        {
+          kind: 'for',
+          init: { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
+          cond: b('<', i, m),
+          post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
+          body: [vecSet(out, i, vecGet(v, b('%', i, len)))],
+        },
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_seq_by') {
+    /* `seq(from, to, by)`：长度照 R 的算法 `floor((to-from)/by + 1e-10) + 1`
+       （`seq.default` 里那个 fuzz 是 R 自己的 —— 不加的话 `seq(0, 1, 0.1)` 会少一格）。 */
+    const out = { kind: 'name', name: 'o' };
+    const from = { kind: 'name', name: 'a' };
+    const to = { kind: 'name', name: 'z' };
+    const by = { kind: 'name', name: 'by' };
+    const m = { kind: 'name', name: 'm' };
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'a', type: REAL }, { name: 'z', type: REAL }, { name: 'by', type: REAL }],
+      ret: RVEC,
+      body: [
+        {
+          kind: 'let',
+          name: 'm',
+          type: INT,
+          init: b('+', call1('toint', call1('rmath', { kind: 'strlit', value: 'floor' },
+            b('+', b('/', b('-', to, from), by), { kind: 'real', value: 1e-10 }))), { kind: 'int', value: 1 }),
+        },
+        {
+          kind: 'if',
+          cond: b('<', m, { kind: 'int', value: 1 }),
+          then: [{ kind: 'builtin-stmt', name: 'fail', args: [{ kind: 'string', value: "wrong sign in 'by' argument" }] }],
+          else_: null,
+        },
+        ...vecNewAs('o', m),
+        {
+          kind: 'for',
+          init: { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
+          cond: b('<', i, m),
+          post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
+          body: [vecSet(out, i, b('+', from, b('*', call1('toreal', i), by)))],
+        },
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_vec1') {
+    /* 一格数 → 长度 1 的向量。`ifelse` 那一格要它：把标量实参先摆成向量，
+       于是回收那一层只写一遍（R 的 `ifelse(t, 0, 1)` 与 `ifelse(t, xs, ys)` 同一条路）。 */
+    const out = { kind: 'name', name: 'o' };
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'x', type: REAL }],
+      ret: RVEC,
+      body: [
+        ...vecNewAs('o', { kind: 'int', value: 1 }),
+        vecSet(out, { kind: 'int', value: 0 }, { kind: 'name', name: 'x' }),
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_ifelse') {
+    /* `ifelse(test, yes, no)`：**结果的长度是 test 的长度**，`yes` / `no` 按回收取
+       （R 的文档原话："the result has the shape of test"）。test 那一格缺失就交缺失。 */
+    const t = { kind: 'name', name: 'v' };
+    const y = { kind: 'name', name: 'y' };
+    const z = { kind: 'name', name: 'z' };
+    const out = { kind: 'name', name: 'o' };
+    const ny = { kind: 'name', name: 'ny' };
+    const nz = { kind: 'name', name: 'nz' };
+    const ti = vecGet(t, i);
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RVEC }, { name: 'y', type: RVEC }, { name: 'z', type: RVEC }],
+      ret: RVEC,
+      body: [
+        declLen(),
+        { kind: 'let', name: 'ny', type: INT, init: vecLen(y) },
+        { kind: 'let', name: 'nz', type: INT, init: vecLen(z) },
+        ...vecNewAs('o', len),
+        loop([{
+          kind: 'if',
+          cond: naQ(ti),
+          then: [vecSet(out, i, { kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] })],
+          else_: [{
+            kind: 'if',
+            cond: b('!=', ti, { kind: 'real', value: 0 }),
+            then: [vecSet(out, i, vecGet(y, b('%', i, ny)))],
+            else_: [vecSet(out, i, vecGet(z, b('%', i, nz)))],
+          }],
+        }], 0),
+        { kind: 'return', values: [out] },
       ],
     };
   }
