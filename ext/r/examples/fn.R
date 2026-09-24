@@ -68,3 +68,23 @@ cat(count(10), "\n")
 half(3)
 hush <- function(x) cat("")
 hush(1)
+
+# 形参默认值与命名实参（默认值在**调用点**填 —— 见 SPEC 第四节第 3 条）
+pow <- function(x, k = 2) x^k
+cat(pow(3), "\n")
+cat(pow(3, 3), "\n")
+cat(pow(k = 3, x = 2), "\n")
+cat(pow(2, k = 4), "\n")
+
+greet2 <- function(name, greeting = "hi", punct = "!") paste0(greeting, ", ", name, punct)
+cat(greet2("bob"), "\n")
+cat(greet2("ann", "hello"), "\n")
+cat(greet2("cat", punct = "?"), "\n")
+
+atol <- function(x, eps = 1e-8) x > eps
+cat(atol(0.5), "\n")
+cat(atol(1e-9), "\n")
+
+scaleby <- function(v, k = 2) v * k
+cat(scaleby(c(1, 2, 3)), "\n")
+cat(scaleby(c(1, 2, 3), 10), "\n")

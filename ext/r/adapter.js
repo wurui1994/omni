@@ -29,8 +29,9 @@
 //      而 `&&` / `||` 有三态参与时**不短路**（原因在 `FN_DEPS` 那段账上）。
 //   3. **不做懒求值**（promise / `missing()` / `substitute()`）、**不做属性**
 //      （`names` / `dim` / `class`）、**不做 S3 / S4 / R5 分派**、**不做环境**
-//      （`<<-` 当普通赋值）、**不做 `...`**。用户函数的形参与返回类型是**从调用点推**的
-//      （`inferFns`）：同一个形参在不同调用点装不同**种**东西那一格没做（要运行期类型标签）。
+//      （`<<-` 当普通赋值）、**不做 `...`**。形参默认值与命名实参**接了**（在调用点填，
+//      见 `fnDefs`）；用户函数的形参与返回类型是**从调用点推**的（`inferFns`）：
+//      同一个形参在不同调用点装不同**种**东西那一格没做（要运行期类型标签）。
 //   4. 内建只认下面 `BUILTINS` 那一张表，表外的名字当用户函数调（调不到就是链接期的错）。
 
 import { isList, tag, kids, leaf } from '../../src/core/lower/cst.js';
@@ -375,6 +376,57 @@ const useFn = (name) => { needFn.add(name); return name; };
  */
 const fnParams = new Map();
 const fnRets = new Map();
+/**
+ * **形参默认值**（`function(x, n = 10)`）：名字 → 一排"默认值的树 或 null"。
+ *
+ * R 里那个默认值是一格 **promise**：在函数体里第一次用到时才求值、而且是在**函数自己的
+ * 环境**里求（所以 `function(x, y = x)` 是合法的）。这一档没有 promise，也没有
+ * "少传几个实参"那种可变元数（方言里函数的元数是定死的）—— 所以这儿的做法是
+ * **在调用点把缺的那几格填上默认值那棵树**。
+ *
+ * 两条由此来的规矩：
+ *   * 默认值里**不许引用这个函数自己的形参**（`function(x, y = x)` 当场报）——
+ *     那要真的 promise：调用点上还没有 `x` 这个名字。
+ *   * 默认值是在**调用点**求值的（R 是在被调方求）。对常量那一档（`n = 10`、
+ *     `sep = ", "`、`tol = 1e-8`，真代码里几乎全是这一档）两者同结果。
+ */
+const fnDefs = new Map();
+/** 名字 → 形参名字表（调用点要按名字配实参，所以这张也得留着）。 */
+const fnFormals = new Map();
+
+/**
+ * **把一次调用的实参配到形参上**（R 的规矩：命名实参先按名字对上，剩下的位置实参
+ * 按顺序填空位，还空着的用默认值）。回一排"实参的树"，`extra` 那一格用 `null` 占位
+ * （`|>` 塞到第一位的那个值）。配不上就当场报 —— 不猜。
+ */
+function bindArgs(fname, pnames, defs, callNode, hasExtra) {
+  const bound = new Array(pnames.length).fill(undefined);
+  const as = argsOf(callNode);
+  for (const a of as) {
+    if (a.name === null) continue;
+    const k = pnames.indexOf(mangle(a.name));
+    if (k < 0) throw new Error(`r->IR: ${fname}() 没有叫 \`${a.name}\` 的形参`);
+    bound[k] = a.value;
+  }
+  const pos = [...(hasExtra ? [null] : []), ...as.filter((a) => a.name === null).map((a) => a.value)];
+  let pi = 0;
+  for (let k = 0; k < bound.length && pi < pos.length; k++) {
+    if (bound[k] === undefined) { bound[k] = pos[pi]; pi += 1; }
+  }
+  if (pi < pos.length) {
+    throw new Error(`r->IR: ${fname}() 只有 ${pnames.length} 个形参，给了 ${pos.length} 格位置实参`);
+  }
+  bound.forEach((node, k) => {
+    if (node !== undefined) return;
+    const d = defs[k];
+    if (d === null || d === undefined) {
+      throw new Error(`r->IR: ${fname}() 的形参 \`${pnames[k]}\` 没给值，而它也没有默认值`
+        + '（R 那边是"用到才报 argument is missing"，这一档在编译期就报）');
+    }
+    bound[k] = d;
+  });
+  return bound;
+}
 
 /** 调一格生成出来的辅助函数（顺手把它记进 `needFn`）。 */
 const lglCall = (name, ...args) => ({ kind: 'call', fn: { kind: 'name', name: useFn(name) }, args });
@@ -709,9 +761,30 @@ function eachCall(x, fn) {
  */
 function inferFns(fns, rest) {
   const formalsOf = (node) => kids(kids(node)[0]).map((f) => mangle(nameOf(kids(f)[0])));
+  /* 默认值：形参那一格有第二个孩子就是它（`function(x, n = 10)` 的 `10`）。
+     **不许引用这个函数自己的形参** —— 默认值是在调用点求的，那儿还没有那些名字。 */
+  const defsOf = (node, ps) => kids(kids(node)[0]).map((f) => {
+    const ks = kids(f);
+    if (ks.length < 2 || ks[1] === undefined) return null;
+    const bad = [];
+    const walk = (y) => {
+      if (!isList(y)) return;
+      if (tag(y) === 'sym' && ps.includes(mangle(nameOf(y)))) bad.push(nameOf(y));
+      for (const k of kids(y)) walk(k);
+    };
+    walk(ks[1]);
+    if (bad.length > 0) {
+      throw new Error(`r->IR: 形参默认值里引用了这个函数自己的形参（\`${bad[0]}\`）——`
+        + ' 那要真的 promise（R 是在被调方求值的），这一档在调用点填默认值，那儿还没有这个名字');
+    }
+    return ks[1];
+  });
   const mainBlock = { kind: 'list', items: [{ kind: 'atom', value: 'block' }, ...rest] };
   for (const f of fns) {
-    if (!fnParams.has(f.name)) fnParams.set(f.name, formalsOf(f.node).map(() => INT));
+    const ps = formalsOf(f.node);
+    if (!fnFormals.has(f.name)) fnFormals.set(f.name, ps);
+    if (!fnDefs.has(f.name)) fnDefs.set(f.name, defsOf(f.node, ps));
+    if (!fnParams.has(f.name)) fnParams.set(f.name, ps.map(() => INT));
     if (!fnRets.has(f.name)) fnRets.set(f.name, INT);
   }
   const byName = new Map(fns.map((f) => [f.name, f]));
@@ -723,14 +796,22 @@ function inferFns(fns, rest) {
       const seed = new Map(ps.map((p, k) => [p, fnParams.get(f.name)[k]]));
       scopes.push({ body: kids(f.node)[1], types: inferTypes(kids(f.node)[1], ps, seed) });
     }
-    /* 2) 扫所有调用点，把实参类型并进形参 */
+    /* 2) 扫所有调用点，把实参类型并进形参（命名实参与默认值都按 `bindArgs` 配） */
     for (const sc of scopes) {
       eachCall(sc.body, (name, node) => {
         const target = byName.get(mangle(name));
         if (target === undefined) return;
         const cur = fnParams.get(target.name);
-        posArgs(node).forEach((a, k) => {
-          if (k >= cur.length) return;
+        const ps = fnFormals.get(target.name);
+        let bound;
+        try {
+          bound = bindArgs(name, ps, fnDefs.get(target.name) ?? [], node, false);
+        } catch {
+          /* 配不上（少实参那种）在 `callOf` 那一侧会当场报，这一轮先跳过 */
+          return;
+        }
+        bound.forEach((a, k) => {
+          if (a === null || a === undefined || k >= cur.length) return;
           cur[k] = widenTy(cur[k], typeOfExpr(a, sc.types));
         });
       });
@@ -1801,16 +1882,23 @@ function callOf(x, types, extra, want) {
   }
   if (fn === null) throw new Error('r->IR: 只接"名字 + 实参"那种调用（函数值还没接）');
   /* 用户函数：形参类型是 `inferFns()` 推出来的，所以实参这一侧要按它对齐
-     （`half(3)` 里 `x` 已经定成 real，那个 `3` 得先加宽 —— 方言那层不隐式转）。 */
+     （`half(3)` 里 `x` 已经定成 real，那个 `3` 得先加宽 —— 方言那层不隐式转），
+     而缺的那几格在这儿填默认值（见 `fnDefs` 那段账）。 */
   const ptys = fnParams.get(mangle(fn));
+  const pnames = fnFormals.get(mangle(fn));
+  if (pnames === undefined) {
+    /* 表外的名字（不是这份源码里定的函数）：照原样发，让链接期去说 */
+    return { kind: 'call', fn: { kind: 'name', name: mangle(fn) }, args: all.map((a, i) => ev(i)) };
+  }
+  const bound = bindArgs(fn, pnames, fnDefs.get(mangle(fn)) ?? [], x, extra !== undefined);
   return {
     kind: 'call',
     fn: { kind: 'name', name: mangle(fn) },
-    args: all.map((a, i) => {
-      const e = ev(i);
+    args: bound.map((node, i) => {
+      const e = node === null ? extra : exprOf(node, types);
       const pt = ptys === undefined ? undefined : ptys[i];
       if (pt === undefined) return e;
-      const at = a === null ? undefined : typeOfExpr(a, types);
+      const at = node === null ? undefined : typeOfExpr(node, types);
       if (pt.kind === 'real' && at !== undefined && (at.kind === 'int' || at.kind === 'bool')) {
         return asReal(e, at);
       }
@@ -3611,12 +3699,6 @@ function closeFns(want) {
 function fnDecl(name, node, types) {
   const formals = kids(node)[0];
   const params = kids(formals).map((f) => mangle(nameOf(kids(f)[0])));
-  for (const f of kids(formals)) {
-    if (kids(f).length > 1) {
-      throw new Error(`r->IR: 形参默认值（${name} 的 ${nameOf(kids(f)[0])}=…）还没接 ——`
-        + ' R 里它是一格 promise，在函数体里才求值（见 adapter 文件头第 2 条不足）');
-    }
-  }
   const body = kids(node)[1];
   /* 形参类型来自 `inferFns()` 扫出来的那张表（表外 —— 没人调过 —— 才落 int）。 */
   const seed = new Map((fnParams.get(name) ?? []).map((t, k) => [params[k], t]));
@@ -3699,6 +3781,8 @@ export function rToIR(tree) {
   needFn.clear();
   fnParams.clear();
   fnRets.clear();
+  fnDefs.clear();
+  fnFormals.clear();
   const items = kids(tree);
   const fns = [];
   const rest = [];
