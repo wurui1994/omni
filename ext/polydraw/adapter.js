@@ -907,19 +907,41 @@ function indexChain(x) {
 }
 
 /**
+ * 一张初值表（`{1,0,0}` / `{'A','2',,'J'}`）-> 一串 IR（空位是 `null` = 不赋值）。
+ *
+ * 空位（`ihole`）与**末尾那个多余的逗号**是同一件事，所以末尾的空位直接丢掉。
+ */
+function initVals(list, C) {
+  const out = kids(list).map((e) => (tag(e) === 'ihole' ? null : exprOf(e, C)));
+  while (out.length > 0 && out[out.length - 1] === null) out.pop();
+  return out;
+}
+
+/**
  * 登记一格 `static` 数组：模块级的 `(arr real)` + 入口里 `a = (anew …)` 做**一次**。
  *
  * 为什么长度要编译期知道：越界那两档规矩（2 的幂按位与 / 否则改成 0）是**按长度**选的，
  * 而且多维要摊成一块 —— 两样都得在发射的时候就定下来。
  */
 function declArr(C, preDecls, name, one, where) {
+  if (tag(one) === 'svarl') {
+    throw new Error(`eval->IR: \`static ${name} = {…}\` 少一个类型前缀 ——`
+      + ' 一张初值表要么给数组（`static a[3] = {…}`），要么给结构体'
+      + '（`static point3d p = {1,0,0}`）');
+  }
   const dims = dimsOf(one, C, name);
   const total = dims.reduce((a, b) => a * b, 1);
+  const k = kids(one);
+  const vals = k.length > 2 ? initVals(k[2], C) : [];
+  if (vals.length > total) {
+    throw new Error(`eval->IR: \`static ${name}[…]\` 的初值表有 ${vals.length} 格，`
+      + `数组只有 ${total} 格`);
+  }
   C.arrs.set(name, dims);
   C.globals.set(name, ARR);
   C.staticOwner.set(name, where);
   preDecls.push({ kind: 'global', name, type: ARR });
-  C.arrInits.push({ name, total });
+  C.arrInits.push({ name, total, vals });
 }
 
 /* ─── 结构体（RScript 的特性）───────────────────────────────────────────
@@ -1007,12 +1029,20 @@ function declTyped(C, preDecls, tyName, one, where) {
   const dims = tag(one) === 'sarr' ? dimsOf(one, C, name) : [];
   const size = structSize(ty, C);
   const total = dims.reduce((a, b) => a * b, 1) * size;
+  /* 初值表：`static dpoint3d pr = {1,0,0}`（`svarl`）与 `static T a[N] = {…}`（`sarr`）
+     两种形状 —— 都按**槽的次序**填（结构体的字段就是那几格槽）。 */
+  const listAt = tag(one) === 'svarl' ? 1 : 2;
+  const vals = k.length > listAt && tag(k[listAt]) === 'init' ? initVals(k[listAt], C) : [];
+  if (vals.length > total) {
+    throw new Error(`eval->IR: \`static ${tyName} ${name}\` 的初值表有 ${vals.length} 格，`
+      + `这一块只有 ${total} 格`);
+  }
   C.arrs.set(name, [total]);
   C.svars.set(name, { ty: ty === 'double' ? null : ty, dims });
   C.globals.set(name, ARR);
   C.staticOwner.set(name, where);
   preDecls.push({ kind: 'global', name, type: ARR });
-  C.arrInits.push({ name, total });
+  C.arrInits.push({ name, total, vals });
 }
 
 /**
@@ -1196,6 +1226,12 @@ function staticDecls(x, out = []) {
       const n = idOf(k[0]);
       if (tag(one) === 'svar') {
         out.push({ name: n, init: k.length > 1 ? k[1] : undefined });
+        continue;
+      }
+      /* `static x = {1,0,0}`（`svarl`）：**不带维度但跟着一张初值表** —— 那是结构体的初值，
+         走 `declTyped` 那条路（它按槽填）。没有类型前缀就没意义，交给那边报。 */
+      if (tag(one) === 'svarl') {
+        out.push({ name: n, arr: one });
         continue;
       }
       /* `static a[16]`：**数组**。初值清单（`= {0}`）在 `eval.txt` 里明写"还没支持"，
@@ -1395,16 +1431,25 @@ export function evalToIR(cst, host, src = '') {
      摆在帧循环**之前**，所以它一辈子只跑一趟 —— 那正是 static 的意思。 */
   const initStmts = [
     /* `static a[n]` 的那一块：**入口里开一次**（数组从零开始，与 EVAL 一样）。
-       摆在 static 标量的初值**前面** —— 初值里可能就用着数组。 */
-    ...C.arrInits.map((a) => ({
-      kind: 'assign',
-      target: nameRef(a.name),
-      value: {
-        kind: 'builtin',
-        name: 'anew',
-        args: [{ kind: 'type', type: ARR }, { kind: 'int', value: String(a.total) }],
+       摆在 static 标量的初值**前面** —— 初值里可能就用着数组。
+       带初值表的（`static vert[24] = {0,1,3,2,…}`，`ken/heightmap.pss:1`）紧跟着按下标赋值：
+       **从前这张表是收下就丢的**，于是那种脚本安静地跑在全零的数组上（查过一次才发现）。 */
+    ...C.arrInits.flatMap((a) => [
+      {
+        kind: 'assign',
+        target: nameRef(a.name),
+        value: {
+          kind: 'builtin',
+          name: 'anew',
+          args: [{ kind: 'type', type: ARR }, { kind: 'int', value: String(a.total) }],
+        },
       },
-    })),
+      ...(a.vals ?? []).flatMap((v, i) => (v === null ? [] : [{
+        kind: 'assign',
+        target: { kind: 'index', obj: nameRef(a.name), index: iNum(i) },
+        value: v,
+      }])),
+    ]),
     /* 随机数那台机器的种子：`kholdrand = 1`（`eval.c:490`）。 */
     ...(C.needRnd ? [{
       kind: 'assign', target: nameRef('pd_rndst'), value: { kind: 'int', value: '1' },

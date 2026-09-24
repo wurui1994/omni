@@ -85,7 +85,11 @@
     ;; **整份文件就是主函数体**那一档（说明书：单函数脚本外面那对 `{}` 可省，`()` 也可省）
     ;; —— `tigrou/cubes reflection.pss` 第一行就是一句调用。与上面那支的歧义由 `(prefer 2)`
     ;; 定胜负：有 `()` 开头就走上面那支。
-    (-> (stmts) (program (main (params) (block $*1)))))
+    (-> (stmts) (program (main (params) (block $*1))))
+    ;; **`()` 写着、花括号省着**那一档（`demos/magfield.kc:1` 就是 `() cls(0x503070);`
+    ;; 接着一串文件级语句）。第一句收的是 `stmtnb`（不以 `{` 开头的语句）—— 于是
+    ;; `() { … }` 照旧只有"主函数 + 若干函数"那一种读法，两支的第一个记号互斥。
+    (-> (params stmtnb stmts) (program (main $1 (block $2 $*3))) (prefer 1)))
 
   (rule pre
     (-> () ())
@@ -176,6 +180,13 @@
 
   (rule stmt
     (-> (block) $1)
+    (-> (stmtnb) $1))
+
+  ;; **不以 `{` 开头**的那些语句单成一格。分这一刀只为 `program` 的第三支（`() 一句话…`）：
+  ;; 那一支若收的是 `stmt`，`() { … }` 就有两种读法（主函数体，或"空形参 + 一句块语句"），
+  ;; 而 `prefer` 要到文件末尾归约 `program` 时才比得出胜负 —— 中途在 `{` 后头第一句上就
+  ;; 当场报 ambiguous 了（`02-gl.pss:21`）。让第三支只收这一格，两支的第一个记号就互斥。
+  (rule stmtnb
     (-> (expr ";") (expr $1))
     (-> (";") (empty))
     ;; **没有"空语句"这一支**（`;` 自己成一句）。少了它是有意的：既然分号可省（见下一支），
@@ -231,14 +242,26 @@
   (rule staticone
     (-> (NAME) (svar $1))
     (-> (NAME "=" expr) (svar $1 $3))
+    ;; **不带维度也能跟一张初值表**：那是**结构体**的初值
+    ;; （`demos/planpos.kc:20`：`static dpoint3d pr = {1,0,0}, pd = {0,1,0}, vec, …`）。
+    (-> (NAME "=" init) (svarl $1 $3))
     (-> (NAME dims) (sarr $1 (dims $*2)))
     (-> (NAME dims "=" init) (sarr $1 (dims $*2) $4)))
 
-  ;; 初值列表**末尾可以多一个逗号**（`ken/curvybuild.pss:22` 那张表每行都以逗号收尾）。
+  ;; 初值表里**可以有空位**：末尾多一个逗号（`ken/curvybuild.pss:22` 那张表每行都以逗号
+  ;; 收尾），中间也可以空着（`games/dragcards.kc:408`：`{'A','2',…,,'J','Q','K'}` —— 那一格
+  ;; 是"10"，作者用空位占着）。空位在 adapter 里就是 0（数组本来是零开头）。
+  ;; **只留一条产生式**：`{}` 与"末尾逗号"都是这一条的特例，分开写会与空位那一支撞成歧义。
   (rule init
-    (-> ("{" "}") (init))
-    (-> ("{" exprlist "}") (init $*2))
-    (-> ("{" exprlist "," "}") (init $*2)))
+    (-> ("{" initlist "}") (init $*2)))
+
+  (rule initlist
+    (-> (initone) ($1))
+    (-> (initlist "," initone) ($*1 $3)))
+
+  (rule initone
+    (-> () (ihole))
+    (-> (expr) $1))
 
   (rule exprlist
     (-> (expr) ($1))
