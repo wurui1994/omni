@@ -645,6 +645,39 @@ function stmtOf(s, C) {
     }];
   }
   if (t === 'expr') return exprStmtOf(kids(s)[0], C);
+  /* **`auto` 那一格在这儿落**：一句 `let` 带初值 —— 数组每趟开一块新的、标量每趟摆
+     一次初值。初值"按运行期算"（`RScript.htm` §Init 第三条），所以是真语句，不像
+     static 那样摆进入口。 */
+  if (t === 'auto' || t === 'aty') {
+    return autoDecls(s).flatMap((d) => {
+      const a = autoShape(C, d);
+      if (a.arr !== true) {
+        return [{
+          kind: 'let',
+          name: a.name,
+          type: REAL,
+          init: a.init === undefined ? num(0) : exprOf(a.init, C),
+        }];
+      }
+      return [
+        {
+          kind: 'let',
+          name: a.name,
+          type: ARR,
+          init: {
+            kind: 'builtin',
+            name: 'anew',
+            args: [{ kind: 'type', type: ARR }, { kind: 'int', value: String(a.total) }],
+          },
+        },
+        ...a.vals.flatMap((v, i) => (v === null ? [] : [{
+          kind: 'assign',
+          target: { kind: 'index', obj: nameRef(a.name), index: iNum(i) },
+          value: v,
+        }])),
+      ];
+    });
+  }
   if (t === 'static' || t === 'enum' || t === 'sty' || t === 'struct') return [];
   if (t === 'label' || t === 'goto') {
     throw new Error('eval->IR: `goto` / `label:` 还没接（标准 IR 里没有无条件跳转）');
@@ -993,6 +1026,13 @@ function collectStructs(x, C) {
     /* 一组带类型的字段（`tgrp 类型 项…`）与光字段项（`fld …`）混着来。 */
     const addOne = (one, ty) => {
       const { name: fn, dims } = fieldItem(one, C);
+      /* 字段的类型**必须已经登记**（`struct` 按先后次序读）。少了这一格检查的话，
+         `col_t col;` 里那个还没见过的 `col_t` 会当成"一格 double" —— 之后所有字段的
+         偏移都错，而且一声不响。 */
+      if (ty !== undefined && ty !== 'double' && !C.structs.has(ty)) {
+        throw new Error(`eval->IR: 结构体 \`${name}\` 的字段 \`${fn}\` 用了还没登记的类型`
+          + ` \`${ty}\`（struct 要在用它之前声明）`);
+      }
       const n = dims.reduce((a, b) => a * b, 1) * structSize(ty ?? 'double', C);
       if (fields.has(fn)) throw new Error(`eval->IR: 结构体 \`${name}\` 里有两个 \`${fn}\``);
       fields.set(fn, { off, dims, ty: ty === undefined || ty === 'double' ? null : ty });
@@ -1210,17 +1250,56 @@ function rndDecls() {
   ];
 }
 
-function staticDecls(x, out = []) {
+/**
+ * **重名的 static 改名**（`games/dragcards.kc` 里主函数与 `drawkard_init` 各有一格 `buf`）。
+ *
+ * 函数体里的 `static` 与 C 的 static 局部量同义 —— 它是**那个函数自己的**一格，跨调用留值。
+ * 这一版把它们落在同一个平名字空间里（模块级的量），所以两个函数各写一格同名的就会共用
+ * 一格 —— 原来当场报，现在按函数名加前缀分开（`drawkard_init__buf`）。
+ *
+ * 改名在**树上**做（原地改叶子的 value），于是后头 `declArr`/`exprOf`/`sizeof`/`bufset`
+ * 那些都不必知道这件事 —— 它们看见的就是新名字。只改两种位置：
+ *   * `(name a)` 里的那个叶子 —— 一切**读写**都走它；
+ *   * `svar`/`svarl`/`sarr` 的第一个叶子 —— 声明处那个裸记号。
+ * 别的裸叶子一律不碰：`(field 基 NAME)` 的字段名、`sty` 的类型名、`goto`/`label` 的标号
+ * 都是裸的，碰了就把不相干的东西一起改了。
+ */
+function renameStatics(x, ren) {
+  if (!isList(x)) return;
+  const t = tag(x);
+  const ks = kids(x);
+  const hit = (a) => {
+    if (a === undefined || a === null || a.kind !== 'atom') return;
+    const nn = ren.get(low(a.value));
+    if (nn !== undefined) a.value = nn;
+  };
+  if (t === 'name') { hit(ks[0]); return; }
+  if (t === 'svar' || t === 'svarl' || t === 'sarr') {
+    hit(ks[0]);
+    for (const k of ks.slice(1)) renameStatics(k, ren);
+    return;
+  }
+  /* `sty` 的第一个孩子是**类型名**，不是变量名。 */
+  for (const k of (t === 'sty' ? ks.slice(1) : ks)) renameStatics(k, ren);
+}
+
+/**
+ * 一个块里的 `static`（或 `auto`）声明清单。
+ *
+ * `tags` 那一格让同一台机器读两族声明：`static`/`sty` 是模块级那一档，
+ * `auto`/`aty` 是**栈上**那一档（形状完全一样，只是落法不同 —— 见 `autoStmts`）。
+ */
+function staticDecls(x, out = [], tags = { plain: 'static', typed: 'sty' }) {
   if (!isList(x)) return out;
   /* **带类型的 static**（`static cel_t cel[12][12];`）—— 一格 `{ ty, one }`，
      由 `declTyped` 落（长度 = 各维之积 × 类型的槽数）。 */
-  if (tag(x) === 'sty') {
+  if (tag(x) === tags.typed) {
     const ks = kids(x);
     const ty = idOf(ks[0]);
     for (const one of ks.slice(1)) out.push({ name: idOf(kids(one)[0]), ty, one });
     return out;
   }
-  if (tag(x) === 'static') {
+  if (tag(x) === tags.plain) {
     for (const one of kids(x)) {
       const k = kids(one);
       const n = idOf(k[0]);
@@ -1241,8 +1320,46 @@ function staticDecls(x, out = []) {
     }
     return out;
   }
-  for (const k of kids(x)) staticDecls(k, out);
+  for (const k of kids(x)) staticDecls(k, out, tags);
   return out;
+}
+
+/** `auto`/`aty` 那一族（同一台机器，换两个标签）。 */
+const autoDecls = (x, out = []) => staticDecls(x, out, { plain: 'auto', typed: 'aty' });
+
+/**
+ * **`auto` 的登记**：栈上那一档只往 `C.arrs` / `C.svars` 记形状（下标算式与 `.字段`
+ * 要靠它们），**不进 `C.globals`** —— 它是函数里的一格局部量，`let` 由 `bodyOf` 补。
+ *
+ * 形状按名字记在同一张平表里（与 static 同一张）。同名不同形状的当场报 ——
+ * 那种脚本要么真的重名，要么是我们这一版该加"按函数分名字空间"了，不能悄悄算错下标。
+ */
+function autoShape(C, s) {
+  const isArr = s.ty !== undefined || s.arr !== undefined;
+  if (!isArr) return { name: s.name, total: 0, vals: [], init: s.init };
+  const ty = s.ty === undefined ? 'double' : s.ty;
+  if (ty !== 'double' && !C.structs.has(ty)) {
+    throw new Error(`eval->IR: \`auto ${s.ty} ${s.name}\` 里的 \`${s.ty}\` 不是登记过的结构体`);
+  }
+  const one = s.one ?? s.arr;
+  const dims = tag(one) === 'sarr' ? dimsOf(one, C, s.name) : [];
+  const size = structSize(ty, C);
+  const total = dims.reduce((a, b) => a * b, 1) * size;
+  const k = kids(one);
+  const listAt = tag(one) === 'svarl' ? 1 : 2;
+  const vals = k.length > listAt && tag(k[listAt]) === 'init' ? initVals(k[listAt], C) : [];
+  if (vals.length > total) {
+    throw new Error(`eval->IR: \`auto ${s.name}\` 的初值表有 ${vals.length} 格，`
+      + `这一块只有 ${total} 格`);
+  }
+  const prev = C.arrs.get(s.name);
+  if (prev !== undefined && (prev.length !== 1 || prev[0] !== total)) {
+    throw new Error(`eval->IR: \`auto ${s.name}\` 与别处同名的那一格形状不同`
+      + `（这儿 ${total} 格）—— 这一版的数组形状记在一张平表里，重名会算错下标`);
+  }
+  C.arrs.set(s.name, [total]);
+  C.svars.set(s.name, { ty: ty === 'double' ? null : ty, dims });
+  return { name: s.name, total, vals, arr: true };
 }
 
 
@@ -1250,11 +1367,18 @@ function staticDecls(x, out = []) {
  * 一格函数体：顶上补 `let`（这门语言没有声明），再是语句。
  *
  * **形参与全局不补** —— 形参已经在签名里，全局（`static` / `enum`）是模块级那一格。
+ *
+ * `auto` 那一族**不在这儿补** —— 它的声明就发在声明那一处（`let` 带初值，见 `stmtOf`），
+ * 因为"每趟调用重来"正是它与 static 的差别。这儿只把它们从 `written` 里摘掉，
+ * 不然同一个名字会声明两次。
  */
 function bodyOf(blk, params, C) {
+  const autos = autoDecls(blk).map((s) => autoShape(C, s));
+  const autoNames = new Set(autos.map((a) => a.name));
   const written = writtenNames(blk);
   const lets = [];
   for (const n of written) {
+    if (autoNames.has(n)) continue;
     if (params.includes(n) || C.globals.has(n) || C.enums.has(n)) continue;
     /* 宿主那一侧的量（host 模式下的 `bstatus` 那一族）不是局部：补一格 `let` 会生出个
        没人读的死变量，而写它已经落成 `(gfxcall "set…" …)` 了。 */
@@ -1359,18 +1483,24 @@ export function evalToIR(cst, host, src = '') {
   /* **函数体里的 `static` 也是模块级的量**：EVAL 与 C 的 static 局部量同义 ——
      跨调用留值、初值只做一次。这门语言"宿主每帧调一次脚本"的执行模型全靠它
      （`ken/*.pss` 里相机位置与速度都是主函数里的 `static`）。
-     名字落在同一个平名字空间里，所以**两处同名 static 当场报**，不悄悄共用一格。 */
+     名字落在同一个平名字空间里，所以**重名的那格按函数名加前缀**（`renameStatics`）：
+     先见到的那个函数留原名，后头同名的改成 `函数名__名字`。 */
   for (const x of top) {
     const isMain = tag(x) === 'main';
     if (!isMain && tag(x) !== 'fn') continue;
     const where = isMain ? '主函数' : idOf(kids(x)[0]);
-    for (const s of staticDecls(isMain ? kids(x)[1] : kids(x)[2])) {
+    const body = isMain ? kids(x)[1] : kids(x)[2];
+    const ren = new Map();
+    for (const s of staticDecls(body)) {
       const prev = C.staticOwner.get(s.name);
-      if (prev !== undefined && prev !== where) {
-        throw new Error(`eval->IR: 两处 \`static ${s.name}\`（${prev} 与 ${where}）——`
-          + ' 这一版把 static 落在同一个平名字空间里，重名会共用一格，所以当场报'
-          + '（要接就按函数名加前缀）');
-      }
+      if (prev === undefined || prev === where) continue;
+      let nn = `${isMain ? 'main' : where}__${s.name}`;
+      while (C.staticOwner.has(nn) || C.globals.has(nn) || C.enums.has(nn)) nn = `${nn}_`;
+      ren.set(s.name, nn);
+      C.staticOwner.set(nn, where);
+    }
+    if (ren.size > 0) renameStatics(body, ren);
+    for (const s of staticDecls(body)) {
       C.staticOwner.set(s.name, where);
       /* 带类型的那一档（`static cel_t cel[12][12]` 写在函数体里）。 */
       if (s.ty !== undefined) { declTyped(C, preDecls, s.ty, s.one, where); continue; }

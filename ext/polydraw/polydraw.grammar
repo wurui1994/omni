@@ -67,7 +67,7 @@
 
     (keyword NAME fold-case
       "if" "else" "while" "do" "for" "return" "break" "continue"
-      "goto" "static" "enum" "struct")
+      "goto" "static" "auto" "enum" "struct")
 
     ;; 运算符与标点。**长的在前**（`(op …)` 按这一串的次序试，`+=` 要比 `+` 先）。
     ;; `.` 是**结构体取字段**（`vt[i].stuck`，RScript.htm 那张算子表的第五行）——
@@ -101,6 +101,7 @@
     (-> ("static" staticlist) (static $*2))
     (-> ("enum" "{" enumlist "}" ";") (enum $*3))
     (-> ("enum" "{" enumlist "}") (enum $*3))
+    (-> (structdecl ";") $1)
     (-> (structdecl) $1)
     ;; **带类型的 static**（`static cel_t cel[CELMAX][CELMAX];`、`static point3d p;`）——
     ;; 只有这一支读得下"static 名字 名字"，所以与上面那支不打架。
@@ -116,9 +117,16 @@
   ;;
   ;; 落法在 adapter：结构体就是**一块摊平的 double**（`a[i].f` = `a[i*格数 + 字段下标]`）
   ;; —— 与多维数组摊平同一手，运行期一格新东西都不加。
+  ;; **末尾那个分号不在这条规则里**：块里那一格由 `(";") (empty)` 收（与 `enum` 同一条
+  ;; 办法）。两种都写在这儿就成了歧义 —— `struct{…}p_t;` 有"带分号的声明"与"声明加一句
+  ;; 空语句"两种读法，GLR 当场报（`games/stratego.kc` 与 `geeky/space_struct.kc` 都撞上）。
+  ;; 文件级那一档没有空语句可收，所以 `predecl` 那边明写 `(structdecl ";")`。
+  ;;
+  ;; **名字在前**那一种也收：`struct col_t {r,g,b;};`（`games/box.kc:8`、`snood.kc:16`、
+  ;; `space_struct.kc:9`）—— RScript 两种写法都认，语料里两种都有。
   (rule structdecl
-    (-> ("struct" "{" fields "}" NAME ";") (struct $5 $*3))
-    (-> ("struct" "{" fields "}" NAME) (struct $5 $*3)))
+    (-> ("struct" "{" fields "}" NAME) (struct $5 $*3))
+    (-> ("struct" NAME "{" fields "}") (struct $2 $*4)))
 
   (rule fields
     (-> (fieldgrps) ($*1))
@@ -204,6 +212,13 @@
     (-> ("goto" NAME ";") (goto $2))
     (-> (NAME ":") (label $1))
     (-> ("static" staticlist ";") (static $*2))
+    ;; **`auto`**（RScript 的"栈上的量"）：`auto mx0[244], my0[244];`（`games/stratego.kc:643`）、
+    ;; `auto perim, grab=-1;`（`games/box.kc:15`）。说明书那一行："Defines a variable with
+    ;; local extent, using the stack. This is the default. Single variables are implicitly
+    ;; defined on their first use, **but arrays must always be explicitly defined**." ——
+    ;; 所以**局部数组只有这一种写法**。初值按运行期算（同一份文档 §Init 第三条）。
+    (-> ("auto" staticlist ";") (auto $*2))
+    (-> ("auto" NAME staticlist ";") (aty $2 $*3))
     ;; 块里也有带类型的 static 与结构体声明（局部结构体，evaldraw.txt 2010-02-10 那条
     ;; 改动日志里提过"local structure"）。
     (-> ("static" NAME staticlist ";") (sty $2 $*3))
