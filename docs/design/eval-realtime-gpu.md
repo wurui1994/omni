@@ -469,3 +469,62 @@ program 与 uniform —— 全是"只有设备做得到"的东西。`glquad` 的
 * `dtol()` 在 MSVC 上是 `fistp`（就近偶数），我们用 `floor(x+0.5)`（就近、遇 .5 往上）。
   非 Windows 上原版那一格本身是坏的（`a = (int)f;` 写到了指针变量上），所以没有"另一份
   正确答案"可对。
+
+## 11. 纹理那一族（第六刀的设计）
+
+`--gfx null` 那把尺子上现在最大的一格红是**数组进不了宿主面**：
+
+    (gfxcall "glsettex" 1 buf 256 256 KGL_BGRA32)
+    -> error: 实参要是 real（宿主面只收 double），这里是 arr<real>
+
+`ken/texture.pss`、`tigrou/metaballs.pss`、`examples/opengl/26_texture_procedural.pss`
+都死在这一句上。宿主面是**平的**（一串 double），所以数组要走**另一格 op** ——
+与 `(gfxbatch …)` 同一手。
+
+### 11.1 方言里再加**一格** op
+
+    (gfxtex 槽 宽 高 层 格 (arr real))      -> real（回 0）
+
+* **槽**：脚本自己编号的纹理（`glbindtexture(槽)` 用的就是它）；
+* **层**：3D 纹理那一档（`GLSETTEX(,&,,,,)`，语料里 4 处），2D 就是 1；
+* **格**：`KGL_*` 那个打包好的数（`polydraw.c:190-193`）——
+  低 4 位是像素格式（`BGRA32=0` / `CHAR` / `SHORT` / `INT` / `FLOAT` / `VEC4`）、
+  `0xf0` 那一档是过滤（`LINEAR`/`NEAREST`/`MIPMAP*`）、`0xf00` 是环绕
+  （`REPEAT`/`MIRRORED_REPEAT`/`CLAMP`/`CLAMP_TO_EDGE`）。**这三段照抄原版的位定义**，
+  不自己编号（脚本里写的是 `KGL_BGRA32+KGL_NEAREST`，值必须与原版同一个）。
+* 一格像素占几个 double 照原版 `evalvalperpix`：`VEC4` 是 4 个、别的都是 1 个
+  （`BGRA32` 那一格是打包好的 `0xRRGGBB`，与 `rgb()` 回的那种数同一形）。
+
+宿主表那一侧（`myext[]:2166-2171`）六种写法各自落在哪儿：
+
+    GLSETTEX(,$)      (槽, "文件")            -> 文件那一档：**这一版明着拒**（见 11.3）
+    GLSETTEX(,$,)     (槽, "文件", 格)         -> 同上
+    GLSETTEX(,&,,)    (槽, 数组, 宽, 高)       -> (gfxtex 槽 宽 高 1 KGL_BGRA32+默认 数组)
+    GLSETTEX(,&,,,)   (槽, 数组, 宽, 高, 格)    -> (gfxtex 槽 宽 高 1 格 数组)
+    GLSETTEX(,&,,,,)  (槽, 数组, 宽, 高, 层, 格) -> (gfxtex 槽 宽 高 层 格 数组)
+    GLGETTEX(,&,,,)   读回                    -> 第六刀的后半（要"设备写回数组"那条路）
+
+`glbindtexture(槽)` / `glactivetexture(GL_TEXTURE0+i)` 是**设备状态**：语言那一侧先
+`gl_flush()`（状态一变就断批）再原样转给设备，与 `glsetshader` 那一格同一手。
+
+### 11.2 设备那三档各自做什么
+
+* **WebGL2**（默认）：`gfxtex` -> `texImage2D`。BGRA 在 WebGL 里没有，所以
+  `BGRA32` 那一格**在上传前换成 RGBA**（一次 `Uint8Array` 走一趟，格式转换是设备的事）；
+  `FLOAT`/`VEC4` 走 `R32F`/`RGBA32F`（WebGL2 本来就有）。过滤与环绕照那三段位设。
+  采样器按**名字约定**接：program 链好之后把 `tex0..tex7` 那几个 uniform 设成 0..7 号
+  纹理单元 —— PolyDraw 的脚本正是 `glactivetexture(GL_TEXTURE0+i); glbindtexture(i)`
+  加片元里 `uniform sampler2D tex0, tex1, tex2`，没有别的绑定办法。
+* **本机 OpenGL**（第五刀）：直接 `glTexImage2D`，BGRA 真有，不必换。
+* **CPU 备选**（JS 与 C 两份）：**收下存着**（一张表：槽 -> 宽高格 + 一份数据）。
+  这一档没有着色器，所以纹理只在"以后接了 2D 贴图"时有用 —— 现在存下来但画不出，
+  这一点明写在错里：`glbindtexture` 之后要是真有人采样，那是着色器那一族，已经在
+  `batchprog` 那一格当场报了。
+
+### 11.3 文件那一档为什么先拒
+
+`glsettex(0,"earth.jpg")`（语料里 7 处 + EvalDraw 那 50 多处 `glsettex("cloud.png")`）
+要**解码 JPG/PNG**。我们这一侧有的只有 PNG 的**写**（`host/png.js`），没有解码器；
+浏览器那一档能用 `createImageBitmap`，但那是**异步**的，而脚本的 `glsettex` 是一句
+同步调用 —— 要接就得先有"帧函数之前先把资源准备好"那一层。所以这一刀先把**数组那三档**
+接通（判据能钉住的那一半），文件那一档当场报一句说清"是哪一格没有"，记在任务里。
