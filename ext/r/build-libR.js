@@ -387,8 +387,15 @@ chmodSync(BIN_R, 0o755);
 b.rule('cpx', { command: 'cp $in $out && chmod +x $out', description: 'CP+x $out' });
 const EXEC_R = join(HOME, 'bin/exec/R');
 b.build(EXEC_R, 'cpx', RBIN);
-const BIN_INSTALL = join(HOME, 'bin/INSTALL');
-b.build(BIN_INSTALL, 'cpx', join(RSRC, 'src/scripts/INSTALL'));
+/* `INSTALL` / `SHLIB` / `REMOVE` 都用 R 自己那几份 shell 脚本。
+   **`SHLIB` 不能漏**：`Rcpp::cppFunction` / `sourceCpp` 现场编 C++ 走的正是
+   `R CMD SHLIB`，缺了它 Rcpp 报的是"The tools required to build C++ code for R
+   were not found"（一句会把人引到 Xcode 那边去的错话）。 */
+const BIN_SCRIPTS = ['INSTALL', 'SHLIB', 'REMOVE'].map((n) => {
+  const dst = join(HOME, 'bin', n);
+  b.build(dst, 'cpx', join(RSRC, 'src/scripts', n));
+  return dst;
+});
 /* libR 得摆在 `R_HOME/lib` 下 —— 包里的 C 是按 `-L$(R_HOME)/lib -lR` 链的。 */
 const LIB_LIBR = join(HOME, 'lib/libR.dylib');
 b.build(LIB_LIBR, 'cp', LIBR);
@@ -414,7 +421,7 @@ b.rule('genmakeconf', {
 b.build(MAKECONF, 'genmakeconf', [], {
   implicit: [join(HERE, 'rt/gen-makeconf.js'), join(RSRC, 'etc/Makeconf.in')],
 });
-const INSTALL_BITS = [EXEC_R, BIN_INSTALL, LIB_LIBR, INC_STAMP, MAKECONF];
+const INSTALL_BITS = [EXEC_R, ...BIN_SCRIPTS, LIB_LIBR, INC_STAMP, MAKECONF];
 
 /* `Meta/package.rds` / `features.rds` / `nsInfo.rds`：**第一轮我们自己写**
    （`rt/bootstrap-meta.R`，只用 base 的 `read.dcf` / `saveRDS` / `parseNamespaceFile`）。
