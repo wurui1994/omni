@@ -396,6 +396,25 @@ const fnDefs = new Map();
 const fnFormals = new Map();
 
 /**
+ * **顶层那些被函数用到的名字**（名字 → 类型）—— 它们落成方言的**模块级变量**
+ * （`(global 名字 类型)`），不是 `main` 的局部量。
+ *
+ * 为什么必须分开：R 的函数能看见顶层的名字（词法作用域到 global env），
+ * 而 `main` 的局部量在别的函数里**根本不存在**（方言那侧会报"未声明的变量"）。
+ * 记忆化那一格就压在这儿：`memo <- numeric(40)` 在顶层，`fibm` 里要读也要写它。
+ *
+ * 三条规矩（与 R 一致）：
+ *   * 函数里用 `<-` 赋值的名字是**局部**的，哪怕顶层有同名的那一格（R 的规矩）——
+ *     于是那一格 `let` 把全局遮住；
+ *   * 只读的名字看见的是全局；
+ *   * `<<-` 写的是**全局**（这一格从前当普通赋值，于是悄悄写进了局部）。
+ *
+ * 零初始化：方言的模块级变量按设计没有初值，所以向量那几格的"开一段内存 + 长度 0"
+ * 摆在 `main` 的开头（与从前 `let` 带初值是同一串语句，只是换成了 `set`）。
+ */
+const globalTys = new Map();
+
+/**
  * **把一次调用的实参配到形参上**（R 的规矩：命名实参先按名字对上，剩下的位置实参
  * 按顺序填空位，还空着的用默认值）。回一排"实参的树"，`extra` 那一格用 `null` 占位
  * （`|>` 塞到第一位的那个值）。配不上就当场报 —— 不猜。
@@ -506,8 +525,11 @@ const isAssign = (x) => (tag(x) === 'bin' && ASSIGN_OPS.has(String(leaf(kids(x)[
 
 /** 一格赋值 → `{target, value}`（`->` / `->>` 那两格实参是反的，见 gram.y:498）。 */
 function assignParts(x) {
-  const [, a, b] = kids(x);
-  return tag(x) === 'bin-rev' ? { target: b, value: a } : { target: a, value: b };
+  const [o, a, b] = kids(x);
+  const op = tag(x) === 'bin-rev' ? String(leaf(o)) : String(leaf(o));
+  return tag(x) === 'bin-rev'
+    ? { target: b, value: a, op }
+    : { target: a, value: b, op };
 }
 
 /** 走遍一棵子树，每格赋值回调一次。 */
@@ -549,6 +571,9 @@ function typeOfExpr(x, types) {
       const nm = mangle(nameOf(x));
       const t = types.get(nm);
       if (t !== undefined) return t;
+      /* 局部没有 → 看顶层那些模块级变量（R 的函数看得见顶层的名字，见 `globalTys`）。 */
+      const g = globalTys.get(nm);
+      if (g !== undefined) return g;
       return BASE_VARS.has(nm) ? BASE_VARS.get(nm).type : INT;
     }
     case 'block': {
@@ -768,7 +793,6 @@ function eachCall(x, fn) {
  * 而宽度是有限的（int → real → 向量）。
  */
 function inferFns(fns, rest) {
-  const formalsOf = (node) => kids(kids(node)[0]).map((f) => mangle(nameOf(kids(f)[0])));
   /* 默认值：形参那一格有第二个孩子就是它（`function(x, n = 10)` 的 `10`）。
      **不许引用这个函数自己的形参** —— 默认值是在调用点求的，那儿还没有那些名字。 */
   const defsOf = (node, ps) => kids(kids(node)[0]).map((f) => {
@@ -799,6 +823,14 @@ function inferFns(fns, rest) {
   for (let round = 0; round < 3; round++) {
     /* 1) 每段按现在这份形参类型推一遍局部类型（顶层那段没有形参） */
     const scopes = [{ body: mainBlock, types: inferTypes(mainBlock, []) }];
+    /* **顶层那些被函数用到的名字 → 模块级变量**（见 `globalTys` 那段账）。
+       要在函数体的类型推断之前定住，不然 `memo[n]` 里的 `memo` 还是不知道装什么。
+       每一轮都刷一遍：第一轮时顶层那份类型可能还没定型（它也要问函数回什么）。 */
+    const used = new Set();
+    for (const f of fns) for (const s of freeSyms(f.node)) used.add(s);
+    for (const [n2, t2] of scopes[0].types) {
+      if (used.has(n2) || globalTys.has(n2)) globalTys.set(n2, t2);
+    }
     for (const f of fns) {
       const ps = formalsOf(f.node);
       const seed = new Map(ps.map((p, k) => [p, fnParams.get(f.name)[k]]));
@@ -824,11 +856,15 @@ function inferFns(fns, rest) {
         });
       });
     }
-    /* 3) 返回类型（要在形参定住之后算，所以摆在这一轮的末尾） */
+    /* 3) 返回类型（要在形参定住之后算，所以摆在这一轮的末尾）。
+          顺带**把形参类型跟着函数体改宽**：`revnum <- function(n) { n <- n %/% 10 }` 里
+          那个 `n` 在体里被赋了 double，于是调用点那侧也得按 double 传（方言不隐式转）。 */
     for (const f of fns) {
       const ps = formalsOf(f.node);
       const seed = new Map(ps.map((p, k) => [p, fnParams.get(f.name)[k]]));
       const local = inferTypes(kids(f.node)[1], ps, seed);
+      const cur = fnParams.get(f.name);
+      ps.forEach((p, k) => { cur[k] = widenTy(cur[k], local.get(p)); });
       fnRets.set(f.name, returnType(kids(f.node)[1], local) ?? { kind: 'void' });
     }
   }
@@ -841,13 +877,16 @@ function inferFns(fns, rest) {
      所以取能装下所有写的那一种。 */
   const rank = (t) => (t.kind === 'string' ? 3 : (isVecTy(t) || t.kind === 'map' ? 3
     : (t.kind === 'real' ? 2 : 1)));
-  eachAssign(body, ({ target, value }) => {
+  eachAssign(body, ({ target, value, op }) => {
     if (tag(target) !== 'sym') return;
     const name = mangle(nameOf(target));
-    if (params.includes(name)) return;
+    /* `<<-` 写的是**全局**（R 的规矩）—— 那一格不该变成这一段的局部量。 */
+    if (op === '<<-' && globalTys.has(name)) return;
     const t0 = typeOfExpr(value, types);
     const t = t0.kind === 'bool' ? INT : t0;        // 条件的值装进量里当 0/1
     const had = types.get(name);
+    /* **形参也算**（只往宽走）：`revnum <- function(n) { n <- n %/% 10; … }` 里那个 `n`
+       被赋了 double，于是它得是 double —— 调用点那侧由 `inferFns` 把形参类型跟着改宽。 */
     if (had === undefined || rank(t) > rank(had)) types.set(name, t);
   });
 }
@@ -873,6 +912,47 @@ function forNames(x, types) {
     if (had === undefined || (had.kind === 'int' && want.kind === 'real')) types.set(v, want);
   }
   for (const k of kids(x)) forNames(k, types);
+}
+
+/** 一段 `function(…) …` 的形参名（按序）。 */
+const formalsOf = (node) => kids(kids(node)[0]).map((f) => mangle(nameOf(kids(f)[0])));
+
+/**
+ * 一段函数体里**自由的那些名字** —— 就是"函数里提到、但函数自己没有绑过"的名字。
+ *
+ * 这一问是给 `globalTys` 用的：顶层的名字只有被函数**自由**地用到，才要落成模块级变量。
+ * 不能拿"函数体里出现过的所有符号"当答案 —— R 里 `for (i in 2:m)` 的 `i`、`out <- c()`
+ * 的 `out` 都是**函数自己的局部量**，它们跟顶层那个同名的 `i` 没有关系。量到过：早先那版
+ * 按"出现过"算，`ext/r/examples/stats.R` 的顶层 `i`（一格 int）被当成模块级变量，
+ * 于是 `main` 开头要给它摆零值，而标量在这门语言这边没有零值可摆 → 当场炸。
+ *
+ * 绑过的名字有三处来源：形参、`<-` 赋值的那格名字、`for` 的循环量。`<<-` **不算绑**
+ * （那一句的意思正相反：写的就是外面那格）。`xs[i] <- …` 也不算绑 —— 被赋的是元素，
+ * 那格 `xs` 本身还是从外面来的（这一点与真 R 的"改元素先复制一份"有出入，见 SPEC §4）。
+ */
+function freeSyms(fnNode) {
+  const body = kids(fnNode)[1];
+  const bound = new Set(formalsOf(fnNode));
+  eachAssign(body, ({ target, op }) => {
+    if (op !== '<<-' && tag(target) === 'sym') bound.add(mangle(nameOf(target)));
+  });
+  const walkFor = (y) => {
+    if (!isList(y)) return;
+    if (tag(y) === 'for') bound.add(mangle(nameOf(kids(kids(y)[0])[0])));
+    for (const k of kids(y)) walkFor(k);
+  };
+  walkFor(body);
+  const out = new Set();
+  const walk = (y) => {
+    if (!isList(y)) return;
+    if (tag(y) === 'sym') {
+      const nm = mangle(nameOf(y));
+      if (!bound.has(nm)) out.add(nm);
+    }
+    for (const k of kids(y)) walk(k);
+  };
+  walk(body);
+  return out;
 }
 
 /* ─── 实参表 ───────────────────────────────────────────────────────────── */
@@ -1108,7 +1188,16 @@ function randVecOf(fn, x, types) {
   };
 }
 
-/** 下标从 1 起 → 从 0 起。字面量当场折掉（`x[1]` 出 `aget(x, 0)` 而不是 `1-1`）。 */function zeroBased(e) {
+/**
+ * 下标从 1 起 → 从 0 起。字面量当场折掉（`x[1]` 出 `aget(x, 0)` 而不是 `1-1`）。
+ *
+ * `ty` 是那格下标的类型：**它可能是 double**（`for (i in seq_along(xs))` 里的 `i` ——
+ * 在向量上遍历，元素是 double），而地址那一侧要 int，所以那一档减完再 `toint`。
+ */
+function zeroBased(e, ty) {
+  if (ty !== undefined && ty.kind === 'real') {
+    return call1('toint', b('-', e, { kind: 'real', value: 1 }));
+  }
   if (e.kind === 'int') return { kind: 'int', value: e.value - 1 };
   return b('-', e, { kind: 'int', value: 1 });
 }
@@ -1190,7 +1279,7 @@ function indexRead(x, types) {
       const helper = isLglTy(kt) ? 'r_vec_mask' : 'r_vec_pick';
       return { kind: 'call', fn: { kind: 'name', name: useFn(helper) }, args: [o, exprOf(keys[0], types)] };
     }
-    return vecGet(o, zeroBased(exprOf(keys[0], types)));
+    return vecGet(o, zeroBased(exprOf(keys[0], types), typeOfExpr(keys[0], types)));
   }
   throw new Error(`r->IR: ${nameOf(obj)} 上的下标读不知道是数组还是表 —— 推出来是 ${ot.kind}`);
 }
@@ -1636,6 +1725,12 @@ function callOf(x, types, extra, want) {
         const pre = [];
         const parts = all.map((a, i) => {
           const t = a === null ? REAL : typeOfExpr(a, types);
+          /* **字符向量没有**（见 SPEC §4 第 12 条）—— 报在这儿，不要让它掉到下面那句
+             `asReal` 上，那样出来的是方言的 `(toreal E) 的参数要是 int，这里是 string`，
+             读的人得自己猜是哪一格没接。 */
+          if (t.kind === 'string') {
+            throw new Error('R 的字符向量还没接：c("…", …)（见 ext/r/SPEC.md 第四节第 12 条）');
+          }
           if (!isVecTy(t)) return { vec: false, value: asReal(ev(i), t) };
           const nm = fresh('ci');
           pre.push({ kind: 'let', name: nm, type: RVEC, init: ev(i) });
@@ -2058,7 +2153,8 @@ function assignOf(x, types) {
       return { kind: 'builtin-stmt', name: 'dset', args: [o, exprOf(keys[0], types), exprOf(value, types)] };
     }
     if (isVecTy(ot)) {
-      return vecSet(o, zeroBased(exprOf(keys[0], types)), asReal(exprOf(value, types), typeOfExpr(value, types)));
+      return vecSet(o, zeroBased(exprOf(keys[0], types), typeOfExpr(keys[0], types)),
+        asReal(exprOf(value, types), typeOfExpr(value, types)));
     }
     throw new Error(`r->IR: ${nameOf(obj)} 上的下标写不知道是数组还是表 —— 推出来是 ${ot.kind}`);
   }
@@ -2072,15 +2168,21 @@ function forOf(x, types) {
   const seq = kids(fc)[1];
   const body = stmtsOf(kids(x)[1], types);
   const name = { kind: 'name', name: v };
-  const step = { kind: 'assign', target: name, value: b('+', name, { kind: 'int', value: 1 }) };
+  /* **循环量可能被推成 double**：同一个名字在这一段里还当过"在向量上遍历"的那种循环量
+     （`for (i in seq_along(xs))` 里元素是 double），而一个名字只有一种类型。
+     那时计数这一档的 1 / 上下界都要按 double 摆 —— 不然方言那侧报"两边要同型"。 */
+  const vt = types.get(v) ?? INT;
+  const one = vt.kind === 'real' ? { kind: 'real', value: 1 } : { kind: 'int', value: 1 };
+  const cnt = (e) => (vt.kind === 'real' ? asReal(exprOf(e, types), typeOfExpr(e, types)) : exprOf(e, types));
+  const step = { kind: 'assign', target: name, value: b('+', name, one) };
 
   /* `a:b` 那一档：R 最常见的循环头，直接落成"从 a 数到 b"。 */
   if (tag(seq) === 'bin' && String(leaf(kids(seq)[0])) === ':') {
     const [, lo, hi] = kids(seq);
     return {
       kind: 'for',
-      init: { kind: 'assign', target: name, value: exprOf(lo, types) },
-      cond: b('<=', name, exprOf(hi, types)),
+      init: { kind: 'assign', target: name, value: cnt(lo) },
+      cond: b('<=', name, cnt(hi)),
       post: step,
       body,
     };
@@ -2090,8 +2192,8 @@ function forOf(x, types) {
     const hi = posArgs(seq)[0];
     return {
       kind: 'for',
-      init: { kind: 'assign', target: name, value: { kind: 'int', value: 1 } },
-      cond: b('<=', name, exprOf(hi, types)),
+      init: { kind: 'assign', target: name, value: one },
+      cond: b('<=', name, cnt(hi)),
       post: step,
       body,
     };
@@ -2170,7 +2272,7 @@ function stmtOf(x, types) {
       }
       if (fn === 'return') {
         const vs = posArgs(x);
-        return { kind: 'return', values: vs.length === 0 ? [] : [exprOf(vs[0], types)] };
+        return { kind: 'return', values: vs.length === 0 ? [] : [retVal(vs[0], types)] };
       }
       return { kind: 'expr-stmt', expr: exprOf(x, types) };
     }
@@ -2202,6 +2304,23 @@ function tailBody(node, types) {
   return [...head, ...tailOf(list[list.length - 1], types)];
 }
 
+/**
+ * **这个函数交什么类型**（`fnDecl` 在发它的体之前摆好）。
+ *
+ * 为什么要这一格：`fibm <- function(n) { if (n <= 2) return(1); … memo[n] }` 交的是
+ * double（`memo` 是向量），而 `return(1)` 那一句给的是 int —— 方言那层不隐式加宽，
+ * 于是"要返回 real，给的是 int"。R 里这两支本来就是同一种东西（都是 double），
+ * 所以这儿按函数的回值类型把每一处 `return` 对齐。
+ */
+let curRet = null;
+
+/** 一格 `return` 的值 → 按 `curRet` 对齐（只加宽，不缩窄）。 */
+function retVal(node, types) {
+  const e = exprOf(node, types);
+  if (curRet === null || curRet.kind !== 'real') return e;
+  return asReal(e, typeOfExpr(node, types));
+}
+
 /** 尾位上的一格东西 → 一串语句（带 `return` 的那种）。 */
 function tailOf(x, types) {
   switch (tag(x)) {
@@ -2221,15 +2340,15 @@ function tailOf(x, types) {
       return [stmtOf(x, types)];
     case 'bin': case 'bin-rev':
       if (isAssign(x)) return [stmtOf(x, types)];
-      return [{ kind: 'return', values: [exprOf(x, types)] }];
+      return [{ kind: 'return', values: [retVal(x, types)] }];
     case 'call': {
       const fnNode = kids(x)[0];
       const fn = tag(fnNode) === 'sym' ? nameOf(fnNode) : null;
       if (fn === 'cat' || fn === 'return') return [stmtOf(x, types)];
-      return [{ kind: 'return', values: [exprOf(x, types)] }];
+      return [{ kind: 'return', values: [retVal(x, types)] }];
     }
     default:
-      return [{ kind: 'return', values: [exprOf(x, types)] }];
+      return [{ kind: 'return', values: [retVal(x, types)] }];
   }
 }
 
@@ -3746,7 +3865,10 @@ function fnDecl(name, node, types) {
   /* 形参类型来自 `inferFns()` 扫出来的那张表（表外 —— 没人调过 —— 才落 int）。 */
   const seed = new Map((fnParams.get(name) ?? []).map((t, k) => [params[k], t]));
   const local = inferTypes(body, params, seed);
+  /* **先定住"这个函数交什么"**，再发它的体 —— 每一处 `return` 要按它对齐（见 `retVal`）。 */
+  curRet = fnRets.get(name) ?? null;
   const stmts = tailBody(body, local);
+  curRet = null;
   const decls = [];
   for (const [n, t] of local) {
     if (params.includes(n)) continue;
@@ -3826,6 +3948,7 @@ export function rToIR(tree) {
   fnRets.clear();
   fnDefs.clear();
   fnFormals.clear();
+  globalTys.clear();
   const items = kids(tree);
   const fns = [];
   const rest = [];
@@ -3848,10 +3971,26 @@ export function rToIR(tree) {
   const stmts = rest.map((k) => topStmtOf(k, types));
   const lets = [];
   for (const [n, t] of types) {
+    /* 被函数用到的那几格是**模块级变量**（见 `globalTys`）：这儿不发 `let`，
+       只在 `main` 开头把零值摆好（方言的 `(global …)` 按设计没有初值）。
+       **标量不用摆** —— `(global …)` 本来就是零起步，而源里那句 `x <- …` 紧跟着就到；
+       要摆的只有向量与表那两格（它们得先有一块地方，`zeroInit` 答 null 就是"没有"）。 */
+    if (globalTys.has(n)) {
+      const z = zeroInit(t);
+      if (z !== null) {
+        lets.push({ kind: 'assign', target: { kind: 'name', name: n }, value: z });
+        lets.push(...zeroStmts(n, t));
+      }
+      continue;
+    }
     lets.push({ kind: 'let', name: n, type: t, init: zeroInit(t) });
     lets.push(...zeroStmts(n, t));
   }
   decls.push({ kind: 'main', body: [...lets, ...stmts] });
+  /* 模块级变量的声明摆在最前（函数体与 `main` 都可能提到它们）。 */
+  for (const [n, t] of [...globalTys].sort((p, q) => (p[0] < q[0] ? -1 : 1)).reverse()) {
+    decls.unshift({ kind: 'global', name: n, type: types.get(n) ?? t });
+  }
   /* 生成出来的辅助函数：**先按 `FN_DEPS` 闭包**，再一次发完（次序与"谁先被点到"无关）。
      摆在 `main` 之前、按名字排 —— 出来的 `.sx` 要能进快照。 */
   for (const name of closeFns(needFn)) {
