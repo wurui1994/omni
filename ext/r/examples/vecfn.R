@@ -207,3 +207,16 @@ print(diff(c(1, 4, 9, 16), lag = 2))
 print(diff(c(1, 4), lag = 5))
 print(diff(c(1, 4, 9), 2))
 print(diff(c(1, 3, 6, 10), lag = 1))
+
+# `cov(x, y)`（= `var(x, y)`）与 `cor(x, y)` —— 都是样本口径（除 n-1），两条要一样长。
+# `cor` 的分母照 R 的 `cov.c`：**两个 sqrt 分开乘**（`sd_x * sd_y`），不是 `sqrt(vx*vy)`
+x2 <- c(1, 2, 3, 4, 5)
+y2 <- c(2, 4, 7, 8, 11)
+print(cor(x2, y2))
+print(cov(x2, y2))
+print(var(x2, y2))
+print(cor(c(1, 2, 3), c(3, 2, 1)))
+print(cov(c(1, 2), c(5, 9)))
+print(cor(x2, x2))
+cat(cor(x2, y2), cov(x2, y2), "\n")
+print(round(cor(x2, y2), 6))

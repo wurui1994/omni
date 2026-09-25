@@ -176,7 +176,8 @@ const FN_DEPS = new Map([
   ['r_cat_vec', ['r_num_str']],
   ['r_cat_lgl', ['r_is_na']],
   ['r_sum', []],
-  ['r_mean', ['r_sum']],
+  /* `mean` 是**两遍**的（照 R 的 `summary.c`）—— 第二遍前要问一句有限，所以要 `r_is_na`。 */
+  ['r_mean', ['r_sum', 'r_is_na']],
   /* `max` / `min` 要把 `NA` 与 `NaN` 分开记（R 的口径见那两段账），所以要问那三格。 */
   ['r_max', ['r_is_na', 'r_is_nan', 'r_na']],
   ['r_min', ['r_is_na', 'r_is_nan', 'r_na']],
@@ -227,6 +228,10 @@ const FN_DEPS = new Map([
   /* `median`：先排（`r_sort` 顺手把缺失丢了）再取中间那一格/两格的平均。缺失那一条要
      **在排之前**问（`na.rm = FALSE` 时 R 答 `NA`，而排完就看不出原来有没有缺失了）。 */
   ['r_median', ['r_sort', 'r_any_na', 'r_na']],
+  /* `cov` / `cor`：两条一样长的向量。`cor` 的分母照 R 的 `cov.c`——**两个 sqrt 分开乘**
+     （不是 `sqrt(varx*vary)`），最后一位就靠这个对上。 */
+  ['r_cov', ['r_mean']],
+  ['r_cor', ['r_cov', 'r_var', 'r_mean']],
   ['r_rep_s', []],
   ['r_rep_v', []],
   ['r_rep_str', []],
@@ -803,6 +808,8 @@ const BUILTINS = new Set([
   'print', 'invisible', 'xor', 'isTRUE', 'isFALSE', 'ifelse',
   /* base 里"向量进向量出"那一族 + 两格统计量。`seq` 与 `rep` 是造向量的。 */
   'sort', 'cumsum', 'prod', 'range', 'diff', 'head', 'tail', 'var', 'sd', 'rep', 'seq', 'rep_len',
+  /* 两条向量的那两格统计量（`var(x, y)` 与 `cov(x, y)` 是同一件事）。 */
+  'cor', 'cov',
   /* 数格子、问缺失、插一段、换几格 —— 后两格与 `x[k] <- v` 同一套口径（见 `r_replace`）。 */
   'tabulate', 'anyNA', 'append', 'replace',
   /* 集合与位置那一族（见 `setFnDecl`）。`%in%` 是个算子，不在这张表里。 */
@@ -1286,6 +1293,8 @@ function applyTy(fn, x, types) {
     case 'setequal': return BOOL;
     case 'findInterval': return RIVEC;
     case 'median': return REAL;
+    /* `cor` / `cov` 回一格数（两条向量进）。 */
+    case 'cor': case 'cov': return REAL;
     /* `rank` 并列取平均 —— 出来的可能带小数（`rank(c(2,2,1))` 是 `2.5 2.5 1.0`），
        所以一律数值向量，不跟着进去那条是不是整数走。 */
     case 'rank': return RVEC;
@@ -3507,6 +3516,8 @@ function callOf(x, types, extra, want) {
       }
       case 'sort': case 'cumsum': case 'prod': case 'range':
       case 'var': case 'sd': {
+        /* `var(x, y)` 在 R 里**就是** `cov(x, y)`（`?var` 写着）—— 两格实参时转过去。 */
+        if (fn === 'var' && n === 2) return callOf(cstCall('cov', all), types);
         /* `prod` 与 `range` 在 R 里也收**任意多格**（先摊平成一条向量，见 `numCatOf`）；
            别的几格只有一格向量。 */
         const many = fn === 'prod' || fn === 'range';
@@ -3617,6 +3628,16 @@ function callOf(x, types, extra, want) {
             : lglCall('r_in1', asReal(ev(0), ts[0]), asVec(1));
         }
         return lglCall(fn === 'setequal' ? 'r_setequal' : 'r_find_int', asVec(0), asVec(1));
+      }
+      case 'cor': case 'cov': {
+        /** `cor(x, y)` / `cov(x, y)` —— 两条一样长的数值向量（`var(x, y)` 也走这儿）。 */
+        if (n !== 2) throw new Error(`r->IR: ${fn}() 要两格向量实参（给了 ${n}）`);
+        const ts = [0, 1].map((k) => (all[k] === null ? REAL : typeOfExpr(all[k], types)));
+        ts.forEach((t, k) => {
+          if (isStrVec(t) || t.kind === 'string') throw new Error(strvGap(fn));
+          if (!isVecTy(t)) throw new Error(`r->IR: ${fn}() 的第 ${k + 1} 格实参不是向量（是 ${t.kind}）`);
+        });
+        return lglCall(fn === 'cor' ? 'r_cor' : 'r_cov', ev(0), ev(1));
       }
       case 'median': {
         /** `median(x)`：一格标量就是它自己（R 也这么答）；`na.rm=` 走公共的 `dropNa`。 */
@@ -6831,13 +6852,58 @@ function vecFnDecl(name) {
     };
   }
   if (name === 'r_mean') {
+    /**
+     * **R 的 `mean` 是两遍的**（`src/main/summary.c` 的实数那一支）：先 `sum/n`，再拿
+     * 那个均值扫第二遍把残差加回去 ——
+     *
+     * ```c
+     * s /= n;
+     * if (R_FINITE((double) s)) { t = 0; for(i) t += (x[i] - s); s += t / n; }
+     * ```
+     *
+     * 只写 `sum/n` 与 R 差最后一两位。量出来的（2026-09-26）：
+     * `cor(sin(1:50), cos(1:50))` 一遍版是 `-0.0042002210293471563`、
+     * R 是 `-0.0042002210293471485`（7 位有效数字那一档看不出来，`%.17g` 一比就分家）。
+     * `cov` / `cor` / `var` / `sd` 都从这一格取均值，所以这一处补上，那四格跟着对。
+     *
+     * 第二遍前的 `R_FINITE` 那道闸门照抄：零长时 `0/0` 是 `NaN`（R 的
+     * `mean(numeric(0))` 也是 `NaN`），那一趟不做修正 —— 不然 `NaN - NaN` 白转一圈。
+     */
+    cabiUsed.add('omni_r_is_infinite');
+    rmathSig('omni_r_is_infinite');
+    const m = { kind: 'name', name: 'm' };
+    const t2 = { kind: 'name', name: 't' };
+    const fin = b('&&', { kind: 'unop', op: '!', operand: naQ(m) },
+      b('==', { kind: 'ccall', sym: 'omni_r_is_infinite', args: [m] }, { kind: 'int', value: 0 }));
+    const nr = call1('toreal', len);
     return {
       kind: 'fn', name, params: P, ret: REAL,
-      body: [{
-        kind: 'return',
-        values: [b('/', { kind: 'call', fn: { kind: 'name', name: 'r_sum' }, args: [v] },
-          call1('toreal', vecLen(v)))],
-      }],
+      body: [
+        declLen(),
+        {
+          kind: 'let',
+          name: 'm',
+          type: REAL,
+          init: b('/', { kind: 'call', fn: { kind: 'name', name: 'r_sum' }, args: [v] }, nr),
+        },
+        {
+          kind: 'if',
+          cond: fin,
+          then: [
+            { kind: 'let', name: 't', type: REAL, init: { kind: 'real', value: 0 } },
+            {
+              kind: 'for',
+              init: { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
+              cond: b('<', i, len),
+              post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
+              body: [{ kind: 'assign', target: t2, value: b('+', t2, b('-', elem, m)) }],
+            },
+            { kind: 'assign', target: m, value: b('+', m, b('/', t2, nr)) },
+          ],
+          else_: null,
+        },
+        { kind: 'return', values: [m] },
+      ],
     };
   }
   if (name === 'r_max' || name === 'r_min') {
@@ -8076,6 +8142,67 @@ function vecFnDecl(name) {
           body: [vecSet(out, i, vecGet(v, b('+', i, off)))],
         },
         { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_cov' || name === 'r_cor') {
+    /**
+     * `cov(x, y)`（也就是 `var(x, y)`）与 `cor(x, y)` —— 都是**样本**口径（除 n-1）。
+     *
+     * 两条一样长才算：R 那边长度不一样是报错（`incompatible dimensions`），这儿也
+     * 当场停下来，不按回收凑。
+     *
+     * `cor` 的分母照 R 自己那份 `src/main/cov.c`：**两个 `sqrt` 分开算再相乘**
+     * （`sd_x * sd_y`，不是 `sqrt(varx * vary)`）—— 那两种写法在最后一位上会分家，
+     * 而这一族的判据是逐字节。
+     */
+    const call = (fnName, ...as) => ({ kind: 'call', fn: { kind: 'name', name: useFn(fnName) }, args: as });
+    const w = { kind: 'name', name: 'w' };
+    const P2 = [{ name: 'v', type: RVEC }, { name: 'w', type: RVEC }];
+    if (name === 'r_cor') {
+      const sq = (e) => call1('rmath', { kind: 'strlit', value: 'sqrt' }, e);
+      return {
+        kind: 'fn',
+        name,
+        params: P2,
+        ret: REAL,
+        body: [{
+          kind: 'return',
+          values: [b('/', call('r_cov', v, w), b('*', sq(call('r_var', v)), sq(call('r_var', w))))],
+        }],
+      };
+    }
+    const mv = { kind: 'name', name: 'mv' };
+    const mw = { kind: 'name', name: 'mw' };
+    return {
+      kind: 'fn',
+      name,
+      params: P2,
+      ret: REAL,
+      body: [
+        declLen(),
+        {
+          kind: 'if',
+          cond: b('!=', vecLen(w), len),
+          then: [{
+            kind: 'builtin-stmt',
+            name: 'fail',
+            args: [{ kind: 'string', value: 'cov/cor(): 两条向量长度不一样（R 那边也报 incompatible dimensions）' }],
+          }],
+          else_: null,
+        },
+        { kind: 'let', name: 'mv', type: REAL, init: call('r_mean', v) },
+        { kind: 'let', name: 'mw', type: REAL, init: call('r_mean', w) },
+        { kind: 'let', name: 's', type: REAL, init: { kind: 'real', value: 0 } },
+        loop([{
+          kind: 'assign',
+          target: acc,
+          value: b('+', acc, b('*', b('-', elem, mv), b('-', vecGet(w, i), mw))),
+        }], 0),
+        {
+          kind: 'return',
+          values: [b('/', acc, call1('toreal', b('-', len, { kind: 'int', value: 1 })))],
+        },
       ],
     };
   }
