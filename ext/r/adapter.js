@@ -638,10 +638,26 @@ function eachAssign(x, fn) {
   for (const k of kids(x)) eachAssign(k, fn);
 }
 
-/** 用 `[[…]]` 读写过的名字 —— R 的 `list` 这么用就是关联表（见文件头第 5 条）。 */
+/** 这一格是不是 `list(…)` 那一次调用（有名字的表从它造出来）。 */
+const isListCall = (node) => isList(node) && tag(node) === 'call'
+  && tag(kids(node)[0]) === 'sym' && nameOf(kids(node)[0]) === 'list';
+
+/**
+ * 用 `[[…]]` 读写过的名字，**加上"被 `list(…)` 赋过"的那些** —— R 的 `list` 这么用就是
+ * 关联表（见文件头第 5 条）。
+ *
+ * 为什么 `list(…)` 那一半也要算进来：`cfg <- list(n = 10, tol = 1e-8)` 之后**只读不写**
+ * （`cfg[["n"]]`）的那种写法里，`[[` 只出现在读的一侧 —— 光看 `[[` 也找得到它；但
+ * `m <- list(a = 1); length(m)` 那种一次 `[[` 都没有的，从前推不出它是一张表（落成 int，
+ * 然后在 `dnew` 那一步报"'m' 是 int"）。
+ */
 function dictNames(x, out = new Set()) {
   if (!isList(x)) return out;
   if (tag(x) === 'sub2' && tag(kids(x)[0]) === 'sym') out.add(nameOf(kids(x)[0]));
+  if (isAssign(x)) {
+    const { target, value } = assignParts(x);
+    if (tag(target) === 'sym' && isListCall(value)) out.add(nameOf(target));
+  }
   for (const k of kids(x)) dictNames(k, out);
   return out;
 }
@@ -896,7 +912,15 @@ function applyTy(fn, x, types) {
         return t.kind === 'bool' || isLgl1(t) || isLglTy(t);
       }) ? RLGL : RVEC;
     }
-    case 'list': return dictOf(INT);
+    /* `list(a = 1, b = 2)` —— R 的 list 当**关联表**用那一档（文件头第 5 条）。
+       值类型按那几格实参算（有一格是串就整张表装串）。 */
+    case 'list': {
+      const vals = argsOf(x).filter((a) => a.name !== null).map((a) => a.value);
+      if (vals.length === 0) return dictOf(INT);
+      return dictOf(vals.some((v) => typeOfExpr(v, types).kind === 'string')
+        ? STR
+        : vals.map((v) => typeOfExpr(v, types)).reduce(joinNum, INT));
+    }
     default: {
       /* 用户函数：`inferFns()` 扫调用点推出来的那张表（表外的名字才落 int）。
          回 void 的那些（体尾是 `cat(…)` 那种）在这儿也按 int 报 —— 它们只该出现在
@@ -923,6 +947,11 @@ function inferTypes(body, params, seed) {
     const writes = [];
     eachAssign(body, ({ target, value }) => {
       if (tag(target) === 'sub2' && mangle(nameOf(kids(target)[0])) === mangle(d)) writes.push(value);
+      /* `m <- list(a = 1, tol = 1e-8)` 里那几格也是"往这张表里写" —— 值类型要算它们，
+         不然 `list(a = 1.5)` 会落成 `dict<string,int>`，`dset` 那一步当场报。 */
+      if (tag(target) === 'sym' && mangle(nameOf(target)) === mangle(d) && isListCall(value)) {
+        for (const a of argsOf(value)) if (a.name !== null) writes.push(a.value);
+      }
     });
     const vt = writes.length === 0 ? INT
       : (writes.some((w) => typeOfExpr(w, types).kind === 'string') ? STR
@@ -2176,6 +2205,9 @@ function callOf(x, types, extra, want) {
        那是静默答错，比当场报难查得多（量出来的）。 */
     for (const a of argsOf(x)) {
       if (a.name === null) continue;
+      /* **`list` 不过这张表**：它的命名实参是**数据**（键），不是开关 —— `list(n = 10)`
+         里那个 `n` 就是键名，白名单在这一格没有意义。 */
+      if (fn === 'list') continue;
       const ok = NAMED_OK.get(fn);
       if (ok === undefined || !ok.has(a.name)) {
         throw new Error(`r->IR: ${fn}() 的命名实参 \`${a.name}=\` 还没接`
@@ -2390,10 +2422,39 @@ function callOf(x, types, extra, want) {
         return { kind: 'block-expr', stmts, value: out };
       }
       case 'list': {
-        if (n !== 0) throw new Error('r->IR: `list(…)` 带实参（有名字的表）还没接 —— 只接 `list()` 造空表');
         /* 空表的**值类型**这一层答不出来（R 里它就是空的），所以听上游那格 `want`——
            也就是"这个名字装什么"那张表推出来的（见 `inferTypes` 的 dicts 那一段）。 */
-        return call1('dnew', tyArg(want !== undefined && want.kind === 'map' ? want : dictOf(INT)));
+        const named = argsOf(x).filter((a) => a.name !== null);
+        if (n === 0 && named.length === 0) {
+          return call1('dnew', tyArg(want !== undefined && want.kind === 'map' ? want : dictOf(INT)));
+        }
+        /* `list(a = 1, tol = 1e-8)` —— **有名字的表**：造一格再一格一格 `dset`。
+           方言里"造"与"写"是两件事（`dset` 是语句），所以回一格 `block-expr`。
+           没名字的那几格（`list(1, 2)` 的位置实参）**当场报**：R 那儿它们是 1 / 2 号位，
+           而这一层的表只有"按名字取"（`m[["k"]]`），假装接住就是静默答错。 */
+        if (n !== 0) {
+          throw new Error('r->IR: `list(…)` 里的**位置实参**还没接'
+            + `（给了 ${n} 格没名字的）—— 这一层的表只有"按名字取"（\`m[["k"]]\`），`
+            + ' R 那儿 `list(1, 2)` 是按位置存的，两回事');
+        }
+        const vt = want !== undefined && want.kind === 'map'
+          ? want
+          : typeOfCall(x, types);
+        const tmp = fresh('lst');
+        const tv = { kind: 'name', name: tmp };
+        const stmts = [{ kind: 'let', name: tmp, type: vt, init: call1('dnew', tyArg(vt)) }];
+        for (const a of named) {
+          const at = typeOfExpr(a.value, types);
+          const v = vt.value !== undefined && vt.value.kind === 'real' && at.kind === 'int'
+            ? asReal(exprOf(a.value, types), at)
+            : exprOf(a.value, types);
+          stmts.push({
+            kind: 'builtin-stmt',
+            name: 'dset',
+            args: [tv, { kind: 'string', value: a.name }, v],
+          });
+        }
+        return { kind: 'block-expr', stmts, value: tv };
       }
       case 'is.null': {
         /* `is.null(m[["k"]])` 是 R 里问"这张表有没有这个键"的写法（缺键回 NULL）。
@@ -2892,7 +2953,14 @@ function assignOf(x, types) {
     const ot = typeOfExpr(obj, types);
     const o = exprOf(obj, types);
     if (ot.kind === 'map') {
-      return { kind: 'builtin-stmt', name: 'dset', args: [o, exprOf(keys[0], types), exprOf(value, types)] };
+      /* 表的值类型是整张表**一起**推出来的（`inferTypes` 的 dicts 那一段）：
+         `list(tol = 0.5)` 之后 `m[["k"]] <- 3` 那个 3 要先加宽成 double，
+         不然方言那侧报"dset 的值要是 real，这里是 int"（量出来的）。 */
+      const vt2 = typeOfExpr(value, types);
+      const v2 = ot.value !== undefined && ot.value.kind === 'real' && vt2.kind === 'int'
+        ? asReal(exprOf(value, types), vt2)
+        : exprOf(value, types);
+      return { kind: 'builtin-stmt', name: 'dset', args: [o, exprOf(keys[0], types), v2] };
     }
     if (isVecTy(ot)) {
       return vecSet(o, zeroBased(exprOf(keys[0], types), typeOfExpr(keys[0], types)),
