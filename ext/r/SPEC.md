@@ -716,3 +716,40 @@ ggplot2 的 `ggsave` / Rcpp 的 `cppFunction`）。
   （`OMNI_R_WINDOW=1` 才开窗 —— 没有窗口服务的场合开它会报错）。
 
 本机装的那个 R 在这一档里也只是**尺子**（`bench/r/run.js` 的参考列），运行时一格不借。
+
+## 六、第三档：R 的 C 到 JS（ADR-0047）
+
+前两档都是**原生**的。这一档问的是"同一批 C 能不能经我们自己的 C 前端跑到 JS 腿上" ——
+"R 进浏览器"这个方向上，quartz 那一格只解决了本机窗口。
+
+**已经落的一格：`src/nmath`。** 120 份 R 的数值 C 加我们自己那两份（`omni_rna.c` /
+`omni_rng.c`）摊成**一份**翻译单元（`ext/r/cjs/gen.js`），经
+`src/core/frontend-c` → MIR → `src/core/mir/emit_js.js` 跑出 66 格数：
+
+```
+node ext/r/cjs/gen.js     # 摊平 -> .omni-cache/r-rt/js/{nmath-all.c, probe.R}
+node tests/r/cjs.js       # 八道门
+```
+
+选 nmath 是因为它是 R 里唯一**不沾 `setjmp`、不沾 `SEXP`、不沾 Fortran** 的一块。
+摊平要跨三道坎（文件局部的 `#define` 会漏到下一份、同名 `static` 会撞车、顶层
+`omni run` 不收 `-D`），账在 ADR-0047；**不改 R 的源码一个字**。
+
+**判据与前两档不同：这一档不判逐字节。** libm 在这个仓库里有三份（本机那份、
+`src/sysroot/libc/math.c`、`interp/libc.js` 里那张宿主表），`exp`/`log`/`pow`/三角
+各自的多项式不同。所以判的是：
+
+* 摊出来那份用 `cc` 编，与 `Rscript` **逐字节相同**（这道门管的是"摊平没改数"）；
+* **解释腿 == JS 腿，逐字节**；
+* JS 腿 vs `Rscript`：66 格里 **51 格逐位相同**，最大误差 **2.99e-15**（`qtukey`，
+  迭代求根），上界记死 1e-14，**只许变小**；
+* `runif` 那三格**逐位相同** —— MT19937 是纯整数运算，libm 插不上手，不同就说明
+  线性内存里那 625 格状态被搬错了，不是精度问题。
+
+**往 ggplot2 走还差四格**，都在 ADR-0047 里摆着：JS 发射器还不发
+`setjmp`/`longjmp`（MIR 解释腿已经有 `LongJmp`，所以是"还没做"而不是"做不到"）、
+MIR 层还没有链接器（`src/main` 那 ~99 份摊不动）、没有 Fortran、
+以及浏览器那台图形设备还缺"宿主导入表"这个接头（现成的地基是
+`src/studio/gfx-gl.js` 的 `globalThis.__OMNI_GFX`、stdout 上那行 `#gfx`、
+以及"把 `<svg>` 印到 stdout 就能在预览栏挂起来"这条零成本的路）。
+

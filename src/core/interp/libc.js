@@ -712,6 +712,154 @@ function ldexpReal(x, e) {
   return x * 2 ** e;
 }
 
+/* ---- libm 那一族要用的几格（表在文件末尾的 `LIBC` 里） -------------------- */
+
+/** 位模式里的符号位。`x < 0` 看不见 -0，而 C 的 `signbit(-0.0)` 是真。 */
+function signBit(x) {
+  if (x < 0) return true;
+  if (x > 0) return false;
+  if (x !== x) return false;      /* NaN 的符号位不可靠，一律当正 */
+  return Object.is(x, -0);
+}
+
+/** `rint`：取偶。`Math.round` 是"往上"，在 .5 上与它不同（2.5 → 2 而不是 3）。 */
+function rintReal(x) {
+  if (!Number.isFinite(x)) return x;
+  const f = Math.floor(x);
+  const d = x - f;
+  if (d < 0.5) return f === 0 ? f * x : f;       /* 保住 -0.2 → -0 的符号 */
+  if (d > 0.5) return f + 1;
+  return f % 2 === 0 ? f : f + 1;
+}
+
+/**
+ * `frexp`：`x = m · 2^e`，`m ∈ [0.5, 1)`。
+ *
+ * 次正规数上不能直接读指数域（那儿是 0），所以先乘 2^64 挪进正规区再把指数减回来
+ * —— 与 `ldexpReal` 分步走是同一个道理。
+ */
+function frexpReal(x) {
+  if (x === 0 || !Number.isFinite(x)) return { m: x, e: 0 };
+  let bias = 0;
+  let v = x;
+  if (Math.abs(v) < 2 ** -1022) { v *= 2 ** 64; bias = -64; }
+  const e = Math.floor(Math.log2(Math.abs(v))) + 1;
+  let m = v / 2 ** e;
+  let ee = e;
+  /* `log2` 在 2 的整数幂附近可能差一格，所以量完再校一次（最多两步）。 */
+  while (Math.abs(m) >= 1) { m /= 2; ee += 1; }
+  while (Math.abs(m) < 0.5) { m *= 2; ee -= 1; }
+  return { m, e: ee + bias };
+}
+
+/**
+ * `cos(πx)` / `sin(πx)` / `tan(πx)`：**k/2（tan 是 k/4）那几格要精确**。
+ *
+ * 这三个函数存在的全部理由就是这件事 —— `Math.cos(Math.PI * 0.5)` 回的是 6.1e-17，
+ * 而真值是 0，而 `cos(πx)` 在 R 里正是用来算 Γ 的反射公式那一族的，那儿差一点就错一片。
+ * 折叠用 `%`（对浮点是精确的），特例照 `src/nmath/cospi.c` 里 R 自己那份回退实现摆。
+ */
+function cosPi(x) {
+  if (x !== x) return x;
+  if (!Number.isFinite(x)) return NaN;
+  const r = Math.abs(x) % 2;                 /* cos 是偶函数，周期 2 */
+  if (r % 1 === 0.5) return 0;
+  if (r === 1) return -1;
+  if (r === 0) return 1;
+  return Math.cos(Math.PI * r);
+}
+function sinPi(x) {
+  if (x !== x) return x;
+  if (!Number.isFinite(x)) return NaN;
+  let r = x % 2;
+  if (r <= -1) r += 2; else if (r > 1) r -= 2;   /* 折进 (-1, 1] */
+  if (r === 0 || r === 1) return 0;
+  if (r === 0.5) return 1;
+  if (r === -0.5) return -1;
+  return Math.sin(Math.PI * r);
+}
+function tanPi(x) {
+  if (x !== x) return x;
+  if (!Number.isFinite(x)) return NaN;
+  let r = x % 1;                                 /* 周期 1 */
+  if (r <= -0.5) r += 1; else if (r > 0.5) r -= 1;
+  if (r === 0) return 0;
+  /* ±0.5 这一格：本机（苹果的 `__tanpi`）回 ±inf，而 R 自己那份回退实现回 NaN。
+     这条腿顶的是本机那一份，所以跟本机。 */
+  if (r === 0.5) return Infinity;
+  if (r === -0.5) return -Infinity;
+  if (r === 0.25) return 1;
+  if (r === -0.25) return -1;
+  return Math.tan(Math.PI * r);
+}
+
+/** macOS `<math.h>` 的那五个数：FP_NAN=1 FP_INFINITE=2 FP_ZERO=3 FP_NORMAL=4 FP_SUBNORMAL=5。 */
+function fpClassify(x) {
+  if (x !== x) return 1n;
+  if (x === Infinity || x === -Infinity) return 2n;
+  if (x === 0) return 3n;
+  return Math.abs(x) < 2 ** -1022 ? 5n : 4n;
+}
+
+/**
+ * `nextafter`：往 `y` 的方向挪**一格**。
+ *
+ * 只能在位模式上做 —— 浮点加法挪不出"下一个可表示的数"。IEEE 754 的排布让这件事
+ * 变成整数加一：正数那半边位模式递增就是数值递增，负数那半边反过来。
+ */
+function nextAfterReal(x, y) {
+  if (x !== x || y !== y) return x + y;               /* 任一个是 NaN 就回 NaN */
+  if (x === y) return y;                              /* 相等时回 y（C11 要求带 y 的符号） */
+  if (x === 0) return y > 0 ? Number.MIN_VALUE : -Number.MIN_VALUE;
+  const b = new DataView(new ArrayBuffer(8));
+  b.setFloat64(0, x);
+  let u = b.getBigUint64(0);
+  /* 往远离零挪还是往靠近零挪 —— 由"x 的符号"与"y 在 x 的哪一边"共同决定。 */
+  const away = (y > x) === (x > 0);
+  u += away ? 1n : -1n;
+  b.setBigUint64(0, u);
+  return b.getFloat64(0);
+}
+
+
+/**
+ * `lgamma`：`ln |Γ(x)|`。宿主的 `Math` 里没有这一格，所以自己写。
+ *
+ * **为什么非要有它**：R 的 nmath 自己有 `lgammafn`，可它在三处**直接调平台的
+ * `lgamma`** —— `lbeta.c:76`（p < 1e-306 那一支）、`pnchisq.c:127`（判要不要走
+ * 级数的那道闸）、`stirlerr.c:120`（n 很大时）。缺这一格 `pchisq(…, ncp=)` 当场报。
+ *
+ * 路数是教科书那两条，刻意不抄 Lanczos 的那串拟合系数（那种常数解释不了自己）：
+ *   * x ≥ 20：Stirling 的渐近式 + Bernoulli 项
+ *     `(x-½)ln x - x + ½ln 2π + 1/12x - 1/360x³ + 1/1260x⁵ - 1/1680x⁷ + 1/1188x⁹`
+ *     —— 下一项是 1/(156·x¹¹)，在 x = 20 上是 2e-18，够了；
+ *   * 0 < x < 20：`Γ(x+1) = xΓ(x)` 往上挪到 20 以上，再把挪出来的那串对数减掉；
+ *   * x < 0：反射公式 `Γ(x)Γ(1-x) = π/sin(πx)`。
+ *
+ * 与平台的 `lgamma` **不逐位相同**（几个 ulp），账与这张表里 `exp`/`log` 那几格一样。
+ */
+function lgammaReal(x) {
+  if (x !== x) return x;
+  if (x === Infinity) return Infinity;
+  if (x === -Infinity) return Infinity;              /* ln|Γ| 在 -Inf 上也是 +Inf */
+  if (x === 0) return Infinity;
+  if (x < 0) {
+    if (Number.isInteger(x)) return Infinity;        /* 负整数是极点 */
+    /* 反射：ln|Γ(x)| = ln π - ln|sin πx| - ln|Γ(1-x)|。`sin(πx)` 直接算在 |x| 大时
+       会丢精度，所以先把 x 折进 [-1, 1)（`x % 2` 是精确的）。 */
+    const frac = x % 2;
+    return Math.log(Math.PI) - Math.log(Math.abs(Math.sin(Math.PI * frac))) - lgammaReal(1 - x);
+  }
+  let v = x;
+  let shift = 0;                                      /* Σ ln(x+k)，要减掉的那一串 */
+  while (v < 20) { shift += Math.log(v); v += 1; }
+  const iv = 1 / v;
+  const i2 = iv * iv;
+  const series = iv * (1 / 12 + i2 * (-1 / 360 + i2 * (1 / 1260 + i2 * (-1 / 1680 + i2 * (1 / 1188)))));
+  const ln2pi = 1.8378770664093454835606594728112;    /* ln(2π) */
+  return (v - 0.5) * Math.log(v) - v + 0.5 * ln2pi + series - shift;
+}
+
 /** 一个十六进制数字的值，不是就回 -1。 */function lcHexVal(ch) {
   if (ch === undefined) return -1;
   const c = ch.charCodeAt(0);
@@ -2045,6 +2193,152 @@ const LIBC = {
   ldexp: (a) => ldexpReal(Number(a[0]), Number(BigInt.asIntN(32, BigInt(a[1])))),
   ldexpl: (a) => ldexpReal(Number(a[0]), Number(BigInt.asIntN(32, BigInt(a[1])))),
   ldexpf: (a) => Math.fround(ldexpReal(Number(a[0]), Number(BigInt.asIntN(32, BigInt(a[1]))))),
+
+  /* ---- libm ---------------------------------------------------------------
+   *
+   * 补这一族是为了 **R 的 C 上 JS 腿**：`r-source/src/nmath` 那 120 份 `.c`，每一个
+   * 分布函数的第一句都是 `ISNAN(x)`，macOS 的 `<math.h>` 把它展成 `__isnand` ——
+   * 于是在这之前 `dnorm(0.5,0,1,0)` 走到第一行就 `C ABI call '__isnand' is not
+   * supported`。解释腿与 JS 腿共用这张表（`mir/interp.js` 与 `mir/emit_js.js` 都
+   * 经 `hasLibc`/`callLibc`），所以补一次两条腿一起有。
+   *
+   * **libm 在这个仓库里有三份，这是第三份，账要摆明**：
+   *   1. 原生腿链本机那一份（`clang … -lm`）—— `ext/r/build.js` 的 `libomniRmath` 是它；
+   *   2. `--libc self` 用我们自己写的 `src/sysroot/libc/math.c`（几个 ulp 之内，
+   *      误差量在 `tests/c/libc-libm.js`）；
+   *   3. 这一份 —— 宿主 JS 的 `Math`。
+   * 三份**不逐位相同**（`exp`/`log`/`pow`/三角那几格各自的多项式不同；`sqrt` 与取整
+   * 那一族是 IEEE 规定的，所以是相同的）。所以拿这条腿与原生对账时判的是
+   * "相对/绝对误差取小者的上界"，不是逐字节 —— 那道门在 `tests/r/cjs.js`。
+   *
+   * 没列进来的名字（`sqrtf` 一族、`lgamma`、`remquo` …）照旧**当场报**：
+   * `hasLibc` 说没有，运行期就报 "not supported"，不会悄悄给一个错数。 */
+
+  /* 分类那几格。macOS 的 `<math.h>` 是宏，展开成这些内部名（SDK 的 math.h:149..331）：
+   * 老 SDK 是 `__inline_isnand`（头里自带 inline 定义，于是不一定会发调用），
+   * 新 SDK 是 `__isnand` —— 两套名字都收，少一个就是一条走不到的路。 */
+  __isnand: (a) => (Number(a[0]) !== Number(a[0]) ? 1n : 0n),
+  __inline_isnand: (a) => (Number(a[0]) !== Number(a[0]) ? 1n : 0n),
+  __isinfd: (a) => (Number(a[0]) === Infinity || Number(a[0]) === -Infinity ? 1n : 0n),
+  __inline_isinfd: (a) => (Number(a[0]) === Infinity || Number(a[0]) === -Infinity ? 1n : 0n),
+  __isfinited: (a) => (Number.isFinite(Number(a[0])) ? 1n : 0n),
+  __inline_isfinited: (a) => (Number.isFinite(Number(a[0])) ? 1n : 0n),
+  /* `signbit` 要认得 -0：`x < 0` 看不见它，所以走位模式（`Object.is`）。 */
+  __signbitd: (a) => (signBit(Number(a[0])) ? 1n : 0n),
+  __inline_signbitd: (a) => (signBit(Number(a[0])) ? 1n : 0n),
+  /* `fpclassify` 的那五个数是 macOS `<math.h>` 里的（FP_NAN=1 … FP_SUBNORMAL=5），
+   * 与 glibc 的**不是同一套** —— 这张表按本机那一份来（它是本机的头展开的）。 */
+  __fpclassifyd: (a) => fpClassify(Number(a[0])),
+  /* 名字直接是 C 函数的那几个（程序自己写 `isnan(x)` 又没被宏截住时会发这个调用）。 */
+  isnan: (a) => (Number(a[0]) !== Number(a[0]) ? 1n : 0n),
+  isinf: (a) => (Number(a[0]) === Infinity || Number(a[0]) === -Infinity ? 1n : 0n),
+  finite: (a) => (Number.isFinite(Number(a[0])) ? 1n : 0n),
+  signbit: (a) => (signBit(Number(a[0])) ? 1n : 0n),
+
+  /* 取整那一族 —— 这几格 IEEE 754 规定了结果，所以与本机逐位相同。
+   * `round` 的口径是 C 的"离零远的那一边"（`Math.round` 把 -0.5 取成 -0，
+   * 而 C 要 -1），所以不能直接用 `Math.round`。 */
+  fabs: (a) => Math.abs(Number(a[0])),
+  floor: (a) => Math.floor(Number(a[0])),
+  ceil: (a) => Math.ceil(Number(a[0])),
+  trunc: (a) => Math.trunc(Number(a[0])),
+  round: (a) => { const x = Number(a[0]); return x < 0 ? -Math.round(-x) : Math.round(x); },
+  /* `rint` / `nearbyint`：取偶（默认舍入方向），与 `round` 在 .5 上不同。 */
+  rint: (a) => rintReal(Number(a[0])),
+  nearbyint: (a) => rintReal(Number(a[0])),
+  fmod: (a) => Number(a[0]) % Number(a[1]),
+  fmax: (a) => Math.max(Number(a[0]), Number(a[1])),
+  fmin: (a) => Math.min(Number(a[0]), Number(a[1])),
+  fdim: (a) => { const d = Number(a[0]) - Number(a[1]); return d > 0 ? d : 0; },
+  copysign: (a) => (signBit(Number(a[1])) ? -Math.abs(Number(a[0])) : Math.abs(Number(a[0]))),
+  /* `sqrt` 也是 IEEE 规定的（正确舍入），`Math.sqrt` 与本机同一个数。 */
+  sqrt: (a) => Math.sqrt(Number(a[0])),
+
+  /* 超越函数那一族 —— **这几格才是与本机分叉的地方**（各自的多项式不同）。 */
+  exp: (a) => Math.exp(Number(a[0])),
+  exp2: (a) => 2 ** Number(a[0]),
+  expm1: (a) => Math.expm1(Number(a[0])),
+  log: (a) => Math.log(Number(a[0])),
+  log2: (a) => Math.log2(Number(a[0])),
+  log10: (a) => Math.log10(Number(a[0])),
+  log1p: (a) => Math.log1p(Number(a[0])),
+  /* `pow`：C 的 `pow(x,y)` 与 JS 的 `**` 在几格特例上口径**不同**——
+   * `pow(1, NaN)` C 是 1、`**` 是 NaN；`pow(NaN, 0)` C 是 1、`**` 是 NaN
+   * （C11 F.10.4.4 与 ECMA-262 的 `Number::exponentiate`）。这儿按 C 来。 */
+  pow: (a) => {
+    const x = Number(a[0]);
+    const y = Number(a[1]);
+    if (y === 0) return 1;
+    if (x === 1) return 1;
+    return x ** y;
+  },
+  cbrt: (a) => Math.cbrt(Number(a[0])),
+  hypot: (a) => Math.hypot(Number(a[0]), Number(a[1])),
+  sin: (a) => Math.sin(Number(a[0])),
+  cos: (a) => Math.cos(Number(a[0])),
+  tan: (a) => Math.tan(Number(a[0])),
+  asin: (a) => Math.asin(Number(a[0])),
+  acos: (a) => Math.acos(Number(a[0])),
+  atan: (a) => Math.atan(Number(a[0])),
+  atan2: (a) => Math.atan2(Number(a[0]), Number(a[1])),
+  sinh: (a) => Math.sinh(Number(a[0])),
+  cosh: (a) => Math.cosh(Number(a[0])),
+  tanh: (a) => Math.tanh(Number(a[0])),
+  asinh: (a) => Math.asinh(Number(a[0])),
+  acosh: (a) => Math.acosh(Number(a[0])),
+  atanh: (a) => Math.atanh(Number(a[0])),
+  /* `fma` 这儿是 `x*y+z` 两次舍入 —— 与真的融合乘加**不是**一回事。
+   * `src/sysroot/libc/math.c:552` 也是这么写的（同一笔账），记在这儿。 */
+  fma: (a) => Number(a[0]) * Number(a[1]) + Number(a[2]),
+  /* `lgamma` 与 `tgamma`：见 `lgammaReal`。`signgam` 那格全局变量**没有**——
+   * 要符号的地方 C 里该用 `lgamma_r`，而那一支 R 不走。 */
+  lgamma: (a) => lgammaReal(Number(a[0])),
+  tgamma: (a) => {
+    const x = Number(a[0]);
+    if (x > 0 && Number.isInteger(x) && x <= 171) {   /* 小整数阶乘精确算，不过一趟 exp */
+      let p = 1;
+      for (let i = 2; i < x; i++) p *= i;
+      return p;
+    }
+    const l = lgammaReal(x);
+    /* 符号：Γ 在 (-1,0)、(-3,-2)… 上为负 —— 由 `floor(x)` 的奇偶决定。 */
+    const neg = x < 0 && Math.floor(x) % 2 === 0;
+    return neg ? -Math.exp(l) : Math.exp(l);
+  },
+
+  /* 二进制指数那一族。`logb` 是 R 的 `fprec`（`signif()`）要的，
+   * 顺手把同一族的几格一起摆上 —— 它们都只动指数域，所以与本机逐位相同。 */
+  logb: (a) => { const x = Number(a[0]); return x === 0 ? -Infinity : (Number.isFinite(x) ? frexpReal(x).e - 1 : Math.abs(x)); },
+  ilogb: (a) => { const x = Number(a[0]); return x === 0 || !Number.isFinite(x) ? -2147483648n : BigInt(frexpReal(x).e - 1); },
+  scalbn: (a) => ldexpReal(Number(a[0]), Number(BigInt.asIntN(32, BigInt(a[1])))),
+  scalbln: (a) => ldexpReal(Number(a[0]), Number(BigInt.asIntN(64, BigInt(a[1])))),
+  /* `remainder`：往**最近的偶数倍**取（与 `fmod` 的往零取不同，C11 7.12.10.2）。 */
+  remainder: (a) => { const x = Number(a[0]); const y = Number(a[1]); return x - y * rintReal(x / y); },
+  nextafter: (a) => nextAfterReal(Number(a[0]), Number(a[1])),
+
+  /* 苹果那三个 `__` 打头的扩展（`sin(πx)` / `cos(πx)` / `tan(πx)`）。R 的
+   * `src/nmath/cospi.c` 探到 `HAVE___COSPI` 就直接转给它们，所以这条腿上非有不可。
+   * 半整数、整数、四分之一那几格**要精确**（这正是它们存在的理由 —— `cos(M_PI*0.5)`
+   * 算出来是 6.1e-17 而不是 0）。特例的取值按本机量过：`__tanpi(±0.5)` 是 ±inf
+   * （**不是** R 自己那份回退实现的 NaN —— 那一格的差算在苹果头上，不在我们头上）。 */
+  __cospi: (a) => cosPi(Number(a[0])),
+  __sinpi: (a) => sinPi(Number(a[0])),
+  __tanpi: (a) => tanPi(Number(a[0])),
+
+  /* 带出参的两格：第二个实参是**线性内存里的地址**，所以要写回去。 */
+  frexp: (a) => {
+    const { m, e } = frexpReal(Number(a[0]));
+    memStore('i32', BigInt(a[1]), 0, BigInt(e));
+    return m;
+  },
+  modf: (a) => {
+    const x = Number(a[0]);
+    /* 整数部分**向零取整**，而且 ±0 与 ±Inf 要带上原来的符号（C11 7.12.6.12）。 */
+    const ip = Number.isFinite(x) ? Math.trunc(x) : x;
+    memStore('f64', BigInt(a[1]), 0, ip);
+    return Number.isFinite(x) ? x - ip : (signBit(x) ? -0 : 0);
+  },
+
   strtol: (a) => {
     const s = readCStr(a[0]);
     const r = scanInt(s, Number(BigInt(a[2])));
@@ -2137,6 +2431,39 @@ const LIBC = {
     return 0n;
   },
 };
+
+/* ---- libm 的 `f` 与 `l` 两套后缀（按上面那些现成的格子派生） ------------------
+ *
+ * 为什么需要：R 的 `pnchisq.c` 把中间量声明成 `LDOUBLE`，于是发出来的调用是 `expl`；
+ * `toms708.c` 一族也有。**在这台目标上 `long double` 就是 `double`**
+ * （`tcc.h:237-241` 对 MACHO+ARM64 开 `TCC_USING_DOUBLE_FOR_LDOUBLE`，我们那份 C
+ * 前端照抄这条），所以 `xxxl` 与 `xxx` 是同一件事 —— 不是近似，是同一个类型。
+ * `xxxf` 多舍一次到单精度（`Math.fround`），与 C 的 `float` 返回值一致。
+ *
+ * 派生而不是一条条写：三十多个名字乘三套后缀是一百多行没有信息量的表，
+ * 而"`l` 等于本体、`f` 多舍一次"这两句话就是全部内容。 */
+const MATH_VAL = ['fabs', 'floor', 'ceil', 'trunc', 'round', 'rint', 'nearbyint',
+  'fmod', 'fmax', 'fmin', 'fdim', 'copysign', 'sqrt', 'exp', 'exp2', 'expm1',
+  'log', 'log2', 'log10', 'log1p', 'pow', 'cbrt', 'hypot', 'sin', 'cos', 'tan',
+  'asin', 'acos', 'atan', 'atan2', 'sinh', 'cosh', 'tanh', 'asinh', 'acosh',
+  'atanh', 'fma', 'lgamma', 'tgamma', 'logb', 'remainder', 'nextafter'];
+for (const nm of MATH_VAL) {
+  const f = LIBC[nm];
+  LIBC[`${nm}l`] = f;
+  LIBC[`${nm}f`] = (a) => Math.fround(f(a));
+}
+/* 分类那几格回的是 `int`，`f` / `l` 后缀不改什么（实参在 C 那边就已经升成 double 了）。 */
+for (const nm of ['isnan', 'isinf', 'finite', 'signbit']) {
+  LIBC[`${nm}l`] = LIBC[nm];
+  LIBC[`${nm}f`] = LIBC[nm];
+}
+for (const nm of ['__isnan', '__isinf', '__isfinite', '__signbit', '__fpclassify']) {
+  /* 老 SDK 的 `__inline_*` 与新 SDK 的 `__*d` 都已经在表里，这儿补的是 `f` / `l` 那两支。 */
+  const d = LIBC[`${nm}d`];
+  if (d !== undefined) { LIBC[`${nm}f`] = d; LIBC[`${nm}l`] = d; }
+  const inl = LIBC[`__inline_${nm.slice(2)}d`];
+  if (inl !== undefined) { LIBC[`__inline_${nm.slice(2)}f`] = inl; LIBC[`__inline_${nm.slice(2)}l`] = inl; }
+}
 
 /** 这个名字在 libc 里有吗（降级器**不**问这一句：链接期缺符号是运行期的错）。
  *  用 `Object.hasOwn` 而不是 `Object.prototype.hasOwnProperty.call`：这个值域里的对象
