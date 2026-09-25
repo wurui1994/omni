@@ -88,3 +88,9 @@ print(strsplit("abc", "")[[1]])        # 空 sep 是"一格一个字符"
 print(strsplit("a.b", ".", fixed = TRUE)[[1]])
 for (w in strsplit("x y z", " ")[[1]]) cat("<", w, ">", sep = "")
 cat("\n")
+
+# `rep` 在串上也接了（`(arr string)` 那一侧另一格辅助函数，见 adapter 的 `r_rep_str`）
+print(rep("ab", 3))
+print(rep(c("a", "b"), 2))
+print(rep(c("a", "b"), each = 2))
+cat(paste(rep("-", 5), collapse = ""), "\n")

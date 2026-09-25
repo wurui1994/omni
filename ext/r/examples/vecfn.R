@@ -109,3 +109,17 @@ cat(sum(5), max(5), mean(5), "\n")
 # `sort(x, decreasing = TRUE)` —— 升着排完倒过来（相等的那几格分不出来，所以与 R 一样）
 print(sort(xs, decreasing = TRUE))
 print(sort(c(2, NA, 1), decreasing = TRUE))
+
+# `rep` 的三格与 `seq` 的 `length.out=`
+# R 的次序是**先 each 再 times**（`rep(c(1,2), times=2, each=3)` 是 `1 1 1 2 2 2 1 1 1 2 2 2`）
+print(rep(c(1, 2), each = 2))
+print(rep(c(1, 2), times = 2, each = 3))
+print(rep(5, 3))
+print(rep(c(1, 2), 0))
+# `seq(a, b, length.out = k)`：步长 `(b-a)/(k-1)`，**最后一格写成 b**（R 的 C 也是这个口径）
+print(seq(1, 10, length.out = 4))
+print(seq(0, 1, length.out = 3))
+print(seq(2, 2, length.out = 3))
+print(seq(1, 10, length.out = 1))
+# `seq(n)` 就是 `1:n`
+print(seq(5))

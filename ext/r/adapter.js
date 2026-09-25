@@ -191,6 +191,8 @@ const FN_DEPS = new Map([
   ['r_sd', ['r_var', 'r_mean']],
   ['r_rep_s', []],
   ['r_rep_v', []],
+  ['r_rep_str', []],
+  ['r_seq_n', []],
   ['r_seq_by', []],
   ['r_sample_i', []],
   ['r_zeros', []],
@@ -669,8 +671,8 @@ const NAMED_OK = new Map([
   /* `sort` 上**没有** `na.rm=` —— R 自己都报"参数没有用(na.rm = TRUE)"（它的默认
      `na.last = NA` 已经是"丢掉缺失"了）。量出来的：我们本来跟着收了，比 R 宽。 */
   ['head', new Set(['n'])], ['tail', new Set(['n'])],
-  ['rep', new Set(['times'])],
-  ['seq', new Set(['by'])],
+  ['rep', new Set(['times', 'each'])],
+  ['seq', new Set(['by', 'length.out'])],
   ['sort', new Set(['decreasing'])],
   ['strsplit', new Set(['fixed'])],
   ['grepl', new Set(['fixed'])], ['sub', new Set(['fixed'])], ['gsub', new Set(['fixed'])],
@@ -1096,7 +1098,8 @@ function applyTy(fn, x, types) {
        而 `cumsum` / `diff` 在 R 里**整数进整数出**（零长时印 `integer(0)`）。 */
     case 'sort': case 'head': case 'tail': case 'rep': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
-      if (isStrVec(t)) return RSTRV;
+      /* `rep` 在串上也接了（`rep("ab", 3)` 出一条字符向量）。 */
+      if (isStrVec(t) || (fn === 'rep' && t.kind === 'string')) return RSTRV;
       return isVecTy(t) ? t : RVEC;
     }
     case 'cumsum': case 'diff': case 'cumprod': {
@@ -3051,22 +3054,60 @@ function callOf(x, types, extra, want) {
         return lglCall(`r_${fn}`, ev(0), cnt);
       }
       case 'rep': {
-        /* `rep(x, times)`：标量与向量两条路（R 还有 `each=` / `length.out=`，没接）。 */
+        /**
+         * `rep(x, times, each)` —— 三格都接了（`length.out=` 没接）。
+         *
+         * R 的次序是**先 each 再 times**（量出来的）。串那一侧走另一格辅助函数
+         * （`(arr string)` 与 `(ptr real)` 是两种存法）；一格串先摆成长度 1 的字符向量。
+         */
         const named = namedArg(x, 'times');
         const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
-        if (isStrVec(t)) throw new Error(strvGap('rep'));
         let cnt = null;
         if (named !== undefined) cnt = asIntE(exprOf(named, types), typeOfExpr(named, types));
         else if (n >= 2) cnt = asIntE(ev(1), typeOfExpr(all[1], types));
-        if (cnt === null) throw new Error('r->IR: rep() 要两格实参（`each=` / `length.out=` 没接）');
-        if (isVecTy(t)) return lglCall('r_rep_v', ev(0), cnt);
-        return lglCall('r_rep_s', asReal(ev(0), t), cnt);
+        const eachNode = namedArg(x, 'each');
+        const each = eachNode === undefined
+          ? { kind: 'int', value: 1 }
+          : asIntE(exprOf(eachNode, types), typeOfExpr(eachNode, types));
+        if (cnt === null && eachNode === undefined) {
+          throw new Error('r->IR: rep() 要 `times` 或者 `each`（`length.out=` 没接）');
+        }
+        if (cnt === null) cnt = { kind: 'int', value: 1 };
+        if (isStrVec(t)) return lglCall('r_rep_str', ev(0), cnt, each);
+        if (t.kind === 'string') {
+          /* 一格串：现摆一条长度 1 的字符向量（`c(…)` 那一格也是这么攒的）。 */
+          const tmp = fresh('rs');
+          const tv = { kind: 'name', name: tmp };
+          return {
+            kind: 'block-expr',
+            stmts: [
+              { kind: 'let', name: tmp, type: RSTRV, init: call1('anew', tyArg(RSTRV), { kind: 'int', value: 1 }) },
+              { kind: 'assign', target: svGet(tv, { kind: 'int', value: 0 }), value: ev(0) },
+            ],
+            value: lglCall('r_rep_str', tv, cnt, each),
+          };
+        }
+        if (isVecTy(t)) return lglCall('r_rep_v', ev(0), cnt, each);
+        /* 一格数：出 `times * each` 格（R 也是这么答的）。 */
+        return lglCall('r_rep_s', asReal(ev(0), t), b('*', cnt, each));
       }
       case 'seq': {
-        /* `seq(a, b)` 就是 `a:b`；带 `by` 的走那格生成出来的函数。
-           `seq(n)`（一格实参 = `1:n`）与 `length.out=` 没接 —— 当场报，不猜。 */
+        /* `seq(a, b)` 就是 `a:b`；带 `by` 的走那格生成出来的函数；`length.out=` 是另一格
+           （步长 `(b-a)/(k-1)`，见 `r_seq_n`）。`seq(n)` 是 `1:n`（R 的文档）。 */
         const byNode = namedArg(x, 'by');
+        const loNode = namedArg(x, 'length.out');
         const tys = all.map((a) => (a === null ? REAL : typeOfExpr(a, types)));
+        if (loNode !== undefined) {
+          if (n !== 2) {
+            throw new Error(`r->IR: seq() 的 \`length.out=\` 这一档要两格位置实参（给了 ${n}）`);
+          }
+          return lglCall('r_seq_n', asReal(ev(0), tys[0]), asReal(ev(1), tys[1]),
+            asIntE(exprOf(loNode, types), typeOfExpr(loNode, types)));
+        }
+        if (byNode === undefined && n === 1) {
+          /* `seq(n)` = `1:n`（R 的文档里就是这一格）。 */
+          return vecSeq({ kind: 'int', value: 1 }, INT, ev(0), tys[0]);
+        }
         if (byNode === undefined && n === 2) {
           return vecSeq(ev(0), tys[0], ev(1), tys[1]);
         }
@@ -3074,8 +3115,8 @@ function callOf(x, types, extra, want) {
           ? asReal(exprOf(byNode, types), typeOfExpr(byNode, types))
           : (n === 3 ? asReal(ev(2), tys[2]) : null);
         if (byE === null || n < 2) {
-          throw new Error(`r->IR: seq() 只接 \`seq(a, b)\` 与 \`seq(a, b, by)\`（给了 ${n} 格）`
-            + ' —— `seq(n)` 与 `length.out=` 没接');
+          throw new Error(`r->IR: seq() 接的是 \`seq(n)\` / \`seq(a, b)\` / \`seq(a, b, by)\``
+            + ` / \`seq(a, b, length.out = k)\`（给了 ${n} 格）`);
         }
         return lglCall('r_seq_by', asReal(ev(0), tys[0]), asReal(ev(1), tys[1]), byE);
       }
@@ -4167,7 +4208,7 @@ function strFnDecl(name) {
 const STRV_FNS = new Set([
   'r_cat_str', 'r_print_str', 'r_join_str', 'r_rev_str', 'r_nchar_v', 'r_upper_v', 'r_lower_v',
   'r_pick_str', 'r_mask_str', 'r_split', 'r_at_name', 'r_nm_at',
-  'r_gsub', 'r_gsub_v', 'r_grepl_v', 'r_grep_i', 'r_grep_s',
+  'r_gsub', 'r_gsub_v', 'r_grepl_v', 'r_grep_i', 'r_grep_s', 'r_rep_str',
 ]);
 
 /** 这一批由 `setFnDecl` 发（集合与位置那一族，见 `FN_DEPS` 上那段账）。 */
@@ -4674,6 +4715,34 @@ function strvFnDecl(name) {
             value: call1('toreal', nm('k')),
           }]
           : []),
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  if (name === 'r_rep_str') {
+    /* `rep(字符向量, times, each)` —— 与 `r_rep_v` 同形，只是落在 `(arr string)` 上。
+       一格串（`rep("ab", 3)`）也走这儿：调用点先摆成一条长度 1 的字符向量。 */
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RSTRV }, { name: 'k', type: INT }, { name: 'e', type: INT }],
+      ret: RSTRV,
+      body: [
+        letI('n', svLen(v)),
+        { kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), I(0)) },
+        {
+          kind: 'for',
+          init: letI('t', I(0)),
+          cond: b('<', nm('t'), nm('k')),
+          post: set('t', b('+', nm('t'), I(1))),
+          body: [loop([{
+            kind: 'for',
+            init: letI('q', I(0)),
+            cond: b('<', nm('q'), nm('e')),
+            post: set('q', b('+', nm('q'), I(1))),
+            body: [{ kind: 'builtin-stmt', name: 'apush', args: [nm('o'), svGet(v, i)] }],
+          }], nm('n'))],
+        },
         { kind: 'return', values: [nm('o')] },
       ],
     };
@@ -6223,22 +6292,100 @@ function vecFnDecl(name) {
       };
     }
     const m = { kind: 'name', name: 'm' };
+    const e = { kind: 'name', name: 'e' };
+    const w = { kind: 'name', name: 'w' };
+    /* `rep(v, times = k, each = e)` —— R 的次序是**先 each 再 times**
+       （`rep(c(1,2), times=2, each=3)` 是 `1 1 1 2 2 2 1 1 1 2 2 2`，量出来的）。
+       三层循环而不是一格 `v[(i % (n*e)) / e]`：方言里两格 int 相除是不是整除这一层
+       不打包票（见 `printFnDecl` 里 `per` 那段账），而这儿要的正是整除。 */
+    const inner = (body) => ({
+      kind: 'for',
+      init: { kind: 'let', name: 'q', type: INT, init: { kind: 'int', value: 0 } },
+      cond: b('<', { kind: 'name', name: 'q' }, e),
+      post: {
+        kind: 'assign',
+        target: { kind: 'name', name: 'q' },
+        value: b('+', { kind: 'name', name: 'q' }, { kind: 'int', value: 1 }),
+      },
+      body,
+    });
     return {
       kind: 'fn',
       name,
-      params: [{ name: 'v', type: RVEC }, { name: 'k', type: INT }],
+      params: [{ name: 'v', type: RVEC }, { name: 'k', type: INT }, { name: 'e', type: INT }],
       ret: RVEC,
       body: [
         declLen(),
-        { kind: 'let', name: 'm', type: INT, init: b('*', len, kk) },
+        { kind: 'let', name: 'm', type: INT, init: b('*', b('*', len, kk), e) },
         ...vecNewAs('o', m),
+        { kind: 'let', name: 'w', type: INT, init: { kind: 'int', value: 0 } },
+        {
+          kind: 'for',
+          init: { kind: 'let', name: 't', type: INT, init: { kind: 'int', value: 0 } },
+          cond: b('<', { kind: 'name', name: 't' }, kk),
+          post: {
+            kind: 'assign',
+            target: { kind: 'name', name: 't' },
+            value: b('+', { kind: 'name', name: 't' }, { kind: 'int', value: 1 }),
+          },
+          body: [{
+            kind: 'for',
+            init: { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
+            cond: b('<', i, len),
+            post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
+            body: [inner([
+              vecSet(out, w, vecGet(v, i)),
+              { kind: 'assign', target: w, value: b('+', w, { kind: 'int', value: 1 }) },
+            ])],
+          }],
+        },
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_seq_n') {
+    /* `seq(from, to, length.out = k)` —— 步长是 `(to-from)/(k-1)`，第 i 格是
+       `from + i*step`，**最后一格写成 `to`**（R 的 C 也是这么收的口径，`seq.c`）。
+       `k == 1` 只出 `from`、`k <= 0` 出零长（R 那两格也是这么答的）。 */
+    const out = { kind: 'name', name: 'o' };
+    const from = { kind: 'name', name: 'a' };
+    const to = { kind: 'name', name: 'z' };
+    const kn = { kind: 'name', name: 'k' };
+    const st = { kind: 'name', name: 'st' };
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'a', type: REAL }, { name: 'z', type: REAL }, { name: 'k', type: INT }],
+      ret: RVEC,
+      body: [
+        {
+          kind: 'if',
+          cond: b('<=', kn, { kind: 'int', value: 0 }),
+          then: [...vecNewAs('e0', { kind: 'int', value: 0 }),
+            { kind: 'return', values: [{ kind: 'name', name: 'e0' }] }],
+          else_: null,
+        },
+        ...vecNewAs('o', kn),
+        {
+          kind: 'if',
+          cond: b('==', kn, { kind: 'int', value: 1 }),
+          then: [vecSet(out, { kind: 'int', value: 0 }, from), { kind: 'return', values: [out] }],
+          else_: null,
+        },
+        {
+          kind: 'let',
+          name: 'st',
+          type: REAL,
+          init: b('/', b('-', to, from), call1('toreal', b('-', kn, { kind: 'int', value: 1 }))),
+        },
         {
           kind: 'for',
           init: { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
-          cond: b('<', i, m),
+          cond: b('<', i, kn),
           post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
-          body: [vecSet(out, i, vecGet(v, b('%', i, len)))],
+          body: [vecSet(out, i, b('+', from, b('*', call1('toreal', i), st)))],
         },
+        vecSet(out, b('-', kn, { kind: 'int', value: 1 }), to),
         { kind: 'return', values: [out] },
       ],
     };

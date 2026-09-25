@@ -227,8 +227,10 @@ R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不�
 
 接了的：`c(…)`（摊平，含"有一格是串就整条收成字符向量"，数按 `as.character` 的 15 位转）、
 `character(n)`、`v[i]` 读与写、`v[c(1,3)]` / `v[掩码]`、`length`、`cat`、`print`、
-`for (s in v)`、`seq_along`、`rev`、`nchar` / `toupper` / `tolower` / `paste` **逐元素**
-（回收规则与数值那一侧同一条；零长那一格在 `paste` 里收成空串，这是 R 的规矩）。
+`for (s in v)`、`seq_along`、`rev`、`rep`（`times` / `each`）、
+`nchar` / `toupper` / `tolower` / `paste` **逐元素**
+（回收规则与数值那一侧同一条；零长那一格在 `paste` 里收成空串，这是 R 的规矩）、
+找与换那一族（`grepl` / `grep` / `sub` / `gsub`，见那一小节）。
 
 `print` 与数值那一侧差三处，都是 R 自己的规矩：元素**带引号**、宽度按"最长那格 + 两个
 引号"取、而且**左对齐**（数值右对齐）—— 所以 R 印出来的**行尾真的有空格**，逐字节对
@@ -239,7 +241,10 @@ R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不�
 `sort` 用的是 Shell 排序（Knuth 的 gap 序列）；R 自己用快排/基数排序，但**全排序的结果
 是唯一的**（double 上相等的元素分不出来），所以两边逐字节一致。
 
-`sort` / `head` / `tail` / `rep` 出来的**元素类型跟着进去的那条走**（逻辑向量排完还是逻辑）。
+`sort` / `head` / `tail` / `rep` 出来的**元素类型跟着进去的那条走**（逻辑向量排完还是逻辑、
+字符向量重复完还是字符向量）。`rep` 的三格都接了（`times` / `each`，R 的次序是**先 each
+再 times**）；`seq` 认 `seq(n)` / `seq(a, b)` / `seq(a, b, by)` / `seq(a, b, length.out = k)`
+——`length.out` 那一档步长是 `(b-a)/(k-1)`、**最后一格写成 `b`**（R 的 `seq.c` 也是这个口径）。
 `xor` / `isTRUE` / `isFALSE` / `ifelse` 也接了：`xor` 逐元素三态、`isTRUE` / `isFALSE`
 回的是**两态**（`isTRUE(NA)` 在 R 里是 `FALSE`，不是 `NA`）、`ifelse` 的形状随 `test`
 （`yes` / `no` 按回收取）。
@@ -547,9 +552,9 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
    **命名实参过一张白名单**（`adapter.js` 的 `NAMED_OK`）：认得的是 `cat` 的 `sep=`、
    `paste` 的 `sep=` / `collapse=`、聚合那一族的 `na.rm=`（`sum` / `prod` / `mean` /
    `max` / `min` / `range` / `var` / `sd` / `any` / `all`）、`head`/`tail` 的 `n=`、
-   `rep` 的 `times=`、`seq` 的 `by=`、`numeric(n)` 那一族的 `length=`、`sort` 的
-   `decreasing=`、找与换那一族的 `fixed=` / `value=`。
-   **表外的一律当场报** —— `each=` / `length.out=` / `na.last=` / `ignore.case=` /
+   `rep` 的 `times=` / `each=`、`seq` 的 `by=` / `length.out=`、`numeric(n)` 那一族的
+   `length=`、`sort` 的 `decreasing=`、找与换那一族的 `fixed=` / `value=`。
+   **表外的一律当场报** —— `length.out=`（`rep` 上那一格）/ `na.last=` / `ignore.case=` /
    `digits=` / `quote=` 都在表外。这张表是为了躲一种静默答错：从前认不出来的命名实参
    被**直接丢掉**，于是 `sum(x, na.rm = TRUE)` 答 `NA` 而 R 答 4（量出来的）。
    `na.rm = TRUE` 的落法是**先滤一遍再算**（`r_drop_na`），与"每个函数里各自跳过"同解；
