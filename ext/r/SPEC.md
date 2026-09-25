@@ -738,6 +738,14 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
     `(arr string)` —— 造它要一串 `apush`，是语句，摆不进一格字面量里。
     `.` 在这一层被 `mangle` 换成 `_`，所以表里的键是 `month_name`。
 
+    同一刀又加了三格命名实参/函数：`trimws(x, which =)`（`"both"` / `"left"` /
+    `"right"`，**只接串字面量** —— 表外的值 R 自己也报错）、`nchar(x, type =)`
+    （只认 `"bytes"` 与 `"chars"`：这一档数的是字节，而非 ASCII 的串字面量在上头
+    就被 `BYTEWISE` 拦了，所以能算出答案的地方两种口径同解；`"width"` 要东亚宽度表，
+    没接）、`chartr(old, new, x)`（`old` 里第 k 个字符换成 `new` 里第 k 个，表外的原样
+    留下 —— 与 `r_lower` 同一条办法：`(sfind old c)` 给位置。`old` 比 `new` 长时 R 报错，
+    这儿也当场停下来；也在 `BYTEWISE` 那张表里）。
+
 13. `identical()` **没接，而且不是"还没写"那种没接** —— 它要的是"两条向量的
     `typeof` 一不一样"，而这一档**分不出 R 的 integer 向量与 double 向量**：
     `c(1, 2, 3)` 与 `c(1L, 2L, 3L)` 在 `typeOfExpr` 里都落成 `RVEC`（那个 `case 'c'`

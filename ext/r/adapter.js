@@ -308,6 +308,9 @@ const FN_DEPS = new Map([
   ['r_sv_mabb', []],
   ['r_strrep_v', []],
   ['r_trim_v', ['r_trim']],
+  /* `chartr`：两张字符表查一遍（与 `r_lower` 同一条办法），向量那一格逐元素。 */
+  ['r_chartr', []],
+  ['r_chartr_v', ['r_chartr']],
   ['r_starts_v', ['r_starts']],
   ['r_ends_v', ['r_ends']],
   ['r_split', []],
@@ -755,6 +758,8 @@ const NAMED_OK = new Map([
   ['median', NA_RM],
   ['diff', new Set(['lag'])],
   ['casefold', new Set(['upper'])],
+  ['trimws', new Set(['which'])],
+  ['nchar', new Set(['type'])],
   /* `sort` 上**没有** `na.rm=` —— R 自己都报"参数没有用(na.rm = TRUE)"（它的默认
      `na.last = NA` 已经是"丢掉缺失"了）。量出来的：我们本来跟着收了，比 R 宽。 */
   ['head', new Set(['n'])], ['tail', new Set(['n'])],
@@ -775,7 +780,8 @@ const NAMED_OK = new Map([
  * **数字节而不是数字符的那几格**（见 `callOf` 里那段账）。`cat` / `paste` / `grepl` /
  * `startsWith` 按字节办也对（拼接与定串查找与码位无关），所以不在这张表里。
  */
-const BYTEWISE = new Set(['nchar', 'substr', 'substring', 'toupper', 'tolower', 'sprintf']);
+const BYTEWISE = new Set(['nchar', 'substr', 'substring', 'toupper', 'tolower', 'sprintf',
+  'chartr', 'casefold']);
 
 /* ─── 内建（表外的名字当用户函数调） ──────────────────────────────────────
  *
@@ -802,7 +808,7 @@ const BUILTINS = new Set([
      查出来 —— **只管 ASCII**（见 SPEC 第四节第 12 条）。 */
   'toupper', 'tolower', 'substr', 'substring', 'trimws', 'sprintf', 'startsWith', 'endsWith',
   /* `casefold` 是那两格的别名（S 兼容）；`strrep` 是方言的 `(srep …)`。 */
-  'casefold', 'strrep',
+  'casefold', 'strrep', 'chartr',
   /* `strsplit` 只接两种形状（见 `splitOf`）：`strsplit(s, sep)[[1]]` 与
      `unlist(strsplit(s, sep))` —— R 那边它回的是一张**表**，而这一层没有"表里装向量"。 */
   'strsplit', 'unlist',
@@ -1193,6 +1199,9 @@ function applyTy(fn, x, types) {
     /* `casefold` 是 `toupper` / `tolower` 的别名（S 兼容），`strrep` 逐元素接起来。 */
     case 'casefold': case 'strrep':
       return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RSTRV : STR;
+    /* `chartr(old, new, x)` 的形状跟着**第三格**走（前两格是字符表）。 */
+    case 'chartr':
+      return args.length > 2 && isStrVec(typeOfExpr(args[2], types)) ? RSTRV : STR;
     /* `character(n)` —— 一条 n 格空串的字符向量。 */
     case 'character': return RSTRV;
     case 'as.numeric': {
@@ -3056,13 +3065,27 @@ function callOf(x, types, extra, want) {
         if (isStrVec(t)) return svLen(ev(0));
         return vecLen(ev(0));
       }
-      case 'nchar':
-        if (n !== 1) throw new Error('r->IR: nchar() 要一格实参');
+      case 'nchar': {
+        if (n !== 1) throw new Error('r->IR: nchar() 要一格位置实参');
+        /**
+         * `type=` 只认 `"bytes"` 与 `"chars"`。这一档数的是**字节**，而"串字面量里有
+         * 非 ASCII 就当场报"那一道闸门（`BYTEWISE`）已经在上头拦过 —— 所以在这一档
+         * 能算出答案的地方，两种口径同解。`"width"` 不认（那要东亚宽度表）。
+         */
+        const tn = namedArg(x, 'type');
+        if (tn !== undefined) {
+          const lit = tag(tn) === 'str' ? String(nameOf(tn)) : null;
+          if (lit !== 'bytes' && lit !== 'chars') {
+            throw new Error('r->IR: nchar() 的 `type=` 只认 "bytes" 与 "chars"'
+              + '（都按字节数 —— 非 ASCII 在上头就报了；`"width"` 要东亚宽度表，没接）');
+          }
+        }
         /* `nchar(字符向量)` 在 R 里逐元素出一条**数值**向量（两种存法之间过一趟）。 */
         if (all[0] !== null && isStrVec(typeOfExpr(all[0], types))) {
           return { kind: 'call', fn: { kind: 'name', name: useFn('r_nchar_v') }, args: [ev(0)] };
         }
         return call1('slen', ev(0));
+      }
       case 'paste0': case 'paste': {
         /* `paste` 的默认 `sep` 是一个空格，`paste0` 是空串（R 的文档）。
            接起来的是**串**，所以数要先 `tostr` —— 与 awk 的 `cat` 那一格同一条。 */
@@ -3778,9 +3801,38 @@ function callOf(x, types, extra, want) {
           asIntE(ev(1), typeOfExpr(all[1], types)), last);
       }
       case 'trimws': {
-        if (n !== 1) throw new Error(`r->IR: trimws() 要一格实参（给了 ${n}）—— \`which=\` 没接`);
+        /**
+         * `trimws(x, which)` —— `which` 是 `"both"`（默认）/ `"left"` / `"right"`，
+         * **只接串字面量**（这一档没有"运行期挑一个分支"的必要，而表外的值在 R 里也是报错）。
+         */
+        if (n !== 1) throw new Error(`r->IR: trimws() 要一格位置实参（给了 ${n}）`);
         const vec = all[0] !== null && isStrVec(typeOfExpr(all[0], types));
-        return lglCall(vec ? 'r_trim_v' : 'r_trim', ev(0));
+        const wn = namedArg(x, 'which');
+        let mode = 0;
+        if (wn !== undefined) {
+          const lit = tag(wn) === 'str' ? String(nameOf(wn)) : null;
+          if (lit === null) throw new Error("r->IR: trimws() 的 `which=` 只接串字面量（\"both\" / \"left\" / \"right\"）");
+          const tb = { both: 0, left: 1, right: 2 };
+          if (!Object.prototype.hasOwnProperty.call(tb, lit)) {
+            throw new Error(`r->IR: trimws() 的 \`which = "${lit}"\` 不认（只有 "both" / "left" / "right"）`);
+          }
+          mode = tb[lit];
+        }
+        return lglCall(vec ? 'r_trim_v' : 'r_trim', ev(0), { kind: 'int', value: mode });
+      }
+      case 'chartr': {
+        /**
+         * `chartr(old, new, x)`：`old` 里第 k 个字符换成 `new` 里第 k 个（表外的原样留下）。
+         * 两张表是串，`x` 可以是串或者字符向量。**按字节办** —— 见 `BYTEWISE` 那张表。
+         */
+        if (n !== 3) throw new Error(`r->IR: chartr() 要三格实参（给了 ${n}）`);
+        const ts = [0, 1, 2].map((k) => (all[k] === null ? STR : typeOfExpr(all[k], types)));
+        if (ts[0].kind !== 'string' || ts[1].kind !== 'string') {
+          throw new Error('r->IR: chartr() 的前两格实参要是串（`old` / `new` 是字符表）');
+        }
+        if (isStrVec(ts[2])) return lglCall('r_chartr_v', ev(2), ev(0), ev(1));
+        if (ts[2].kind !== 'string') throw new Error(`r->IR: chartr() 的第三格实参不是串（是 ${ts[2].kind}）`);
+        return lglCall('r_chartr', ev(0), ev(1), ev(2));
       }
       case 'unlist': {
         /* `unlist(strsplit(s, sep))` 与 `unlist(lapply(v, f))` —— 前者与 `[[1]]` 同解，
@@ -4672,29 +4724,80 @@ function strFnDecl(name) {
     };
   }
   if (name === 'r_trim') {
-    /* `trimws(s)` —— 两头的空白去掉（R 默认 `which = "both"`，空白是 `[ \t\r\n]`）。 */
+    /**
+     * `trimws(s, which)` —— 去掉空白（R 的空白是 `[ \t\r\n]`）。`w` 是哪一头：
+     * `0` 两头（R 的默认 `"both"`）、`1` 只左边、`2` 只右边。
+     *
+     * 摆成一格参数而不是三个函数：两头那两趟本来就是各自独立的 `while`，多一格 `if`
+     * 比多两份函数体短，也不会让"哪一头"这件事有两处说法。
+     */
     const ws = (e) => b('||', b('||', b('==', e, S(' ')), b('==', e, S('\t'))),
       b('||', b('==', e, S('\r')), b('==', e, S('\n'))));
+    const w = nm('w');
     return {
       kind: 'fn',
       name,
-      params: [{ name: 's', type: STR }],
+      params: [{ name: 's', type: STR }, { name: 'w', type: INT }],
       ret: STR,
       body: [
         letI('n', call1('slen', s)),
         letI('a', I(0)),
         letI('z', nm('n')),
-        {
+        iff(b('!=', w, I(2)), [{
           kind: 'while',
           cond: b('&&', b('<', nm('a'), nm('z')), ws(call1('ssub', s, nm('a'), I(1)))),
           body: [set('a', b('+', nm('a'), I(1)))],
-        },
-        {
+        }]),
+        iff(b('!=', w, I(1)), [{
           kind: 'while',
           cond: b('&&', b('>', nm('z'), nm('a')), ws(call1('ssub', s, b('-', nm('z'), I(1)), I(1)))),
           body: [set('z', b('-', nm('z'), I(1)))],
-        },
+        }]),
         ret(call1('ssub', s, nm('a'), b('-', nm('z'), nm('a')))),
+      ],
+    };
+  }
+  if (name === 'r_chartr') {
+    /**
+     * `chartr(old, new, x)`：`old` 里的第 k 个字符换成 `new` 里的第 k 个，表外的原样留下
+     * （量出来 `chartr("abc", "xyz", "cab")` 是 `"zxy"`）。办法与 `r_lower` 同一条 ——
+     * `(sfind old c)` 给位置，再从 `new` 里取同一格。
+     *
+     * `old` 比 `new` 长时 R 报错（"'old' is longer than 'new'"），这儿也当场停下来。
+     * **按字节办**：非 ASCII 的串字面量在调用点上就被 `BYTEWISE` 那张表拦了（多字节
+     * 字符按字节查会切出半个字符），运行期才知道的拦不住 —— 明写在 SPEC。
+     */
+    const o = nm('o');
+    const on = nm('on');
+    const nw = nm('nw');
+    const c = nm('c');
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'on', type: STR }, { name: 'nw', type: STR }, { name: 's', type: STR }],
+      ret: STR,
+      body: [
+        iff(b('>', call1('slen', on), call1('slen', nw)), [{
+          kind: 'builtin-stmt',
+          name: 'fail',
+          args: [{ kind: 'string', value: "chartr(): 'old' 比 'new' 长 —— 后头那几格换成什么说不清（R 也报这一句）" }],
+        }]),
+        letI('n', call1('slen', s)),
+        { kind: 'let', name: 'o', type: STR, init: S('') },
+        {
+          kind: 'for',
+          init: letI('i', I(0)),
+          cond: b('<', nm('i'), nm('n')),
+          post: set('i', b('+', nm('i'), I(1))),
+          body: [
+            { kind: 'let', name: 'c', type: STR, init: call1('ssub', s, nm('i'), I(1)) },
+            letI('k', call1('sfind', on, c)),
+            iff(b('>=', nm('k'), I(0)),
+              [set('o', b('+', o, call1('ssub', nw, nm('k'), I(1))))],
+              [set('o', b('+', o, c))]),
+          ],
+        },
+        ret(o),
       ],
     };
   }
@@ -4734,7 +4837,7 @@ const STRV_FNS = new Set([
   'r_gsub', 'r_gsub_v', 'r_grepl_v', 'r_grep_i', 'r_grep_s', 'r_rep_str', 'r_ifelse_s',
   'r_substr_v', 'r_trim_v', 'r_starts_v', 'r_ends_v',
   /* base 那四条字符向量常量 + `strrep` 在字符向量上那一格。 */
-  'r_sv_letters', 'r_sv_upper', 'r_sv_month', 'r_sv_mabb', 'r_strrep_v',
+  'r_sv_letters', 'r_sv_upper', 'r_sv_month', 'r_sv_mabb', 'r_strrep_v', 'r_chartr_v',
 ]);
 
 /** 这一批由 `setFnDecl` 发（集合与位置那一族，见 `FN_DEPS` 上那段账）。 */
@@ -5410,21 +5513,29 @@ function strvFnDecl(name) {
       ],
     };
   }
-  if (name === 'r_substr_v' || name === 'r_trim_v' || name === 'r_starts_v' || name === 'r_ends_v') {
+  if (name === 'r_substr_v' || name === 'r_trim_v' || name === 'r_starts_v' || name === 'r_ends_v'
+      || name === 'r_chartr_v') {
     /* 串那一族在**字符向量**上逐元素（`substr(v, 1, 3)` / `trimws(v)` /
-       `startsWith(v, "a")`）—— 每一格转给标量那一版，出来的是另一条向量。
+       `startsWith(v, "a")` / `chartr(o, n, v)`）—— 每一格转给标量那一版，出来的是另一条向量。
        `startsWith` / `endsWith` 出的是**逻辑**向量（`(ptr real)` 上的 1 / 0，见 `RLGL`）。 */
     const lgl = name === 'r_starts_v' || name === 'r_ends_v';
     const one = {
       r_substr_v: 'r_substr', r_trim_v: 'r_trim', r_starts_v: 'r_starts', r_ends_v: 'r_ends',
+      r_chartr_v: 'r_chartr',
     }[name];
-    const args = name === 'r_substr_v'
-      ? [svGet(v, i), nm('a'), nm('z')]
-      : (name === 'r_trim_v' ? [svGet(v, i)] : [svGet(v, i), nm('t')]);
+    const args = {
+      r_substr_v: () => [svGet(v, i), nm('a'), nm('z')],
+      /* `trimws` 的第二格是"哪一头"（0 两头 / 1 左 / 2 右），原样传下去。 */
+      r_trim_v: () => [svGet(v, i), nm('w')],
+      /* `chartr` 的两张表在前头（与标量那一版同序）。 */
+      r_chartr_v: () => [nm('on'), nm('nw'), svGet(v, i)],
+    }[name] ?? (() => [svGet(v, i), nm('t')]);
     const params = [{ name: 'v', type: RSTRV }];
     if (name === 'r_substr_v') params.push({ name: 'a', type: INT }, { name: 'z', type: INT });
+    if (name === 'r_trim_v') params.push({ name: 'w', type: INT });
+    if (name === 'r_chartr_v') params.push({ name: 'on', type: STR }, { name: 'nw', type: STR });
     if (lgl) params.push({ name: 't', type: STR });
-    const el = { kind: 'call', fn: { kind: 'name', name: useFn(one) }, args };
+    const el = { kind: 'call', fn: { kind: 'name', name: useFn(one) }, args: args() };
     return {
       kind: 'fn',
       name,
@@ -8002,7 +8113,7 @@ function vecFnDecl(name) {
   }
   if (name === 'r_substr' || name === 'r_starts' || name === 'r_ends'
       || name === 'r_padl' || name === 'r_padr' || name === 'r_pad0' || name === 'r_lower'
-      || name === 'r_trim') {
+      || name === 'r_trim' || name === 'r_chartr') {
     return strFnDecl(name);
   }
   if (STRV_FNS.has(name)) return strvFnDecl(name);
