@@ -25,7 +25,7 @@ struct stat {
   struct timespec st_atim;  /* 72 */
   struct timespec st_mtim;  /* 88 */
   struct timespec st_ctim;  /* 104 */
-  long int __reserved[3];   /* 120, pad to 144 */
+  long int __omni__reserved[3];   /* 120, pad to 144 */
 };
 
 #define S_IFMT   0170000

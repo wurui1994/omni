@@ -2,7 +2,11 @@
    打印用 %.6g（看值用的，不追求往返）；序列化用 repr（要求 strtod 能往返回原值）。 */
 #include "omni.h"
 /* omni_run_proc 要 WIFEXITED/WEXITSTATUS —— omni.h 里那批标准头不含它。 */
+#if !defined(_WIN32) || defined(__OMNI_LIBC__)
 #include <sys/wait.h>
+#else
+#include "omni_win32.h"   /* WIFEXITED/WEXITSTATUS 的替代 */
+#endif
 /* omni_gfx_frame 的 `mkdir -p` 要 mkdir（同上：omni.h 里没有这一个头）。 */
 #include <sys/stat.h>
 /* 图形设备的 `klock()` 要 clock()/CLOCKS_PER_SEC。 */
@@ -456,8 +460,15 @@ static int gfx_is_query(const char *nm) {
  * 宿主那格帧缓冲的初值是 **-1 = 这一格没人画**，交帧时 GPU 那一层当底、宿主那一层盖上去。
  */
 #define GFX_RTLD_NOW 2
+/* 手写这两句而不是 `#include <dlfcn.h>`：tcc 那条腿也要编这份文件（见上面那段）。
+ * **Windows + MSVC 的 CRT 那条腿除外**：那边没有 `dlopen` 这个符号，声明得出来、链不出来
+ * （`lld-link: error: undefined symbol: dlopen`）—— 那一格在 omni_win32.h 里（`static`，
+ * 这份文件开头已经包过了，所以这儿只要别再声明一遍）。 */
+#if !defined(_WIN32) || defined(__OMNI_LIBC__)
 extern void *dlopen(const char *, int);
 extern void *dlsym(void *, const char *);
+#endif
+
 
 typedef int (*gfx_gl_open_fn)(int, int);
 typedef void (*gfx_gl_cls_fn)(unsigned int);

@@ -2468,8 +2468,17 @@ static int r3_tri_transparent(const r3tris *t, size_t i) {
 #include "../runtime-gl/omni_gl.h"
 
 #define R3_RTLD_NOW 2
+/* 手写这两句而不是 `#include <dlfcn.h>`：tcc 那条腿也要编这份文件（见上面那段）。
+ * **Windows + MSVC 的 CRT 那条腿除外**：那边压根没有 `dlopen` 这个符号 —— 声明得出来、
+ * 链不出来（量到的是 `lld-link: error: undefined symbol: dlopen`）。那一格由
+ * `omni_win32.h` 用 `LoadLibraryA` 顶上（是 `static` 的，所以不能再有这两句外部声明）。 */
+#if !defined(_WIN32) || defined(__OMNI_LIBC__)
 extern void *dlopen(const char *, int);
 extern void *dlsym(void *, const char *);
+#else
+#include "omni_win32.h"
+#endif
+
 
 typedef int (*r3_gl_draw_fn)(const char *, const omni_gl_scene *, unsigned char *);
 typedef const char *(*r3_gl_err_fn)(void);

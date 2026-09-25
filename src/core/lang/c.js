@@ -78,8 +78,38 @@ export function sdkUsrLib() {
  * `installDir()/../../include` 在源码树里是 `src/include`，在 dist 布局里什么都不是。
  * 第一百三十八片量到的（`OMNI_CC=self` 的第 2 阶段）。
  */
+/**
+ * **Windows 宿主上的系统头**：随包带的那一份 win32 sysroot（`sysroot/win32/include`）。
+ *
+ * 为什么不是本机的：Windows 上压根没有 `/usr/include` 这一套，而 MSVC + Windows SDK
+ * 那两套头里 `__declspec` / SAL 注解 / `#pragma` 一堆 MS 扩展，我们自己那台 C 前端
+ * 吃不下。量到的就是
+ *   `src/runtime/omni.h:33: error: include file 'stdio.h' not found`
+ * —— 看着像运行时头坏了，其实是这张表在 Windows 上**一格都没有**（与第一百四十七片
+ * Linux 那一格同一个病：`sdkUsrInclude` 只有 macOS 答得出来）。
+ *
+ * 那一份与「交叉到 win32」用的是同一份：Windows 上没有稳定的裸 syscall，平台层调的是
+ * kernel32 的导入函数，所以 arm64-win32 与 x86_64-win32 共用一份头（见 `bundledSysroot`）。
+ *
+ * 位置按 `C_INCLUDE_DIR` 往边上数：源码树里 `src/include` -> `src/sysroot/win32/include`，
+ * 装过之后 `share/include` -> `share/sysroot/win32/include` —— 与 `bundledSysroot` 找的是同几处。
+ *
+ * MSVC 自己那套头只在「把生成的 C 交给 `cl`」（`--cc msvc`）那一路上用：那时是 `cl` 在读。
+ */
+function winSysInclude() {
+  if (env('OS') !== 'Windows_NT' && (env('SystemRoot') ?? '') === '') return null;
+  for (const p of [join(C_INCLUDE_DIR, '..', 'sysroot', 'win32', 'include'),
+    join(installDir(), '..', '..', 'sysroot', 'win32', 'include'),
+    join(installDir(), '..', 'sysroot', 'win32', 'include')]) {
+    if (isDir(p)) return p;
+  }
+  return null;
+}
+
 export function cSysInclude(libDir) {
   const out = [libDir === undefined ? C_INCLUDE_DIR : join(libDir, 'include')];
+  const win = winSysInclude();
+  if (win !== null) out.push(win);
   const sdk = sdkUsrInclude();
   if (sdk !== null) out.push(sdk);
   /* **Linux（与别的没有 SDK 那一套的宿主）那几处**（第一百四十七片）：

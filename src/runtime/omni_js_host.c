@@ -12,22 +12,52 @@
  * 到那时这些错误会进 pending-error 槽，不需要在这里改成返回码）。
  */
 #include "omni.h"
+#if defined(_WIN32) && !defined(__OMNI_LIBC__)
+#include "omni_win32.h"   /* POSIX 那一小块的 Windows 替代（第 msvc 刀） */
+#endif
 
+#if !defined(_WIN32) || defined(__OMNI_LIBC__)
 #include <dirent.h>
+#endif
+#if !defined(_WIN32) || defined(__OMNI_LIBC__)
 #include <dlfcn.h>
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
+#if !defined(_WIN32) || defined(__OMNI_LIBC__)
 #include <pthread.h>
+#endif
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32) || defined(__OMNI_LIBC__)
 #include <sys/resource.h>
+#endif
+#if !defined(_WIN32) || defined(__OMNI_LIBC__)
 #include <sys/wait.h>
+#endif
 #include <time.h>
+#if !defined(_WIN32) || defined(__OMNI_LIBC__)
 #include <unistd.h>
+#endif
+
+/* **起子进程那一格，两条 Windows 腿各有一份同形状的实现**（见 `omni_host_spawn`）：
+ *   自带 libc（`--libc self`）  `sysroot/win32/libc/io.c` 的 `__libc_spawn`
+ *   MSVC 的 CRT（缺省）        `omni_win32.h` 的 `omni_w32_spawn`
+ * 名字在这儿折成一格，好让下面那一处只有**一份** Windows 代码。 */
+#if defined(_WIN32) && defined(__OMNI_LIBC__)
+long __libc_spawn(const char *cmd, char *const argv[], int fd0, int fd1, int fd2);
+int __libc_spawn_wait(long h);
+#define omni_spawn_ __libc_spawn
+#define omni_spawn_wait_ __libc_spawn_wait
+#elif defined(_WIN32)
+#define omni_spawn_ omni_w32_spawn
+#define omni_spawn_wait_ omni_w32_spawn_wait
+#endif
+
 
 /* ---------------------------------------------------------------- 进程状态 */
 
@@ -62,7 +92,9 @@ static double host_mono_ms_(void) {
  * 默认 30。`0` / `off` / `none` = 不限。
  */
 #ifndef OMNI_RELEASE
+#if !defined(_WIN32) || defined(__OMNI_LIBC__)
 #include <sys/time.h>
+#endif
 
 #define OMNI_DEADLINE_DEFAULT_S 30.0
 
@@ -104,6 +136,7 @@ static int omni_dl_from_dotenv_(double *out) {
   return omni_dl_parse_(buf, "OMNI_TIMEOUT", out);
 }
 
+#if !defined(_WIN32) || defined(__OMNI_LIBC__)
 static void omni_dl_fire_(int sig) {
   static const char msg[] =
     "omni: 超时 —— 这一趟跑过了开发期的时限，程序自己停了（退 124）。\n"
@@ -174,10 +207,59 @@ static void omni_deadline_init_(void) {
   omni_dl_spawn_watchdog_(sec);
 }
 #else
+/* **Windows（用 MSVC 的 CRT 那一档）上这一格是一条计时线程。**
+ *
+ * 那边没有对应物的是三样：`SIGALRM`（UCRT 的 `signal` 只认 SIGABRT 那六个）、
+ * `setitimer`、以及起外部看门狗要的 `fork`+`execl`。于是换成最直白的那一种：一条线程
+ * 睡到点、把同一段话写出去、把整个进程停掉。
+ *
+ * **丢掉的是"外部那一格"**：进程内信号被 block、或者 `exec` 换掉整个映像时，POSIX 那边
+ * 还有一条 `/bin/sh` 的看门狗兜着；Windows 上这两种情形本来也不成立（没有 exec 语义），
+ * 所以不是偷工，是那一格在这儿没有对应的失效模式。 */
+static DWORD WINAPI omni_dl_thread_(LPVOID arg) {
+  static const char msg[] =
+    "omni: 超时 —— 这一趟跑过了开发期的时限，程序自己停了（退 124）。\n"
+    "omni: 放宽：OMNI_TIMEOUT=120（秒）；关掉：OMNI_TIMEOUT=0；也可以写进 .env。\n"
+    "omni: 发布构建（--release）里没有这一格。\n";
+  Sleep((DWORD)(uintptr_t)arg);
+  (void)fwrite(msg, 1, sizeof(msg) - 1, stderr);
+  (void)fflush(stderr);
+  /* `ExitProcess` 而不是 `exit`：这一格是从另一条线程上开的枪，`exit` 会去跑 atexit
+   * 与 CRT 的收尾（那些东西正握在被卡住的那条线程手里）。 */
+  ExitProcess(124u);
+  return 0;
+}
+
+static void omni_deadline_init_(void) {
+  const char *e = getenv("OMNI_TIMEOUT");
+  const char *rel = getenv("OMNI_RELEASE");
+  double sec = -1.0;
+  HANDLE th;
+  if (rel != NULL && strcmp(rel, "1") == 0) return;
+  if (e != NULL && *e != '\0') {
+    if (strcmp(e, "off") == 0 || strcmp(e, "none") == 0) return;
+    sec = atof(e);
+  } else if (!omni_dl_from_dotenv_(&sec)) {
+    sec = OMNI_DEADLINE_DEFAULT_S;
+  }
+  if (!(sec > 0.0)) return;                       /* 0 / 负 / 不是数 = 不限 */
+  th = CreateThread(NULL, 0, omni_dl_thread_,
+                    (LPVOID)(uintptr_t)(DWORD)(sec * 1000.0), 0, NULL);
+  if (th != NULL) CloseHandle(th);                /* 不 join —— 它只管到点开枪 */
+}
+#endif /* _WIN32 */
+#else
+
 static void omni_deadline_init_(void) { }
 #endif /* OMNI_RELEASE */
 
 void omni_host_init(int argc, char **argv) {
+#if defined(_WIN32) && !defined(__OMNI_LIBC__)
+  /* 先把 stdout/stderr 摆成二进制（见 omni_win32.h 里那段）：MSVC 的 CRT 默认会把 `\n`
+   * 翻成 `\r\n`，那会让这条腿的输出与别的腿逐字节不一样。摆在最前面 —— 后面任何一句
+   * 输出都得在它之后。 */
+  omni_w32_binary_stdio();
+#endif
   host_up_base_ms = host_mono_ms_();
   host_argc = argc;
   host_argv = argv;
@@ -212,14 +294,21 @@ int omni_host_exit_code(void) { return host_exit_code; }
    开不出线程就退回直接调用。 */
 static void (*run_entry_fn)(void);
 
+#if !defined(_WIN32) || defined(__OMNI_LIBC__)
 static void *run_entry_thread(void *arg) {
   (void)arg;
   run_entry_fn();
   return NULL;
 }
+#endif
+
+
+/* kernel32 的那一格**要有原型**：隐式声明在 LLP64 上按 `int` 回，而两个出参是
+ * `ULONG_PTR*` —— 少了原型，栈边界拿到的是截断过的值。 */
+extern void GetCurrentThreadStackLimits(unsigned long long *lo, unsigned long long *hi);
 
 /* 主线程现在有多大的栈。查不到就报 0 = "不知道，按不够算"。 */
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(__OMNI_LIBC__)
 /* Windows 上这一格是**链接期定死的** PE 头里那个 `SizeOfStackReserve`（`omni build`
  * 给 512MB，见 cli.js 里 pe 那一格的 `--stack`）。`GetCurrentThreadStackLimits` 把
  * 当前线程的上下界直接说出来（Win8+），相减就是那个数。
@@ -249,6 +338,28 @@ static size_t omni_main_stack_bytes(void) {
 #endif
 }
 
+#if defined(_WIN32) && !defined(__OMNI_LIBC__)
+/* **Windows（MSVC 的 CRT）那一档：线程是 kernel32 的，不是 pthread 的。**
+ * `CreateThread` 第二格默认是**提交**量，要它当"保留"得给
+ * `STACK_SIZE_PARAM_IS_A_RESERVATION` —— 不给的话 512MB 会当场吃掉 512MB 物理内存
+ * （而我们要的只是"地址空间上留够"）。 */
+static DWORD WINAPI run_entry_thread_win(LPVOID arg) {
+  (void)arg;
+  run_entry_fn();
+  return 0;
+}
+
+void omni_run_entry(void (*entry)(void)) {
+  HANDLE th;
+  if (omni_main_stack_bytes() >= (size_t)256 * 1024 * 1024) { entry(); return; }
+  run_entry_fn = entry;
+  th = CreateThread(NULL, (SIZE_T)512 * 1024 * 1024, run_entry_thread_win, NULL,
+                    STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
+  if (th == NULL) { entry(); return; }            /* 开不出来就退回直接调用 */
+  WaitForSingleObject(th, INFINITE);
+  CloseHandle(th);
+}
+#else
 void omni_run_entry(void (*entry)(void)) {
   pthread_attr_t attr;
   pthread_t th;
@@ -264,6 +375,8 @@ void omni_run_entry(void (*entry)(void)) {
   pthread_attr_destroy(&attr);
   pthread_join(th, NULL);
 }
+#endif
+
 
 /* ---------------------------------------------------------------- 小助手 */
 
@@ -400,9 +513,15 @@ omni_dyn omni_js_fs_mtime_ms(omni_dyn path) {
   if (stat(p, &st) != 0) omni_errorf("ENOENT: cannot stat '%s'", p);
 #if defined(__APPLE__)
   double ms = (double)st.st_mtimespec.tv_sec * 1000.0 + (double)st.st_mtimespec.tv_nsec / 1e6;
+#elif defined(_WIN32) && !defined(__OMNI_LIBC__)
+  /* MSVC 的 `struct stat` 里只有 `st_mtime`（秒），没有 POSIX 那格 `st_mtim` 的纳秒 ——
+   * 于是这条腿的分辨率就是**秒**。写在明处：靠 mtime 判"变没变"的那些增量缓存在这条腿上
+   * 粒度粗一秒（同一秒内改两次看不出来）。 */
+  double ms = (double)st.st_mtime * 1000.0;
 #else
   double ms = (double)st.st_mtim.tv_sec * 1000.0 + (double)st.st_mtim.tv_nsec / 1e6;
 #endif
+
   return omni_dyn_of_real(ms);
 }
 
@@ -715,6 +834,7 @@ omni_dyn omni_js_proc_uptime(void) {
 
    闹钟的分辨率是秒，所以时限向上取整到秒；node 那侧是毫秒。差别写在明处，不假装一致。 */
 
+#if !defined(_WIN32) || defined(__OMNI_LIBC__)
 static volatile pid_t host_timeout_child = -1;
 static char host_timeout_msg[256];
 static size_t host_timeout_msg_len = 0;
@@ -764,6 +884,61 @@ omni_dyn omni_js_run_timeout(omni_dyn ms, omni_dyn msg) {
   alarm(secs == 0 ? 1 : secs);
   return omni_dyn_undef();
 }
+#else
+/* **Windows（MSVC 的 CRT）那一档：一条计时线程顶那把闹钟。**
+ *
+ * 没有 `SIGALRM`/`alarm`/`sigaction`，也没有"给子进程先 TERM 再 KILL"那一套（Windows 上
+ * 只有 `TerminateProcess`，它不给对方跑收尾的机会 —— 而先 TERM 的全部意义就是让对方把
+ * profile 写完）。所以这条腿上**只剩进程内那一路**：到点把那句话写出去、把 profile 交出来、
+ * 退 124。子进程那一路（`omni_host_spawn` 正在等的那个孩子）在这条腿上不另外开枪 ——
+ * 我们自己退掉之后它的管道就断了，它下一次写就会失败。
+ *
+ * 重设（同一趟里再叫一次 `run_timeout`）靠的是一格代号：线程醒来先看代号还是不是自己那一格，
+ * 不是就安静退掉。这比"想办法把线程叫醒"简单，而且没有竞态（代号只在主线程上改）。 */
+static char host_timeout_msg[256];
+static size_t host_timeout_msg_len = 0;
+static volatile long host_timeout_gen = 0;
+
+static DWORD WINAPI host_timeout_thread(LPVOID arg) {
+  struct { DWORD ms; long gen; } *a = (void *)arg;
+  DWORD ms = a->ms;
+  long gen = a->gen;
+  free(a);
+  Sleep(ms);
+  if (host_timeout_gen != gen) return 0;          /* 已经被改过（或关掉）了 */
+  if (host_timeout_msg_len) {
+    (void)fwrite(host_timeout_msg, 1, host_timeout_msg_len, stderr);
+    (void)fflush(stderr);
+  }
+  omni_prof_report();
+  ExitProcess(124u);
+  return 0;
+}
+
+omni_dyn omni_js_run_timeout(omni_dyn ms, omni_dyn msg) {
+  double m = omni_dyn_as_real(ms);
+  struct { DWORD ms; long gen; } *a;
+  HANDLE th;
+  host_timeout_gen++;                             /* 先作废上一格 */
+  if (!(m > 0.0)) return omni_dyn_undef();        /* 0 = 关掉 */
+  {
+    omni_str u = omni_s16_to_utf8(omni_js_as_s16(msg));
+    size_t n = (size_t)u.len;
+    if (n > sizeof(host_timeout_msg)) n = sizeof(host_timeout_msg);
+    memcpy(host_timeout_msg, u.p, n);
+    host_timeout_msg_len = n;
+  }
+  a = malloc(sizeof *a);
+  if (a == NULL) return omni_dyn_undef();
+  a->ms = (DWORD)m;                               /* 这儿是毫秒 —— 比 POSIX 那把闹钟还准 */
+  a->gen = host_timeout_gen;
+  th = CreateThread(NULL, 0, host_timeout_thread, a, 0, NULL);
+  if (th == NULL) { free(a); return omni_dyn_undef(); }
+  CloseHandle(th);
+  return omni_dyn_undef();
+}
+#endif
+
 
 /* 本地时间的日历字段，14 位数字 YYYYMMDDHHMMSS（`__DATE__` / `__TIME__` 要它）。
    一次 localtime、一个字符串：六个字段必须是同一个瞬间的（tcc 在那儿也只 time() 一次），
@@ -785,7 +960,7 @@ omni_dyn omni_js_local_stamp(void) {
 omni_dyn omni_js_install_dir(void) {
   const char *exe = host_argc > 0 ? host_argv[0] : "";
   char buf[8192];
-#ifdef _WIN32
+#if defined(_WIN32)
   /* Windows（第 win-c-backend 刀）：绝对路径是 `X:\…`/`X:/…` 或 `\\机器\共享\…`，
      **不是**以 '/' 开头；分隔符还有 '\\'。少了这两条，`C:\omni\bin\omni.exe` 被当成
      相对路径接在 cwd 后头，`strrchr(buf,'/')` 找到的是 cwd 里的那一个 ——
@@ -918,19 +1093,17 @@ int omni_host_spawn(const char *cmd, char *const *argv, int mode, const char *in
   if (cap_err && pipe(pe) != 0) omni_error("cannot create a pipe");
   if (feed && pipe(pi) != 0) omni_error("cannot create a pipe");
 
-#ifdef _WIN32
-  /* Windows 上没有 `fork`（这条腿的 `fork` 一律 ENOSYS），起子进程走 CreateProcessA ——
-   * 拼命令行、把三个 fd 复制成可继承的句柄、起、等。那两格在 win32 sysroot 的
-   * `libc/io.c` 里（`__libc_spawn` / `__libc_spawn_wait`，只有这条腿有）。
+#if defined(_WIN32)
+  /* Windows 上没有 `fork`，起子进程走 `CreateProcess` —— 拼命令行、把三个 fd 换成可继承的
+   * 句柄、起、等。那两格按腿分（见文件头上 `omni_spawn_` 那段）。
    *
    * **起不来不是崩**：回 127（与 `execvp` 失败之后子进程 `_exit(127)` 同一个数）。
    * 这一条要紧 —— 编译器启动时会问一句 `uname`，而 Windows 上根本没有这个程序；
    * 第一版在这儿 `omni_error("cannot fork")`，于是 `omni.exe build` 一进门就死，
    * 印的是 `omni: runtime error: cannot fork`（JS 那侧的 try/catch 拦不住它）。 */
-  long __libc_spawn(const char *cmd, char *const argv[], int fd0, int fd1, int fd2);
-  int __libc_spawn_wait(long h);
-  long hproc = __libc_spawn(cmd, argv, feed ? pi[0] : -1,
-                            cap_out ? po[1] : -1, cap_err ? pe[1] : -1);
+  long hproc = omni_spawn_(cmd, argv, feed ? pi[0] : -1,
+                           cap_out ? po[1] : -1, cap_err ? pe[1] : -1);
+
   if (cap_out) close(po[1]);
   if (cap_err) close(pe[1]);
   if (feed) close(pi[0]);
@@ -956,7 +1129,7 @@ int omni_host_spawn(const char *cmd, char *const *argv, int mode, const char *in
   if (cap_err) { we = omni_host_slurp(pe[0]); close(pe[0]); }
   *out = wo;
   *err = we;
-  return __libc_spawn_wait(hproc);
+  return omni_spawn_wait_(hproc);
 #else
   pid_t pid = fork();
   if (pid < 0) omni_error("cannot fork");

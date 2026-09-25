@@ -13,9 +13,14 @@
  * 消毒扫描走这条。两条路径的可观察行为必须一致，差分测试同时覆盖。
  */
 #include "omni.h"
+#if defined(_WIN32) && !defined(__OMNI_LIBC__)
+#include "omni_win32.h"   /* POSIX 那一小块的 Windows 替代（第 msvc 刀） */
+#endif
 
 /* 按调用栈归属分配（`OMNI_MEM_DEBUG=4`）要它。只在量口那条路上用，平时一个符号都不碰。 */
+#if !defined(_WIN32) || defined(__OMNI_LIBC__)
 #include <execinfo.h>
+#endif
 
 /* class 引用的显式空检查（`omni_nullck`）挪去 omni.h 当 static inline 了 ——
    它是生成代码里最密的一个调用，跨编译单元内联不了就只剩纯调用开销（见那儿的注）。 */
@@ -64,7 +69,9 @@ typedef struct {
    LeakSanitizer 不会报泄漏。 */
 #ifdef OMNI_NO_TLS
 /* 不认 `_Thread_local` 的编译器（我们自己的 C 前端、tcc）走 pthread 的 TSD。 */
+#if !defined(_WIN32) || defined(__OMNI_LIBC__)
 #include <pthread.h>
+#endif
 
 typedef struct {
   omni_arena_tp tp;                          /* 头一格：omni_arena_slot 回的就是它 */

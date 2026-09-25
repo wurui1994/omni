@@ -20,6 +20,13 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+/* `localtime_r` 是 POSIX 的名字；MSVC 的 CRT 给的是 `localtime_s`（参数次序还反着）。
+ * 那一格替代在 omni_win32.h 里 —— 只在「Windows + 不是我们自己那份 libc」时才进来
+ * （自带那条腿的 `sysroot/win32/include/time.h` 自己有 `localtime_r`）。 */
+#if defined(_WIN32) && !defined(__OMNI_LIBC__)
+#include "omni_win32.h"
+#endif
+
 
 /* 1970-01-01 之前的天数（负数也对）。规范 21.4.1.12 的 MakeDay 就是这一格。 */
 static int64_t js_days_from_civil(int64_t y, int64_t m, int64_t d) {

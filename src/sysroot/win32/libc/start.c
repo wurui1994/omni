@@ -24,6 +24,32 @@ extern void exit(int code);
 
 char **environ;
 
+/* **`_fltused`**：MSVC 的约定。`cl` 在每个用到浮点的目标文件里引一次这个符号，让链接器
+ * 知道要带浮点支持；正常由 CRT 定义，而 `--cc msvc` 这条腿走 `/NODEFAULTLIB`（平台层是
+ * 我们自己这份 libc），所以得自己立一次。量到的是二十多条
+ *   libc-math.o : error LNK2001: unresolved external symbol _fltused
+ * 值 0x9875 是历史习惯，没有代码读它 —— 存在就够。
+ *
+ * 只在 MSVC 编这一份时才需要（自带那台前端不发这个引用）。 */
+#ifdef _MSC_VER
+int _fltused = 0x9875;
+
+/* **`_tls_index`**：MSVC 实现 C11 `_Thread_local` 时引的那个索引（`omni.h` 里那几格
+ * 线程局部量）。正常由 CRT 定义并在启动时填好；我们是**单模块、没有动态 TLS 回调**的
+ * 程序（自己的 `_start`、不链 CRT），所以 0 就是对的 —— 12 份 .o 都引它，量到的是
+ *   omni_mem.o : error LNK2001: unresolved external symbol _tls_index */
+unsigned long _tls_index = 0;
+
+/* **`__report_rangecheckfailure`**：`/GS` 那一族的越界报告桩。给了 `/GS-` 之后 cl 在
+ * 少数模式下照旧会发这个引用（量到的是 `libc-io.o` 里 `getcwd` 那一处）。与其让链接器
+ * 去 CRT 里找，不如自己给一个：**当场停住**，别让越界之后还往下跑。 */
+void __report_rangecheckfailure(void) {
+  ExitProcess(0xC0000409u);   /* STATUS_STACK_BUFFER_OVERRUN，与 MSVC 的约定一致 */
+}
+
+#endif
+
+
 #define ARG_MAX_N 256
 #define ARG_MAX_B 32768
 
@@ -153,11 +179,35 @@ static long __veh(void *info) {
 
 /* PE 的入口。名字用 `_start` 与另两条腿一致（`pe-link` 的 `-e` 由 cli.js 给），
  * 不叫 `mainCRTStartup` —— 那个名字属于 msvcrt 那一路的约定，我们不链它。 */
+/* **控制台代码页**：这一份 libc 写出去的都是 UTF-8 字节（源码、诊断、帮助文本都是），
+ * 而 Windows 的控制台按自己的输出代码页解码 —— 简体中文机器上默认 936，于是
+ * `dist\omni.exe` 的帮助是一片乱码，手工 `chcp 65001` 之后同一个 exe 就正常。
+ *
+ * 所以开工先把输出页切成 65001（CP_UTF8），**退出时还回去**：`SetConsoleOutputCP`
+ * 改的是那个控制台、不是我们这个进程 —— 不还的话每跑一趟就把用户的 shell 留在
+ * 65001 上，那是编译器不该留下的痕迹。崩溃那一路不还（VEH 里只管把现场印出来）。
+ *
+ * 管道/重定向那一头这一格帮不上忙（那时解码的人不是控制台）—— 真要全面正确得在
+ * 写那一层判 `GetFileType`、是控制台就走 `WriteConsoleW` + UTF-16，那是另一刀。 */
+static unsigned int __con_cp_old;
+
+static void __con_init(void) {
+  __con_cp_old = GetConsoleOutputCP();
+  if (__con_cp_old != 0 && __con_cp_old != 65001) SetConsoleOutputCP(65001);
+}
+
+static void __con_fini(void) {
+  if (__con_cp_old != 0 && __con_cp_old != 65001) SetConsoleOutputCP(__con_cp_old);
+}
+
 void _start(void) {
   AddVectoredExceptionHandler(1, __veh);
   __env_init();
   int argc = __split(GetCommandLineA());
-  exit(main(argc, __argv));
+  __con_init();
+  int __rc = main(argc, __argv);
+  __con_fini();
+  exit(__rc);
   for (;;) { }
 }
 

@@ -92,6 +92,17 @@ export function scratchDir(kind) {
  */
 function rmTree(p) {
   if (p === undefined || p === null || p === '') return;
+  /* **win32 上那条另一份实现**（上面那段注释欠的账）：那儿没有 `rm`，量到的是
+   *   `Error: cannot spawn: spawnSync rm ENOENT`（`scratchDir` 一进来就倒）。
+   * cmd 自己带的 `rmdir /s /q` 做的是同一件事；路径要折成反斜杠 —— cmd 的 rmdir
+   * 不认正斜杠，而我们内部一路用的是正斜杠。退出码不看：这一格的语义是「确保没有」，
+   * 本来就不存在时 rmdir 回非零，那不是错。 */
+  if (env('OS') === 'Windows_NT' || (env('SystemRoot') ?? '') !== '') {
+    const w = p.replace(/\//g, '\\');
+    if (isDir(p)) spawn('cmd', ['/c', 'rmdir', '/s', '/q', w], 'c');
+    else if (exists(p)) spawn('cmd', ['/c', 'del', '/f', '/q', w], 'c');
+    return;
+  }
   spawn('rm', ['-rf', p], 'c');
 }
 

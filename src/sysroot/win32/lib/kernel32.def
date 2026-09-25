@@ -24,6 +24,8 @@ FindFirstFileA
 FindNextFileA
 FlushFileBuffers
 FreeEnvironmentStringsA
+GetConsoleOutputCP
+SetConsoleOutputCP
 GetCommandLineA
 GetCurrentDirectoryA
 GetCurrentProcess

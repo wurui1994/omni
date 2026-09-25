@@ -349,6 +349,47 @@ char *mkdtemp(char *tmpl) {
  * `arm64/from_mir.js` 与 `x64/from_mir.js`）。这条路**不碰 Windows 的 SEH**：
  * `RtlUnwind` 那一套要 `.pdata`/`.xdata`，我们链出来的 PE 没有那两节。
  * `jmp_buf` 在这条腿上 200 字节（`include/setjmp.h`）：arm64 用头 168、x64 用头 64。 */
+#ifdef _MSC_VER
+/* **`--cc msvc` 这条腿上的 setjmp/longjmp**（第 msvc 刀）。
+ *
+ * 这两格平时由**我们自己的后端**发（`OP.SETJMP`/`OP.LONGJMP`，见 arm64/x64 的 from_mir），
+ * 所以 `misc.c` 里的 `setjmp`/`longjmp` 只是转手。换成 cl 编，它发不出这两个原语，
+ * 链接期就是 `unresolved external symbol __omni_setjmp`。
+ *
+ * 现在给桩而不是硬做：Win64 上不写汇编就得靠 `RtlCaptureContext`/`RtlRestoreContext`，
+ * 而 `CONTEXT` 是 1232 字节、我们 `setjmp.h` 里的 `jmp_buf` 远没这么大 —— 真做要连头
+ * 一起改，那是单独一刀。生成的 C 不走这条路（它走后端那两格），只有**用户自己写的 `.c`**
+ * 里调 setjmp 才会碰到，所以桩里把话说明白、当场停住，别静默地跑错。 */
+/* 桩里要停住，而这份 libc 没有 `__libc_die` —— 用这套 sysroot 里确定有的两格：
+ * `WriteFile` 往 stderr 写一句，然后 `ExitProcess`（与 start.c 里 VEH 那段同一条路）。 */
+static void __omni_sj_die(const char *msg) {
+  /* 这两格的类型要跟 `syscall.h` 里那句声明对上（`unsigned int *`）：Win64 上
+   * `unsigned long` 与 `unsigned int` 同宽，`cl` 只当警告放过去，而 clang 把它当错误 ——
+   *   misc.c:369:54: error: incompatible pointer types passing 'unsigned long *'
+   *                  to parameter of type 'unsigned int *'
+   * （start.c 里那一处本来就写的是 `unsigned int`。） */
+  unsigned int put = 0;
+  unsigned int n = 0;
+
+  while (msg[n] != 0) n++;
+  WriteFile(GetStdHandle((unsigned int)-12), msg, n, &put, 0);
+  WriteFile(GetStdHandle((unsigned int)-12), "\n", 1, &put, 0);
+  ExitProcess(70);
+}
+
+int __omni_setjmp(void *buf) {
+  (void)buf;
+  __omni_sj_die("setjmp: __omni_setjmp 在这条腿上还没做（--cc msvc）——用 --cc self 或 --cc clang");
+  return 0;
+}
+
+void __omni_longjmp(void *buf, int v) {
+  (void)buf;
+  (void)v;
+  __omni_sj_die("longjmp: __omni_setjmp 在这条腿上还没做（--cc msvc）——用 --cc self 或 --cc clang");
+}
+#endif
+
 int setjmp(void *env) { return __omni_setjmp(env); }
 void longjmp(void *env, int val) { __omni_longjmp(env, val); }
 

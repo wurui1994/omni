@@ -30,6 +30,27 @@
 #define _DEFAULT_SOURCE 1
 #endif
 
+/* ---- MSVC 上的 __builtin_clz（第 msvc 刀）----
+ * MSVC 的对应物是 `_BitScanReverse`（回的是**最高位的位号**，所以 clz = 31 - 它）。
+ * 零的 clz 在 GCC 那边是未定义，这儿明确回 32 —— 调用处（omni_js_num.c）本来就不传零，
+ * 写明白比留个未定义好。 */
+#ifdef _MSC_VER
+/* 纯 C（移位找最高位）：**不 include <intrin.h>** —— 那一份会 include xmmintrin.h，
+ * 而它要 UCRT 的 <malloc.h>，UCRT 正是这条腿故意排除的。量到的原话：
+ *   xmmintrin.h(79): fatal error C1083: Cannot open include file: 'malloc.h' */
+static __inline int __omni_clz_(unsigned int v) {
+  int n = 0;
+  if (v == 0) return 32;
+  if ((v & 0xffff0000u) == 0) { n += 16; v <<= 16; }
+  if ((v & 0xff000000u) == 0) { n += 8; v <<= 8; }
+  if ((v & 0xf0000000u) == 0) { n += 4; v <<= 4; }
+  if ((v & 0xc0000000u) == 0) { n += 2; v <<= 2; }
+  if ((v & 0x80000000u) == 0) { n += 1; }
+  return n;
+}
+#define __builtin_clz(v) __omni_clz_((unsigned int)(v))
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,6 +62,18 @@
 /* setjmp：JSON 那两段（parse 的十几处语法错、stringify 的环）要把栈剥回入口那一层。
    JS 那侧用宿主自己的 throw 做同一件事（见 prelude 的 $HostBad）—— 两条腿同一个形状。 */
 #include <setjmp.h>
+
+/* **Windows + 外部 cc 的 CRT 那一档，把用到的那一小块 POSIX 面补上**（第 clang 刀）。
+ *
+ * 摆在 `omni.h` 里而不是只在各个 `.c` 里 include：**生成的那份 C 也要它**。`--profile stub`
+ * 那一档我们在发射期插的计时用的是 `clock_gettime(CLOCK_MONOTONIC, …)`，而生成的 C 只
+ * include 这一份头 —— 少了这一句量到的是
+ *   fib.exe.c(30): error C2065: 'CLOCK_MONOTONIC': undeclared identifier
+ * （运行时那几份 `.c` 里各自那句留着也无害：omni_win32.h 自己有 include guard。） */
+#if defined(_WIN32) && !defined(__OMNI_LIBC__)
+#include "omni_win32.h"
+#endif
+
 
 #if defined(__GNUC__) || defined(__clang__)
 #define OMNI_NORETURN __attribute__((noreturn))

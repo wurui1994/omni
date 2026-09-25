@@ -41,17 +41,25 @@
 #endif
 
 #include "omni.h"
+#if defined(_WIN32) && !defined(__OMNI_LIBC__)
+#include "omni_win32.h"   /* POSIX 那一小块的 Windows 替代（第 msvc 刀） */
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <signal.h>
+#if !defined(_WIN32) || defined(__OMNI_LIBC__)
 #include <sys/time.h>
+#endif
+#if !defined(_WIN32) || defined(__OMNI_LIBC__)
 #include <execinfo.h>
-#ifndef __APPLE__
+#endif
+#if !defined(__APPLE__) && (!defined(_WIN32) || defined(__OMNI_LIBC__))
 #include <dlfcn.h>    /* dladdr —— 翻外部模块（libc 之类）里的地址 */
 #endif
+
 #ifdef __linux__
 #include <link.h>     /* dl_iterate_phdr + ElfW —— 自己走每个模块的符号表 */
 #include <elf.h>
@@ -223,7 +231,7 @@ static void pf_warm(void) {
   (void)backtrace(fr, 4);
 }
 
-#ifdef _WIN32
+#if defined(_WIN32)
 /**
  * Windows 上的采样：**另起一条线程**，不走信号。
  *
@@ -266,7 +274,14 @@ static void pf_warm(void) {
 #define PF_W_PC       0xF8
 #endif
 
-/* kernel32 的那几个（名字都在 `sysroot/win32/lib/kernel32.def` 里）。 */
+/* kernel32 的那几个。**自带 libc 那条腿没有 `windows.h`**（名字都在
+ * `sysroot/win32/lib/kernel32.def` 里），所以自己声明一份；MSVC 的 CRT 那条腿
+ * `omni_win32.h` 已经把 `windows.h` 拉进来了，再声明一遍就是
+ *   error: conflicting types for 'CreateThread'
+ * —— 那边用它自己那份（签名等价，只是写法上多一层 typedef 与 `WINAPI`）。
+ * 差出来的两格靠 `PF_W_FN` / `PF_W_CTX` 抹平：x64/arm64 上 `WINAPI` 是空的、
+ * `DWORD` 就是 `unsigned long`，所以那两个转换是同 ABI 的改写，不是"糊过去"。 */
+#ifdef __OMNI_LIBC__
 void *CreateThread(void *sa, unsigned long long stack,
                    unsigned long (*fn)(void *), void *arg,
                    unsigned long flags, unsigned long *tid);
@@ -279,6 +294,12 @@ unsigned long ResumeThread(void *h);
 int GetThreadContext(void *h, void *ctx);
 void Sleep(unsigned long ms);
 int CloseHandle(void *h);
+#define PF_W_FN(f)  (f)
+#define PF_W_CTX(p) ((void *)(p))
+#else
+#define PF_W_FN(f)  ((LPTHREAD_START_ROUTINE)(void *)(f))
+#define PF_W_CTX(p) ((CONTEXT *)(void *)(p))
+#endif
 
 static void *pf_w_main;              /* 主线程的句柄（复制过的，伪句柄跨线程没用） */
 static volatile int pf_w_stop;
@@ -296,7 +317,7 @@ static unsigned long pf_w_sampler(void *arg) {
     if (SuspendThread(pf_w_main) == (unsigned long)-1) continue;
     void *st[PF_BT];
     int m = 0;
-    if (GetThreadContext(pf_w_main, ctx)) {
+    if (GetThreadContext(pf_w_main, PF_W_CTX(ctx))) {
       unsigned long long pc = *(unsigned long long *)(ctx + PF_W_PC);
       unsigned long long fp = *(unsigned long long *)(ctx + PF_W_FP);
       unsigned long long sp = *(unsigned long long *)(ctx + PF_W_SP);
@@ -335,7 +356,7 @@ static int pf_w_start(int hz) {
                        0x00000002 /* DUPLICATE_SAME_ACCESS */)) {
     return 0;
   }
-  void *h = CreateThread(0, 0, pf_w_sampler, 0, 0, 0);
+  void *h = CreateThread(0, 0, PF_W_FN(pf_w_sampler), 0, 0, 0);
   if (h == 0) { CloseHandle(pf_w_main); pf_w_main = 0; return 0; }
   CloseHandle(h);                    /* 线程自己跑，句柄留着也没用 */
   return 1;
@@ -357,7 +378,7 @@ void omni_prof_sample_start(int hz) {
   if (hz <= 0) hz = 200;
   if (hz > 100000) hz = 100000;             /* 再高就只是在量自己 */
   pf_warm();
-#ifdef _WIN32
+#if defined(_WIN32)
   /* Windows 上换成采样线程（第 win-c-backend 刀）：`pf_sampling = 3` 是这一档的号，
    * 停表那一格按它分叉（`omni_prof_report`）。 */
   if (pf_w_start(hz)) pf_sampling = 3;
@@ -418,12 +439,20 @@ static void pf_trap_signals(void) {
   static int done = 0;
   if (done) return;
   done = 1;
+#if defined(_WIN32) && !defined(__OMNI_LIBC__)
+  /* UCRT 只有 `signal()`（没有 `sigaction`），而且它那张表里**没有 SIGQUIT** ——
+   * Windows 上没有那一枪。SIGTERM/SIGINT 两格接得上（Ctrl-C 由 CRT 自己在控制台处理
+   * 函数里转成 SIGINT），所以这条腿上"要死了也把报告交出来"这件事仍然成立。 */
+  signal(SIGTERM, pf_on_term);
+  signal(SIGINT, pf_on_term);
+#else
   struct sigaction sa;
   memset(&sa, 0, sizeof sa);
   sa.sa_handler = pf_on_term;
   sigaction(SIGTERM, &sa, 0);
   sigaction(SIGINT, &sa, 0);
   sigaction(SIGQUIT, &sa, 0);
+#endif
 }
 
 /* ---- `cc` 档：编译器插的那一对（`-finstrument-functions`）。
@@ -478,6 +507,30 @@ void __cyg_profile_func_exit(void *this_fn, void *call_site) {
     pf_stack_add(st, m, self);
   }
 }
+
+/* ---- MSVC 那一档的同一件事（`/Gh` / `/GH`）。
+ *
+ * `cl` 没有 `-finstrument-functions`，它的对应物是 `/Gh` / `/GH`：每个函数进出各调一次
+ * **`_penter` / `_pexit`**，而这两个名字**要我们自己提供**，且**一个参数都不带** ——
+ * 谁被插了只能从返回地址看出来（那是被插桩函数里 `call` 的下一条指令）。
+ *
+ * 那一对不能用 C 写（它们必须保住每一个易失寄存器，否则被插桩函数的入参与返回值当场被改
+ * 掉），所以真正的入口在 `omni_prof_msvc_x64.asm` 里；那份汇编存好寄存器之后，把返回地址
+ * 递给下面这两格。于是**这一档与 gcc/clang 那一档共用同一套账**（`__cyg_*` 那两个函数）。
+ *
+ * `call_site` 给 0：`_penter` 那一侧拿不到调用点（要走 unwind 才有），而这份收集器本来就
+ * 没用那一格（上面 `(void)call_site` 两处）。
+ *
+ * `this_fn` 是**函数体内的一个地址**（不是函数首地址）。两处因此仍然对：按函数计数的那张表
+ * 只要"同一个函数每次是同一个键"，翻名字那一侧按"不大于它的最近符号"找 —— 落在函数体内
+ * 正是它要的。退出那一侧压根不看 `this_fn`（它弹的是影子栈）。 */
+#if defined(_MSC_VER) && !defined(__clang__)
+void omni_prof_penter_site(void *site);
+void omni_prof_pexit_site(void *site);
+
+void omni_prof_penter_site(void *site) { __cyg_profile_func_enter(site, 0); }
+void omni_prof_pexit_site(void *site) { __cyg_profile_func_exit(site, 0); }
+#endif
 
 /* ---- 报告。
  *
@@ -681,7 +734,7 @@ static size_t pf_load_base(void) {
   }
   fclose(f);
 #endif
-#ifdef _WIN32
+#if defined(_WIN32)
   /* Windows（第 win-c-backend 刀）：映像开了 DYNAMIC_BASE，**每趟装在哪儿都不一样**，
      而 `pe-link --map` 里落的是链接期的 VA。滑动量要靠图里那一行 `# imagebase 0x…`
      —— **不能**从自己头上读：装载器会把内存里那个 ImageBase 字段改成真实基址
@@ -696,8 +749,10 @@ static unsigned long long pf_map_imagebase = 0;
 
 /** 自己这份映像现在装在哪儿（只有 Windows 这条腿要，别的腿回 0）。 */
 static size_t pf_module_base(void) {
-#ifdef _WIN32
+#if defined(_WIN32)
+#ifdef __OMNI_LIBC__
   void *GetModuleHandleA(const char *name);
+#endif
   return (size_t)GetModuleHandleA(0);
 #else
   return 0;
@@ -975,7 +1030,7 @@ void omni_prof_report(void) {
   if (pf_reported) return;
   pf_reported = 1;
   if (pf_sampling) {
-#ifdef _WIN32
+#if defined(_WIN32)
     /* 采样线程那一档（3 号）：把旗子放下就行 —— 它自己会在下一轮 `Sleep` 之后退出。
      * 不等它（`WaitForSingleObject`）：这一趟可能是**要死的那一趟**（时限那一枪），
      * 而它最多还会记一帧，那一帧记进表里也不碍事。 */

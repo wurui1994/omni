@@ -28,6 +28,8 @@ import { renderPlan, renderSummary, renderStage } from './cli/stages.js';
 import { planForC } from './cli/plan-c.js';
 import { planForOmni } from './cli/plan-omni.js';
 import { tccTranslate } from './cli/cmd-tcc.js';
+import { isMsvc, msvcFind, msvcEnv, msvcArgs, vsRoots } from './cli/msvc.js';
+import { isClang, isClangCl, clangWant, clangFind, clangArgs, clangTargetArgs } from './cli/clang.js';
 import {
   foldedToSvg, cpuProfileToFolded, heapProfileToFolded, foldedTable, foldedSummary, foldedPaths,
   foldedTree, foldedEdges, foldedDiff,
@@ -205,6 +207,22 @@ function sysIncDirs(argv) {
   if (CROSS !== null) {
     out.push(cap('c.sysInclude')()[0]);        // C_INCLUDE_DIR（src/include，编译器自己那几个头）
     out.push(join(CROSS.sysroot, 'include'));
+    return out;
+  }
+  /* **本机就是 Windows**：那儿没有 `/usr/include`，`cSysInclude()` 一份系统头也探不到，
+   * 量到的是 `src/runtime/omni.h:33: error: include file 'stdio.h' not found` ——
+   * 看着像运行时头坏了，其实是**系统头一格都没给**。
+   *
+   * 自带的 win32 sysroot 就是这台机器该用的那一份：Windows 上没有稳定的裸 syscall，
+   * 平台层调的是 kernel32 的导入函数，所以「交叉到 win32」与「本机是 win32」是同一份头
+   * （`bundledSysroot` 里 `<os>` 那条退路正是为此）。
+   *
+   * 为什么不用 MSVC 的 `INCLUDE`：那套头里 `__declspec` / SAL / `#pragma` 一堆 MS 扩展，
+   * 我们自己那台 C 前端吃不下。MSVC 的头只在「把生成的 C 交给 `cl` 自己」（`--cc msvc`）
+   * 那一路上用 —— 那时是 `cl` 在读，不是我们在读。 */
+  if (hostOs() === 'win32') {
+    out.push(cap('c.sysInclude')()[0]);
+    out.push(join(bundledSysroot({ arch: hostArch(), os: 'win32' }), 'include'));
     return out;
   }
   const bi = argv.indexOf('--tcc-lib-dir');
@@ -673,6 +691,25 @@ function spawn(cmd, argv, mode) {
  * 为什么要它：`4 份模块（这一趟编了 1 格）` 说了"几格"却没说"哪一格" —— 而 `-v` 存在的
  * 理由正是"哪一格"。步骤行保持一行一格好对齐，具体是谁往下缩一层。
  */
+/**
+ * **链接器那条结果行**（`pe-link` / `elf-link` / `macho-link` 各一条）。
+ *
+ * 独立敲 `omni c link …` 时它是这条命令的结果，照旧走 stdout；而 `run-c`/`build` 内部
+ * 会 subMain 调一次链接器 —— 那时它落进**被比较的程序输出**里，量到的是 tests/run.js 的
+ * `js==c` 差在第 1 行（c 腿头一行是这条横幅）。嵌套时改走 stderr，与 `omni:` 那些步骤行
+ * 同一个去处。
+ */
+function linkSay(msg) {
+  /* 嵌套（`run-c` / `build` 内部）时**不印**：tests/run.js 的判据是 stdout、stderr、退出码
+   * 三个流全等，所以这一行无论落在哪个流上都会让 `js==c` 失败。要看它就 `-v`（那时它与
+   * `omni:` 那些步骤行一起出现）。独立敲 `omni c link …` 照旧走 stdout —— 那是那条命令的结果行。 */
+  if (MAIN_NEST > 0) {
+    if (VERBOSE) stderr(msg);
+    return;
+  }
+  stdout(msg);
+}
+
 function vSay(msg) {
   if (VERBOSE) stderr(`omni:   ${msg}\n`);
 }
@@ -1617,6 +1654,40 @@ function compileFront(path, argv) {
  * lib/ 底下的 .asy 不在这里：它们逐个进了产物缓存的依赖清单（见 jsCachePut）。
  */
 let srcStampMemo = '';
+/**
+ * **自带那份 libc 与它的头的指纹**（第 msvc 刀）。
+ *
+ * `srcStamp()` 只覆盖编译器自己那棵树（`src/core`），而运行时那 20 多份 `.o` 与 libc 的
+ * `.o` 还依赖 `src/sysroot/**` 里的源码与头。少了这一格，改一行 `start.c` 之后所有 `.o`
+ * 照旧命中缓存 —— 今天量到两次：`_fltused` 补了等于没补（链接期照旧 unresolved）、
+ * 控制台代码页改了之后跑出来的还是老 exe（`prof[core]` 一片乱码）。
+ *
+ * 只看 `libc/` 与 `include/`（还有公用的 `src/sysroot/libc`）：那是这些 `.o` 真正吃的东西。
+ */
+function libcStamp() {
+  const roots = [];
+  if (CROSS !== null) {
+    roots.push(join(CROSS.sysroot, 'libc'), join(CROSS.sysroot, 'include'),
+      join(CROSS.sysroot, '..', 'libc'), join(CROSS.sysroot, 'cc-include'));
+  }
+  const parts = [];
+  for (const d of roots) {
+    if (!isDir(d)) continue;
+    for (const f of readDir(d).sort()) {
+      const p = join(d, f);
+      if (isDir(p)) {
+        for (const g of readDir(p).sort()) {
+          const q = join(p, g);
+          if (!isDir(q)) parts.push(`${f}/${g}:${mtimeMs(q)}:${fileSize(q)}`);
+        }
+        continue;
+      }
+      parts.push(`${f}:${mtimeMs(p)}:${fileSize(p)}`);
+    }
+  }
+  return hash16(parts.join('|'));
+}
+
 function srcStamp() {
   if (srcStampMemo !== '') return srcStampMemo;
   const parts = [];
@@ -1927,7 +1998,7 @@ function exeCachePath(path) {
      "同名不同目录"分开。生成的 C 与目标文件的名字都跟着产物走（`buildNative` 里
      `${basename(outPath)}.c`），所以这一格起好名字，`01-arith-1f2e3d4c.out.c` 这种
      也就看得出是谁。从前叫 `<哈希>.out`，一整棵暖存里全是十六进制。 */
-  return join(exeCacheDir(), `${progName(path)}-${hash16(path).slice(0, 8)}.out`);
+  return runExeName(join(exeCacheDir(), `${progName(path)}-${hash16(path).slice(0, 8)}.out`));
 }
 
 
@@ -2586,7 +2657,7 @@ function asyCModsBuild(path, outPath) {
   const cs = srcStamp();
   const r = cap('asy.unitTexts')(path, asyModsSkip(dir, cs, 'c'));
   const arch = CROSS === null ? hostArch() : CROSS.arch;
-  const os = CROSS === null ? (hostIsDarwin() ? 'osx' : 'linux') : CROSS.os;
+  const os = CROSS === null ? hostOs() : CROSS.os;
   const fmt = fmtOfOs(os);
   const sysIncs = CROSS === null ? undefined : sysIncDirs(['--sysroot', CROSS.sysroot]);
   const rowOf = (u) => {
@@ -2821,6 +2892,197 @@ function ccPick() {
 }
 
 /** 找一个可用的 C 编译器：tcc 最快，适合开发循环；clang/gcc 用于发布 */
+/* MSVC 那一档：找一次、配一次环境，之后这一趟都用它。 */
+let MSVC_FOUND = null;
+let MSVC_ENV_DONE = false;
+
+/** 递给 `cli/msvc.js` 与 `cli/clang.js` 的宿主那几格（那两份自己不 import 宿主，好在测试里换掉）。 */
+function ccIo() {
+  const cacheFile = () => join(cacheRoot(), "msvc-env.json");
+  return {
+    env, exists, readDir, readText, isDir, mtimeMs, spawn, join,
+    fail: (m) => new OmniError(m),
+    cacheGet: (key) => {
+      try {
+        if (!exists(cacheFile())) return null;
+        return JSON.parse(readText(cacheFile()))[key] ?? null;
+      } catch { return null; }
+    },
+    cacheSet: (key, val) => {
+      try {
+        const all = exists(cacheFile()) ? JSON.parse(readText(cacheFile())) : {};
+        all[key] = val;
+        mkdirAll(cacheRoot());
+        writeText(cacheFile(), JSON.stringify(all));
+      } catch { /* 存不上下趟再问一遍，不是错 */ }
+    },
+  };
+}
+
+/** 找人 + 把 vcvars 那套环境捞进本进程。`ccRun` 与 `ccJob` 共用，各只做一次。 */
+function msvcReady() {
+  const io = ccIo();
+  if (MSVC_FOUND === null) {
+    const tgtArch = CROSS === null ? hostArch() : CROSS.arch;
+    MSVC_FOUND = msvcFind(io, tgtArch);
+    if (MSVC_FOUND.cl === null) {
+      const looked = (MSVC_FOUND.looked ?? []).join("；");
+      throw new OmniError("--cc msvc：这台机器上找不到 cl.exe（看过：" + looked
+        + "）。装一份 VS 的「使用 C++ 的桌面开发」或 Build Tools，"
+        + "或者用 OMNI_MSVC_CL 指一份 cl.exe");
+    }
+    vSay("msvc: " + MSVC_FOUND.cl + "（" + MSVC_FOUND.from + "）");
+  }
+  if (!MSVC_ENV_DONE) {
+    const e = msvcEnv(io, MSVC_FOUND, { selfLibc: LIBC === 'self' });
+    for (const k of Object.keys(e)) setEnv(k, e[k]);
+    MSVC_ENV_DONE = true;
+  }
+}
+
+/**
+ * **LLVM 那一档：只找人，不配环境。** clang 自己会找 MSVC 与 Windows SDK（量过：普通会话、
+ * `INCLUDE`/`LIB` 都空着，`clang` 与 `clang-cl` 都直接编得出跑得起来的 exe），所以这儿一格
+ * 环境变量都不设 —— 设了反而会盖掉它自己挑的那套。
+ *
+ * 按「要哪一份 exe」记账（`clang` 与 `clang-cl` 可能来自两套安装），一趟里各只找一次。
+ */
+const CLANG_FOUND = new Map();
+function clangReady(cc) {
+  const want = clangWant(cc) ?? 'clang';
+  const hit = CLANG_FOUND.get(want);
+  if (hit !== undefined) return hit;
+  const io = ccIo();
+  const f = clangFind(io, cc, vsRoots(io));
+  if (f.exe === null) {
+    throw new OmniError(`--cc ${want}：这台机器上找不到 ${want}.exe（看过：`
+      + (f.looked ?? []).join('；')
+      + '）。装一份 LLVM（https://releases.llvm.org 的 Windows 安装包，或者 VS 安装器里'
+      + '勾「适用于 Windows 的 C++ Clang 工具集」），或者用 OMNI_CLANG 指一份');
+  }
+  vSay(`${want}: ${f.exe}（${f.from}）`);
+  CLANG_FOUND.set(want, f);
+  return f;
+}
+
+/**
+ * **自带 libc（`--libc self`）+ 外部 cc**：这一趟要不要自己编、自己链那份 libc。
+ * msvc 与 Windows 上的 clang/clang-cl 都算 —— 两台都是「自己带 CRT」的，我们那份要不要上场
+ * 由 `--libc self` 明说（缺省不上，见 `main` 里那格判据）。
+ */
+function selfLibcExt(cc) {
+  if (LIBC !== 'self' || CROSS === null || targetOs() !== 'win32') return false;
+  return isMsvc(cc) || (hostOs() === 'win32' && isClang(cc));
+}
+
+
+
+/**
+ * **外部 cc 的唯一出口**（`spawn` 要的 `[cmd, ...args]`）。
+ *
+ * 三条腿：
+ *   tcc / gcc / 真正的 clang-on-unix   原样递 —— 整棵编译器里拼的就是它们的说法
+ *   msvc                               `cl.exe` 要先找出来（PATH 上没有）、开关要翻成 `cl` 说法
+ *   Windows 上的 clang / clang-cl      人要找（PATH 上可能没有），开关按方言分两路：
+ *                                      `clang` 是 GNU 说法（滤掉几格 Windows 上没有的），
+ *                                      `clang-cl` 是 `cl` 说法（借 `msvcArgs` 那台翻译机）
+ *
+ * **Windows 之外不走 clang 这一腿**：Linux/macOS 上 `clang` 本来就在 PATH 上、吃的就是 GNU
+ * 说法，原样递才对。
+ */
+function ccXlate(cc, argv) {
+  if (isMsvc(cc)) {
+    msvcReady();
+    return [MSVC_FOUND.cl, ...msvcArgs(argv, ccIo(), { selfLibc: LIBC === 'self' })];
+  }
+  if (hostOs() === 'win32' && isClang(cc)) {
+    const f = clangReady(cc);
+    const io = ccIo();
+    const extra = clangTargetArgs(hostArch(), CROSS === null ? null : CROSS.arch);
+    const selfLibc = LIBC === 'self';
+    /* **自带 libc 那一档还要把 MSVC 那套环境配上**（`--libc self` 才走这一格）。
+     * 不是为了头（那边 `-nostdlibinc` / `/X` 把系统头全掐了），是为了**挑链接器**：
+     * clang 的 MSVC 工具链在 PATH 上找得到 `link.exe` 就用它，找不到才退回 `lld-link`——
+     * 而这一档上那两个链接器的行为不一样：`lld-link` 会把 `libcmt.lib` 里那些与我们的 libc
+     * 重名的对象也拉进来，报一串
+     *   lld-link: error: duplicate symbol: memcmp（还有 memcpy/snprintf/_fltused…）
+     *   >>> defined at .omni-cache/rt/host-clang-cl/libc-string.o
+     *   >>> defined at libvcruntime.lib(memcmp.obj)
+     * 而 `link.exe` 按"对象里的定义优先于库里的"处理，同一组输入它链得出来（`--cc msvc`
+     * 这一档就是这么跑通的）。`libcmt.lib` 本身是为了 `__chkstk` 那一格，躲不开。
+     * 顺带 `LIB` 也配上了 —— 那正是 `libcmt.lib` 从哪儿找。 */
+    if (selfLibc) msvcReady();
+    if (isClangCl(cc)) return [f.exe, ...msvcArgs(argv, io, { selfLibc, clangCl: true, extra })];
+    return [f.exe, ...clangArgs(argv, io, { selfLibc, target: extra })];
+  }
+
+  return [cc, ...argv];
+}
+
+
+/**
+ * **MSVC 插桩那一档要的那份 `.obj`**（`--profile cc`）。
+ *
+ * `cl` 的 `/Gh` `/GH` 只管"每个函数进出各调一次 `_penter` / `_pexit`"，那一对**要我们自己
+ * 提供**（不在任何库里，`/NODEFAULTLIB` 与否都一样）。它们不能用 C 写 —— 量出来的原因写在
+ * `runtime/omni_prof_msvc_x64.asm` 头上（那两个钩子摆在"入参还在寄存器里"与"返回值已就位"
+ * 这两个位置上，必须保住所有易失寄存器）。所以是一份汇编，拿**工具链自带的 `ml64.exe`**
+ * （与 `cl.exe` 同一个目录）汇成 `.obj` 跟着一起链。
+ *
+ * 只在 `.asm` 比 `.obj` 新的时候汇一遍：这一格的输入就一份文件，不值得一套缓存键。
+ */
+function msvcInstrObjs(cc) {
+  if (!isMsvc(cc)) return [];
+  msvcReady();
+  if (MSVC_FOUND.target !== 'x64') {
+    throw new OmniError(`--profile cc 在 msvc + ${MSVC_FOUND.target} 上还没接：`
+      + '`_penter`/`_pexit` 那一对只有 x64 一版汇编（arm64 要 armasm64、另一套寄存器与另一套'
+      + '调用约定）。那边先用 `--cc clang`（它有 -finstrument-functions）或 `--profile sample`');
+  }
+  const src = join(RUNTIME_DIR, 'omni_prof_msvc_x64.asm');
+  if (!exists(src)) throw new OmniError(`--profile cc（msvc）：找不到 ${src}`);
+  const dir = join(cacheRoot(), 'work', 'prof-msvc');
+  const obj = join(dir, 'omni_prof_hooks.obj');
+  if (exists(obj) && mtimeMs(obj) >= mtimeMs(src)) return [obj];
+  mkdirAll(dir);
+  const ml = join(dirname(MSVC_FOUND.cl), 'ml64.exe');
+  if (!exists(ml)) {
+    throw new OmniError(`--profile cc（msvc）：这份工具链里没有 ${ml} —— 汇编器本来与 cl 一起`
+      + '装（VS 安装器里「MSVC … 生成工具」那一格）。缺了它这一档编不出来');
+  }
+  const r = spawn(ml, ['/nologo', '/c', `/Fo${obj}`, src], 'c');
+  if (r[0] !== 0) {
+    throw new OmniError(`ml64 汇不动 ${src}（退出码 ${r[0]}）\n${r[1] ?? ''}${r[2] ?? ''}`);
+  }
+  vSay(`msvc: 插桩钩子 ${obj}（ml64）`);
+  return [obj];
+}
+
+/** 上面那条翻译之后真的把它起起来。 */
+
+function ccRun(cc, argv, mode) {
+  const [cmd, ...args] = ccXlate(cc, argv);
+  if (!isMsvc(cc)) return spawn(cmd, args, mode);
+  /* **`cl` 把每个输入文件的名字回显到 stdout** —— 而 stdout 是**被编译的那个程序**的输出流，
+   * 不是编译器的日记本。量到的是 `run --backend c --cc msvc` 的第一行多出一句
+   *   01_basics.exe.c
+   * 于是 js==c 那道门第一行就不一样。`/nologo` 只压横幅，这句回显没有开关可关
+   * （MSVC 从 1.0 起就这么干），所以在这儿滤：它是**单独一行、正好等于某个输入的文件名**。 */
+  const names = new Set(args.filter((a) => /\.(c|cc|cpp|cxx)$/i.test(a)).map((a) => basename(a)));
+  const r = spawn(cmd, args, mode === 'o' ? 'c' : mode);
+  const keep = String(r[1] ?? '').split(/\r?\n/).filter((l) => !names.has(l.trim()));
+  const txt = keep.join('\n');
+  if (mode === 'o' && txt.trim() !== '') stdout(txt.replace(/\n+$/, ''));
+  return [r[0], txt, r[2]];
+}
+
+
+/** 一格作业（`spawnPar` 吃 `[cmd, ...args]`）。与 `ccRun` 同一条解析与翻译。 */
+function ccJob(cc, argv) {
+  return ccXlate(cc, argv);
+}
+
+
 let findCCMemo = '';
 function findCC() {
   /* `--cc` 不进 memo：那一格是「这一趟」的话，而 memo 是进程级的
@@ -2860,6 +3122,16 @@ function selfCC() {
   const v = ccPick();
   return !v || v === 'self';
 }
+
+/**
+ * 这一趟是不是交给 **Windows 上的外部 cc**（`msvc` / `clang` / `clang-cl`）。
+ * 判「自带 libc 要不要缺省打开」用它：那几台自己带着 CRT 与一整套头。
+ */
+function extWinCc() {
+  const v = ccPick();
+  return isMsvc(v) || isClang(v);
+}
+
 
 /**
  * 问一次 `uname`。回**它印的那一行**；两种"没答案"分得清：
@@ -2971,12 +3243,46 @@ function optFlag() {
  * （超越函数改成转手宿主的数学库），但 flag 留着：核心方言的 `(bin "*" …)`/`(bin "+" …)`
  * 是**逐个运算**的语义，编译器不许替我们改写 —— 这跟数学库怎么绑没关系。
  */
+/**
+ * **自带 libc（`--libc self`）那一档，我们那套头往哪儿找**（第 msvc 刀，第 clang 刀扩到 LLVM）。
+ *
+ * 两处用它：`ccFlags`（运行时与生成的 C）与 `cFileViaCc`（**用户自己那份 `.c`**）。
+ * 后者从前没给，量到的是 `hello.c(1): fatal error C1083: Cannot open include file: stdio.h`。
+ *
+ * **偏偏不能摆进 `ccXlate`**（外部 cc 的唯一出口，那儿看着更顺手）：libc 自己那几份 `.c`
+ * 要的是**另一套**头（`<sysroot>/libc` 那些内部头），它们也走同一条出口 —— 摆在那儿就等于
+ * 把给用户程序的那套公开头塞给 libc 自己，两套 `struct __FILE` 打起来。
+ *
+ * 两台 cc 要的不一样：
+ *   `cl`            `INCLUDE` 里故意只有 VC 自己那一份（UCRT 一进来就把 time_t/size_t 按它
+ *                   的说法重定义），所以 freestanding 那几格（stddef/float/limits）得由我们
+ *                   `<sysroot>/cc-include` 里那三个头顶上
+ *   `clang`/`clang-cl`  有 `-nostdlibinc`：系统与 CRT 的头掐掉、**编译器自己那几个 freestanding
+ *                   头还在**，于是只要给 `<sysroot>/include` 一条就够 —— 那三个头让 clang 自己
+ *                   那份来（它那份跟着它的 ABI 走，比我们抄一遍稳）
+ */
+function selfIncArgs(cc) {
+  if (LIBC !== 'self' || CROSS === null) return [];
+  if (isMsvc(cc)) {
+    return ['-I', join(CROSS.sysroot, 'include'), '-I', join(CROSS.sysroot, 'cc-include')];
+  }
+  if (hostOs() === 'win32' && isClang(cc)) return ['-I', join(CROSS.sysroot, 'include')];
+  return [];
+}
+
 function ccFlags(cc) {
   // -pthread：入口可能跑在一条大栈的线程上（omni_run_entry），编译与链接两边都要这一位。
+
+
   // macOS 上 pthread 就在 libSystem 里、这个开关等于空操作；glibc 2.34 起也已并进 libc。
+  /* **自带 libc**（方案 B）：用户程序与运行时那一套头在 `<sysroot>/include`，
+   * 不是 MSVC 的 UCRT。libc 自己那几份 `.c` 反过来只吃 `<sysroot>/libc`（见 runtimeObjects）。 */
+  const selfInc = selfIncArgs(cc);
   return isTcc(cc) ? ['-I', RUNTIME_DIR]
-    : [optFlag(), '-std=c99', '-ffp-contract=off', '-w', '-pthread', '-I', RUNTIME_DIR];
+    : [optFlag(), '-std=c99', '-ffp-contract=off', '-w', '-pthread', '-I', RUNTIME_DIR, ...selfInc];
 }
+
+
 
 /**
  * 这台 cc 是 tcc 吗 —— 按**基名**认，不按整条命令认。
@@ -3077,6 +3383,22 @@ function targetOs() {
 function exeName(out) {
   if (targetOs() !== 'win32') return out;
   return /\.[A-Za-z0-9]+$/.test(basename(out)) ? out : `${out}.exe`;
+}
+
+/**
+ * **内部产物**（`run` 那一趟的临时程序、暖存里那一份）在 win32 上的名字。
+ *
+ * 与 `exeName` 的区别：那一格是"用户用 `-o` 说了名字"，已经带后缀的就不动；这一格的名字
+ * 是我们自己起的（`01_basics`、`02-strings-1f2e3d4c.out`），而 `CreateProcess` **只认
+ * `.exe`** —— 量到的是
+ *   `Error: cannot spawn: spawnSync …/work/run-01_basics.omni/01_basics ENOENT`
+ * PE 已经链好了（1647104 字节、4 节、49 个导入桩），只是那个名字在 Windows 上起不来。
+ * `.out` 这种我们自己加的后缀要**换掉**，不是往后面再接一段。
+ */
+function runExeName(out) {
+  if (targetOs() !== 'win32') return out;
+  if (out.endsWith('.exe')) return out;
+  return out.endsWith('.out') ? `${out.slice(0, -4)}.exe` : `${out}.exe`;
 }
 
 /**
@@ -3216,7 +3538,7 @@ function goLib() {
      那个路径写进库自己的 `LC_ID_DYLIB`，于是链上它的程序一跑就是
      `Library not loaded: …/work/go-stage-…/libomnigo.dylib` —— 暖存盘用完就没了。
      GL 那条腿不撞这一格是因为它走 dlopen（按路径装），不进链接命令。 */
-  const r = spawn(cc, ['-O2', '-w', hostIsDarwin() ? '-dynamiclib' : '-shared',
+  const r = ccRun(cc, ['-O2', '-w', hostIsDarwin() ? '-dynamiclib' : '-shared',
     ...(hostIsDarwin() ? ['-install_name', lib] : []),
     '-fPIC', '-o', staged, ...srcs, '-I', SCHED_DIR, '-lpthread'], 'c');
   if (r[0] !== 0) {
@@ -3273,7 +3595,7 @@ function glPlugin() {
   if (slot.fresh && exists(lib)) return lib;
   const stage = workDirFor('gl-stage', key);
   const staged = join(stage, 'libomnigl.dylib');
-  const r = spawn(cc, ['-O2', '-w', '-dynamiclib', '-o', staged, ...srcs,
+  const r = ccRun(cc, ['-O2', '-w', '-dynamiclib', '-o', staged, ...srcs,
     '-I', GL_DIR, '-framework', 'OpenGL',
     /* 文件纹理的解码走 ImageIO（§20.2）。 */
     '-framework', 'ImageIO', '-framework', 'CoreGraphics',
@@ -3317,7 +3639,7 @@ function evGlAddon() {
   const staged = join(stage, 'omni_ev_gl.node');
   const shared = ['-fPIC', '-shared']
     .concat(hostIsDarwin() ? ['-undefined', 'dynamic_lookup'] : []);
-  const r = spawn(cc, ['-O2', '-w', ...shared, '-o', staged, ...srcs,
+  const r = ccRun(cc, ['-O2', '-w', ...shared, '-o', staged, ...srcs,
     '-I', RUNTIME_DIR, '-framework', 'OpenGL',
     /* 文件纹理的解码走 ImageIO（§20.2）。 */
     '-framework', 'ImageIO', '-framework', 'CoreGraphics',
@@ -3344,6 +3666,14 @@ function jobCount() {
   if (o !== undefined && o !== '') {
     const n = Number(o);
     JOBS_CACHE = Number.isInteger(n) && n > 0 ? n : 1;
+    return JOBS_CACHE;
+  }
+  /* **Windows 上没有 `getconf`**：cmd 自己就把核数摆在环境里（`NUMBER_OF_PROCESSORS`）。
+   * 量到的是 `Error: cannot spawn: spawnSync getconf ENOENT` —— 而且那一下是**致命**的，
+   * 不是"问不出来就猜 4"：`spawn` 在这条腿上取不到程序直接抛。 */
+  if (hostOs() === 'win32') {
+    const w = Number(String(env('NUMBER_OF_PROCESSORS') ?? '').trim());
+    JOBS_CACHE = Number.isInteger(w) && w > 0 ? (w > 16 ? 16 : w) : 4;
     return JOBS_CACHE;
   }
   const r = spawn('getconf', ['_NPROCESSORS_ONLN'], 'c');
@@ -3373,6 +3703,13 @@ function shQuote(s) {
  */
 function spawnPar(jobs) {
   const n = jobCount();
+  /* **Windows 上退回串行**：这一格的实现是"生成一份 sh 脚本、里头 `cmd & cmd & wait`"，
+   * 而那儿没有 `/bin/sh`（`cmd` 的 `&` 是顺序执行、`start /b` 又没有 `wait`）。
+   * 退回串行只是慢，不影响任何一格产物 —— 真要并行，正解是在 Windows 上另写一份
+   * （`start /b` + 轮询 rc 文件），那是另一刀，不该顺手塞在这儿。 */
+  if (hostOs() === 'win32') {
+    return jobs.map((j) => spawn(j[0], j.slice(1), 'c'));
+  }
   if (n <= 1 || jobs.length <= 1) {
     return jobs.map((j) => spawn(j[0], j.slice(1), 'c'));
   }
@@ -3437,12 +3774,26 @@ function runtimeObjects(cc) {
      从前是拿 `hash16(cc|flags|deps)` 当目录名：一台机器上永远只有一份，那串十六进制
      买不到东西，配置真变了的时候旧的那一格还留着没人清。 */
   const slot = cacheSlot(cacheRoot(), 'rt', `host-${basename(cc)}`,
-    hash16([cc, ...flags, ...deps].join('|')));
+    hash16([cc, ...flags, ...deps, libcStamp()].join('|')));
   const dir = slot.dir;
   const objs = srcs.map((p) => join(dir, `${basename(p, '.c')}.o`));
-  if (slot.fresh && objs.every((o) => exists(o))) {
+  /* **libc 那一批**（方案 B，只在 msvc + 自带 libc 时有）：与运行时那一批**头不一样**，
+   * 所以分两批编。它们只吃 `<sysroot>/libc` 与公用的 `src/sysroot/libc`（内部头：
+   * syscall.h、`struct __FILE`）—— 给用户程序那一套 glibc 形状的头绝不能进来。 */
+  const libcSelf = selfLibcExt(cc);
+  const libcDir = libcSelf ? join(CROSS.sysroot, 'libc') : '';
+  const libcShared = libcSelf ? join(CROSS.sysroot, '..', 'libc') : '';
+  const libcSrcs = [];
+  if (libcSelf) {
+    for (const d of (isDir(libcShared) ? [libcDir, libcShared] : [libcDir])) {
+      for (const f of readDir(d)) if (f.endsWith('.c')) libcSrcs.push(join(d, f));
+    }
+    libcSrcs.sort();
+  }
+  const libcObjs = libcSrcs.map((p) => join(dir, `libc-${basename(p, '.c')}.o`));
+  if (slot.fresh && objs.every((o) => exists(o)) && libcObjs.every((o) => exists(o))) {
     vStep(`runtime .o  ${objs.length} objects, cache hit ${dir}`);
-    return objs;
+    return [...objs, ...libcObjs];   /* libc 那一批也要回去 —— 少了它链接期全是 unresolved */
   }
 
   // 先编进暂存目录再整体 rename：中断不会留下半个缓存
@@ -3450,10 +3801,30 @@ function runtimeObjects(cc) {
   // 不会撞文件名；而且用完就扔 —— 从前那个时间戳键每趟留一个目录（task #55 的后半截）。
   const stage = scratchDir('rt-stage');
   const staged = srcs.map((p) => join(stage, `${basename(p, '.c')}.o`));
-  const rs = spawnPar(srcs.map((p, i) => [cc, ...flags, '-c', '-o', staged[i], p]));
+  if (libcSrcs.length > 0) {
+    mkdirAll(dir);   /* 这一批直接落缓存那一格，目录得先在 */
+    /* `cc-include` 只给 `cl`：clang 那一档有 `-nostdlibinc`，freestanding 那几个头用它自己的
+     * （`ccXlate` 已经把那一格递上了）。 */
+    const ccinc = isMsvc(cc) ? ['-I', join(CROSS.sysroot, 'cc-include')] : [];
+    const linc = isDir(libcShared) ? ['-I', libcDir, '-I', libcShared, ...ccinc]
+      : ['-I', libcDir, ...ccinc];
+    const lr = spawnPar(libcSrcs.map((p, i) => ccJob(cc,
+      [optFlag(), '-w', ...linc, '-c', '-o', libcObjs[i], p])));
+    for (let i = 0; i < lr.length; i++) {
+      if (lr[i][0] !== 0) {
+        throw new OmniError(`自带那份 libc 编不过（${cc}）：${basename(libcSrcs[i])}\n`
+          + `${lr[i][1] ?? ''}${lr[i][2] ?? ''}`);
+      }
+    }
+    vStep(`libc .o  ${libcSrcs.length} objects compiled with ${cc}`);
+  }
+  const rs = spawnPar(srcs.map((p, i) => ccJob(cc, [...flags, '-c', '-o', staged[i], p])));
   for (let i = 0; i < rs.length; i++) {
     if (rs[i][0] !== 0) {
-      throw new OmniError(`omni runtime failed to compile with ${cc}:\n${rs[i][2]}`);
+      /* 两个流都印：`cl.exe` 的诊断在 stdout 上（GNU 那几个在 stderr），
+         只印一个的话 msvc 这条腿报错等于一片空白。 */
+      throw new OmniError(`omni runtime failed to compile with ${cc}:\n`
+        + `${rs[i][1] ?? ''}${rs[i][2] ?? ''}`);
     }
   }
   // 目标已存在 = 别人先建好了，下面那句会用它（rename 到一个非空目录在两个宿主上都是硬错，
@@ -3471,7 +3842,7 @@ function runtimeObjects(cc) {
     dropScratch(stage);
     kept = objs;
   }
-  return kept;
+  return [...kept, ...libcObjs];
 }
 
 /**
@@ -3499,8 +3870,12 @@ function runtimeObjectsSelf(arch, os) {
      * 开着档编出来的字节与不开是两份东西，而从前键里没有它 —— 只要有人拿
      * `OMNI_MIR_OPT=2` 在冷缓存上编过一趟，后面**所有**默认档的构建都会安静地端到
      * 那份优化过的运行库（体积差不多，看不出来）。这里存的是原文而不是档位：
-     * `''` 与 `'0'` 语义相同但各占一格，多一格空目录比少一格判据便宜。 */
-    hash16(['self', arch, os, srcStamp(), env('OMNI_MIR_OPT') ?? '',
+     * `''` 与 `'0'` 语义相同但各占一格，多一格空目录比少一格判据便宜。
+     *
+     * **`libcStamp()` 同理**（第 msvc 刀）：自带 libc 那一档的 `.o` 跟着 `src/sysroot` 里那套
+     * 头与 `.c` 走，而它们不在 `deps`（那一格只看 `src/runtime`）—— 改完 sysroot 再编，
+     * 量到的是"改了没效果"，因为端上来的还是旧的那一批。 */
+    hash16(['self', arch, os, srcStamp(), libcStamp(), env('OMNI_MIR_OPT') ?? '',
       CROSS === null ? '' : CROSS.sysroot, ...deps].join('|')));
   const dir = slot.dir;
   const objs = srcs.map((p) => join(dir, `${basename(p, '.c')}.o`));
@@ -3632,13 +4007,17 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
        * emit.js 里那段注释的原话）。`-finstrument-functions` 是 gcc 与 clang 都有的
        * 跨平台机制（Darwin 上 `-pg`/gprof 早就不出 `gmon.out` 了）。 */
       ...(PROF !== null && PROF.mode === 'cc' ? ['-finstrument-functions'] : []),
+      /* msvc 那一档还要多一份 `.obj`（`/Gh /GH` 要的 `_penter`/`_pexit`）—— 见 `msvcInstrObjs`。 */
+      ...(PROF !== null && PROF.mode === 'cc' ? msvcInstrObjs(cc) : []),
+
       cPath, ...runtimeObjects(cc),
       '-o', outPath, '-lm', ...libs, ...libLinkArgs(mod.libs)]
     : [...ccFlags(cc), ...shared, cPath, '-o', outPath, ...libs, ...libLinkArgs(mod.libs)];
   const tCc0 = nowMs();
-  const r = spawn(cc, cargs, 'o');
+  const r = ccRun(cc, cargs, 'o');
   if (r[0] !== 0) {
-    throw new OmniError(`C backend produced code that ${cc} rejected:\n${r[2]}\n(kept at ${cPath})`);
+    throw new OmniError(`C backend produced code that ${cc} rejected:\n`
+      + `${r[1] ?? ''}${r[2] ?? ''}\n(kept at ${cPath})`);
   }
   vStep(`${cc}  ${cargs.length} args -> ${outPath}  ${fileSize(outPath)} bytes`);
   /* 这一份记进流水账（核心一档、插件一档，收尾时 vTally 印）。 */
@@ -3690,7 +4069,7 @@ function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms)
   /* 交叉编译（`--sysroot`）那一趟：目标由 `CROSS` 说，头与库都从 sysroot 里取；
    * 本机那一趟一个字不变。 */
   const arch = CROSS === null ? hostArch() : CROSS.arch;
-  const os = CROSS === null ? (hostIsDarwin() ? 'osx' : 'linux') : CROSS.os;
+  const os = CROSS === null ? hostOs() : CROSS.os;
   const fmt = fmtOfOs(os);
   const sysIncs = CROSS === null ? undefined : sysIncDirs(['--sysroot', CROSS.sysroot]);
   const sysArgs = [
@@ -3835,7 +4214,7 @@ function perModuleWanted(argv, path) {
  */
 function buildSelfModules(mod, outPath, dir) {
   const arch = CROSS === null ? hostArch() : CROSS.arch;
-  const os = CROSS === null ? (hostIsDarwin() ? 'osx' : 'linux') : CROSS.os;
+  const os = CROSS === null ? hostOs() : CROSS.os;
   const fmt = fmtOfOs(os);
   const sysIncs = CROSS === null ? undefined : sysIncDirs(['--sysroot', CROSS.sysroot]);
   const sysArgs = [
@@ -4027,7 +4406,7 @@ function runViaC(mod, argv, srcPath, cache) {
   const cached = wi >= 0 || cache !== true ? null : exeCachePath(srcPath);
   const dir = wi >= 0 ? argv[wi + 1] : workDirFor('run', workName(srcPath));
   if (wi >= 0) mkdirAll(dir);
-  const exe = cached === null ? join(dir, progName(srcPath)) : cached;
+  const exe = runExeName(cached === null ? join(dir, progName(srcPath)) : cached);
   /* 工作目录**总是按源文件起名**（`work/run-<源名>/`）：产物落进暖存那一格时它的名字带
      内容哈希（`02-strings-1633f663.out`），从前 buildNative 按产物名算目录，于是每换一个
      哈希就多一个 `work/c-02-strings-1633f663.out/`，里头那份 `.c` 也叫
@@ -4098,7 +4477,7 @@ function ffiAddon(mod) {
   const shared = ['-fPIC', '-shared']
     .concat(hostIsDarwin() ? ['-undefined', 'dynamic_lookup'] : []);
   const args = ['-O2', '-w', ...shared, '-I', RUNTIME_DIR, cPath, '-o', staged, ...libs];
-  const r = spawn(cc, args, 'o');
+  const r = ccRun(cc, args, 'o');
   if (r[0] !== 0) {
     throw new OmniError(`node ffi：那份发出来的 N-API 扩展 ${cc} 编不过（ADR-0038）：\n${r[2]}\n`
       + `（那份 C 留在 ${cPath}）`);
@@ -4134,7 +4513,7 @@ function ffiHost() {
     const staged = join(stage, 'omni_ffi_host.node');
     const shared = ['-fPIC', '-shared']
       .concat(hostIsDarwin() ? ['-undefined', 'dynamic_lookup'] : []);
-    const r = spawn(cc, ['-O2', '-w', ...shared, '-I', RUNTIME_DIR, src, '-o', staged], 'o');
+    const r = ccRun(cc, ['-O2', '-w', ...shared, '-I', RUNTIME_DIR, src, '-o', staged], 'o');
     if (r[0] !== 0) {
       throw new OmniError(`node ffi：注入宿主 ${cc} 编不过（ADR-0038）：\n${r[2]}`);
     }
@@ -4261,7 +4640,7 @@ function buildLlvm(mod, outPath, workDir) {  const mir = lowerToMir(mod);
   const args = [optFlag(), '-w', '-ffp-contract=off', '-pthread', ...mainStackFlags(cc),
     '-I', RUNTIME_DIR, llPath, ...runtimeObjects(cc), '-o', outPath, '-lm',
     ...libLinkArgs(mir.libs)];
-  const r = spawn(cc, args, 'o');
+  const r = ccRun(cc, args, 'o');
   if (r[0] !== 0) {
     throw new OmniError(`llvm backend produced IR that ${cc} rejected:\n${r[2]}\n(kept at ${llPath})`);
   }
@@ -4341,7 +4720,7 @@ function buildJitHost() {
   const args = ['-O2', '-w', '-pthread', ...mainStackFlags(cc), '-I', inc[1].trim(),
     '-I', RUNTIME_DIR, src, symSrc,
     ...objs, '-L', libdir[1].trim(), '-lLLVM', '-lm', '-o', staged];
-  const r = spawn(cc, args, 'o');
+  const r = ccRun(cc, args, 'o');
   if (r[0] !== 0) throw new OmniError(`the jit host failed to build with ${cc}:\n${r[2]}`);
   mkdirAll(join(cacheRoot(), 'jit'));
   if (!exists(exe)) rename(stage, dir);
@@ -4584,7 +4963,7 @@ function cFileViaCc(path, argv, exe) {
   if (!cc || cc === 'self') return null;
   const mode = PROF === null ? null : PROF.mode;
   const objs = [];
-  const flags = ['-O2', '-g'];
+  const flags = ['-O2', '-g', ...selfIncArgs(cc)];
   /* `.c` 输入这条腿上 **`cc` 与 `stub` 是同一件事**：那份 C 不经我们的发射器，所以"发射期
    * 插的那一对"在这儿只能理解成"插桩" —— 谁编的谁插（我们自己那台前端也会插了，
    * 见 `emitProfCall`）。两个名字都落到 `-finstrument-functions` 上，不多一句拒绝。 */
@@ -4595,11 +4974,16 @@ function cFileViaCc(path, argv, exe) {
      * 进入钩子又触发钩子 —— 量到的就是当场 `Segmentation fault: 11`（栈爆）。所以它
      * 单独先编成一个 `.o`（不带那面开关），再和用户那份一起链。 */
     const pobj = join(dirname(exe), 'omni_prof.o');
-    const prc = spawn(cc, ['-O2', '-g', '-I', RUNTIME_DIR, '-c',
+    const prc = ccRun(cc, ['-O2', '-g', '-I', RUNTIME_DIR, '-c',
       join(RUNTIME_DIR, 'omni_prof.c'), '-o', pobj], 'c')[0];
     if (prc !== 0) throw new OmniError(`${cc} 编不过收集器 omni_prof.c（退出码 ${prc}）`);
     objs.push(pobj);
-    if (instr) flags.push('-finstrument-functions');
+    if (instr) {
+      flags.push('-finstrument-functions');
+      /* msvc 那一档：`/Gh /GH` 要的 `_penter`/`_pexit` 在一份自己汇的 `.obj` 里。 */
+      objs.push(...msvcInstrObjs(cc));
+    }
+
     if (mode === 'sample') {
       /* 采样那条栈是靠**帧指针**往上走的（`ucontext` 拿到 fp 再一格格串）—— `-O2` 默认
        * 会省掉它，省掉就只剩最外那一帧。这一格明着要回来。 */
@@ -4610,17 +4994,25 @@ function cFileViaCc(path, argv, exe) {
       writeText(shim, 'void omni_prof_env_init(void);\n'
         + '__attribute__((constructor)) static void omni_prof_boot(void) { omni_prof_env_init(); }\n');
       const sobj = join(dirname(exe), 'omni_prof_boot.o');
-      const src = spawn(cc, ['-O2', '-c', shim, '-o', sobj], 'c')[0];
+      const src = ccRun(cc, ['-O2', '-c', shim, '-o', sobj], 'c')[0];
       if (src !== 0) throw new OmniError(`${cc} 编不过采样启动那一格（退出码 ${src}）`);
       objs.push(sobj);
     }
   }
   /* `-lm`：数学库在 Linux 上是单独一份（macOS 上并进 libSystem，多给这一格也无害）。
    * `.c` 输入里 `sqrt`/`pow` 太常见，少这一格会在链接那一步倒。 */
-  const args = [...flags, path, ...objs, '-o', exe, '-lm'];
-  const rc = spawn(cc, args, 'c')[0];
+  /* **msvc + 自带 libc**：用户这份 `.c` 也得链上我们那份 libc —— `printf` 与入口 `_start`
+   * 都在里头（这条腿走 `/NODEFAULTLIB`，MSVC 的 CRT 一格都不接）。量到的是
+   *   LINK : error LNK2001: unresolved external symbol _start
+   *   hello.obj : error LNK2019: unresolved external symbol printf
+   * 复用 `runtimeObjects` 那一格缓存，只挑 `libc-*` 那几份（运行时那 20 多份这儿用不上）。 */
+  const libcObjs = selfLibcExt(cc)
+    ? runtimeObjects(cc).filter((o) => basename(o).startsWith('libc-')) : [];
+  const args = [...flags, path, ...objs, ...libcObjs, '-o', exe, '-lm'];
+  const r = ccRun(cc, args, 'c');
+  const rc = r[0];
   vStep(`${cc} ${mode === null ? '' : `--profile ${mode} `}${path} -> ${exe}`);
-  if (rc !== 0) throw new OmniError(`${cc} 编不过 ${path}（退出码 ${rc}）`);
+  if (rc !== 0) throw new OmniError(`${cc} 编不过 ${path}（退出码 ${rc}）\n` + `${r[1] ?? ''}${r[2] ?? ''}`);
   return exe;
 }
 
@@ -5172,22 +5564,50 @@ function main(argv) {
      * **只有 `build`/`run`/`plugins` 这几条推**：`omni c obj|link` 是**低一层的工具**
      * （对着 `cc` 的口径），那一层「头从哪儿来」得写明白 —— 判据里那些交叉编探子正是
      * 靠「不给 sysroot 就用本机 SDK 的头」在跑的，推一手会悄悄换掉它们的尺子。 */
+    /* `--cc CC`：生成的 C 交给谁（`self` = 我们自己那台）。比 `OMNI_CC` 优先。
+     *
+     * **要在 `--libc` 之前解析**：下面那一格「win32 上缺省 `self`」的判据要看这一趟到底
+     * 交给谁编 —— 交给 msvc/clang 的话缺省就不是我们那份 libc 了。 */
+    const ci = rest.indexOf('--cc');
+    CC = ci < 0 ? null : rest[ci + 1];
     const bi = rest.indexOf('--libc');
+    /* **win32 宿主上缺省是 `self`（只对我们自己那台 cc）**：那儿我们既没有 `msvcrt` 的导入库、
+     * 也没有 `x86_64-win32-libtcc1.a`（编译器支持例程那一份），于是不给 `--libc` 的一趟停在
+     *   pe: 找不到 x86_64-win32-libtcc1.a
+     * 自带那份 libc 反过来什么都不缺：平台层直接调 kernel32 的导入函数，libtcc1 里那些
+     * 支持例程我们自己的后端本来就自己发。于是「本机 Windows」与「交叉到 Windows」
+     * 走的是同一条路 —— 那两条以前不对称，只因为交叉那条命令行上一直写着 `--libc self`。
+     *
+     * **`--cc msvc|clang|clang-cl` 那几趟不在此列**：那几台自己带着 CRT 与一整套头，缺省就该
+     * 用它们自己的（`--cc msvc` 编出来的东西跟别处 `cl` 编出来的一样，这是拿它的人预期的样子）。
+     * 要走我们那份就明写 `--libc self`。明写 `--libc msvcrt` 仍然按写的来。 */
     LIBC = bi < 0 ? null : rest[bi + 1];
     const si = rest.indexOf('--sysroot');
-    const infer = node.key === 'build' || node.key === 'run' || node.key === 'plugins';
+    /* `run-c` / `run-llvm` / `run-jit` 是 `run --backend X` 的老拼法（cmds.js 那张表，
+     * 各自一格 key）。漏了它们的样子是「测试套件那条 run-c 腿一声不响地还走老路」——
+     * 这句话 cli.js 里另一处（`perModuleC` 那个判据）已经写过一遍，这儿是同一个坑。
+     * 量到的：tests/run.js 的 c 腿报 `pe: 找不到 x86_64-win32-libtcc1.a`。 */
+    const infer = node.key === 'build' || node.key === 'run' || node.key === 'run-c'
+      || node.key === 'run-llvm' || node.key === 'run-jit' || node.key === 'plugins';
     if (si >= 0) {
       CROSS = { ...cTgt(rest), sysroot: rest[si + 1] };
     } else if (infer) {
       const tgt = cTgt(rest);
       const cross = tgt.arch !== hostArch() || tgt.os !== hostOs();
+      /* **win32 宿主上缺省是 `self`，但只对我们自己那台 cc**（那儿没有 msvcrt 的导入库、
+       * 也没有 libtcc1.a）—— 而且只在**会推 sysroot 的这几条命令**上给：`omni c obj|link`
+       * 那一层不推，给了就成了「要 self 却没有 sysroot」，报 `--libc self 要配 --sysroot`。
+       * （那正是我上一版改出来的回归：tests/run.js 的每条腿都走那一层。）
+       *
+       * **外部 cc（msvc / clang / clang-cl）缺省不用我们那份 libc**：它们各自带着 CRT 与
+       * 一整套头，那是它们平常的样子，也是别人拿 `--cc msvc` 时预期的样子。要走我们那份
+       * 就明说 `--libc self`（于是 `-nostdlibinc` / `/NODEFAULTLIB` 那一套才上场）。 */
+      if (LIBC === null && hostOs() === 'win32' && !extWinCc()) LIBC = 'self';
       CROSS = (cross || LIBC === 'self') ? { ...tgt, sysroot: bundledSysroot(tgt) } : null;
     } else {
       CROSS = null;
     }
-    /* `--cc CC`：生成的 C 交给谁（`self` = 我们自己那台）。比 `OMNI_CC` 优先。 */
-    const ci = rest.indexOf('--cc');
-    CC = ci < 0 ? null : rest[ci + 1];
+    /* `--cc` 已经在上面（`--libc` 之前）解析过了。 */
     /* `--no-trim`：不裁产物里的运行时那一段（逃生门，见 `NO_TRIM` 头上那段）。 */
     NO_TRIM = rest.includes('--no-trim');
     /* `--lang-directive`：认不认第一行的 `#lang`（ADR-0037，默认不认）。
@@ -6557,7 +6977,7 @@ function main(argv) {
       writeLinkMap(valOf('--map'), r.mapSyms, `# imagebase 0x${r.img.imagebase.toString(16)}`);
       /* 有导出的符号时 tcc 还顺手写一份 `<输出>.def`（`pe_build_exports` 里那段 `#if 1`）。 */
       if (r.def !== undefined) writeText(r.def.path, r.def.text);
-      stdout(`${out} (${r.bytes.length} 字节，${r.infos.length} 节，${r.nthunks} 个导入桩)\n`);
+      linkSay(`${out} (${r.bytes.length} 字节，${r.infos.length} 节，${r.nthunks} 个导入桩)\n`);
       return 0;
     }
     /* `elf-link`：几个 `.o` 链成一份 Linux 可执行文件（第九刀第五十三、五十四片）。
@@ -6677,7 +7097,7 @@ function main(argv) {
       });
       writeBinary(out, r.bytes);
       writeLinkMap(valOf('--map'), r.syms);
-      stdout(`${out} (${r.bytes.length} 字节，${r.shnum} 节，${r.phnum} 段，`
+      linkSay(`${out} (${r.bytes.length} 字节，${r.shnum} 节，${r.phnum} 段，`
         + `入口 0x${r.entry.toString(16)})\n`);
       return 0;
     }
@@ -6808,7 +7228,7 @@ function main(argv) {
       });
       writeBinary(out, r.bytes);
       if (!rest.includes('-q')) {
-        stdout(`${out} (${r.bytes.length} 字节，${r.ncmds} 条加载命令，${r.nsects} 节，`
+        linkSay(`${out} (${r.bytes.length} 字节，${r.ncmds} 条加载命令，${r.nsects} 节，`
           + `入口偏移 0x${r.entryoff.toString(16)}`
           + `${r.members.length === 0 ? '' : `，拉了 ${r.members.length} 个库成员`})\n`);
       }

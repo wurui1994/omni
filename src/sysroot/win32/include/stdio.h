@@ -5,6 +5,11 @@
  *
  * 三条标准流在 glibc 上是**真的数据符号**（`extern FILE *stdout;`，不像 macOS 那层
  * `__stdoutp` 的宏），所以 `.def` 里它们要标 `DATA 8`（copy 重定位要划那么大一块）。 */
+/* **这一趟用的是我们自己那套 libc**（不是 MSVC 的 CRT + 真 SDK）。运行时那几份 .c
+ * 靠它决定 POSIX 那几个头能不能 include —— 我们的 win32 sysroot 里有 sys/wait.h、
+ * unistd.h、dirent.h、pthread.h 一族，而真 SDK 里一个都没有。 */
+#define __OMNI_LIBC__ 1
+
 #ifndef _STDIO_H
 #define _STDIO_H
 

@@ -24,13 +24,17 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { CORE_DATA, PLUGIN_SET } from '../../src/core/plugin-set.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '../..');
-const HOOK = join(HERE, 'deps-hook.mjs');
+/* `--import` 要的是**模块说明符**，不是路径：Windows 上 `C:\...` 会被当成 scheme
+ * `c:`，node 当场倒在 `ERR_UNSUPPORTED_ESM_URL_SCHEME`（"Received protocol 'c:'"），
+ * 于是每一趟带缓存的腿都是 host crash。POSIX 上裸路径恰好能当相对说明符用，所以这处
+ * 在 mac/Linux 上一直没露头。 */
+const HOOK = pathToFileURL(join(HERE, 'deps-hook.mjs')).href;
 
 const sha = (s) => createHash('sha256').update(s).digest('hex').slice(0, 32);
 

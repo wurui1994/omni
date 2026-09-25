@@ -104,6 +104,13 @@ int SetEnvironmentVariableA(const char *name, const char *val);
 char *GetEnvironmentStrings(void);
 int FreeEnvironmentStringsA(char *p);
 char *GetCommandLineA(void);
+
+/* 控制台的**输出代码页**。我们所有输出都是 UTF-8 字节，而控制台默认按本地页解码
+ * （简体中文机器上是 936），于是自己印出来的中文在 cmd 里是一片乱码 —— 量到的原话：
+ *   omni 鈥?stage0 bootstrap compiler / 缂栬瘧骞舵墽琛?
+ * 手工 `chcp 65001` 之后同一个 exe 就对了，所以坏的不是字节，是解码那一头。 */
+unsigned int GetConsoleOutputCP(void);
+int SetConsoleOutputCP(unsigned int cp);
 int CreateProcessA(const char *app, char *cmd, void *psec, void *tsec, int inherit,
                    unsigned int flags, void *env, const char *cwd, void *si, void *pi);
 unsigned int WaitForSingleObject(void *h, unsigned int ms);

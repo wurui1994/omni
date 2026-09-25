@@ -13,6 +13,33 @@
  * 用户程序看的是 `<sysroot>/include` 里那份 glibc/SDK 形状的头，与这一份刻意不共用：
  * 那边的 `FILE` 是不透明结构，我们这边就是一个 fd 加两位状态。
  */
+/* ---- 变参：`__builtin_va_*` -> MSVC 的那一套 ----
+ *
+ * 我们这份 libc 的 printf 一族写的是 GCC/clang/tcc 都认的 `__builtin_va_list` 与那三个
+ * 内建（我们自己那台 C 前端也认）。MSVC 一个都不认：它的 `va_list` 在 `<stdarg.h>` 里，
+ * 是另一个类型。量到的是
+ *   src/sysroot/libc/file.c(150): error C2065: '__builtin_va_list': undeclared identifier
+ *
+ * 只在 `--cc msvc` 那条腿上走这一支（`_MSC_VER` 只有 cl 会定义），别的腿一个字不变。 */
+/* ---- MSVC 上的 __builtin_frame_address（第 msvc 刀）----
+ * MSVC 没有这一格，最接近的是 `_AddressOfReturnAddress()`（回"返回地址所在的那个槽"）。
+ * 用处只有一处：Linux 的 `_start` 靠它捞栈上的 argc/argv。win32 这条腿不走那一路
+ * （命令行问 `GetCommandLineA`），所以这儿只要能编过、语义对得上就够。 */
+#ifdef _MSC_VER
+/* 自己声明一句就够 —— MSVC 按名字认这个内建；**不 include <intrin.h>**（那一份要 UCRT）。 */
+extern void *_AddressOfReturnAddress(void);
+#define __builtin_frame_address(n) ((void *)_AddressOfReturnAddress())
+#endif
+
+#ifdef _MSC_VER
+#include <stdarg.h>
+#define __builtin_va_list va_list
+#define __builtin_va_start(ap, last) va_start(ap, last)
+#define __builtin_va_arg(ap, T) va_arg(ap, T)
+#define __builtin_va_end(ap) va_end(ap)
+#define __builtin_va_copy(d, s) va_copy(d, s)
+#endif
+
 #ifndef __OMNI_LIBC_H
 #define __OMNI_LIBC_H
 

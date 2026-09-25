@@ -13,8 +13,14 @@ import module from 'node:module';
 import { appendFileSync } from 'node:fs';
 import process from 'node:process';
 
+/* **老 node 上降级**：`module.registerHooks` 是 22.15+ / 23.5+ 才有的。这一份是靠
+ * `--import` 装进每个子进程的，所以少了它**每一趟都在装载期就倒**，测试那层看到的是
+ *   `TypeError: module.registerHooks is not a function`
+ * 而不是某个用例的失败（目标机上是 v23.1.0，量到的就是这个）。
+ * 没有钩子就不记依赖 —— 下面那格写不出清单时本来就有约定："当没有依赖，下一趟照旧重跑"，
+ * 于是降级落在已有的安全路上，不会把缓存误判成命中。 */
 const out = process.env.OMNI_DEPS_OUT;
-if (out !== undefined && out !== '') {
+if (out !== undefined && out !== '' && typeof module.registerHooks === 'function') {
   const seen = new Set();
   module.registerHooks({
     load(url, ctx, next) {

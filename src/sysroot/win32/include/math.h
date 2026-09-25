@@ -13,8 +13,42 @@
  *
  * 函数清单是**量出来的**：运行时那 20 份 `.c` 编出来的未定义符号（见
  * `src/sysroot/README.md` 的量法），不是照 C99 抄一遍。 */
+
+
 #ifndef _MATH_H
 #define _MATH_H
+
+#ifdef _MSC_VER
+/* ---- MSVC 上的 NaN 与 inf（第 msvc 刀）----
+ *
+ * cl 不认 __builtin_nanf 一族（GCC/clang/tcc 的说法）。按位模式给，不靠 0.0/0.0 ——
+ * 那个式子 MSVC 常量折叠时会当除零错。quiet NaN = 0x7fc00000（float）；
+ * inf = 0x7f800000 / 0x7ff0000000000000。
+ *
+ * 摆在文件头注释**之后**：上一版按"第一次出现 __builtin_ 的行"去插，插进了注释里
+ * （那段注释正在讲这几个内建），两条腿一起编不过。 */
+static __inline float __omni_nanf_(void) {
+  union { unsigned int u; float f; } x;
+  x.u = 0x7fc00000u;
+  return x.f;
+}
+static __inline double __omni_inf_(void) {
+  union { unsigned long long u; double d; } x;
+  x.u = 0x7ff0000000000000ull;
+  return x.d;
+}
+static __inline float __omni_inff_(void) {
+  union { unsigned int u; float f; } x;
+  x.u = 0x7f800000u;
+  return x.f;
+}
+#define __builtin_nanf(s) (__omni_nanf_())
+#define __builtin_nan(s) ((double)__omni_nanf_())
+#define __builtin_huge_val() (__omni_inf_())
+#define __builtin_huge_valf() (__omni_inff_())
+#define __builtin_isnan(x) ((x) != (x))
+#endif
+
 
 #define NAN (__builtin_nanf(""))
 #define INFINITY (__builtin_huge_valf())

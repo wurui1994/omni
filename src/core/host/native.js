@@ -425,7 +425,14 @@ export function localStamp() {
  */
 export function installDir() {
   const url = import.meta.url;
-  const p = url.startsWith('file://') ? decodeURIComponent(url.slice('file://'.length)) : url;
+  let p = url.startsWith('file://') ? decodeURIComponent(url.slice('file://'.length)) : url;
+  /* **盘符前那个斜杠**：Windows 上 `import.meta.url` 是 `file:///C:/…`，切掉 `file://`
+   * 剩下的是 `/C:/Users/…` —— 那不是一条能用的 Windows 路径。于是 sysroot / share /
+   * 插件全都找不着，量到的原话是
+   *   `没有 x86_64-win32 那一份 sysroot —— 自己给一份：--sysroot DIR`
+   * 而 `src/sysroot/win32` 明明就在那儿。`fileURLToPath` 干的就是这件事，这儿手做一遍：
+   * 宿主这一层要能在没有 node 的腿上原样搬过去，所以不 import `node:url`。 */
+  if (/^\/[A-Za-z]:/.test(p)) p = p.slice(1);
   /* 两种分隔符都认（第 win-c-backend 刀）：编出来的那份核心在 Windows 上，这一格拿到的
    * 是 `C:\omni\bin\omni.exe`（argv[0]，见 backend-c 里 `import.meta.url` 那一格）——
    * 只找 '/' 的话一个都找不到、回 '.'，于是 sysroot / share / 插件全部落到当前目录旁边去找。
