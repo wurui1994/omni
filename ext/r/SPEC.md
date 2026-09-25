@@ -576,7 +576,13 @@ int。现在 apply 那一族里每段匿名函数体**各算一个作用域**（
 另两处当场报：`lapply` 裸着用（R 回一张表，这一层没有"表里装向量"—— 写 `unlist(lapply(…))`）、
 `sapply` / `vapply` 在**字符向量**上（R 会拿那些串当结果的**名字**，`USE.NAMES = TRUE`，
 而这一层没有 `names`；`unlist(lapply(…))` 那一格没有名字，两边同解）。
-`Map` / `do.call` / `Recall` 没接。
+
+`do.call(f, list(…))` **接了**（2026-09-26）：第二格是**就地写的 `list(…)`** 时
+就地摊成一次普通调用（`do.call(sum, list(1,2))` → `sum(1,2)`），与 `nameToLambda`
+同一遍改写。那时"有几格实参、哪一格带名字"都是编译期看得见的，命名实参照原样搬过去
+（`bindArgs` 那一侧本来就会配 —— 量出来 `do.call(f, list(y=3, x=2))` 也对得上）。
+第二格是一格**变量**的那种没接（要运行期才知道长度与名字）。`f` 也认串
+（`do.call("sum", …)`）。`Map` / `mapply` / `Recall` 还没接。
 
 ### `switch(…)`：R 的分支那一格（判据 `ext/r/examples/branch.R`）
 

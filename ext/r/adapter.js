@@ -1488,6 +1488,27 @@ function nameToLambda(x, userFns) {
   for (const k of kids(x)) nameToLambda(k, userFns);
   if (tag(x) !== 'call' || tag(kids(x)[0]) !== 'sym') return;
   const nm2 = String(nameOf(kids(x)[0]));
+  /**
+   * `do.call(f, list(…))` —— **就地摊成一次普通调用**（`do.call(sum, list(1,2))` → `sum(1,2)`）。
+   *
+   * 只认第二格是**就地写的 `list(…)`** 那一种：那时"有几格实参、哪一格带名字"都是
+   * 编译期看得见的，摊开之后与 R 同解（量出来 `do.call(f, list(y=3, x=2))` 也对得上 ——
+   * 命名实参那几格照原样搬过去，`bindArgs` 那一侧本来就会配）。
+   * 第二格是一格**变量**的那种没接：那要运行期才知道长度与名字，当场报（在 `callOf` 那侧）。
+   */
+  if (nm2 === 'do.call') {
+    const as = kids(x).slice(1).filter((a) => tag(a) === 'arg');
+    if (as.length !== 2) return;
+    const fnode = kids(as[0])[0];
+    const lnode = kids(as[1])[0];
+    if (fnode === undefined || lnode === undefined || !isList(fnode) || !isList(lnode)) return;
+    if (tag(fnode) !== 'sym' && tag(fnode) !== 'str') return;
+    if (tag(lnode) !== 'call' || tag(kids(lnode)[0]) !== 'sym' || String(nameOf(kids(lnode)[0])) !== 'list') return;
+    const rname2 = String(nameOf(fnode));
+    if (!BUILTINS.has(rname2) && !RMATH.has(rname2) && !userFns.has(mangle(rname2))) return;
+    x.items = [{ kind: 'atom', value: 'call' }, cstSym(rname2), ...kids(lnode).slice(1)];
+    return;
+  }
   if (!APPLY_FNS.has(nm2)) return;
   const fnFirst = nm2 === 'Reduce' || nm2 === 'Filter';
   /* 要换的是第几格**位置**实参 —— 在 `items` 里数（`kids(x).slice(1)` 那一串）。 */

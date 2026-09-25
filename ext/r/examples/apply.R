@@ -57,3 +57,16 @@ print(Reduce(`+`, c(1, 2, 3, 4)))
 print(Reduce(`*`, c(1, 2, 3, 4)))
 # 就地写一层壳子包着别的函数 —— 那格形参的类型从数据那边来
 print(sapply(c(1, 2, 3), function(k) dbl(k)))
+
+# `do.call(f, list(…))` —— 第二格是**就地写的 `list(…)`** 时摊成一次普通调用
+g2 <- function(x, y) x * 10 + y
+print(do.call(sum, list(1, 2, 3)))
+print(do.call("sum", list(1, 2)))
+print(do.call(max, list(3, 1, 4)))
+print(do.call(paste, list("a", "b")))
+print(do.call(paste, list("a", "b", sep = "-")))
+print(do.call(g2, list(2, 3)))
+print(do.call(g2, list(y = 3, x = 2)))
+print(do.call(round, list(2.567, 2)))
+print(do.call(c, list(1, 2, 3)))
+print(do.call(rep, list(5, 3)))
