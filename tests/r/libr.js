@@ -15,7 +15,7 @@
 //   node tests/r/libr.js
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -86,6 +86,34 @@ if (!existsSync(join(LIB, 'Rcpp'))) {
     'library(Rcpp); cppFunction("double ssq(NumericVector x) { double s=0; for (int i=0;i<x.size();i++) s+=x[i]*x[i]; return s; }");'
     + ' cat(ssq(1:10), "\\n")', '385');
 }
+
+/**
+ * **`omni run x.R` 一句就够** —— 编译器那一档接不住时自己换到这一档（`ext/r/libr-run.js`）。
+ *
+ * 量两件事，因为它们都出过问题：
+ *   1. 换档真的发生了，而且不用手敲 `R_HOME=… bin/exec/R --vanilla -f …` 那一串；
+ *   2. **R 自己的编译器一格都没用上**（ADR-0046）：JIT 级别是 0、转了 100 圈的函数体还是
+ *      `call` 而不是 `bytecode`、装进来的 base/stats 里的函数体也还是 `{`。
+ *      只设 `R_ENABLE_JIT=0` 不够 —— 包里带着字节码时还会去执行它，所以
+ *      `R_DISABLE_BYTECODE=1` 那一格也要在。
+ */
+const omniRun = (code, ms = 300000) => {
+  const f = join(ROOT, '.omni-cache/r-rt/libR', 'test-omni-run.R');
+  writeFileSync(f, code);
+  const r = spawnSync(process.execPath, [join(ROOT, 'src/cli.js'), 'run', f], {
+    encoding: 'utf8', timeout: ms, cwd: ROOT,
+  });
+  rmSync(f, { force: true });
+  return `${r.stdout ?? ''}${r.stderr ?? ''}`;
+};
+const out = omniRun('library(stats)\n'
+  + 'f <- function(x) x + 1\n'
+  + 'for (i in 1:100) f(i)\n'
+  + 'cat("JIT", compiler::enableJIT(-1), class(body(f))[1], class(body(var))[1], "\\n")\n');
+if (!out.includes('换 libR 那一档')) no('omni run/接不住时自己换档', out);
+else if (!out.split('\n').map((l) => l.trim()).includes('JIT 0 call {')) {
+  no('omni run/R 自己的编译器一格都不用', `想要有一行是 "JIT 0 call {"，得到：${out.trim()}`);
+} else ok('omni run/一句换到 libR 那一档，R 的编译器全关', 'JIT 0 call {');
 
 process.stdout.write(`\n${pass} passed, ${fail} failed（libR：我们自己编的那个 R）\n`);
 process.exit(fail === 0 ? 0 : 1);

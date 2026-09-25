@@ -69,7 +69,7 @@ import { Diagnostics, OmniError, SourceFile } from './source/diag.js';
  * 静态 import 是有代价的（十一份 adapter 一起进核心），可它们都是纯 JS、小、没有别的依赖；
  * 哪天核心大小要紧了，正解是把它登记成 lang / plugin，不是在这儿加一句 `await import`
  * （这份文件里那几十个 import 全是静态的，只有一套规矩）。 */
-import { coreSxText, borrowedExts, unitsBuilderOf } from './lower/drive.js';
+import { coreSxText, borrowedExts, unitsBuilderOf, runFallbackOf } from './lower/drive.js';
 /* 构建引擎（`omni ninja`）：依赖图 + 脏判定 + 调度，不认识语言 —— 设计见
  * `docs/design/build-system.md`，模型照 ninja 复刻。 */
 import { ninjaCmd } from './build/cli.js';
@@ -6281,7 +6281,25 @@ function main(argv) {
   if (path !== undefined && path !== null
       && ['run', 'build', 'emit', 'check'].includes(node.key)
       && lang(path) === null && borrowedExts().some((e) => path.endsWith(e))) {
-    const sx = coreSxText(path, rest);
+    /**
+     * **接不住的时候还有没有第二条路**（登记处的 `runFallback`，见 `langs.js`）。
+     *
+     * R 是两档（ADR-0046）：编译器那一档只认接过的形状，`library(ggplot2)` 那种归 libR 那一档。
+     * 从前换档要自己敲一串 `R_HOME=… bin/exec/R --vanilla --no-echo -f …` —— 四件事记对才跑得起来，
+     * 而那四件事没有一件是用户该决定的。所以 `omni run x.R` 一句管到底：接得住走编译器那条
+     * （快得多），接不住就换过去，**并把为什么换印在 stderr 上**（不闷着换）。
+     * 只在 `run` 上换：`build` 要的是一份产物，那一档给不出。
+     */
+    let sx = null;
+    try {
+      sx = coreSxText(path, rest);
+    } catch (err) {
+      const fb = node.key === 'run' ? runFallbackOf(path) : null;
+      if (fb === null) throw err;
+      const code = fb(path, rest, err.message);
+      if (code === null) throw err;          /* 那一档也不在（还没编）→ 照旧报第一条路的话 */
+      return code;
+    }
     if (sx === null) return 1;
     /* 核心方言那份文本**留在内存里**（`SRC_SX`），不落盘。
      *

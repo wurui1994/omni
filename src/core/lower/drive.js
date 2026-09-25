@@ -224,12 +224,25 @@ export function borrowedExts() {
 }
 
 /**
- * 源码 → 核心方言文本（`.sx`）。**这是 `cli.js` 那一侧的名字**。
- *
+ * 源码 → 核心方言文本（`.sx`）。**这是 `cli.js` 那一侧的名字**。 *
  * `.go` 这类文件与 `.c` 一样，**就是这条链的一个前端**：译成 `.sx` 之后走的是与 `.sx`
  * 输入一模一样的那条路（lower → OIR → MIR → 原生 / js / llvm，还有 `--cc` /
  * `OMNI_MIR_OPT` / 摇树 / profile），所以下游一行都不用再写。
  */
 export function coreSxText(path, argv, out = null, opts = {}) {
   return sxTextOf(path, argv, out, opts);
+}
+
+/**
+ * **这门语言有没有"接不住时还能怎么跑"那一格**（登记处的 `runFallback`）。
+ *
+ * `cli.js` 只问这一句：编译器那条路报了"这一格还没接"之后，还有没有第二条路。
+ * 知识按语言分 —— 驱动这一层不知道 R 有两档，也不该知道。
+ */
+export function runFallbackOf(path) {
+  for (const [, d] of LANGS) {
+    if (d.guess === false || d.runFallback === undefined) continue;
+    if (d.exts.some((e) => path.endsWith(`.${e}`))) return d.runFallback;
+  }
+  return null;
 }

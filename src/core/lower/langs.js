@@ -43,6 +43,7 @@ import { nimToIR, nimImports } from '../../../ext/nim/adapter/index.js';
 import { vlangToIR, vlangImports } from '../../../ext/vlang/adapter/index.js';
 import { goToIR, goImports } from '../../../ext/go/adapter/index.js';
 import { rToIR } from '../../../ext/r/adapter.js';
+import { runWithLibR } from '../../../ext/r/libr-run.js';
 
 /**
  * 这棵树的根。**从宿主那格 `installDir()` 走上去**（`src/core/host` 往上三层）——
@@ -133,8 +134,12 @@ export const LANGS = new Map([
   /* R（GNU R）。语法是**照 R 自己那份 bison 复刻的**（`r-source/src/main/gram.y`，
      ADR-0034 的导入器本来就读得动它）—— 这一门的正确性有真口径：本机有 `Rscript`，
      例子逐字节对它（`tests/r/oracle.js`）。
-     后缀两格：`.R` 是主流写法，`.r` 也有（大小写在这张表里是两条）。 */
-  ['r', { grammar: 'ext/r/r.grammar', toIR: rToIR, exts: ['R', 'r'] }],
+     后缀两格：`.R` 是主流写法，`.r` 也有（大小写在这张表里是两条）。
+     `runFallback` 是**可选**的一格：这一门答"编译器这一档接不住时，`omni run` 还能怎么跑"。
+     R 是两档（ADR-0046）—— 编译器那一档接不住的（`library(ggplot2)` 那种）由 `omni run`
+     自己换到 libR 那一档，而不是要人手敲一串 `R_HOME=… bin/exec/R --vanilla -f …`。
+     别的语言不给这一格就是老样子（接不住就报"这一格还没接"）。 */
+  ['r', { grammar: 'ext/r/r.grammar', toIR: rToIR, exts: ['R', 'r'], runFallback: runWithLibR }],
   /* PolyDraw 的脚本（Ken Silverman 的 EVAL）。正确性口径是那棵参考树里的
      `polydraw_src/`（`eval.c` + `eval.txt`）—— 新写的 `c_impl` / `js_impl` 有已知偏差。
      `pre` 是**预处理**那一格（`#define` / `#if` 那一族，语料里真在用）—— 词法之前跑。 */

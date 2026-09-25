@@ -504,8 +504,23 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
 node ext/r/build-libR.js      # 405 条边：libR.dylib + R.bin + 12 个基础包 + Meta + 验一趟
 node ext/r/install-cran.js    # 从 CRAN 下 tarball、按拓扑序装（默认那一串是 ggplot2 的闭包）
 node ext/r/install-cran.js Rcpp
-node tests/r/libr.js          # 这一档的尺子：六格都真跑
+node tests/r/libr.js          # 这一档的尺子：七格都真跑
 ```
+
+**跑一份脚本不用手敲那一串**：`omni run x.R` 一句管到底 —— 编译器那一档接得住就走它
+（快 17~76 倍），接不住就**自己换到这一档**，并把"为什么换"印在 stderr 上（不闷着换）。
+登记在 `langs.js` 的 `runFallback` 上、落在 `ext/r/libr-run.js`；`build` 上不换（那一档给不出产物）。
+换过去的那趟把 **R 自己的编译器三格全关**：
+
+```
+R_ENABLE_JIT=0        跑的时候不即时编译（`compiler` 包那一层）
+R_COMPILE_PKGS=0      装包的时候不字节编译
+R_DISABLE_BYTECODE=1  连**执行**字节码那一路也关掉（`bcEval` 不进，走 AST 那条）
+```
+
+前两格是"不产生字节码"、第三格是"就算包里带着也不跑它"—— 三格一起摆才是真的不借。
+量法在 `tests/r/libr.js` 最后一格：JIT 级别是 0、转过 100 圈的函数体还是 `call`
+（不是 `bytecode`）、装进来的 `stats::var` 的体还是 `{`。
 
 `R_HOME` 在 `.omni-cache/r-rt/libR/home`，`bin/R` / `bin/exec/R` 都在那儿。
 两档的判据分开：编译器那一档是 `tests/r/oracle.js`（逐字节对 `Rscript`），

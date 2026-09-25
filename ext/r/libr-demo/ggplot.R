@@ -1,8 +1,8 @@
 # ext/r/libr-demo/ggplot.R —— libR 那一档的例子：装进来的 CRAN 包 + R 自己的设备
 #
-# 跑法（先 `node ext/r/build-libR.js` 与 `node ext/r/install-cran.js`）：
-#   R_HOME=.omni-cache/r-rt/libR/home R_ENABLE_JIT=0 \
-#     .omni-cache/r-rt/libR/home/bin/exec/R --vanilla --no-echo -f ext/r/libr-demo/ggplot.R
+# 跑法：`omni run ext/r/libr-demo/ggplot.R` —— 编译器那一档接不住（`library(ggplot2)`），
+# `omni run` 自己换到 libR 那一档（`ext/r/libr-run.js`），不用手敲 R_HOME 与那串旗子。
+# 前提是先 `node ext/r/build-libR.js` 与 `node ext/r/install-cran.js`。
 #
 # 这一份**不进 `tests/r/oracle.js`**（那一轴是编译器那一档、逐字节对 Rscript，而这儿用的
 # 是 ggplot2）。它的判据在 `tests/r/libr.js` 里。
