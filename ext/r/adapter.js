@@ -1504,6 +1504,19 @@ const asIntE = (e, ty) => {
   return ty !== undefined && ty.kind === 'int' ? e : call1('toint', e);
 };
 
+/**
+ * **逻辑当数用**：R 里 `TRUE` / `FALSE` 在算术与比较里就是 1 / 0
+ * （`TRUE + TRUE` 是 2、`TRUE * 3` 是 3 —— 量出来的）。方言里 bool 上没有算术，
+ * 所以这儿摊成一格 int（字面量直接折，别的落一格三元）。不是 bool 的原样过。
+ */
+const asNumE = (e, ty) => {
+  if (e.kind === 'bool') return { kind: 'int', value: e.value ? 1 : 0 };
+  if (ty !== undefined && ty.kind === 'bool') {
+    return { kind: 'ternary', cond: e, then: { kind: 'int', value: 1 }, else_: { kind: 'int', value: 0 } };
+  }
+  return e;
+};
+
 const asReal = (e, ty) => {
   if (e.kind === 'real') return e;
   if (e.kind === 'int') return { kind: 'real', value: e.value };
@@ -2400,6 +2413,12 @@ function exprOf(x, types, want) {
       if (numeric && (op === '/' || lt.kind === 'real' || rt.kind === 'real')
           && lt.kind !== 'string' && rt.kind !== 'string') {
         return b(op, asReal(le, lt), asReal(re, rt));
+      }
+      /* **逻辑当数用**（`TRUE + TRUE` 是 2、`TRUE * 3` 是 3）：方言里 bool 上没有算术，
+         所以有一边是 bool 就先摊成 int（见 `asNumE`）。比较那几格同理 —— 方言的 bool
+         之间没有 `>`，而 R 的 `TRUE > FALSE` 是 `TRUE`。 */
+      if (numeric && (lt.kind === 'bool' || rt.kind === 'bool')) {
+        return b(op, asNumE(le, lt), asNumE(re, rt));
       }
       return b(op, le, re);
     }
@@ -3686,6 +3705,11 @@ function assignOf(x, types) {
     /* 名字定成了 double、这一句给的是整数 → 提升。R 里 `t <- 0` 之后 `t <- t + 2.5` 是一回事
        （那格量一直是 double），而方言那侧一个名字只有一种类型，所以写的时候对齐。 */
     if (want !== undefined && want.kind === 'real' && vt.kind === 'int') v = asReal(v, vt);
+    /* **`x <- TRUE` 之后 `x + 1`**：那格名字被推成 int（`inferRound` 里 bool → int），
+       所以赋进去的 bool 也要摊成 1 / 0（见 `asNumE`）。 */
+    if (want !== undefined && want.kind !== 'bool' && vt.kind === 'bool') {
+      v = want.kind === 'real' ? asReal(v, vt) : asNumE(v, vt);
+    }
     const asg = { kind: 'assign', target: { kind: 'name', name }, value: v };
     /* **带名字的向量：名字那一条另发一句**（落在影子变量 `v__nm` 上，见 `RNVEC`）。
        右边推不出名字来（`v <- c(1, 2)` / `v <- unname(w)`）就把名字**清掉** —— R 那边

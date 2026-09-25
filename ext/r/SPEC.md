@@ -261,6 +261,11 @@ R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不�
 判据在 `ext/r/examples/lgl.R`。两边都是 int 的比较仍然回方言的 `bool`：
 这一档没有 `NA_integer_`，那个状态到不了，而 `while (i <= n)` 是循环里最热的一格。
 
+**逻辑当数用**也接了（`TRUE + TRUE` 是 2、`TRUE * 3` 是 3、`n <- n + (k > 2)` 那种数一数的
+写法）：方言里 bool 上没有算术，所以有一边是 bool 就先摊成 int（字面量当场折，别的落一格
+三元，见 `asNumE`）。比较那几格同理 —— 方言的 bool 之间没有 `>`，而 R 的 `TRUE > FALSE`
+是 `TRUE`。赋值那一侧也要（`x <- TRUE` 之后 `x + 1`：那格名字被推成 int）。
+
 线性内存这条路顺带把**两条腿**都走通了：`omni run`（JS + N-API）与 `omni build`（C 后端，
 `ccall` 直接连 `libomniRmath`）对 `vec.R` 的输出都与 `Rscript` 逐字节相同。
 

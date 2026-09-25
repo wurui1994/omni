@@ -86,3 +86,17 @@ cat(T, "\n", sep = "")
 cat(F, "\n", sep = "")
 cat(pi, "\n", sep = "")
 cat(sin(pi / 2), "\n", sep = "")
+
+# **逻辑当数用**：R 里 `TRUE` / `FALSE` 在算术与比较里就是 1 / 0。方言里 bool 上没有算术，
+# 所以有一边是 bool 就先摊成 int（字面量当场折，别的落一格三元）。
+cat(TRUE + TRUE, TRUE - FALSE, "\n")
+cat(TRUE * 3, FALSE * 3, "\n")
+cat((1 > 0) + (2 > 1), "\n")
+cat(TRUE > FALSE, TRUE == TRUE, "\n")
+cat(TRUE + 1.5, "\n")
+b <- TRUE
+cat(b + 1, "\n")
+# 数一数"有几格满足" —— R 里这是常用写法
+n <- 0
+for (k in c(1, 5, 3)) n <- n + (k > 2)
+cat(n, "\n")
