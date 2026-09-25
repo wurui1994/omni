@@ -682,6 +682,12 @@ const NAMED_OK = new Map([
   ['character', new Set(['length'])],
 ]);
 
+/**
+ * **数字节而不是数字符的那几格**（见 `callOf` 里那段账）。`cat` / `paste` / `grepl` /
+ * `startsWith` 按字节办也对（拼接与定串查找与码位无关），所以不在这张表里。
+ */
+const BYTEWISE = new Set(['nchar', 'substr', 'substring', 'toupper', 'tolower', 'sprintf']);
+
 /* ─── 内建（表外的名字当用户函数调） ──────────────────────────────────────
  *
  * 这张表是**判据**，不是方便：R 的内建在树上与用户函数完全同形（`length(x)` 与 `f(x)`
@@ -2712,6 +2718,29 @@ function callOf(x, types, extra, want) {
   }
 
   if (fn !== null && BUILTINS.has(fn)) {
+    /**
+     * **按字节办的那几格：串字面量里有非 ASCII 就当场报。**
+     *
+     * 方言的 `slen` / `ssub` / `supper` 数的都是**字节**，而 R 的 `nchar` / `substr` /
+     * `toupper` 数的是**字符**（跟 locale 走）。量出来的（`Rscript`，2026-09-25）：
+     * `nchar("héllo")` R 答 5、我们答 6；`substr("héllo", 1, 2)` R 出 `"hé"`、我们把那个
+     * 两字节的字符切成半个。要接它得先给核心方言加"按码位走"那一层（见 SPEC 第四节第 12 条）。
+     *
+     * 这一格只拦得住"字面量里就有非 ASCII"那一半 —— 运行期才知道的拦不住。但那一半正是
+     * 写例子时最容易撞上的，而静默答错最难查。`cat` / `paste` / `grepl` / `startsWith`
+     * 这些**按字节办也对**（拼接与定串查找与码位无关），不在这张表里。
+     */
+    if (BYTEWISE.has(fn)) {
+      for (const a of argsOf(x)) {
+        if (a.value === null || !isList(a.value) || tag(a.value) !== 'str') continue;
+        const s = String(leaf(kids(a.value)[0]));
+        if (!/[^\u0000-\u007F]/.test(s)) continue;
+        throw new Error(`r->IR: ${fn}() 收了一格**带非 ASCII 的串**（\`${s}\`）——`
+          + ' 方言的 `slen` / `ssub` / `supper` 数的是**字节**，而 R 数的是字符'
+          + '（`nchar("héllo")` 在 R 里是 5、按字节是 6）。要接它得先给核心方言加'
+          + '"按码位走"那一层，见 ext/r/SPEC.md 第四节第 12 条');
+      }
+    }
     /* **命名实参先过一遍白名单**。为什么要这一格：认不出来的命名实参从前是被**静默丢掉**的
        —— `sum(x, na.rm = TRUE)` 里那个 `na.rm` 直接没了，于是答的是 `NA` 而 R 答 4。
        那是静默答错，比当场报难查得多（量出来的）。 */

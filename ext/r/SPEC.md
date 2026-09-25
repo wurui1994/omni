@@ -606,6 +606,15 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
       按字节比 `"Banana"` 会跑到最前面。要对上得先有那套 collation。同理 `head` /
       `tail` / `rep` / `which` / `order` / `match` / `%in%` / `unique` / `duplicated` /
       `union` / `intersect` / `setdiff` 在字符向量上也都当场报。
+    * **数的是字节，不是字符。** 方言的 `slen` / `ssub` / `supper` 都按字节办，而 R 的
+      `nchar` / `substr` / `toupper` 按**字符**（跟 locale 走）。量出来的（`Rscript`，
+      2026-09-25）：`nchar("héllo")` R 答 5、按字节是 6；`substr("héllo", 1, 2)` R 出
+      `"hé"`、按字节切出半个字符。要接它得先给核心方言加"按码位走"那一层
+      （现在连"取第 i 个字节"都没有算子：只有 `slen` / `ssub` / `sfind`）。
+      所以 `nchar` / `substr` / `substring` / `toupper` / `tolower` / `sprintf` 上
+      **串字面量里有非 ASCII 就当场报**（`BYTEWISE` 那张表）—— 那是编译期看得出来的那一半，
+      运行期才知道的拦不住，明写在这儿。`cat` / `paste` / `grepl` / `sub` / `gsub` /
+      `startsWith` **按字节办也对**（拼接与定串查找与码位无关），不在那张表里。
     * `tolower` 只管 **ASCII**：方言里只有 `(supper …)`，没有反过来的那一格，所以
       `r_lower` 拿两张 26 个字母的表查（`(sfind 大写表 这个字符)` 给位置）。表里查不到的
       字符原样留下 —— R 那边非 ASCII 是跟 locale 走的。`toupper` 走方言的算子，口径随它。
