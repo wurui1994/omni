@@ -311,6 +311,10 @@ const FN_DEPS = new Map([
   /* `chartr`：两张字符表查一遍（与 `r_lower` 同一条办法），向量那一格逐元素。 */
   ['r_chartr', []],
   ['r_chartr_v', ['r_chartr']],
+  /* `as.character(向量)`：数那一档走 `r_num_str`（15 位），逻辑那一档走 `r_lgl_str`；
+     两格都要问缺失（碰上就当场报 —— 没有 `NA_character_`）。 */
+  ['r_as_str_v', ['r_is_na', 'r_num_str']],
+  ['r_as_str_lv', ['r_is_na', 'r_lgl_str']],
   ['r_starts_v', ['r_starts']],
   ['r_ends_v', ['r_ends']],
   ['r_split', []],
@@ -1146,7 +1150,11 @@ function applyTy(fn, x, types) {
         return isVecTy(t) || isStrVec(t);
       }) ? RSTRV : STR;
     }
-    case 'as.character': return STR;
+    /* `as.character` 在向量上出一条**字符向量**（见 `callOf` 里那段 NA 的账）。 */
+    case 'as.character': {
+      const t = args.length > 0 ? typeOfExpr(args[0], types) : STR;
+      return isVecTy(t) ? RSTRV : STR;
+    }
     case 'sprintf': {
       /* 有一格实参是向量 → 出一整条字符向量（见 `sprintfOf` 里那段账）。 */
       const ps = posArgs(x).slice(1);
@@ -3739,14 +3747,18 @@ function callOf(x, types, extra, want) {
          不是 `tostr`（那一格是方言自己的浮点文本，与 R 的挑法无关）。 */
       case 'as.character': {
         if (n !== 1 || all[0] === null) return call1('tostr', ev(0));
-        /* **向量那一档当场报**：R 出的是一条字符向量，而里头的 `NA` 印出来是**不带引号**的
-           `NA`（`as.character(c(1, NA))` 是 `[1] "1" NA`）—— 那要 `NA_character_`，
-           这一档没有（第四节第 11 条）。把它印成 `"NA"` 就是静默差两个引号。 */
-        if (isVecTy(typeOfExpr(all[0], types))) {
-          throw new Error('r->IR: as.character() 收了一条**向量** —— R 出的是字符向量，'
-            + '而里头的 `NA` 印出来不带引号（`NA_character_`），这一档没有带缺失的串'
-            + '（见 ext/r/SPEC.md 第四节第 11 条）。要逐元素转就写 `sapply(v, as.character)`');
-        }
+        /**
+         * 向量那一档出**一条字符向量**（15 位有效数字 —— `coerce.c` 的口径）。
+         *
+         * **里头有 `NA` 就当场报**：R 那边 `as.character(c(1, NA))` 是 `[1] "1" NA`，
+         * 那个 `NA` 印出来**不带引号**（是 `NA_character_`，不是串 `"NA"`），而这一档
+         * 没有带缺失的串（第四节第 11 条）。印成 `"NA"` 就是静默差两个引号，所以
+         * 那一格在**运行期**停下来 —— 从前是整格不接（连 `as.character(c(1,2))` 都报），
+         * 现在只拦真碰上缺失的那一趟。
+         */
+        const t0 = typeOfExpr(all[0], types);
+        if (isStrVec(t0)) return ev(0);
+        if (isVecTy(t0)) return lglCall(isLglTy(t0) ? 'r_as_str_lv' : 'r_as_str_v', ev(0));
         return asStr(all[0], types, 15);
       }
       case 'toupper': case 'tolower': case 'casefold': {
@@ -4838,6 +4850,7 @@ const STRV_FNS = new Set([
   'r_substr_v', 'r_trim_v', 'r_starts_v', 'r_ends_v',
   /* base 那四条字符向量常量 + `strrep` 在字符向量上那一格。 */
   'r_sv_letters', 'r_sv_upper', 'r_sv_month', 'r_sv_mabb', 'r_strrep_v', 'r_chartr_v',
+  'r_as_str_v', 'r_as_str_lv',
 ]);
 
 /** 这一批由 `setFnDecl` 发（集合与位置那一族，见 `FN_DEPS` 上那段账）。 */
@@ -5303,6 +5316,46 @@ function strvFnDecl(name) {
           name: 'apush',
           args: [nm('o'), call1('srep', svGet(v, i), nm('k'))],
         }], nm('n')),
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  if (name === 'r_as_str_v' || name === 'r_as_str_lv') {
+    /**
+     * `as.character(向量)` —— 出一条字符向量。数那一档按**15 位有效数字**
+     * （`coerce.c` 的口径，与 `paste` 同一条），逻辑那一档出 `"TRUE"` / `"FALSE"`。
+     *
+     * **碰上缺失就当场报**：R 那边出的是 `NA_character_`（印出来不带引号），
+     * 而这一档没有带缺失的串（SPEC 第四节第 11 条）—— 印成 `"NA"` 差两个引号。
+     */
+    const lgl = name === 'r_as_str_lv';
+    const el = vecGet(v, i);
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: lgl ? RLGL : RVEC }],
+      ret: RSTRV,
+      body: [
+        letI('n', vecLen(v)),
+        { kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), I(0)) },
+        loop([
+          iff(naQ(el), [{
+            kind: 'builtin-stmt',
+            name: 'fail',
+            args: [{
+              kind: 'string',
+              value: 'as.character(): 这条向量里有 NA —— R 出的是 NA_character_（印出来不带引号），'
+                + '而这一档没有带缺失的串（见 ext/r/SPEC.md 第四节第 11 条）',
+            }],
+          }]),
+          {
+            kind: 'builtin-stmt',
+            name: 'apush',
+            args: [nm('o'), lgl
+              ? { kind: 'call', fn: { kind: 'name', name: useFn('r_lgl_str') }, args: [el] }
+              : { kind: 'call', fn: { kind: 'name', name: useFn(NUM_STR) }, args: [el, I(15)] }],
+          },
+        ], nm('n')),
         { kind: 'return', values: [nm('o')] },
       ],
     };

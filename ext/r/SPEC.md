@@ -693,8 +693,11 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
     R 那一条，见第二节）。没接的是 `replace=` / `prob=`、`RNGkind()`、以及 `rgamma` /
     `rweibull` 那几个要先换算参数的。
 11. `NA_integer_` / `NA_character_` 没接（实数的 `NA` 已经立住了）—— 见第二节那一小节。
-    由此来的两格**当场报**（不猜）：`as.integer(x > 2)`（R 答 `NA_integer_`）与
-    `as.character(一条向量)`（R 出的字符向量里 `NA` 印出来**不带引号**）。
+    由此来的一格**编译期当场报**（不猜）：`as.integer(x > 2)`（R 答 `NA_integer_`）。
+    `as.character(一条向量)` **接了**（2026-09-26）：出一条字符向量，15 位有效数字
+    （`coerce.c` 的口径）；**只有真碰上缺失的那一趟在运行期停下来** —— R 那边那一格是
+    `NA_character_`（印出来**不带引号**），印成 `"NA"` 就差两个引号。从前这一格是整格
+    不接（连 `as.character(c(1,2))` 都报），现在只拦拦得住的那一趟。
     **`as.numeric` / `as.integer` 本身接了**（判据 `ext/r/examples/str.R`）：real / int /
     两态逻辑 / 三态逻辑标量 / 数值与逻辑**向量**都答得准 —— 向量本来就是 double，
     `as.integer` 逐元素**朝零截**而缺失原样留着（"整数向量"底下还是 double，`NA` 跟得住）。

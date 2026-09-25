@@ -158,3 +158,16 @@ print(chartr("abc", "xyz", "cab"))
 print(chartr("a", "A", "banana"))
 print(chartr("ab", "xy", c("ab", "ba")))
 print(chartr("z", "Z", "abc"))
+# `as.character(向量)` 出一条字符向量（**15 位有效数字** —— 与 `paste` 同一条口径，
+# 而 `cat` / `print` 是 7 位）。里头有 `NA` 的那一趟**当场报**：R 出的是 `NA_character_`
+# （印出来不带引号），而这一档没有带缺失的串（第四节第 11 条）
+print(as.character(c(1, 2, 3)))
+print(as.character(c(1.5, -2.25)))
+print(as.character(c(0.1, 1 / 3)))
+print(as.character(1:3))
+print(as.character(c(1e6, 1e-5)))
+print(as.character(c(TRUE, FALSE)))
+print(rev(as.character(c(1, 2))))
+print(nchar(as.character(c(10, 200))))
+print(paste(as.character(c(1, 2)), collapse = "-"))
+print(as.character(123))
