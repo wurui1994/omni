@@ -377,7 +377,21 @@ function exprOf(x, C, want = 'val') {
     if (op === '^' || op === '%') {
       let v;
       if (op === '^') {
-        v = rmath('pow', [exprOf(a, C), exprOf(b, C)]);
+        /* **`x^2` / `x^3` 落成乘法**（2026-09-25）：`pow` 是一次 libm 调用，而这门语言里
+           `x^2+y^2 < r^2` 是最常见的写法 —— `tigrou/balls2k.pss` 的碰撞那一段里 `pow`
+           占语言那一半 **17%** 的栈顶样本（`--gfx null` + `OMNI_PROF=sample:997`）。
+           **只在底数是"重算一遍也没副作用"的简单式（名字或字面量）时折**：不然那一侧
+           要出现两三次，复杂式子会被算两三遍。指数只认字面量 2 与 3 ——
+           `0.5` 那档不折（`sqrt` 与 `pow(x,0.5)` 未必逐位相同）。 */
+        const eb = exprOf(b, C);
+        const ea = exprOf(a, C);
+        const n = eb.kind === 'real' ? Number(eb.value) : NaN;
+        if ((ea.kind === 'name' || ea.kind === 'real') && (n === 2 || n === 3)) {
+          const sq = bin('*', exprOf(a, C), exprOf(a, C));
+          v = n === 2 ? sq : bin('*', sq, exprOf(a, C));
+        } else {
+          v = rmath('pow', [ea, eb]);
+        }
       } else {
         v = modIR(C, exprOf(a, C), exprOf(b, C));
       }
