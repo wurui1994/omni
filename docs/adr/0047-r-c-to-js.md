@@ -161,8 +161,23 @@ MIR 链接器两道坎（`src/main` 与 `grDevices` 都在那后面）。
 
 1. **~~`setjmp`/`longjmp` 在 JS 腿上是拒绝的~~ —— 这一格已经落了（见下面第 7 条）。**
 2. **单翻译单元。** nmath 摊得动是因为它 122 份、互相只靠头。`src/main` 是 ~99 份
-   加 `src/appl`/`src/unix`/`src/extra/tre`/tzone，而且 `static` 撞车会多得多 ——
-   到那一步该做的是 MIR 层的链接器，不是更聪明的摊平脚本。
+   加 `src/appl`/`src/unix`/`src/extra/tre`/tzone —— 这一格**量过了**（2026-09-25 的
+   一次探底，`cc -fsyntax-only` 数错误）：
+   * 照原样叠 99 个 `#include`：**1444 条错**；
+   * 加上 nmath 那套机械活（每份包完 `#undef` 它的宏 + 撞车的 `static` 按文件挂后缀
+     + 把 `R_USE_SIGNALS` / `USE_RINTERNALS` 这两个"头的旋钮"提到最前面）：
+     **降到 490 条**，12 类。
+   * 剩下那几类说明**textual 改名在这个规模上是错的工具**：
+     - `src/main/arithmetic.h` 这种**没有 include guard、体里带 `static R_INLINE`
+       函数**的内部头，被两份 `.c` 各包一次就是重定义；
+     - `connections.c` 与 `dounzip.c` 各有一个 `NORET static int null_vfprintf`
+       —— 前缀带属性，"行首 static"的正则看不见；
+     - 最说明问题的一格：`eval.c` 里有个 static 叫 `expr`，按文件改名之后
+       `#define expr expr__eval` 把 `Defn.h` 的 `PRCODE(x) ((x)->u.promsxp.expr)`
+       一起改了 —— 宏是文本的，它不知道哪个 `expr` 是结构体成员。
+   * 所以判断是：**到 `src/main` 这一步该做的是 MIR 层的链接器，不是更聪明的摊平脚本。**
+     摊平在 nmath 上是几十行的机械活（那儿 0 错），在 `src/main` 上是与 C 的
+     预处理模型作对。
 3. **没有 Fortran。** R 的 `SOURCES_F` 与 BLAS/LAPACK 都是 Fortran。nmath 恰好不沾。
 4. **浏览器那台图形设备：两档都通了，接 R 自己的设备结构体还没到。**
    * 已经有的：`omni_c_gfx_frame`（交一帧，上面第 5 条）与 `omni_c_gfx_call`
