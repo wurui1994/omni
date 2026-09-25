@@ -369,7 +369,7 @@ export function pluginLoad(path) {
  * 整个编译器搬进 Worker —— 那是另一刀，账记在设计文档 §8。
  */
 let DEADLINE_MS = 0;
-export function runTimeout(ms) {
+export function runTimeout(ms, msg) {
   DEADLINE_MS = ms > 0 ? Date.now() + ms : 0;
   return undefined;
 }

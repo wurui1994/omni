@@ -5360,6 +5360,14 @@ function applyGfxFlags(verb, path, rest) {
 }
 
 function armDevDeadline(verb, rest) {
+  /**
+   * **先把上一趟的截止时刻清掉。** 常驻工人里 `runCli` 会被调很多趟（`studio/worker.js`），
+   * 而下面那几个 `return` 是"这一趟不装时限"——不清的话上一趟的 `DEADLINE_MS` 会留着，
+   * 于是这一趟每个 `spawnSync` 都拿到"剩下 1ms"，表现成"莫名其妙超时"。
+   */
+  RUN_DEADLINE = 0;
+  RUN_TIMEOUT_MSG = '';
+  runTimeout(0, '');
   /* 发布那一档没有时限（生成出来的程序里那一格也由 `--release` 关掉）。 */
   if (rest.includes('--release') || env('OMNI_RELEASE') === '1') return;
   /* 常驻/交互那几个动词也没有 —— 见 `LONG_VERBS`。 */
@@ -5379,9 +5387,30 @@ function armDevDeadline(verb, rest) {
     }
   }
   if (sec === 0) return;
+  /**
+   * **`--timeout SEC` 要让三层都看见同一个数。**
+   *
+   * 时限有三层：这一层（CLI 的枪 + 子进程的时限）、生成出来的程序里那一格
+   * （JS 腿是 prelude 的 `$dl_arm`、原生腿是 `omni_js_host.c` 的 SIGALRM + 外部看门狗）。
+   * 后两层读的是环境变量 `OMNI_TIMEOUT` / `.env`，**看不见命令行上那格 `--timeout`** ——
+   * 量出来（2026-09-26）：`run x.sx --timeout 4` 在"不开枪"那一档下是 30s 才停的
+   * （.env 里那个数），也就是说 `--timeout` 只管住了一层。所以这儿把它写回环境变量。
+   * 只在"跑一个程序"的动词上写：`OMNI_TIMEOUT` 是程序的预算，不是编译这一趟的。
+   */
+  if (running) setEnv('OMNI_TIMEOUT', String(sec));
   const knob = running ? 'OMNI_TIMEOUT' : 'OMNI_BUILD_TIMEOUT';
   RUN_TIMEOUT_MSG = `omni: 超时 —— 这一趟 ${verb} 过了 ${sec}s（--timeout / ${knob} / .env），已中止\n`;
   RUN_DEADLINE = nowMs() + sec * 1000;
+  /**
+   * **常驻工人那一档只记不开枪**（`OMNI_CLI_NO_SHOT=1`，由 `studio/worker.js` 设）——
+   * 那一格由宿主的 `runTimeout` 自己看（它才是拿着枪的人，见 `host/native.js`）。
+   *
+   * 那一枪打的是"本进程"，而常驻工人是池子的进程：它得活着接下一格请求，超时由池子数着、
+   * 到点杀工人。从前工人是用 `OMNI_TIMEOUT=0` 躲这一枪的，可**那个环境变量会跟着孩子走**：
+   * 于是 `spawnSync` 没了时限、生成出来的程序里那格 SIGALRM 与外部看门狗也一起关掉
+   * —— 三层全丢。量出来的后果：一个 GUI 例子跑了 28 分钟还在，父进程早没了（孤儿，
+   * 只能手动 `kill -9`）。现在是"关枪、留预算"。
+   */
   runTimeout(sec * 1000, RUN_TIMEOUT_MSG);
 }
 

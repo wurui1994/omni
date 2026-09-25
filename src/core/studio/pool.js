@@ -53,7 +53,12 @@ class Worker {
     this.proc = cp.spawn(process.execPath, [join(root, 'src', 'core', 'studio', 'worker.js')], {
       cwd: root,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, OMNI_AS_LIB: '1', OMNI_TIMEOUT: '0', OMNI_BUILD_TIMEOUT: '0' },
+      /* `OMNI_CLI_NO_SHOT=1` 只关掉"到点给本进程一枪"那一格（本进程是常驻工人）——
+         **预算留着**。从前这儿给的是 `OMNI_TIMEOUT=0` / `OMNI_BUILD_TIMEOUT=0`，
+         而那两格会跟着孩子走：`spawnSync` 没了时限、生成出来的程序里那格 SIGALRM
+         与外部看门狗也一起关掉。量出来的后果（2026-09-26）：一个 GUI 例子跑了
+         28 分钟还在，父进程早就没了（孤儿）。见 worker.js 的第 3 条纪律。 */
+      env: { ...process.env, OMNI_AS_LIB: '1', OMNI_CLI_NO_SHOT: '1' },
     });
     this.proc.stdout.setEncoding('utf8');
     this.proc.stdout.on('data', (c) => this.onData(c));

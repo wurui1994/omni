@@ -235,12 +235,28 @@ const TIMEOUT_GRACE_MS = 1500;
 const TIMEOUT_KILL_GRACE_MS = 2000;
 let DEADLINE_MS = 0;
 
+/**
+ * 时限：记下**截止时刻**（子进程那一路要它），再在另一根线程上摆一枪（本进程那一路要它）。
+ *
+ * **`OMNI_CLI_NO_SHOT=1` 那一档只记不开枪**（`studio/worker.js` 设的）：那一枪打的是
+ * 本进程，而常驻工人得活着接下一格请求 —— 超时由池子数着、到点杀工人。
+ *
+ * 为什么这一格读的是环境变量而不是多一个形参：`runTimeout` 是**宿主 op**
+ * （`hir/js_abi.js` 的 `js_run_timeout`，arity 2，另有 JS prelude 与 C 两份实现）——
+ * 加形参要连那张 ABI 表一起动，而"开不开枪"本来就是宿主自己的事。
+ *
+ * 2026-09-26 加这一格的理由是量出来的：工人从前靠 `OMNI_TIMEOUT=0` 来躲这一枪，
+ * 可那个环境变量会**跟着孩子走** —— 于是 `spawnSync` 没了时限、生成出来的程序里那格
+ * SIGALRM 与外部看门狗**也一起关掉**。三层全没了之后，一个 GUI 例子跑了 28 分钟还在，
+ * 而且父进程早就不在了（孤儿，只能手动 `kill -9`）。
+ */
 export function runTimeout(ms, msg) {
   if (ms <= 0) {
     DEADLINE_MS = 0;
     return undefined;
   }
   DEADLINE_MS = Date.now() + ms;
+  if (env('OMNI_CLI_NO_SHOT') === '1') return undefined;
   /* worker 的源码里不能用 `require`（父这边是 ESM，eval 出来的 worker 也是），
    * 所以两处都走 `process.getBuiltinModule` —— 与这个文件顶上的 `node()` 同一条路。
    * 直接 `writeSync(2, …)` 而不是 `console.error`：写的是真的那个 fd，不过 worker
