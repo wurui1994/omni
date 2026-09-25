@@ -6750,7 +6750,15 @@ function strvFnDecl(name) {
     };
   }
   if (name === 'r_head_str' || name === 'r_tail_str') {
-    /** 字符向量上的 `head` / `tail` —— 按下标挑，与 collation 无关。 */
+    /**
+     * 字符向量上的 `head` / `tail` —— 按下标挑，与 collation 无关。
+     *
+     * **负的 `k` 是"去掉那么多格"**（`head(v, -1)` 是前 n-1 格、`tail(v, -2)` 是后 n-2 格）
+     * —— 与数那一侧的 `r_head` / `r_tail` 同一条。从前这儿少了这一步：`k` 是负数时被
+     * 下面那句"小于 0 就当 0"直接抹成 0，于是 `head(c("a","b","c"), -1)` 答
+     * `character(0)` 而 R 答 `"a" "b"` —— **静默答错**。带名字的向量更绕：名字那一条走的
+     * 就是这一格，短了之后 `print` 退回不带名字的那一行（连名字都不见了）。
+     */
     const kk = nm('k');
     const from = name === 'r_head_str' ? I(0) : b('-', nm('n'), kk);
     return {
@@ -6761,6 +6769,7 @@ function strvFnDecl(name) {
       body: [
         letI('n', svLen(v)),
         letI('c', kk),
+        iff(b('<', nm('c'), I(0)), [set('c', b('+', nm('n'), nm('c')))]),
         iff(b('>', nm('c'), nm('n')), [set('c', nm('n'))]),
         iff(b('<', nm('c'), I(0)), [set('c', I(0))]),
         { kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), I(0)) },

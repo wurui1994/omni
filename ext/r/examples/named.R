@@ -194,3 +194,6 @@ print(which.max(dv))
 print(which.min(dv))
 print(diff(c(a = 1, b = 2, c = 4, d = 8)))
 cat(sum(diff(dv)), "\n")
+# 负的 `n`：`head(v, -1)` 是"去掉最后一格"、`tail(v, -1)` 是"去掉第一格"（名字跟着）
+print(head(dv, -1))
+print(tail(dv, -1))

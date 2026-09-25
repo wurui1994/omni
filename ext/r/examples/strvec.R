@@ -192,6 +192,13 @@ print(intersect(c("a", "b"), c("b", "c")))
 print(setdiff(c("a", "b"), c("b")))
 print(head(ww, 2))
 print(tail(ww, 2))
+# **负的 `n` 是"去掉那么多格"**（2026-09-26 补的一刀）：从前字符向量这一侧少了那一步，
+# `k` 是负数时被"小于 0 就当 0"抹平，于是 `head(ww, -1)` 答 `character(0)` 而 R 答前 n-1 格
+# —— 静默答错。带名字的向量更绕：名字那一条走的就是这一格，短了之后 `print` 会退回
+# 不带名字的那一行（连名字一起不见）。数那一侧本来就是对的。
+print(head(ww, -1))
+print(tail(ww, -1))
+print(head(ww, -99))
 
 # 排序那两格**只接 `method = "radix"`**：R 自己明说 radix 是在 **C locale** 下比的
 # （`?sort`），量出来正是按字节 —— `sort(c("pear","apple","Banana"), method="radix")` 出
