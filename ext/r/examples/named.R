@@ -93,9 +93,8 @@ print(signif(m, 2))
 print(round(sqrt(m), 3))
 print(sqrt(m) * 2)
 
-# 位置动了那几格：`rev` / `head` / `tail` 的名字**跟着动**（2026-09-26 接了 ——
-# 名字那一条走字符向量上同名的那几格辅助函数）。`sort` 要排序的那个置换、`diff` 还要
-# 丢掉第一格，那两格还没接。
+# 位置动了那几格：`rev` / `head` / `tail` / `sort` 的名字**跟着动**（2026-09-26 接了）。
+# `diff` 还要丢掉第一格，那一格还没接。
 kv <- c(a = 1, bb = 4, ccc = 9.25, d = 2)
 print(rev(kv))
 print(head(kv, 2))
@@ -107,3 +106,15 @@ print(head(rev(kv), 2))
 print(rev(c(p = TRUE, q = FALSE)))
 print(names(rev(kv)))
 print(tail(kv, 0))       # 零长那一档
+
+# `sort` 的名字按**排序那个置换**挑一遍（`r_nm_sort`）。缺失那几格跟着值一起丢 ——
+# R 的 `sort` 缺省 `na.last = NA`，而 `r_order` 把缺失排最后，两边长度因此对得上。
+sv <- c(b = 3, a = 1, ccc = 2)
+print(sort(sv))
+print(sort(sv, decreasing = TRUE))
+print(names(sort(sv)))
+print(rev(sort(sv)))
+print(head(sort(sv), 2))
+print(sort(c(b = 3, a = 1, d = NA)))   # 缺失连名字一起丢
+print(sort(c(z = 2, y = 2, x = 1)))    # 同值的次序是唯一的（原下标当最后一把钥匙）
+print(sort(c(only = 1)))

@@ -282,6 +282,8 @@ const FN_DEPS = new Map([
   ['r_nan_v', ['r_is_nan']],
   ['r_fin_v', []],
   ['r_inf_v', []],
+  /* `sort` 的名字那一条：体里用 `r_order`（它自己要 `r_ord_lt`）与 `r_is_na`。 */
+  ['r_nm_sort', ['r_order', 'r_is_na']],
   /* 这三格的体里用 `r_in1` 问"另一条里有没有这一格"（`setFnDecl2` 的 `inW`）——
      登记漏了的话它只在"源码里还另有一处 `%in%`"时凑巧能链上（量出来的：`print.R` 里
      单写 `intersect(1:2, 3:4)` 报 `未声明的函数 'r_in1'`）。 */
@@ -604,7 +606,7 @@ const NAME_KEEP_NUM = new Set([
   'round', 'signif', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
   'sinh', 'cosh', 'tanh', 'cumsum', 'cumprod', 'cummax', 'cummin', 'zapsmall',
 ]);
-const NAME_KEEP = new Set([...NAME_KEEP_LGL, ...NAME_KEEP_NUM, 'rev', 'head', 'tail']);
+const NAME_KEEP = new Set([...NAME_KEEP_LGL, ...NAME_KEEP_NUM, 'rev', 'head', 'tail', 'sort']);
 /** 第 i 格（0 起）。方言的 `{kind:'index'}` 落成 `(aget …)`，赋值那侧落 `(aset …)`。 */
 const svGet = (v, i) => ({ kind: 'index', obj: v, index: i });
 const svLen = (v) => call1('alen', v);
@@ -1014,16 +1016,28 @@ function namesExprOf(x, types) {
     return as.length < 1 ? null : namesExprOf(as[0], types);
   }
   /**
-   * `rev` / `head` / `tail` —— 位置动了，所以名字那一条也得**跟着动**：走字符向量上
-   * 同名的那几格辅助函数（`r_rev_str` / `r_head_str` / `r_tail_str`），与值那一侧
-   * 同一个规矩（取几格的算法也照 `callOf` 那一段抄：缺省 6，也认 `n=`）。
+   * `rev` / `head` / `tail` / `sort` —— 位置动了，所以名字那一条也得**跟着动**：
+   * `rev` / `head` / `tail` 走字符向量上同名的那几格辅助函数（`r_rev_str` /
+   * `r_head_str` / `r_tail_str`），与值那一侧同一个规矩（取几格的算法也照 `callOf`
+   * 那一段抄：缺省 6，也认 `n=`）；`sort` 走 `r_nm_sort`（按 `order` 那个置换挑一遍，
+   * 缺失那几格跟着值一起丢，`decreasing = TRUE` 再倒过来）。
    */
-  if (fn === 'rev' || fn === 'head' || fn === 'tail') {
+  if (fn === 'rev' || fn === 'head' || fn === 'tail' || fn === 'sort') {
     const as = posArgs(x);
     if (as.length < 1) return null;
     const ns = namesExprOf(as[0], types);
     if (ns === null) return null;
     if (fn === 'rev') return { kind: 'call', fn: { kind: 'name', name: useFn('r_rev_str') }, args: [ns] };
+    if (fn === 'sort') {
+      const got = {
+        kind: 'call',
+        fn: { kind: 'name', name: useFn('r_nm_sort') },
+        args: [ns, exprOf(as[0], types)],
+      };
+      return trueFlag(x, 'decreasing')
+        ? { kind: 'call', fn: { kind: 'name', name: useFn('r_rev_str') }, args: [got] }
+        : got;
+    }
     const nArg = namedArg(x, 'n');
     let cnt = { kind: 'int', value: 6 };
     if (nArg !== undefined) cnt = asIntE(exprOf(nArg, types), typeOfExpr(nArg, types));
@@ -5476,7 +5490,7 @@ const SET_FNS = new Set([
   'r_same', 'r_which_max', 'r_which_min', 'r_cumprod', 'r_pmax', 'r_pmin',
   'r_ord_lt', 'r_order', 'r_match', 'r_in_v', 'r_in1', 'r_unique', 'r_dup', 'r_any_dup',
   'r_union', 'r_intersect', 'r_setdiff', 'r_setequal', 'r_find_int',
-  'r_na_v', 'r_nan_v', 'r_fin_v', 'r_inf_v',
+  'r_na_v', 'r_nan_v', 'r_fin_v', 'r_inf_v', 'r_nm_sort',
 ]);
 
 /**
@@ -5716,6 +5730,35 @@ function setFnDecl2(name) {
         },
         /* 内部是 0 起的，交出去要 1 起（R 的 `order` 回的是位置）。 */
         forTo('i', nm('n'), [vecSet(o, i, b('+', vecGet(o, i), R(1)))]),
+        ret(o),
+      ],
+    };
+  }
+  if (name === 'r_nm_sort') {
+    /**
+     * `sort(带名字的向量)` 里**名字那一条**：按排序的那个置换挑一遍。
+     *
+     * 值那一侧走 `r_sort`（它自己把缺失丢掉 —— R 的 `sort` 缺省 `na.last = NA`），
+     * 所以这儿也得丢：`r_order` 把缺失排在**最后**，于是"值是缺失的那几格不 push"
+     * 与 `r_sort` 出来的长度一定对得上（这一条是它们两格共用的规矩）。
+     *
+     * 排序那一格不是稳定排序也无妨：`r_ord_lt` 拿原下标当最后一把钥匙，次序是唯一的。
+     */
+    const ord = nm('q');
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'ns', type: RSTRV }, { name: 'v', type: RVEC }],
+      ret: RSTRV,
+      body: [
+        letI('n', vecLen(v)),
+        { kind: 'let', name: 'q', type: RVEC, init: cal('r_order', v) },
+        { kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), I(0)) },
+        forTo('i', nm('n'), [
+          letI('p', b('-', call1('toint', vecGet(ord, i)), I(1))),
+          iff({ kind: 'unop', op: '!', operand: isNa(vecGet(v, nm('p'))) },
+            [{ kind: 'builtin-stmt', name: 'apush', args: [o, svGet(nm('ns'), nm('p'))] }]),
+        ]),
         ret(o),
       ],
     };

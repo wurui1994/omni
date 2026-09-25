@@ -466,11 +466,12 @@ R 那儿挑出的是 `NA_character_`，这一档没有那种值，与 `v[掩码]
 （`NAME_KEEP`，2026-09-26）：`is.na` / `is.nan` / `is.finite` / `is.infinite`（出逻辑向量）
 与数学那一族 `abs` / `sqrt` / `exp` / `log` / `log10` / `floor` / `ceiling` / `trunc` /
 `round` / `signif` / `sin` / `cos` / `tan` / `cumsum` / `cumprod` / `zapsmall`（出数值向量）。
-`sort` / `diff` 在 R 里也带名字，可它们要的不止"原样跟着"：`sort` 得先有排序那个**置换**
-（`order` 再按它挑一遍名字），`diff` 还要丢掉第一格 —— 那两格还没接，照旧**报**。
-`rev` / `head` / `tail` 这三格**接了**（2026-09-26）：名字那一条走字符向量上同名的那几格
-辅助函数（`r_rev_str` / `r_head_str` / `r_tail_str`），与值那一侧同一个规矩（缺省 6、认 `n=`、
-负的 `n` 两边都没接）。别的照旧**报** —— 静默丢掉的话 `print` 会少印
+`rev` / `head` / `tail` / `sort` 这四格**接了**（2026-09-26）：`rev` / `head` / `tail` 的名字走
+字符向量上同名的那几格辅助函数（`r_rev_str` / `r_head_str` / `r_tail_str`），与值那一侧同一个
+规矩（缺省 6、认 `n=`、负的 `n` 两边都没接）；`sort` 走 `r_nm_sort` —— 按 `order` 那个**置换**
+挑一遍，**值是缺失的那几格连名字一起丢**（R 的 `sort` 缺省 `na.last = NA`，而 `r_order` 把缺失
+排最后，于是两边长度一定对得上），`decreasing = TRUE` 再倒过来。`diff` 还要丢掉第一格，
+还没接。别的照旧**报** —— 静默丢掉的话 `print` 会少印
 名字那一行，而例子的判据是逐字节对 `Rscript`，那种错最难查。真要丢就自己写 `unname(v)`。
 
 **带名字的逻辑向量**（`print(v > 1)` / `c(a = TRUE, b = FALSE)` / `setNames(c(TRUE, NA), ns)` /
