@@ -114,3 +114,16 @@ print(format(TRUE, width = 6))
 print(format("a", width = 4))
 print(format("abcdef", width = 3))
 cat(nchar(format(2, width = 5)), "\n")
+
+# `zapsmall(x, digits = 7)` —— 照 R 的定义"按最大那一格的量级把位数让出去"：
+# `round(x, if (mx > 0) max(0, digits - log10(mx)) else digits)`，于是 `c(1e-20, 1)` 出 `0 1`。
+# 取整走 R 自己的 `fround`（位数是个小数，`fround` 内部再收成整数 —— 照它办）
+print(zapsmall(c(1e-20, 1)))
+print(zapsmall(c(1.0000000001, 2)))
+print(zapsmall(c(0.1234567891, 100)))
+print(zapsmall(c(1e-9, 1e-8), digits = 3))
+print(zapsmall(c(0, 0)))
+print(zapsmall(c(-1e-18, 5)))
+print(zapsmall(c(123.456789, 0.000001)))
+print(zapsmall(c(1, 2, 3)))
+print(zapsmall(c(1.5e-8, 2)))

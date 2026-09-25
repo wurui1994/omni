@@ -231,6 +231,7 @@ const FN_DEPS = new Map([
   /* `cov` / `cor`：两条一样长的向量。`cor` 的分母照 R 的 `cov.c`——**两个 sqrt 分开乘**
      （不是 `sqrt(varx*vary)`），最后一位就靠这个对上。 */
   /* `quantile` 的 type 7（照 `quantile.default` 抄）+ 不给 `probs` 时那五格。 */
+  ['r_zap', ['r_is_na']],
   ['r_qdef', []],
   ['r_no_na', ['r_any_na']],
   ['r_quantile', ['r_sort']],
@@ -789,6 +790,7 @@ const NAMED_OK = new Map([
   ['range', NA_RM], ['var', NA_RM], ['sd', NA_RM], ['any', NA_RM], ['all', NA_RM],
   ['median', NA_RM],
   ['quantile', new Set(['probs', 'names', 'na.rm', 'type'])],
+  ['zapsmall', new Set(['digits'])],
   ['diff', new Set(['lag'])],
   ['casefold', new Set(['upper'])],
   ['format', new Set(['nsmall', 'width'])],
@@ -835,7 +837,7 @@ const BUILTINS = new Set([
   /* base 里"向量进向量出"那一族 + 两格统计量。`seq` 与 `rep` 是造向量的。 */
   'sort', 'cumsum', 'prod', 'range', 'diff', 'head', 'tail', 'var', 'sd', 'rep', 'seq', 'rep_len',
   /* 两条向量的那两格统计量（`var(x, y)` 与 `cov(x, y)` 是同一件事）。 */
-  'cor', 'cov', 'quantile',
+  'cor', 'cov', 'quantile', 'zapsmall',
   /* 数格子、问缺失、插一段、换几格 —— 后两格与 `x[k] <- v` 同一套口径（见 `r_replace`）。 */
   'tabulate', 'anyNA', 'append', 'replace',
   /* 集合与位置那一族（见 `setFnDecl`）。`%in%` 是个算子，不在这张表里。 */
@@ -1333,6 +1335,8 @@ function applyTy(fn, x, types) {
     case 'cor': case 'cov': return REAL;
     /* `quantile` 回一条数值向量（`names = FALSE` 那一档 —— 见 `callOf`）。 */
     case 'quantile': return RVEC;
+    /* `zapsmall` 进出都是数值向量。 */
+    case 'zapsmall': return RVEC;
     /* `rank` 并列取平均 —— 出来的可能带小数（`rank(c(2,2,1))` 是 `2.5 2.5 1.0`），
        所以一律数值向量，不跟着进去那条是不是整数走。 */
     case 'rank': return RVEC;
@@ -3698,6 +3702,17 @@ function callOf(x, types, extra, want) {
             : lglCall('r_in1', asReal(ev(0), ts[0]), asVec(1));
         }
         return lglCall(fn === 'setequal' ? 'r_setequal' : 'r_find_int', asVec(0), asVec(1));
+      }
+      case 'zapsmall': {
+        /** `zapsmall(x, digits = 7)`（R 的默认 `getOption("digits")` 是 7）。 */
+        if (n < 1) throw new Error('r->IR: zapsmall() 一格实参都没给');
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        if (isStrVec(t) || t.kind === 'string') throw new Error(strvGap('zapsmall'));
+        const dn = namedArg(x, 'digits');
+        let dig = { kind: 'real', value: 7 };
+        if (dn !== undefined) dig = asReal(exprOf(dn, types), typeOfExpr(dn, types));
+        else if (n >= 2) dig = asReal(ev(1), typeOfExpr(all[1], types));
+        return lglCall('r_zap', isVecTy(t) ? ev(0) : lglCall('r_vec1', asReal(ev(0), t)), dig);
       }
       case 'anyDuplicated': {
         /** `anyDuplicated(v)` —— 第一格重复元素的位置（1 起），没有回 0。串那一侧也接。 */
@@ -8659,6 +8674,69 @@ function vecFnDecl(name) {
           else_: null,
         },
         { kind: 'return', values: [v] },
+      ],
+    };
+  }
+  if (name === 'r_zap') {
+    /**
+     * `zapsmall(x, digits)` —— 照 R 的定义（`base::zapsmall`）：
+     *
+     * ```r
+     * mx <- max(abs(x), na.rm = TRUE)
+     * round(x, digits = if (mx > 0) max(0L, digits - as.numeric(log10(mx))) else digits)
+     * ```
+     *
+     * 也就是"按最大那一格的量级把位数让出去"，于是 `zapsmall(c(1e-20, 1))` 出 `0 1`。
+     * 取整走 R 自己的 `fround`（那是 `round` 的正本，见 `RMATH`），**位数是个小数**
+     * （`digits - log10(mx)`），`fround` 内部再 `floor(digits + 0.5)` 收成整数 ——
+     * 照它办，不自己先取整。
+     *
+     * 一处明写的不足：`log10` 在 JS 腿上是 V8 的实现，与本机 libm 可能差 1 ulp ——
+     * 只有 `digits - log10(mx)` 正好落在 `k + 0.5` 的 1 ulp 之内时才会让 `fround` 收到
+     * 不同的位数。碰得到的话那一格会与 R 差一位（这一族的账在 SPEC 第三节）。
+     */
+    cabiUsed.add('fround');
+    rmathSig('fround');
+    const out = { kind: 'name', name: 'o' };
+    const mx = { kind: 'name', name: 'mx' };
+    const dg = { kind: 'name', name: 'dg' };
+    const av = { kind: 'name', name: 'av' };
+    const rm = (f, e) => call1('rmath', { kind: 'strlit', value: f }, e);
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RVEC }, { name: 'dig', type: REAL }],
+      ret: RVEC,
+      body: [
+        declLen(),
+        { kind: 'let', name: 'mx', type: REAL, init: { kind: 'real', value: 0 } },
+        loop([
+          { kind: 'let', name: 'av', type: REAL, init: rm('fabs', elem) },
+          {
+            kind: 'if',
+            cond: b('&&', { kind: 'unop', op: '!', operand: naQ(av) }, b('>', av, mx)),
+            then: [{ kind: 'assign', target: mx, value: av }],
+            else_: null,
+          },
+        ], 0),
+        { kind: 'let', name: 'dg', type: REAL, init: { kind: 'name', name: 'dig' } },
+        {
+          kind: 'if',
+          cond: b('>', mx, { kind: 'real', value: 0 }),
+          then: [
+            { kind: 'assign', target: dg, value: b('-', { kind: 'name', name: 'dig' }, rm('log10', mx)) },
+            {
+              kind: 'if',
+              cond: b('<', dg, { kind: 'real', value: 0 }),
+              then: [{ kind: 'assign', target: dg, value: { kind: 'real', value: 0 } }],
+              else_: null,
+            },
+          ],
+          else_: null,
+        },
+        ...vecNewAs('o', len),
+        loop([vecSet(out, i, { kind: 'ccall', sym: 'fround', args: [elem, dg] })], 0),
+        { kind: 'return', values: [out] },
       ],
     };
   }

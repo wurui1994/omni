@@ -529,6 +529,13 @@ R 的 `cat` 不带，差一个字节就对不上 `Rscript`）。
 所以 `as.character(1e5)` 是 `1e+05` 而不是 `100000` —— 定点与科学记数那条挑法照旧管，
 只是位数不同。落地就是 `asStr(…, dig)` 那一个参数（`r_num_str` 与 `r_sci` 都收位数）。
 
+`zapsmall(x, digits = 7)` 接了（2026-09-26）：照 `base::zapsmall` 的定义 ——
+`round(x, if (mx > 0) max(0, digits - log10(mx)) else digits)`，`mx` 是 `max(abs(x))`。
+取整走 R 自己的 `fround`（`round` 的正本），**位数是个小数**、由 `fround` 内部收成整数，
+照它办不自己先取整。一处明写的不足：`log10` 在 JS 腿上是 V8 的实现，与本机 libm 可能差
+1 ulp —— 只有 `digits - log10(mx)` 正好落在 `k + 0.5` 的 1 ulp 之内时才会让 `fround`
+收到不同的位数，那一格会与 R 差一位。
+
 `format(x, nsmall =, width =)` **接了一半**（2026-09-26，判据 `ext/r/examples/numfmt.R`）：
 **标量**那一档全接 —— 底子就是 `cat` / `print` 那条（7 位有效数字），`nsmall = k` 是
 "**至少** k 位小数"而且**只在定点那一侧管**（量出来 `format(1e5, nsmall = 2)` 还是
