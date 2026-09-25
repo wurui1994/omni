@@ -148,3 +148,16 @@ print(c(cv, c(z = 7)))
 print(names(c(cv, 4)))
 print(c(c(p = TRUE), FALSE))
 cat(sum(c(cv, 4)), "\n")
+
+# 按名字**一次取多格**（2026-09-26 接了）：找着的按 R 的规矩取第一处，找不着的
+# 值是 `NA`、名字那一行印 `<NA>`。
+nk <- c(a = 1, bb = 4, ccc = 9)
+print(nk[c("a", "ccc")])
+print(nk[c("a", "zz")])
+print(nk[c("bb")])
+print(nk[c("ccc", "a")])
+print(nk[character(0)])
+cat(sum(nk[c("a", "bb")]), "\n")
+# `names(v[按名字挑])` 那一格**当场报**（退到 libR）：找不着的那一格 R 给的是
+# `NA_character_`，这一层没有串的缺失 —— 名字那一行印的 `<NA>` 只是"印出来的样子"，
+# 当数据用会静默差一格。所以这儿不写那种形状。

@@ -260,6 +260,8 @@ const FN_DEPS = new Map([
   ['r_sat1', []],
   ['r_nm_pos', []],
   ['r_nm_pick', []],
+  ['r_nm_keys', []],
+  ['r_at_keys', ['r_na']],
   ['r_mask_str', ['r_is_na']],
   ['r_drop_na', ['r_is_na']],
   /* 集合与位置那一族（`match` / `%in%` / `unique` / `order`…）。"两格值算不算同一格"
@@ -1001,6 +1003,10 @@ function namesExprOf(x, types) {
     const ks = kids(x).slice(1).map((k) => kids(k)[0]).filter((k) => k !== undefined);
     if (ks.length !== 1) return null;
     const kt = typeOfExpr(ks[0], types);
+    /* `v[c("a","zz")]` —— 名字那一侧就是要的那几个串，找不着的印 `<NA>`。 */
+    if (isStrVec(kt)) {
+      return { kind: 'call', fn: { kind: 'name', name: useFn('r_nm_keys') }, args: [ns, exprOf(ks[0], types)] };
+    }
     if (isVecTy(kt)) {
       const h = useFn(isLglTy(kt) ? 'r_mask_str' : 'r_nm_pick');
       return { kind: 'call', fn: { kind: 'name', name: h }, args: [ns, exprOf(ks[0], types)] };
@@ -1240,6 +1246,10 @@ function typeOfExpr(x, types) {
         return STR;
       }
       if (!isVecTy(a)) return INT;
+      /* `v[c("a","b")]` —— 带名字的向量上按名字一次取多格，出来还是**带名字的**向量
+         （找不着那几格值是 `NA`、名字印 `<NA>`）。 */
+      const kstr = kids(x).slice(1).map((k) => kids(k)[0]).filter((k) => k !== undefined);
+      if (kstr.length === 1 && isNamedTy(a) && isStrVec(typeOfExpr(kstr[0], types))) return a;
       /* 下标是向量 → 挑出来的还是一格向量（逻辑/数值随被挑的那个走）。
          **写着负号的那一格也是**（`x[-1]` 在 R 里是"丢掉第一格"，出来是一条向量）。 */
       const ks = kids(x).slice(1).map((k) => kids(k)[0]).filter((k) => k !== undefined);
@@ -2936,15 +2946,14 @@ function indexRead(x, types) {
     /* `v["a"]` / `v[["a"]]` —— 带名字的向量上**按名字取**（名字那一条在影子变量里，
        见 `RNVEC`）。找不到那个名字时回 `NA` —— R 也是（`v["zz"]` 印 `<NA>` / `NA`）。 */
     if (kt.kind === 'string' || (isStrVec(kt) && isNamedTy(ot))) {
-      if (isStrVec(kt)) {
-        throw new Error('r->IR: `v[c("a","b")]` 那种按名字一次取多格还没接'
-          + '（挑出来的那几格名字也要跟着走）');
-      }
       const ns = namesExprOf(obj, types);
       if (ns === null) {
         throw new Error('r->IR: 按名字取下标只在**带名字的向量**上接'
           + '（`c(a = 1, …)` / `setNames(v, ns)`）—— 这一格推不出名字来');
       }
+      /* `v[c("a","b")]` —— 一次取多格（2026-09-26 接了）：找不着那个名字的位置
+         值回 `NA`、名字印 `<NA>`（与一格那一档 `r_at_name` 同一条）。 */
+      if (isStrVec(kt)) return lglCall('r_at_keys', o, ns, exprOf(keys[0], types));
       return lglCall('r_at_name', o, ns, exprOf(keys[0], types));
     }
     if (isVecTy(kt)) {
@@ -3533,6 +3542,25 @@ function callOf(x, types, extra, want) {
          这儿只管**值**那一条 —— 名字那一条由 `namesExprOf` 在赋值那一句上另发一条。 */
       case 'names': {
         if (n !== 1 || all[0] === null) throw new Error('r->IR: names() 要一格实参（管道位上还没接）');
+        /**
+         * **`names(v[按名字挑])` 当场报。** 按名字挑出来的那几格，找不着的那一格
+         * R 给的名字是 `NA_character_`；这一层没有串的缺失，名字那一行印的是 `"<NA>"`
+         * **这个串**（印出来与 R 一样，见 `r_nm_keys` / `r_at_name`）。那个串当**数据**用
+         * 就与 R 差了一格：R 的 `names(v[c("a","zz")])` 印 `[1] "a" NA `（NA 不带引号），
+         * 这儿会印 `[1] "a"    "<NA>"`。所以这一格报而不是静默差 —— 退到 libR 答案是对的。
+         */
+        const arg0 = all[0];
+        if (isList(arg0) && tag(arg0) === 'sub1') {
+          const kk = kids(arg0).slice(1).map((k) => kids(k)[0]).filter((k) => k !== undefined);
+          if (kk.length === 1) {
+            const ktt = typeOfExpr(kk[0], types);
+            if (ktt.kind === 'string' || isStrVec(ktt)) {
+              throw new Error('r->IR: `names(v[按名字挑])` 还没接 —— 找不着的那一格 R 给的是'
+                + ' `NA_character_`，这一层没有串的缺失（名字那一行印的是 `<NA>` 这个串，'
+                + '当数据用会静默差一格）');
+            }
+          }
+        }
         const ns = namesExprOf(all[0], types);
         if (ns === null) {
           throw new Error('r->IR: names() 只在**带名字的向量**上接（`c(a = 1, …)` / `setNames`）'
@@ -5583,7 +5611,7 @@ function strFnDecl(name) {
 /** 这一批由 `strvFnDecl` 发（形状都是"一条 `(arr string)` 进"）。 */
 const STRV_FNS = new Set([
   'r_cat_str', 'r_print_str', 'r_join_str', 'r_rev_str', 'r_nchar_v', 'r_upper_v', 'r_lower_v',
-  'r_pick_str', 'r_mask_str', 'r_split', 'r_at_name', 'r_nm_at', 'r_sat1', 'r_nm_pos', 'r_nm_pick',
+  'r_pick_str', 'r_mask_str', 'r_split', 'r_at_name', 'r_nm_at', 'r_sat1', 'r_nm_pos', 'r_nm_pick', 'r_nm_keys',
   'r_gsub', 'r_gsub_v', 'r_grepl_v', 'r_grep_i', 'r_grep_s', 'r_rep_str', 'r_ifelse_s',
   'r_substr_v', 'r_trim_v', 'r_starts_v', 'r_ends_v',
   /* base 那四条字符向量常量 + `strrep` 在字符向量上那一格。 */
@@ -5598,7 +5626,7 @@ const SET_FNS = new Set([
   'r_same', 'r_which_max', 'r_which_min', 'r_cumprod', 'r_pmax', 'r_pmin',
   'r_ord_lt', 'r_order', 'r_match', 'r_in_v', 'r_in1', 'r_unique', 'r_dup', 'r_any_dup',
   'r_union', 'r_intersect', 'r_setdiff', 'r_setequal', 'r_find_int',
-  'r_na_v', 'r_nan_v', 'r_fin_v', 'r_inf_v', 'r_nm_sort', 'r_at1',
+  'r_na_v', 'r_nan_v', 'r_fin_v', 'r_inf_v', 'r_nm_sort', 'r_at1', 'r_at_keys',
 ]);
 
 /**
@@ -5838,6 +5866,36 @@ function setFnDecl2(name) {
         },
         /* 内部是 0 起的，交出去要 1 起（R 的 `order` 回的是位置）。 */
         forTo('i', nm('n'), [vecSet(o, i, b('+', vecGet(o, i), R(1)))]),
+        ret(o),
+      ],
+    };
+  }
+  if (name === 'r_at_keys') {
+    /**
+     * `v[c("a","zz")]` —— 带名字的向量上**按名字一次取多格**的值那一侧。
+     * 找不到那个名字时 R 挑出一格 `NA`（名字那一侧印 `<NA>`，见 `r_nm_keys`）——
+     * 量出来 `c(a=1,b=2)[c("a","zz")]` 印的是 `a <NA>` 一行、`1 NA` 一行。
+     * 重名那一档按 R 的规矩取**第一处**（`r_at_name` 也是这么找的）。
+     */
+    const ks = nm('ks');
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RVEC }, { name: 'ns', type: RSTRV }, { name: 'ks', type: RSTRV }],
+      ret: RVEC,
+      body: [
+        letI('n', svLen(nm('ns'))),
+        letI('m', svLen(ks)),
+        ...vecNewAs('o', nm('m')),
+        forTo('j', nm('m'), [
+          letI('f', I(-1)),
+          forTo('i', nm('n'), [
+            iff(b('&&', b('<', nm('f'), I(0)), b('==', svGet(nm('ns'), i), svGet(ks, j))), [set('f', i)]),
+          ]),
+          iff(b('<', nm('f'), I(0)),
+            [vecSet(o, j, cal('r_na'))],
+            [vecSet(o, j, vecGet(v, nm('f')))]),
+        ]),
         ret(o),
       ],
     };
@@ -6511,6 +6569,37 @@ function strvFnDecl(name) {
           }]),
         ], nm('n')),
         { kind: 'return', values: [val ? lglCall('r_na') : S('<NA>')] },
+      ],
+    };
+  }
+  if (name === 'r_nm_keys') {
+    /* `v[c("a","zz")]` 的**名字那一侧**：找着的那几格名字就是要的那个串，找不着的
+       印 `<NA>`（值那一侧回 `NA`，见 `r_at_keys`）。 */
+    const ks = nm('ks');
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'ns', type: RSTRV }, { name: 'ks', type: RSTRV }],
+      ret: RSTRV,
+      body: [
+        letI('n', svLen(nm('ns'))),
+        letI('m', svLen(ks)),
+        { kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), I(0)) },
+        {
+          kind: 'for',
+          init: letI('j', I(0)),
+          cond: b('<', nm('j'), nm('m')),
+          post: set('j', b('+', nm('j'), I(1))),
+          body: [
+            { kind: 'let', name: 'f', type: BOOL, init: { kind: 'bool', value: false } },
+            loop([iff(b('==', svGet(nm('ns'), i), svGet(ks, nm('j'))),
+              [{ kind: 'assign', target: nm('f'), value: { kind: 'bool', value: true } }])], nm('n')),
+            iff(nm('f'),
+              [{ kind: 'builtin-stmt', name: 'apush', args: [nm('o'), svGet(ks, nm('j'))] }],
+              [{ kind: 'builtin-stmt', name: 'apush', args: [nm('o'), S('<NA>')] }]),
+          ],
+        },
+        { kind: 'return', values: [nm('o')] },
       ],
     };
   }
