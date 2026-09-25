@@ -200,6 +200,9 @@ JS 腿 `$gfx_frame_fn(omni_eval$frame)`、C 腿 `omni_gfx_frame_fn((void *)…)`
    > `serve` 那一档产物在 node 侧的工人里跑，页面的设备它碰不到）。
    > 还欠：着色器与纹理（第 5、6 刀）。
 4. **OpenGL 设备**（本机，默认）：`libomnigl` 加窗口与帧循环。
+   > 已落地：离屏那一半（2026-09-24，§13.1~13.9）+ **窗口与真实时帧循环**
+   > （2026-09-26，§13.10：`--mode view`，GLFW 只 `dlopen`，view 与 render 逐字节相同）。
+   > 还欠："默认"那一半 —— 默认设备仍是 `host`；以及 vsync（量到 1900 fps，不节流）。
 5. **可编程管线**：`@v`/`@f` 区段直送、`glsetshader` / `gluniform*` / `glvertexattrib*`；
    浏览器走 `glslSource` 转写。
    > 已落地（2026-09-24）：方言加了 `(gfxdef 种类 名字 内容)`（**串只在入口里登记一次**，
