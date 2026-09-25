@@ -76,6 +76,11 @@ static int g_st_cull = -1;
 static int g_st_blend = -1;
 static int g_st_vp = -1;
 static int g_st_bound = 0;
+/** 已经发上去的那两张矩阵（连同哪格 program）——**一样就不再发**。 */
+static GLuint g_st_mat_prog;
+static int g_st_mat_ok;
+static float g_st_mvp[16];
+static float g_st_mv[16];
 
 static int g_on;
 static int g_depth_test;
@@ -241,6 +246,8 @@ int omni_ev_gl_open(int w, int h) {
   g_st_blend = -1;
   g_st_vp = -1;
   g_st_bound = 0;
+  g_st_mat_ok = 0;
+  g_st_mat_prog = 0;
   return 0;
 }
 
@@ -1085,12 +1092,23 @@ void omni_ev_gl_batch(int kind, long n, const double *verts) {
   if (g_useprog && (g_cur != 0 || ev_need_prog())) { prog = g_cur; m = g_mvp; mv = g_mv; }
   if (prog != g_st_prog) { glUseProgram(prog); g_st_prog = prog; }
   int li = ev_loc_at(prog);
-  GLint mvp = li >= 0 ? g_loc[li].mvp : glGetUniformLocation(prog, "u_mvp");
-  if (mvp >= 0) glUniformMatrix4fv(mvp, 1, GL_FALSE, m);
-  /* `u_mv` 是模型视图那一格（`gl_ModelViewMatrix` / `gl_NormalMatrix` 用它）——
-     只有脚本那格着色器引用了它才有位置，内建那对没有。 */
-  GLint mvloc = li >= 0 ? g_loc[li].mv : glGetUniformLocation(prog, "u_mv");
-  if (mvloc >= 0) glUniformMatrix4fv(mvloc, 1, GL_FALSE, mv);
+  /* 两张矩阵：**与上一段一样就不发**（uniform 是按 program 存着的，所以换了 program
+     要重新发一遍）。矩阵每段都变的那些脚本（`disco ball`）这一格不省，别的省两句。 */
+  int matsame = g_st_mat_ok && g_st_mat_prog == prog
+      && memcmp(g_st_mvp, m, sizeof(g_st_mvp)) == 0
+      && memcmp(g_st_mv, mv, sizeof(g_st_mv)) == 0;
+  if (!matsame) {
+    GLint mvp = li >= 0 ? g_loc[li].mvp : glGetUniformLocation(prog, "u_mvp");
+    if (mvp >= 0) glUniformMatrix4fv(mvp, 1, GL_FALSE, m);
+    /* `u_mv` 是模型视图那一格（`gl_ModelViewMatrix` / `gl_NormalMatrix` 用它）——
+       只有脚本那格着色器引用了它才有位置，内建那对没有。 */
+    GLint mvloc = li >= 0 ? g_loc[li].mv : glGetUniformLocation(prog, "u_mv");
+    if (mvloc >= 0) glUniformMatrix4fv(mvloc, 1, GL_FALSE, mv);
+    memcpy(g_st_mvp, m, sizeof(g_st_mvp));
+    memcpy(g_st_mv, mv, sizeof(g_st_mv));
+    g_st_mat_prog = prog;
+    g_st_mat_ok = 1;
+  }
   /* 混合：`glquad(0)` 那一档要 alpha 混合（语言那一侧发的 `batchblend`）。 */
   if (g_blend != g_st_blend) {
     if (g_blend == 0) {

@@ -2227,6 +2227,50 @@ OMNI_GFX=null OMNI_FRAMES=30 OMNI_PROF=sample:997 OMNI_PROF_OUT=/tmp/db.folded /
 `snake tube` c 5.4 / js 11.5（13.7）、`balls2k` c 10.8 / js 7.3（4.7）、
 `disco ball` c 39.1 / js 83.7（41.4）—— **只剩 `disco ball` 一份不到 60fps**。
 
+### 29.7 `disco ball` 剩下那 37ms 拆成三段，三条路量过是死路（2026-09-25）
+
+**先把一帧拆开**（js 腿，30 帧取最好那一帧；两个临时开关插在插件的 `omni_ev_gl_batch`
+里、量完就撤了）：
+
+* 全开 **72ms**；
+* 不发 `glDrawArrays` **59ms** ⇒ **4000 句 draw call ≈ 13ms**（每句 3.2µs —— CGL 上
+  一句 GL 调用就这个价）；
+* 连顶点上传也不发 58ms ⇒ **`glBufferData` 那一句总共只 ~1ms**；
+* 剩下的 58ms 是**语言这一侧**（同一份程序 `--gfx null` 量到 54ms）。
+
+c 腿同一份账：语言 22ms + draw 13ms + 零碎 ≈ 37ms（判据 36.7~39.1ms 对得上）。
+所以要进 60fps 得两边一起砍：语言 22 -> 8ms、draw call 13 -> 4ms。
+
+**三条量过之后放弃的路**（都是"改完更慢或没动"，留着省下一次重试）：
+
+1. **顶点 VBO 当环形缓冲**（一块 4MB 开着、每段批 `glBufferSubData` 往后接 +
+   `glDrawArrays(mode, first, n)`）：`disco ball` 从 108 掉到 **520ms/帧**。
+   往**正在用着的**那块里写会逼一次隐式同步，4000 段批就是 4000 次等 GPU；
+   现在这句"每段批 `glBufferData` 弃一块"才是对的（弃块不必等）。真要省这一句只能走
+   `glMapBufferRange` + `GL_MAP_UNSYNCHRONIZED_BIT`。
+2. **把批那两条数组的句柄提成局部量**（省掉每格元素一次全局装载）：22.0 -> 22.1ms/帧
+   （没动）。数组元素访问的价钱在**边界判**上，不在取句柄。
+3. **我们自己的 -O1**（`OMNI_OPT=1`）：0.66 vs 0.67s/30 帧，中性（第二次确认）。
+
+**留下的那一格状态缓存**（这一轮唯一保住的改动）：两张矩阵与上一段批**逐字节相同就不发**
+（`u_mvp`/`u_mv` 是按 program 存着的，所以换 program 要重发）。`disco ball` 每段批矩阵都变，
+这一格对它没用；矩阵不动的那些脚本每段批省两句 `glUniformMatrix4fv`。
+
+**下一刀只剩"把批并起来"**，而挡在前面的是"顶点是物体坐标、变换随批走"这条约定。
+做法（还没做）：语言这一侧把顶点**烘到眼空间**（`MV · v`）、法向烘成
+`NormalMatrix · n`，然后 `u_mv` 发单位矩阵、`u_mvp` 只发投影 ——
+`ftransform()` / `gl_ModelViewMatrix * gl_Vertex` / `gl_NormalMatrix * gl_Normal`
+这三种写法的结果**一个字不变**，于是矩阵变了也不必断批，一帧 3994 段变成 ~40 段
+（顶点上限 3072 那一格才断），draw call 13ms -> 0.1ms。
+两个前提：
+* **要在编译期判"这份着色器能不能烘"**：`gl_Vertex` 只许出现在上面那三种乘法里
+  （`ken/cubetex.pss` 那种 `v = gl_Vertex` 直接当物体坐标用的**不能烘**）——
+  我们本来就在 `glslAlign` 里改写这几个名字，判据就在那儿；
+* **精度**：烘是 double 算完再转 float，GPU 那条是 float 里算 —— 差在 1e-7 量级，
+  现在逐像素相同的那十几份会掉到"差几格 ±1"（仍然过 RMSE ≤ 8，但会丢"逐像素相同"那个记号）。
+  所以这一刀要连"判据里那个记号怎么记"一起想清楚再动。
+
+
 
 
 
