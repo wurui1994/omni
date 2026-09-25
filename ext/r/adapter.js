@@ -251,6 +251,12 @@ const FN_DEPS = new Map([
   ['r_pad0', []],
   ['r_trim', []],
   ['r_split', []],
+  /* 找与换那一族（见 `findOf`）。`r_gsub` 是 `sub` 与 `gsub` 共用的那一个（带"换几次"的旗子）。 */
+  ['r_gsub', []],
+  ['r_gsub_v', ['r_gsub']],
+  ['r_grepl_v', []],
+  ['r_grep_i', []],
+  ['r_grep_s', []],
   ['r_lgl_str', ['r_is_na']],
   ['r_any', ['r_is_na', 'r_na']],
   ['r_all', ['r_is_na', 'r_na']],
@@ -620,6 +626,8 @@ const NAMED_OK = new Map([
   ['rep', new Set(['times'])],
   ['seq', new Set(['by'])],
   ['strsplit', new Set(['fixed'])],
+  ['grepl', new Set(['fixed'])], ['sub', new Set(['fixed'])], ['gsub', new Set(['fixed'])],
+  ['grep', new Set(['fixed', 'value'])],
   ['numeric', new Set(['length'])], ['double', new Set(['length'])],
   ['integer', new Set(['length'])], ['logical', new Set(['length'])],
   ['character', new Set(['length'])],
@@ -647,6 +655,8 @@ const BUILTINS = new Set([
   /* `strsplit` 只接两种形状（见 `splitOf`）：`strsplit(s, sep)[[1]]` 与
      `unlist(strsplit(s, sep))` —— R 那边它回的是一张**表**，而这一层没有"表里装向量"。 */
   'strsplit', 'unlist',
+  /* 找与换那一族（见 `findOf`）—— **只认按字面找**那一档，pattern 是串字面量。 */
+  'grepl', 'grep', 'sub', 'gsub',
   /* 函数当实参那一族 —— **只接就地写的匿名函数**（见 `applyOf`）。 */
   'sapply', 'vapply', 'lapply', 'Reduce', 'Filter',
   /* "这是什么东西"那三问 —— 类型在这一层是**推出来的**，所以答案是编译期常量。 */
@@ -981,6 +991,17 @@ function applyTy(fn, x, types) {
     case 'sapply': case 'vapply': case 'lapply': case 'Reduce': case 'Filter':
       return applyTy(fn, x, types);
     case 'strsplit': return RSTRV;
+    /* 找与换那一族（见 `findOf`）：`grepl` 的形状随被找的那一格、`grep` 回位置（或元素）、
+       `sub` / `gsub` 逐元素换（一格串进一格串出）。 */
+    case 'grepl': {
+      const ps = posArgs(x);
+      return ps.length > 1 && isStrVec(typeOfExpr(ps[1], types)) ? RLGL : BOOL;
+    }
+    case 'grep': return namedArg(x, 'value') !== undefined ? RSTRV : RIVEC;
+    case 'sub': case 'gsub': {
+      const ps = posArgs(x);
+      return ps.length > 2 && isStrVec(typeOfExpr(ps[2], types)) ? RSTRV : STR;
+    }
     case 'is.character': case 'is.numeric': case 'is.logical': return BOOL;
     case 'toupper': return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RSTRV : STR;
     case 'startsWith': case 'endsWith': return BOOL;
@@ -1606,6 +1627,83 @@ function splitOf(callNode, types) {
 /** 这一格是不是 `strsplit(…)` 那一次调用（`[[1]]` 与 `unlist` 两处都要问）。 */
 const isSplitCall = (node) => isList(node) && tag(node) === 'call'
   && tag(kids(node)[0]) === 'sym' && nameOf(kids(node)[0]) === 'strsplit';
+
+/** 那格命名实参是不是写着字面量 `TRUE`（`fixed=` / `value=` 两处都这么问）。 */
+function trueFlag(callNode, name) {
+  const node = namedArg(callNode, name);
+  if (node === undefined) return false;
+  const txt = tag(node) === 'num' ? String(leaf(kids(node)[0])) : null;
+  if (txt === 'TRUE' || txt === 'T') return true;
+  if (txt === 'FALSE' || txt === 'F') return false;
+  throw new Error(`r->IR: ${name}= 只认字面量 TRUE / FALSE（给的是一格要算的值）`);
+}
+
+/**
+ * `grepl` / `grep` / `sub` / `gsub` 那一格**要找的东西** —— 与 `strsplit` 同一条规矩：
+ * 只收串字面量，而且**没有正则元字符**（或者明写了 `fixed = TRUE`）。
+ *
+ * 为什么不是"接了正则"：R 这一族默认按 POSIX 扩展正则匹配，而正则那一层这儿没有。
+ * 不是字面量时连"它是不是一条正则"都不知道 —— 那时假装按定串找就是静默答错。
+ * 好在真代码里这一族的实参多半就是定串（`gsub(",", "", s)`），所以这一半覆盖得住。
+ */
+function litPat(callNode, fn, node) {
+  if (!isList(node) || tag(node) !== 'str') {
+    throw new Error(`r->IR: ${fn}() 的 pattern 只接串字面量 —— R 那边它默认是**正则**，`
+      + '不是字面量就没法知道它是不是一条正则（正则那一层没有）');
+  }
+  const p = String(leaf(kids(node)[0]));
+  if (p === '') {
+    throw new Error(`r->IR: ${fn}() 的 pattern 是空串 —— R 那一档是"每个字符之间都算一次"`
+      + '（`gsub("", "-", "abc")` 是 `"-a-b-c-"`），这儿没接');
+  }
+  if (!trueFlag(callNode, 'fixed') && RE_META.test(p)) {
+    throw new Error(`r->IR: ${fn}() 的 "${p}" 里有正则元字符 —— R 默认按正则找，`
+      + ' 而正则那一层没有。真想按定串找就写 `fixed = TRUE`');
+  }
+  return { kind: 'string', value: p };
+}
+
+/**
+ * `grepl` / `grep` / `sub` / `gsub` → 一格表达式。
+ *
+ * 一格串上的 `grepl` 直接落成 `(sfind s p) >= 0`（不必发函数）；字符向量那几档各走一格
+ * 生成出来的辅助函数。`sub` 与 `gsub` 是同一个函数带一格"换几次"的旗子。
+ */
+function findOf(fn, x, types) {
+  const args = posArgs(x);
+  const arity = fn === 'grepl' || fn === 'grep' ? 2 : 3;
+  if (args.length !== arity) {
+    throw new Error(`r->IR: ${fn}() 要 ${arity} 格实参（给了 ${args.length}）`);
+  }
+  const pat = litPat(x, fn, args[0]);
+  const subj = arity === 2 ? args[1] : args[2];
+  const st = typeOfExpr(subj, types);
+  if (st.kind !== 'string' && !isStrVec(st)) {
+    throw new Error(`r->IR: ${fn}() 要找的那一格是串或字符向量（推出来是 ${st.kind}）`);
+  }
+  const s = exprOf(subj, types);
+  if (fn === 'grepl') {
+    return isStrVec(st)
+      ? lglCall('r_grepl_v', s, pat)
+      : b('>=', call1('sfind', s, pat), { kind: 'int', value: 0 });
+  }
+  if (fn === 'grep') {
+    if (!isStrVec(st)) {
+      throw new Error('r->IR: grep() 的第二格实参要是一条字符向量 —— 一格串上写 grepl()');
+    }
+    return lglCall(trueFlag(x, 'value') ? 'r_grep_s' : 'r_grep_i', s, pat);
+  }
+  const rt = typeOfExpr(args[1], types);
+  if (rt.kind !== 'string') {
+    throw new Error(`r->IR: ${fn}() 换上去的那一格要是串（推出来是 ${rt.kind}）`
+      + ' —— R 的 `\\1` 那种回引用要正则，没接');
+  }
+  const rep = exprOf(args[1], types);
+  const all = { kind: 'int', value: fn === 'gsub' ? 1 : 0 };
+  return isStrVec(st)
+    ? lglCall('r_gsub_v', s, pat, rep, all)
+    : lglCall('r_gsub', s, pat, rep, all);
+}
 /** 这一格是不是 `名字(…)` 那一次调用（`unlist(lapply(…))` 要问）。 */
 const isApplyCall = (node, name) => isList(node) && tag(node) === 'call'
   && tag(kids(node)[0]) === 'sym' && nameOf(kids(node)[0]) === name;
@@ -3071,6 +3169,9 @@ function callOf(x, types, extra, want) {
       case 'strsplit':
         throw new Error('r->IR: strsplit(…) 要写成 `strsplit(s, sep)[[1]]` 或'
           + ' `unlist(strsplit(s, sep))` —— R 那边它回的是一张**表**，而这一层没有"表里装向量"');
+      /* 找与换那一族（见 `findOf`）—— pattern 只认串字面量。 */
+      case 'grepl': case 'grep': case 'sub': case 'gsub':
+        return findOf(fn, x, types);
       case 'is.character': case 'is.numeric': case 'is.logical': {
         /* 类型在这一层是**推出来的**（方言那侧没有运行期的类型标签），所以这三问的答案是
            编译期常量。R 的口径：`is.numeric(TRUE)` 是 FALSE、`is.numeric(1L)` 是 TRUE。 */
@@ -3936,6 +4037,7 @@ function strFnDecl(name) {
 const STRV_FNS = new Set([
   'r_cat_str', 'r_print_str', 'r_join_str', 'r_rev_str', 'r_nchar_v', 'r_upper_v', 'r_lower_v',
   'r_pick_str', 'r_mask_str', 'r_split', 'r_at_name', 'r_nm_at',
+  'r_gsub', 'r_gsub_v', 'r_grepl_v', 'r_grep_i', 'r_grep_s',
 ]);
 
 /** 这一批由 `setFnDecl` 发（集合与位置那一族，见 `FN_DEPS` 上那段账）。 */
@@ -4330,6 +4432,119 @@ function strvFnDecl(name) {
           }]),
         ], nm('n')),
         { kind: 'return', values: [val ? lglCall('r_na') : S('<NA>')] },
+      ],
+    };
+  }
+  if (name === 'r_gsub') {
+    /* 一格串上按**定串**换：`all` 是 0 就只换第一处（`sub`），1 是全换（`gsub`）。
+       从 `pos` 往后找用的是"把剩下那段切出来再 `sfind`" —— 方言的 `sfind` 只从头找。
+       R 的口径：不重叠、从左往右（`gsub("aa", "b", "aaaa")` 是 `"bb"`，量出来的）。 */
+    const s = nm('s');
+    const p = nm('p');
+    const pos = nm('pos');
+    return {
+      kind: 'fn',
+      name,
+      params: [
+        { name: 's', type: STR }, { name: 'p', type: STR },
+        { name: 'r', type: STR }, { name: 'all', type: INT },
+      ],
+      ret: STR,
+      body: [
+        letI('n', call1('slen', s)),
+        letI('m', call1('slen', p)),
+        letS('o', S('')),
+        letI('pos', I(0)),
+        {
+          kind: 'while',
+          cond: b('<=', b('+', pos, nm('m')), nm('n')),
+          body: [
+            letI('k', call1('sfind', call1('ssub', s, pos, b('-', nm('n'), pos)), p)),
+            iff(b('<', nm('k'), I(0)), [{ kind: 'break' }]),
+            set('o', b('+', b('+', nm('o'), call1('ssub', s, pos, nm('k'))), nm('r'))),
+            set('pos', b('+', b('+', pos, nm('k')), nm('m'))),
+            iff(b('==', nm('all'), I(0)), [{ kind: 'break' }]),
+          ],
+        },
+        { kind: 'return', values: [b('+', nm('o'), call1('ssub', s, pos, b('-', nm('n'), pos)))] },
+      ],
+    };
+  }
+  if (name === 'r_gsub_v') {
+    return {
+      kind: 'fn',
+      name,
+      params: [
+        { name: 'v', type: RSTRV }, { name: 'p', type: STR },
+        { name: 'r', type: STR }, { name: 'all', type: INT },
+      ],
+      ret: RSTRV,
+      body: [
+        letI('n', svLen(v)),
+        { kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), nm('n')) },
+        loop([{
+          kind: 'assign',
+          target: svGet(nm('o'), i),
+          value: {
+            kind: 'call',
+            fn: { kind: 'name', name: useFn('r_gsub') },
+            args: [svGet(v, i), nm('p'), nm('r'), nm('all')],
+          },
+        }], nm('n')),
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  if (name === 'r_grepl_v') {
+    /* 逐元素"里头有没有这一段"→ 一条**逻辑**向量（`(ptr real)` 上的 1 / 0，见 `RLGL`）。 */
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RSTRV }, { name: 'p', type: STR }],
+      ret: RLGL,
+      body: [
+        letI('n', svLen(v)),
+        ...vecNewAs('o', nm('n')),
+        loop([vecSet(nm('o'), i, {
+          kind: 'ternary',
+          cond: b('>=', call1('sfind', svGet(v, i), nm('p')), I(0)),
+          then: { kind: 'real', value: 1 },
+          else_: { kind: 'real', value: 0 },
+        })], nm('n')),
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  if (name === 'r_grep_i' || name === 'r_grep_s') {
+    /* `grep(p, v)` 回**位置**（1 起）、`grep(p, v, value = TRUE)` 回那几格元素本身。
+       两个都是"先按上界开、填完改长度"（槽 0 是长度 / `anew` 那条按 `k` 截）。 */
+    const idx = name === 'r_grep_i';
+    const hit = b('>=', call1('sfind', svGet(v, i), nm('p')), I(0));
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RSTRV }, { name: 'p', type: STR }],
+      ret: idx ? RIVEC : RSTRV,
+      body: [
+        letI('n', svLen(v)),
+        ...(idx
+          ? vecNewAs('o', nm('n'))
+          : [{ kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), I(0)) }]),
+        letI('k', I(0)),
+        loop([iff(hit, idx
+          ? [
+            vecSet(nm('o'), nm('k'), call1('toreal', b('+', i, I(1)))),
+            set('k', b('+', nm('k'), I(1))),
+          ]
+          : [{ kind: 'builtin-stmt', name: 'apush', args: [nm('o'), svGet(v, i)] }])], nm('n')),
+        ...(idx
+          ? [{
+            kind: 'assign',
+            target: { kind: 'deref', expr: nm('o') },
+            value: call1('toreal', nm('k')),
+          }]
+          : []),
+        { kind: 'return', values: [nm('o')] },
       ],
     };
   }
