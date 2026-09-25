@@ -18,6 +18,12 @@ import {
   cwd, installDir, isDir, writeBinary, readBinary, runTimeout, pluginLoad, pluginsOk,
 } from './host/native.js';
 import { join, basename, dirname, isAbsolute, resolve } from './host/path.js';
+/* `omni c split`（ADR-0046）那一格。静态进来而不是 `await import(…)`：分发那个函数不是
+   async 的，动态 import 在它里头是语法错（`SyntaxError: Unexpected reserved word`，踩过）。 */
+import {
+  scanTopLevel as cSplitScan, formatScan as cSplitFormat, readPlan as cSplitReadPlan,
+  applyPlan as cSplitApply, checkRejoin as cSplitCheck,
+} from './frontend-c/split.js';
 import { installSrcEvalHook } from './host/src_eval.js';
 import { cacheRoot, scratchDir, dropScratch, cacheList, cacheGc, cacheKept } from './host/cache.js';
 import { dataPath, dataDir } from './host/data.js';
@@ -6748,6 +6754,57 @@ function main(argv) {
     // C 的预处理（ADR-0017 第五刀）。**格式与 `tcc -E` 逐字节相同** —— 那是它的
     // 测试轴（`tests/c/`）：同一份 `.c` 交给我们和 tcc，两份输出必须一样。
     // `-I <目录>` 与 `.jnc` 那一路共用同一个收集器；`-D 名字[=宏体]` 与 tcc 同形。
+    /**
+     * `omni c split`（ADR-0046）：**按声明切分 C 源码，且能逐字节复原**。
+     *
+     *   omni c split --scan FILE.c                 印清单（种类 名字 行号 字节数）
+     *   omni c split --map FILE.split FILE.c -o DIR   照描述文件切 + 写 manifest
+     *   omni c split --check FILE.split FILE.c -o DIR  只验：拉链回原文，逐字节比
+     *
+     * 三件事都**不改原文一个字节** —— 只有 slice / concat。描述文件是**人写的规划**
+     * （哪个函数进哪个文件），`--map` 见到没指派的格子就报错退出，不给默认落点。
+     */
+    case 'c-split': {
+      const val = (n) => { const i = rest.indexOf(n); return i >= 0 ? rest[i + 1] : undefined; };
+      const src0 = rest.find((a) => !a.startsWith('-') && /\.c$/.test(a)
+        && a !== val('--map') && a !== val('--check'));
+      if (src0 === undefined) { stderr('omni c split: 要一份 FILE.c\n'); return 64; }
+      /* **必须按字节读写**（`readBinary`/`writeBinary` 是 latin1，一字节一码位）。
+         用 `readText`（utf8）会把非 ASCII 的字节转码 —— `eval.c` 上量到 238471 读成
+         238465（少 6 个字节），"逐字节复原"那句话当场就不成立了。 */
+      const src = readBinary(src0);
+      const chunks = cSplitScan(src);
+      if (rest.includes('--scan')) { stdout(cSplitFormat(src, chunks)); return 0; }
+      const mapPath = val('--map') ?? val('--check');
+      if (mapPath === undefined) { stderr('omni c split: 要 --scan 或 --map/--check 描述文件\n'); return 64; }
+      const plan = cSplitReadPlan(readBinary(mapPath));
+      const r = cSplitApply(src, chunks, plan);
+      if (r.missing.length > 0) {
+        stderr(`omni c split: ${r.missing.length} 格没指派（描述文件不许有默认落点）——\n`);
+        for (const c of r.missing.slice(0, 10)) stderr(`  ${c.kind}\t${c.name}\t${c.line}\n`);
+        return 65;
+      }
+      const chk = cSplitCheck(src, r.manifest, r.files);
+      if (!chk.ok) {
+        stderr(`omni c split: 复原不等于原文（${chk.got} vs ${chk.want} 字节）—— 不落盘\n`);
+        return 70;
+      }
+      const dir = val('-o');
+      if (rest.includes('--check') || dir === undefined) {
+        stderr(`omni c split: ${chunks.length} 格 -> ${r.files.size} 份；复原逐字节相同（${chk.want} 字节）\n`);
+        return 0;
+      }
+      for (const [f, body] of r.files) {
+        const p = join(dir, f);
+        mkdirAll(dirname(p));
+        writeBinary(p, body);
+      }
+      writeText(join(dir, `${basename(src0, '.c')}.manifest.json`),
+        `${JSON.stringify({ source: basename(src0), len: src.length, pieces: r.manifest })}\n`);
+      stderr(`omni c split: ${chunks.length} 格 -> ${r.files.size} 份，写进 ${dir}`
+        + `（复原逐字节相同，${chk.want} 字节）\n`);
+      return 0;
+    }
     case 'cpp': {
       /* `-dD` / `-dM`：把 `#define`/`#undef`/`#pragma *_macro` 边过边印，
        * `-dM` 再把记号流那一半掐掉（tcc 的 `dflag` = 3 / 7）。 */

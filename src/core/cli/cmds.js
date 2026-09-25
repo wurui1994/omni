@@ -251,6 +251,18 @@ const C_GROUP = {  name: 'c',
 而 jnc 走的是与语言无关的 run/build/emit —— 「上哪儿找源文件」不是某一门语言的事。`,
   children: [
     {
+      /* ADR-0046。三个动词一个 key：`--scan` 摊家底、`--map` 照描述文件切、`--check` 只验。
+         判据是"拆开再接回去逐字节等于原文" —— 它不成立就不落盘（退出码 70）。 */
+      name: 'split', key: 'c-split', usage: 'FILE.c --scan | --map FILE.split -o DIR',
+      brief: '按声明切分（AST 定边界、原文的字节做内容，能逐字节复原）',
+      flags: [
+        { name: '--scan', arity: 0, brief: '印清单：种类 名字 行号 字节数（不切）' },
+        { name: '--map', arity: 1, brief: '描述文件：目标文件<TAB>种类<TAB>符号名<TAB>行号' },
+        { name: '--check', arity: 1, brief: '只验复原，不落盘' },
+        { name: '-o', arity: 1, brief: '产物目录' },
+      ],
+    },
+    {
       name: 'cpp', key: 'cpp', usage: 'FILE.c',
       brief: '预处理。输出与 tcc -E -P 逐字节相同，那个相等就是测试轴',
       flags: [...C_CPP_FLAGS,
