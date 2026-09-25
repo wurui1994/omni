@@ -192,3 +192,18 @@ print(intersect(c("a", "b"), c("b", "c")))
 print(setdiff(c("a", "b"), c("b")))
 print(head(ww, 2))
 print(tail(ww, 2))
+
+# 排序那两格**只接 `method = "radix"`**：R 自己明说 radix 是在 **C locale** 下比的
+# （`?sort`），量出来正是按字节 —— `sort(c("pear","apple","Banana"), method="radix")` 出
+# `Banana apple pear`，而默认那一档按 locale 排（这台机器是 `zh_CN`，出 `apple Banana pear`）。
+# 默认那一档要 ICU 那一套，照旧当场报
+print(sort(c("pear", "apple", "Banana"), method = "radix"))
+print(order(c("pear", "apple", "Banana"), method = "radix"))
+print(sort(c("b", "a", "c"), method = "radix"))
+print(sort(c("B", "a", "C"), method = "radix"))
+print(sort(c("a10", "a9", "a1"), method = "radix"))
+print(sort(c("", "a"), method = "radix"))
+print(sort(c("ab", "a"), method = "radix"))
+print(sort(c("b", "a", "b"), method = "radix"))
+print(sort(c("b", "a"), decreasing = TRUE, method = "radix"))
+print(order(c("b", "a", "b"), method = "radix"))

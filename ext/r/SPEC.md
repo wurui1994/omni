@@ -775,7 +775,13 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
     `c(…)` / `character(n)` / `v[i]` 读写 / `v[c(1,3)]` / `v[掩码]` / `length` / `cat` /
     `print` / `for (s in v)` / `seq_along` / `rev` / `nchar(v)` / `toupper(v)` /
     `tolower(v)` / `paste(…)` 逐元素（含回收与 `collapse=`）。**没接的是这几格**：
-    * `sort(v)` / `order(v)` —— R 排串按 **locale 的排序规则**（`Scollate`），不是按字节：
+    * `sort(v)` / `order(v)` —— **只接 `method = "radix"`**（2026-09-26）。R 自己明说
+      radix 是在 **C locale** 下比的（`?sort`），量出来正是按字节：
+      `sort(c("pear","apple","Banana"), method = "radix")` 出 `Banana apple pear` ——
+      那我们答得准（两条腿都逐字节对上了）。比较用方言的 `(bin "<" 串 串)`，而**只管
+      ASCII**：JS 那侧 `<` 比 UTF-16 码元、C 那侧比字节，非 ASCII 上两种次序会分家，
+      所以这两格也进了 `BYTEWISE` 那张表。
+      **默认那一档照旧当场报**：R 排串按 locale 的排序规则（`Scollate`），不是按字节：
       `sort(c("pear","apple","Banana"))` 在 R 那边是 `"apple" "Banana" "pear"`，
       按字节比 `"Banana"` 会跑到最前面。要对上得先有那套 collation，**这两格当场报**。
       而**只要"相等"的那一族 2026-09-26 接了**：`match` / `%in%` / `unique` /

@@ -322,6 +322,9 @@ const FN_DEPS = new Map([
      两格都要问缺失（碰上就当场报 —— 没有 `NA_character_`）。 */
   /* 字符向量上"只要相等、不要 collation"那一族（`sort` / `order` 照旧当场报）。 */
   ['r_sv1', []],
+  /* 字符向量的 `sort(method="radix")` / `order(method="radix")`：按字节比（C locale）。 */
+  ['r_sort_str', []],
+  ['r_order_str', []],
   ['r_uniq_str', []],
   ['r_dup_str', []],
   ['r_match_str', ['r_na']],
@@ -789,7 +792,8 @@ const NAMED_OK = new Map([
   ['head', new Set(['n'])], ['tail', new Set(['n'])],
   ['rep', new Set(['times', 'each'])],
   ['seq', new Set(['by', 'length.out'])],
-  ['sort', new Set(['decreasing'])],
+  ['sort', new Set(['decreasing', 'method'])],
+  ['order', new Set(['method'])],
   ['strsplit', new Set(['fixed'])],
   ['grepl', new Set(['fixed'])], ['sub', new Set(['fixed'])], ['gsub', new Set(['fixed'])],
   ['grep', new Set(['fixed', 'value'])],
@@ -805,7 +809,10 @@ const NAMED_OK = new Map([
  * `startsWith` 按字节办也对（拼接与定串查找与码位无关），所以不在这张表里。
  */
 const BYTEWISE = new Set(['nchar', 'substr', 'substring', 'toupper', 'tolower', 'sprintf',
-  'chartr', 'casefold']);
+  'chartr', 'casefold',
+  /* `sort` / `order` 的 radix 那一档按字节比，而 JS 那侧 `<` 比的是 UTF-16 码元 ——
+     非 ASCII 上两种次序会分家，所以串字面量里有非 ASCII 就在调用点当场报。 */
+  'sort', 'order']);
 
 /* ─── 内建（表外的名字当用户函数调） ──────────────────────────────────────
  *
@@ -3553,6 +3560,23 @@ function callOf(x, types, extra, want) {
           throw new Error(`r->IR: ${fn}() 只接一格向量实参（给了 ${n}）`);
         }
         if (n === 0) throw new Error(`r->IR: ${fn}() 一格实参都没给`);
+        /**
+         * `sort` 在**字符向量**上只接 `method = "radix"` 那一档：R 自己明说 radix 是在
+         * **C locale** 下比的（`?sort`），量出来正是按字节 —— 那我们答得准。默认那一档
+         * 按 locale 的排序规则（这台机器 `LC_COLLATE` 是 `zh_CN`，`sort(c("pear","apple",
+         * "Banana"))` 出 `apple Banana pear`），要 ICU 那一套，照旧当场报。
+         */
+        if (fn === 'sort' && n >= 1 && all[0] !== null && isStrVec(typeOfExpr(all[0], types))) {
+          const mn = namedArg(x, 'method');
+          const ml = mn !== undefined && tag(mn) === 'str' ? String(nameOf(mn)) : null;
+          if (ml !== 'radix') {
+            throw new Error('r->IR: sort() 在字符向量上只接 `method = "radix"` —— R 的默认排序'
+              + '按 locale 的排序规则（`Scollate`），那要 ICU 那一套；radix 是 R 自己明说'
+              + '在 C locale 下比的那一档（按字节），这一档答得准');
+          }
+          const got0 = lglCall('r_sort_str', ev(0));
+          return trueFlag(x, 'decreasing') ? lglCall('r_rev_str', got0) : got0;
+        }
         const tyOf = (k) => {
           const t = all[k] === null ? REAL : typeOfExpr(all[k], types);
           if (isStrVec(t) || t.kind === 'string') throw new Error(strvGap(fn));
@@ -3909,6 +3933,16 @@ function callOf(x, types, extra, want) {
            同一个 case 里的 `order` / `which.max` 那几格还是当场报（要排序）。 */
         if (isStrVec(t) && (fn === 'unique' || fn === 'duplicated')) {
           return lglCall(fn === 'unique' ? 'r_uniq_str' : 'r_dup_str', ev(0));
+        }
+        /* `order` 在字符向量上与 `sort` 同一条规矩：只接 `method = "radix"`（C locale）。 */
+        if (isStrVec(t) && fn === 'order') {
+          const mn2 = namedArg(x, 'method');
+          const ml2 = mn2 !== undefined && tag(mn2) === 'str' ? String(nameOf(mn2)) : null;
+          if (ml2 !== 'radix') {
+            throw new Error('r->IR: order() 在字符向量上只接 `method = "radix"`（R 的默认那一档'
+              + '按 locale 的排序规则，要 ICU）');
+          }
+          return lglCall('r_order_str', ev(0));
         }
         if (isStrVec(t)) throw new Error(strvGap(fn));
         if (!isVecTy(t)) throw new Error(`r->IR: ${fn}() 的实参不是向量（是 ${t.kind}）`);
@@ -5173,7 +5207,7 @@ const STRV_FNS = new Set([
   /* base 那四条字符向量常量 + `strrep` 在字符向量上那一格。 */
   'r_sv_letters', 'r_sv_upper', 'r_sv_month', 'r_sv_mabb', 'r_strrep_v', 'r_chartr_v',
   'r_as_str_v', 'r_as_str_lv',
-  'r_sv1', 'r_uniq_str', 'r_dup_str', 'r_match_str', 'r_in_str', 'r_in1_str',
+  'r_sv1', 'r_sort_str', 'r_order_str', 'r_uniq_str', 'r_dup_str', 'r_match_str', 'r_in_str', 'r_in1_str',
   'r_union_str', 'r_isect_str', 'r_sdiff_str', 'r_head_str', 'r_tail_str',
 ]);
 
@@ -5680,6 +5714,90 @@ function strvFnDecl(name) {
               : { kind: 'call', fn: { kind: 'name', name: useFn(NUM_STR) }, args: [el, I(15)] }],
           },
         ], nm('n')),
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  if (name === 'r_sort_str' || name === 'r_order_str') {
+    /**
+     * 字符向量的 `sort(v, method = "radix")` / `order(v, method = "radix")`。
+     *
+     * **为什么只接 `radix` 这一档**：R 的默认排序按 locale 的排序规则（`Scollate`，
+     * 量出来这台机器 `LC_COLLATE` 是 `zh_CN`，`sort(c("pear","apple","Banana"))` 出
+     * `apple Banana pear`）—— 那要 ICU 那一套。而 `method = "radix"` 是 R 自己
+     * **明说在 C locale 下比**的那一档（`?sort`），量出来正是**按字节**：
+     * `sort(c("pear","apple","Banana"), method="radix")` 出 `Banana apple pear`。
+     * 按字节比我们答得准，所以接这一档、默认那一档照旧当场报。
+     *
+     * 比较用方言的 `<`（`(bin "<" 串 串)`）。**只管 ASCII**：JS 那侧 `<` 比的是 UTF-16
+     * 码元、C 那侧是字节，非 ASCII 上这两种次序会分家 —— 所以 `sort` / `order` 进了
+     * `BYTEWISE` 那张表（串字面量里有非 ASCII 就在调用点当场报）。
+     *
+     * 排法与数那一侧同一条（Knuth 的 gap 序列）；`order` 排的是**下标**，同值按原下标
+     * 分先后（于是次序唯一 —— 与 R 的 radix 稳定排序同解）。
+     */
+    const ord = name === 'r_order_str';
+    const g = nm('g');
+    const j = nm('j');
+    const t2 = ord ? nm('ti') : nm('ts');
+    const oAt = (e) => (ord ? vecGet(nm('o'), e) : svGet(nm('o'), e));
+    /* 要比的那一格：`order` 手上是下标（按 double 存），要先取出串来。 */
+    const key = (e) => (ord ? svGet(v, call1('toint', e)) : e);
+    const less = b('||', b('<', key(t2), key(oAt(b('-', j, g)))),
+      b('&&', b('==', key(t2), key(oAt(b('-', j, g)))),
+        ord ? b('<', t2, oAt(b('-', j, g))) : { kind: 'bool', value: false }));
+    return {
+      kind: 'fn',
+      name,
+      params: P,
+      ret: ord ? RIVEC : RSTRV,
+      body: [
+        letI('n', svLen(v)),
+        ...(ord
+          ? [...vecNewAs('o', nm('n')),
+            loop([vecSet(nm('o'), i, call1('toreal', i))], nm('n'))]
+          : [{ kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), I(0)) },
+            loop([{ kind: 'builtin-stmt', name: 'apush', args: [nm('o'), svGet(v, i)] }], nm('n'))]),
+        letI('g', I(1)),
+        {
+          kind: 'while',
+          cond: b('<', b('*', g, I(3)), nm('n')),
+          body: [set('g', b('+', b('*', g, I(3)), I(1)))],
+        },
+        {
+          kind: 'while',
+          cond: b('>=', g, I(1)),
+          body: [
+            {
+              kind: 'for',
+              init: letI('i2', g),
+              cond: b('<', nm('i2'), nm('n')),
+              post: set('i2', b('+', nm('i2'), I(1))),
+              body: [
+                ord
+                  ? { kind: 'let', name: 'ti', type: REAL, init: vecGet(nm('o'), nm('i2')) }
+                  : { kind: 'let', name: 'ts', type: STR, init: svGet(nm('o'), nm('i2')) },
+                letI('j', nm('i2')),
+                {
+                  kind: 'while',
+                  cond: b('&&', b('>=', j, g), less),
+                  body: [
+                    ord
+                      ? vecSet(nm('o'), j, vecGet(nm('o'), b('-', j, g)))
+                      : { kind: 'assign', target: svGet(nm('o'), j), value: svGet(nm('o'), b('-', j, g)) },
+                    set('j', b('-', j, g)),
+                  ],
+                },
+                ord
+                  ? vecSet(nm('o'), j, t2)
+                  : { kind: 'assign', target: svGet(nm('o'), j), value: t2 },
+              ],
+            },
+            set('g', b('/', b('-', g, I(1)), I(3))),
+          ],
+        },
+        /* `order` 内部 0 起，交出去要 1 起（R 的 `order` 回的是位置）。 */
+        ...(ord ? [loop([vecSet(nm('o'), i, b('+', vecGet(nm('o'), i), { kind: 'real', value: 1 }))], nm('n'))] : []),
         { kind: 'return', values: [nm('o')] },
       ],
     };
