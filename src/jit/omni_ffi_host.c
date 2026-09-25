@@ -205,6 +205,31 @@ static napi_value omni_fh_init(napi_env env, napi_callback_info info) {
   return entry(env, exports);
 }
 
+/* ================================================================== calli
+ *
+ * 把那个地址当成 `int64_t (*)(void)` 叫一次，回它的返回值（BigInt）。
+ *
+ * 为什么要它（ADR-0045 的 D1）：`init` 那一格只会按 napi 注册函数的形状调用 ——
+ * 那是"注入一份 addon"那条路专用的。自己那台 JIT 发出来的是**普通函数**
+ * （`main` 就是 `int (void)`），要的是这一格。
+ *
+ * 这是"跳进自己发的字节"那一下。调用之前 JS 那侧必须已经：写完字节 · 打完重定位 ·
+ * `protect(rx)`（arm64 上那一句顺手刷了 icache）。次序错了就是 SIGBUS 或者跑错字节。
+ */
+static napi_value omni_fh_calli(napi_env env, napi_callback_info info) {
+  napi_value a[1];
+  void *p = NULL;
+  if (!omni_fh_args(env, info, 1, a)) return omni_fh_err(env, "omni ffi host: calli(addr)");
+  if (!omni_fh_addr(env, a[0], &p) || p == NULL) {
+    return omni_fh_err(env, "omni ffi host: calli 的 addr 要一格非零 BigInt");
+  }
+  int64_t (*entry)(void) = (int64_t (*)(void))p;
+  int64_t r = entry();
+  napi_value v;
+  if (napi_create_bigint_int64(env, r, &v) != omni_napi_ok) return NULL;
+  return v;
+}
+
 /* ================================================================== 装配 */
 static napi_value omni_fh_pagesize(napi_env env, napi_callback_info info) {
   (void)info;
@@ -226,6 +251,7 @@ napi_value napi_register_module_v1(napi_env env, napi_value exports) {
   omni_fh_put(env, exports, "dlopen", omni_fh_dlopen);
   omni_fh_put(env, exports, "sym", omni_fh_sym);
   omni_fh_put(env, exports, "init", omni_fh_init);
+  omni_fh_put(env, exports, "calli", omni_fh_calli);
   return exports;
 }
 

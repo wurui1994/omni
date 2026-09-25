@@ -423,6 +423,54 @@ export function contiguity(manifest) {
 }
 
 /**
+ * 一段文本里 `#if`/`#ifdef`/`#ifndef` 与 `#endif` 的净深度（跳过注释与串）。
+ *
+ * `#else`/`#elif` 不计 —— 它们不改深度，只换分支。
+ */
+function ppDelta(text) {
+  let d = 0;
+  let i = 0;
+  let atLineStart = true;
+  while (i < text.length) {
+    const c = text.charCodeAt(i);
+    if (c === 47) { const k = skipComment(text, i); if (k !== i) { i = k; continue; } }
+    if (c === 34 || c === 39) { i = skipQuoted(text, i); atLineStart = false; continue; }
+    if (c === 10) { atLineStart = true; i++; continue; }
+    if (c === 35 && atLineStart) {
+      const nm = directiveName(text, i);
+      if (nm === 'if' || nm === 'ifdef' || nm === 'ifndef') d++;
+      else if (nm === 'endif') d--;
+      i = endOfDirective(text, i);
+      atLineStart = true;
+      continue;
+    }
+    if (c !== 32 && c !== 9 && c !== 13) atLineStart = false;
+    i++;
+  }
+  return d;
+}
+
+/**
+ * **每一份产物的条件编译必须自己配平**（`--map` 的第二道硬闸）。
+ *
+ * 为什么是硬要求：缝合走的是 `#include`，而 `#include` 的边界**不能**劈开一个
+ * `#if … #endif` —— 预处理器要求每份文件里的条件自己闭合。踩过一次：`eval.c` 的
+ * `#ifdef _MSC_VER`（`kasm_state.c` 末尾）与它的 `#else/#endif`（`kasm_cpu.c` 开头）
+ * 被切点劈成两半，于是 `kasm_state.c: unterminated conditional directive` +
+ * `kasm_cpu.c: #else without #if`，一条命令都编不过。四对文件全是这个形状。
+ *
+ * 回不配平的那几份（文件名 -> 净深度），全配平时回空表。
+ */
+export function ppBalance(files) {
+  const bad = new Map();
+  for (const [f, text] of files) {
+    const d = ppDelta(text);
+    if (d !== 0) bad.set(f, d);
+  }
+  return bad;
+}
+
+/**
  * **缝合文件**：按原次序 `#include` 那几份产物的一份 `.c`。
  *
  * 为什么要它（这一格决定了"拆分不动原文"能不能编过）：拆出来的模块里那些 `static`

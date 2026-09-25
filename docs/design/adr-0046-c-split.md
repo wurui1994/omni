@@ -144,6 +144,31 @@ chunk = { file, kind, name, start, end, lead }
 （`src/runtime/omni_fmt.c` 那种真实尺寸的）过一遍 `--check`。这一格是为了把
 "C 解析能力"的缺口暴露在**我们自己的代码**上，而不是等 polydraw 报错。
 
+### 4.1 切点上的两道闸（都是真踩出来的）
+
+`--map` 那条路上，除了"复原逐字节"，还有两件事**结构上**必须成立，否则缝合出来的
+那份文件与原文不是同一个翻译单元。两道闸都在 `split.js` 里，CLI 拿退出码报：
+
+* **一段连续**（`contiguity`，退出码 66）：同一份产物的格子必须连成一段区间。
+  缝合是"一份 `#include` 一次"，不连续就等于悄悄重排了声明次序。踩过一次：
+  头一版按名字指派，`eval.c` 的 10 份文件摊成 **69 段**；
+* **条件自己配平**（`ppBalance`，退出码 67）：每份产物里 `#if`/`#ifdef`/`#ifndef`
+  与 `#endif` 的净深度必须是 0。`#include` 的边界**劈不开**一个条件段 —— 预处理器
+  要求每份文件里的条件自己闭合。踩过**四对**，全是同一个形状：
+
+  - `eval.c`：`#ifdef _MSC_VER`（`kasm_state.c` 末尾）/ `#else…#endif`（`kasm_cpu.c` 开头）；
+  - `eval.c`：`#if (COMPILE == 0)`（`kasm_opt.c` 末尾）/ `#endif`（`kasm_interp.c` 末尾）；
+  - `kplib.c`：`#ifdef BIGENDIAN`（`kp_head.h` 末尾）/ `kp_cpu.c`；
+  - `kplib.c`：`mulshr24` 那条 `#if/#elif/#elif/#else` 链被 `kp_png.c`/`kp_jpg.c` 劈开。
+
+  报出来的样子是 `kasm_state.c: unterminated conditional directive` +
+  `kasm_cpu.c: #else without #if` —— **一条命令都编不过**。这道闸是在 arm64 上第一次
+  真编译时才暴露的，说明"复原逐字节"证明不了"拆完还能编"，两条判据都要。
+
+  修法不是放宽闸门，是**挪切点**：把开条件的那一格（以及到 `#endif` 之间的全部格子）
+  一并归到后面那份里。四处各挪 1~18 行，`kp_jpg.c` 顺带从"JPEG 的函数"扩成
+  "JPEG 的全局 + 函数"，那本来就是更像话的切法。
+
 ## 5. 落地次序
 
 * **S1**：扫描器 + `--check`（不切，只证明能划分与复原）。判据：`tests/c/split`；

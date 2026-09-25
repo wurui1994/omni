@@ -23,7 +23,7 @@ import { join, basename, dirname, isAbsolute, resolve } from './host/path.js';
 import {
   scanTopLevel as cSplitScan, formatScan as cSplitFormat, readPlan as cSplitReadPlan,
   applyPlan as cSplitApply, checkRejoin as cSplitCheck, contiguity as cSplitContig,
-  stitchFile as cSplitStitch,
+  stitchFile as cSplitStitch, ppBalance as cSplitPpBalance,
 } from './frontend-c/split.js';
 import { installSrcEvalHook } from './host/src_eval.js';
 import { cacheRoot, scratchDir, dropScratch, cacheList, cacheGc, cacheKept } from './host/cache.js';
@@ -6296,6 +6296,36 @@ function main(argv) {
     });
     return r.fail > 0 ? 1 : 0;
   }
+  /**
+   * `omni jit-selftest`（ADR-0045 的 D1）：**把字节变成能跑的代码**这一格的最小判据。
+   *
+   * 发两条指令（`mov w0,#42` / `ret`）、`protect(rx)`、跳进去，要回 42。
+   * 这一格是自己那台 JIT 的地基 —— 它不成立，后面发多少字节都白搭。
+   * 走的是已有的注入宿主（`omni_ffi_host.node`，ADR-0038）：`mem` 要一块页对齐的内存、
+   * `protect` 做 mprotect（**arm64 上顺手刷 icache**，少了它的症状是"有时候跑到旧字节上"）、
+   * `calli` 把那个地址当 `int64_t (*)(void)` 叫一次。
+   *
+   * 摆在"要不要源文件"那道门**之前**：它不吃任何文件。
+   */
+  if (cmd === 'jit-selftest') {
+    const fh = ffiHost();
+    const pg = fh.page();
+    const arch = hostArch();
+    /* **手写机器码**，不过编译器 —— 这一格判的就是"我们自己算出来的字节对不对"。
+     * arm64：`MOVZ W0,#42` = 0x52800000 | (42<<5) = 0x52800540；`RET` = 0xD65F03C0（小端）。
+     * x86-64：`mov eax,42` = B8 2A 00 00 00；`ret` = C3。 */
+    const code = arch === 'arm64'
+      ? [0x40, 0x05, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6]
+      : [0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3];
+    const m = fh.mem(pg);
+    const u8 = new Uint8Array(m.buf);
+    for (let i = 0; i < code.length; i++) u8[i] = code[i];
+    fh.protect(m.addr, pg, 0);            // 0 = rx
+    const got = fh.calli(m.addr);
+    const ok = Number(got) === 42;
+    stdout(`jit selftest ${arch}: ${code.length} 字节 -> ${got} ${ok ? '（对）' : '（要 42）'}\n`);
+    return ok ? 0 : 1;
+  }
   if (!path) throw new OmniError(`command '${cmd}' needs a source file`);
   /* 借来语言那条路的入口是**内存里那份核心方言**（`SRC_SX`），路径只当名字用 —— 那一格
    * 本来就不存在，所以这一问跳过它。 */
@@ -6797,6 +6827,14 @@ function main(argv) {
         stderr('omni c split: 这几份不是一段连续区间（缝合会重排声明次序；放行加 --loose）——\n');
         for (const [f, n] of bad) stderr(`  ${f}\t${n} 段\n`);
         return 66;
+      }
+      /* **每份产物的 `#if` 要自己配平**：`#include` 的边界不能劈开一个条件段
+         （理由与那四对踩过的文件见 split.js 的 `ppBalance`）。`--loose` 一并放行。 */
+      const unbal = cSplitPpBalance(r.files);
+      if (unbal.size > 0 && !rest.includes('--loose')) {
+        stderr('omni c split: 这几份的条件编译没配平（切点劈开了 #if…#endif，编不过；放行加 --loose）——\n');
+        for (const [f, d] of unbal) stderr(`  ${f}\t净深度 ${d > 0 ? `+${d}` : d}\n`);
+        return 67;
       }
       const dir = val('-o');
       if (rest.includes('--check') || dir === undefined) {

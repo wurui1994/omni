@@ -12,8 +12,8 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { scanTopLevel, joinChunks, KIND, readPlan, applyPlan, checkRejoin, contiguity, stitchFile }
-  from '../../../src/core/frontend-c/split.js';
+import { scanTopLevel, joinChunks, KIND, readPlan, applyPlan, checkRejoin, contiguity, stitchFile,
+  ppBalance } from '../../../src/core/frontend-c/split.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 const P = (s) => process.stdout.write(s);
@@ -87,14 +87,48 @@ for (const p of files) {
   const incs = [...st.matchAll(/#include "([^"]+)"/g)].map((m) => m[1]);
   const cat = incs.map((f) => r.files.get(f) ?? '').join('');
   const ok = r.missing.length === 0 && chk.ok && bad.size === 0 && cat === src
-    && incs.length === 4;
+    && incs.length === 4 && ppBalance(r.files).size === 0;
   if (ok) {
     pass++;
     P(`  ok   整条路（omni_r3.c -> 4 份 -> 缝合）：复原逐字节、每份一段连续、缝合等于原文\n`);
   } else {
     fail++;
     P(`  FAIL 整条路：未指派 ${r.missing.length}、复原 ${chk.ok}、不连续 ${bad.size}`
-      + `、缝合 ${incs.length} 份 ${cat === src}\n`);
+      + `、缝合 ${incs.length} 份 ${cat === src}、条件没配平 ${ppBalance(r.files).size}\n`);
+  }
+}
+
+/* ── 第三段：**条件编译要自己配平**那道闸 ──
+ *
+ * 这是真踩过的坑：`eval.c` 的 `#ifdef _MSC_VER`（`kasm_state.c` 末尾）与它的
+ * `#else/#endif`（`kasm_cpu.c` 开头）被切点劈成两半 —— `#include` 的边界劈不开一个
+ * 条件段，于是 `unterminated conditional directive` + `#else without #if`，
+ * 四对文件一条命令都编不过。这里正反各压一次：劈开要报，不劈开要过。 */
+{
+  const src = 'static int a;\n#ifdef X\nstatic int f (void) { return 1; }\n#else\n'
+    + 'static int f (void) { return 2; }\n#endif\nstatic int b;\n';
+  const chunks = scanTopLevel(src);
+  const mk = (pick) => {
+    const rows = chunks.map((c, i) => {
+      const at = src.slice(0, c.start).split('\n').length;
+      return `${pick(i)}\t${c.kind}\t${c.name}\t${at}`;
+    });
+    return applyPlan(src, chunks, readPlan(rows.join('\n')));
+  };
+  /* 劈开：`#ifdef` 落在前一份、`#else/#endif` 落在后一份。 */
+  const cut = chunks.findIndex((c) => c.kind === KIND.pp && c.name === 'ifdef');
+  const split = mk((i) => (i <= cut ? 'x/a.c' : 'x/b.c'));
+  const whole = mk((i) => (i < cut ? 'x/a.c' : 'x/b.c'));
+  const b1 = ppBalance(split.files);
+  const b2 = ppBalance(whole.files);
+  const ok = cut > 0 && b1.size === 2 && b1.get('x/a.c') === 1 && b1.get('x/b.c') === -1
+    && b2.size === 0 && checkRejoin(src, whole.manifest, whole.files).ok;
+  if (ok) {
+    pass++;
+    P('  ok   条件编译配平那道闸：劈开 #ifdef 报 +1/-1，整段归一份就过\n');
+  } else {
+    fail++;
+    P(`  FAIL 条件编译配平那道闸：切点 ${cut}、劈开报 ${[...b1]}、整段报 ${[...b2]}\n`);
   }
 }
 

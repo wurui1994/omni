@@ -642,6 +642,7 @@ asy（5 分多钟），而 tests/asy/eps.js 默认不生成 —— 清掉之后�
     { name: 'cpp', key: 'cpp', hidden: true, flags: C_GROUP.children[0].flags },
     { name: 'c-mir', key: 'c-mir', hidden: true, flags: [...C_CPP_FLAGS] },
     { name: 'c-run', key: 'c-run', hidden: true, flags: [...C_CPP_FLAGS] },
+    { name: 'jit-selftest', key: 'jit-selftest', hidden: true, flags: [] },
     { name: 'c-obj', key: 'c-obj', hidden: true, flags: [F_OUT, ...C_CPP_FLAGS, ...C_TARGET_FLAGS] },
     { name: 'elf-r', key: 'elf-r', hidden: true, flags: [...LINK_COMMON] },
     { name: 'elf-link', key: 'elf-link', hidden: true, flags: [...LINK_COMMON, ...LINK_ELF_ONLY] },
