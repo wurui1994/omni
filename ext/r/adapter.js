@@ -182,7 +182,7 @@ const FN_DEPS = new Map([
   ['r_max', ['r_is_na', 'r_is_nan', 'r_na']],
   ['r_min', ['r_is_na', 'r_is_nan', 'r_na']],
   /* 下标里有 `NA` 就停下来、正负混着就停下来（见那个函数上的账）。 */
-  ['r_vec_pick', ['r_is_na']],
+  ['r_vec_pick', ['r_is_na', 'r_na']],
   ['r_vec_mask', ['r_is_na', 'r_na']],
   ['r_rev', []],
   ['r_seq_along', []],
@@ -257,6 +257,7 @@ const FN_DEPS = new Map([
   ['r_lower_v', ['r_lower']],
   ['r_lower', []],
   ['r_pick_str', []],
+  ['r_sat1', []],
   ['r_mask_str', ['r_is_na']],
   ['r_drop_na', ['r_is_na']],
   /* 集合与位置那一族（`match` / `%in%` / `unique` / `order`…）。"两格值算不算同一格"
@@ -284,6 +285,8 @@ const FN_DEPS = new Map([
   ['r_inf_v', []],
   /* `sort` 的名字那一条：体里用 `r_order`（它自己要 `r_ord_lt`）与 `r_is_na`。 */
   ['r_nm_sort', ['r_order', 'r_is_na']],
+  /* `v[i]` 越界回 NA，所以体里要 `r_na`。 */
+  ['r_at1', ['r_na']],
   /* 这三格的体里用 `r_in1` 问"另一条里有没有这一格"（`setFnDecl2` 的 `inW`）——
      登记漏了的话它只在"源码里还另有一处 `%in%`"时凑巧能链上（量出来的：`print.R` 里
      单写 `intersect(1:2, 3:4)` 报 `未声明的函数 'r_in1'`）。 */
@@ -2883,7 +2886,28 @@ function indexRead(x, types) {
     if (isNegSub(keys[0])) {
       return lglCall('r_vec_pick', o, lglCall('r_vec1', asReal(exprOf(keys[0], types), kt)));
     }
-    return vecGet(o, zeroBased(exprOf(keys[0], types), typeOfExpr(keys[0], types)));
+    /**
+     * **一格标量下标**（`v[2]` / `v[i]`）。从前这儿直接 `aget(v, i-1)`，三处错：
+     *
+     *   * `v[0]` 印的是**这条向量的长度** —— 长度就存在第 0 格（`(ptr real)` 的头），
+     *     `0 - 1 = -1` 正好读到它。量出来 `c(1,4,9)[0]` 印 `[1] 3`，而 R 印 `numeric(0)`。
+     *     **静默答错**，最难查的那一种。
+     *   * `v[5]`（越界）在运行期撞 `pointer out of bounds`，而且 `print` 的前半行
+     *     （`[1] `）已经印出去了 —— R 那边是 `NA`。
+     *   * 运行期为负的下标（`i <- -1; v[i]`）也读到界外（`isNegSub` 只看得见写着的负号）。
+     *
+     * 所以走 `r_at1`：越界回 `NA`（R 的答案），`0` 与负数**当场停下来**
+     * （`v[0]` 要的是零长向量，这一档的标量下标没有那种值 —— 不猜）。
+     *
+     * **写着 `0` 的那一档在编译期就报** —— 那时还没过换档那道门，于是退到 libR，
+     * 答案是对的（`numeric(0)`）。运行期才知道是 0 的只能在运行期停。
+     */
+    const k0 = exprOf(keys[0], types);
+    if ((k0.kind === 'int' || k0.kind === 'real') && k0.value === 0) {
+      throw new Error('r->IR: `v[0]` 回的是**零长向量**，这一档的标量下标没有那种值'
+        + '（要零长就写 `v[integer(0)]`）');
+    }
+    return lglCall('r_at1', o, asIntE(k0, kt));
   }
   /* 字符向量：一格标量下标（`labels[2]`）、按位置挑（`labels[c(1,3)]`）、
      按掩码挑（`labels[nchar(labels) > 2]`）。 */
@@ -2897,7 +2921,15 @@ function indexRead(x, types) {
     if (isNegSub(keys[0])) {
       return lglCall('r_pick_str', o, lglCall('r_vec1', asReal(exprOf(keys[0], types), kt)));
     }
-    return svGet(o, zeroBased(exprOf(keys[0], types), kt));
+    /* 一格标量下标：走 `r_sat1`（与数那一侧的 `r_at1` 同形）。越界那一格 R 回的是
+       `NA_character_` —— 这一档没有那种值（见 SPEC），所以**报**，报的是这句话，
+       而不是方言那句 `array index out of range`（那句连是哪一行都说不清）。
+       写着 `0` 的那一档在编译期报，于是退到 libR，答案是对的。 */
+    const sk0 = exprOf(keys[0], types);
+    if ((sk0.kind === 'int' || sk0.kind === 'real') && sk0.value === 0) {
+      throw new Error('r->IR: `s[0]` 回的是**零长字符向量**，这一档的标量下标没有那种值');
+    }
+    return lglCall('r_sat1', o, asIntE(sk0, kt));
   }
   throw new Error(`r->IR: ${nameOf(obj)} 上的下标读不知道是数组还是表 —— 推出来是 ${ot.kind}`);
 }
@@ -5475,7 +5507,7 @@ function strFnDecl(name) {
 /** 这一批由 `strvFnDecl` 发（形状都是"一条 `(arr string)` 进"）。 */
 const STRV_FNS = new Set([
   'r_cat_str', 'r_print_str', 'r_join_str', 'r_rev_str', 'r_nchar_v', 'r_upper_v', 'r_lower_v',
-  'r_pick_str', 'r_mask_str', 'r_split', 'r_at_name', 'r_nm_at',
+  'r_pick_str', 'r_mask_str', 'r_split', 'r_at_name', 'r_nm_at', 'r_sat1',
   'r_gsub', 'r_gsub_v', 'r_grepl_v', 'r_grep_i', 'r_grep_s', 'r_rep_str', 'r_ifelse_s',
   'r_substr_v', 'r_trim_v', 'r_starts_v', 'r_ends_v',
   /* base 那四条字符向量常量 + `strrep` 在字符向量上那一格。 */
@@ -5490,7 +5522,7 @@ const SET_FNS = new Set([
   'r_same', 'r_which_max', 'r_which_min', 'r_cumprod', 'r_pmax', 'r_pmin',
   'r_ord_lt', 'r_order', 'r_match', 'r_in_v', 'r_in1', 'r_unique', 'r_dup', 'r_any_dup',
   'r_union', 'r_intersect', 'r_setdiff', 'r_setequal', 'r_find_int',
-  'r_na_v', 'r_nan_v', 'r_fin_v', 'r_inf_v', 'r_nm_sort',
+  'r_na_v', 'r_nan_v', 'r_fin_v', 'r_inf_v', 'r_nm_sort', 'r_at1',
 ]);
 
 /**
@@ -5731,6 +5763,30 @@ function setFnDecl2(name) {
         /* 内部是 0 起的，交出去要 1 起（R 的 `order` 回的是位置）。 */
         forTo('i', nm('n'), [vecSet(o, i, b('+', vecGet(o, i), R(1)))]),
         ret(o),
+      ],
+    };
+  }
+  if (name === 'r_at1') {
+    /**
+     * `v[i]` —— 一格标量下标。R 的三条（量出来的，`Rscript`，2026-09-26）：
+     *   `1 <= i <= n` 取那一格；`i > n` 回 **`NA`**；`i == 0` 回**零长向量**。
+     * 前两条照办，第三条这一档没有那种值（标量下标的类型是一格数）—— **当场停下来**。
+     * 负数也停：写着负号那一档在 `isNegSub` 里就分走了，落到这儿的是运行期才知道的负数。
+     */
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RVEC }, { name: 'i', type: INT }],
+      ret: REAL,
+      body: [
+        letI('n', vecLen(v)),
+        iff(b('<', nm('i'), I(1)), [{
+          kind: 'builtin-stmt',
+          name: 'fail',
+          args: [{ kind: 'string', value: 'v[0] / 运行期为负的下标：R 回的是零长向量或者"丢掉那几格"，这一档的标量下标没有那种值（写 v[-1] 那种写着负号的形状，或者 v[integer(0)]）' }],
+        }]),
+        iff(b('>', nm('i'), nm('n')), [ret(cal('r_na'))]),
+        ret(vecGet(v, b('-', nm('i'), I(1)))),
       ],
     };
   }
@@ -6635,6 +6691,32 @@ function strvFnDecl(name) {
           set('o', b('+', nm('o'), svGet(v, i))),
         ], nm('n')),
         { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  if (name === 'r_sat1') {
+    /**
+     * `s[i]` —— 字符向量上一格标量下标。R 的三条里这一档只办得到一条：
+     * `1 <= i <= n` 取那一格；`i > n` R 回 **`NA_character_`**、`i == 0` 回**零长**，
+     * 这一档两种值都没有（见 SPEC 第四节），所以**报**。
+     *
+     * 报在这儿的意思是：报的是**这句话**（说清是哪一格、R 那边是什么），而不是
+     * 方言那句 `array index out of range: 4 (length 2)` —— 后者连哪一行都说不清，
+     * 而且 `print` 的前半行已经印出去了。
+     */
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RSTRV }, { name: 'i', type: INT }],
+      ret: STR,
+      body: [
+        letI('n', svLen(v)),
+        iff(b('||', b('<', nm('i'), I(1)), b('>', nm('i'), nm('n'))), [{
+          kind: 'builtin-stmt',
+          name: 'fail',
+          args: [{ kind: 'string', value: 's[i]: 下标越界（或者是 0 / 负数）—— R 回的是 NA_character_ 或者零长字符向量，这一档两种值都没有' }],
+        }]),
+        { kind: 'return', values: [svGet(v, b('-', nm('i'), I(1)))] },
       ],
     };
   }
@@ -7936,13 +8018,20 @@ function vecFnDecl(name) {
           ])]),
           { kind: 'return', values: [out2] },
         ]),
-        /* 全是正数（或者一格都没有）→ 按位置挑，下标 0 跳过。 */
+        /* 全是正数（或者一格都没有）→ 按位置挑，下标 0 跳过。
+           **越界那一格 R 挑出 `NA`**（量出来 `c(1,2,3)[5]` 是 `NA`）—— 从前这儿直接
+           `aget(v, p-1)`，于是运行期撞上"pointer out of bounds"，而且前半行已经印出去了。
+           数长度那一趟把越界也算上（R 也算），所以只要填的时候分一下。 */
         letI2('kk', I0(0)),
         forJ(m, [iff2(b('!=', at, { kind: 'real', value: 0 }), [setI('kk', b('+', { kind: 'name', name: 'kk' }, I0(1)))])]),
         ...vecNewAs('o', { kind: 'name', name: 'kk' }),
         letI2('w', I0(0)),
         forJ(m, [iff2(b('!=', at, { kind: 'real', value: 0 }), [
-          vecSet(out, { kind: 'name', name: 'w' }, vecGet(v, b('-', call1('toint', at), I0(1)))),
+          letI2('pp', call1('toint', at)),
+          iff2(b('>', { kind: 'name', name: 'pp' }, n),
+            [vecSet(out, { kind: 'name', name: 'w' },
+              { kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] })],
+            [vecSet(out, { kind: 'name', name: 'w' }, vecGet(v, b('-', { kind: 'name', name: 'pp' }, I0(1))))]),
           setI('w', b('+', { kind: 'name', name: 'w' }, I0(1))),
         ])]),
         { kind: 'return', values: [out] },
