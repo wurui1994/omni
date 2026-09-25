@@ -27,6 +27,9 @@ const $CN = (v) => (typeof v === "bigint"
   ? (v <= $ISAFEn && v >= -$ISAFEn ? Number(v) : v) : v);
 const $B = (x) => (typeof x === "bigint" ? x : BigInt(x));
 const $INT_MIN = -(2n ** 63n);
+// 加减那两格在**调用点**展开时用的一格临时（见 backend-js/emit.js 的 intFast）：
+// 赋完立刻读，不存任何状态。嵌套也安全 —— 里层先赋完、外层再赋。
+let $T = 0;
 
 // + - * 的快路：两个 number 时直接算，结果落在安全范围里就是**精确**的
 // （IEEE 是正确舍入的：真值 >= 2^53+1 时算出来必然 >= 2^53，所以这一查是充分的）。

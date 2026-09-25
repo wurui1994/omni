@@ -174,6 +174,16 @@ export function trimJsRuntime(text, rootText) {
 // 指针（ADR-0016）。fat 是三元组 [addr, base, end]，thin 是一个数 —— 所以"拿地址"
 // 与"查范围"这两件事在两种指针上各是一行，读写那一半共用。
 const jsPtrAddr = (code, t) => (t.k === 'tptr' ? code : `${code}[0]`);
+/* 「重算一遍也没副作用」的式子：一个名字（`v_i` / `g_gl_no` / `$T` 这种）或一格整数字面量。
+   `intFast` 的慢路会把两边各写第二遍，所以只对这种式子展开。 */
+const JS_SIMPLE = /^(?:-?\d+|[A-Za-z_$][A-Za-z0-9_$]*)$/;
+/** `a + b` / `a - b` 的**调用点快路**（判断与 prelude 的 `$iadd`/`$isub` 逐句相同）。 */
+const intFast = (fn, op, a, b) => {
+  if (!JS_SIMPLE.test(a) || !JS_SIMPLE.test(b)) return `${fn}(${a}, ${b})`;
+  return `(typeof ${a} === "number" && typeof ${b} === "number"`
+    + ` && ($T = ${a} ${op} ${b}) <= $ISAFE && $T >= -$ISAFE ? $T : ${fn}(${a}, ${b}))`;
+};
+
 const jsPtrChk = (self, p, size) => (p.type.k === 'tptr'
   ? `$tchk(${self.expr(p)})` : `$pchk(${self.expr(p)}, ${size})`);
 // 目标类型是**指针自己**时，读写的是三个字（fat）或一个字（thin）——
@@ -972,8 +982,16 @@ class JsEmitter {
       switch (op) {
         // int 是规范化的 number|BigInt（见 prelude 的文件头）：两个 number 时
         // $iadd/$isub/$imul 走一句浮点加 + 一次范围查，不碰 BigInt。
-        case '+': return `$iadd(${a}, ${b})`;
-        case '-': return `$isub(${a}, ${b})`;
+        //
+        // **加减那两格在调用点手展开**（与 `$aget`/`$aset` 同一条理由，见 prelude 那段话）：
+        // 下标算术是热路径上最密的一族 —— polydraw 的 `disco ball` 一帧 12 万个顶点、
+        // 每格顶点 32 次 `base + k`，`$iadd` 一个函数在 js 腿上就占 2.45% 的自用样本
+        // （2026-09-25）。展开的条件是**两边都是"重算一遍也没副作用"的简单式**
+        // （名字或整数字面量）—— 不然慢路那一趟会把实参算第二遍。
+        // 判断与 prelude 里那一份**逐句相同**（先 typeof 两格、再范围查），
+        // 出了 2^53 照旧交给真函数，所以答案一个字不变。
+        case '+': return intFast('$iadd', '+', a, b);
+        case '-': return intFast('$isub', '-', a, b);
         case '*': return `$imul(${a}, ${b})`;
         case '/': return `$div(${a}, ${b})`;
         case '%': return `$mod(${a}, ${b})`;
