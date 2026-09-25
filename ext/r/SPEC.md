@@ -775,11 +775,14 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
     `c(…)` / `character(n)` / `v[i]` 读写 / `v[c(1,3)]` / `v[掩码]` / `length` / `cat` /
     `print` / `for (s in v)` / `seq_along` / `rev` / `nchar(v)` / `toupper(v)` /
     `tolower(v)` / `paste(…)` 逐元素（含回收与 `collapse=`）。**没接的是这几格**：
-    * `sort(v)` —— R 排串按 **locale 的排序规则**（`Scollate`），不是按字节：
+    * `sort(v)` / `order(v)` —— R 排串按 **locale 的排序规则**（`Scollate`），不是按字节：
       `sort(c("pear","apple","Banana"))` 在 R 那边是 `"apple" "Banana" "pear"`，
-      按字节比 `"Banana"` 会跑到最前面。要对上得先有那套 collation。同理 `head` /
-      `tail` / `rep` / `which` / `order` / `match` / `%in%` / `unique` / `duplicated` /
-      `union` / `intersect` / `setdiff` 在字符向量上也都当场报。
+      按字节比 `"Banana"` 会跑到最前面。要对上得先有那套 collation，**这两格当场报**。
+      而**只要"相等"的那一族 2026-09-26 接了**：`match` / `%in%` / `unique` /
+      `duplicated` / `union` / `intersect` / `setdiff` / `head` / `tail`（`rep` 早就接了）。
+      分水岭就在这儿 —— "两个串是不是同一个"是逐字节的、与 locale 无关，而"谁排在前头"
+      不是。这几格一边是串一边是数时当场报（R 那边会替你 `as.character`，这一档不替）。
+      负的 `n`（`head(v, -1)`）两边都还没接。
     * **数的是字节，不是字符。** 方言的 `slen` / `ssub` / `supper` 都按字节办，而 R 的
       `nchar` / `substr` / `toupper` 按**字符**（跟 locale 走）。量出来的（`Rscript`，
       2026-09-25）：`nchar("héllo")` R 答 5、按字节是 6；`substr("héllo", 1, 2)` R 出

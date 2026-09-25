@@ -320,6 +320,18 @@ const FN_DEPS = new Map([
   ['r_chartr_v', ['r_chartr']],
   /* `as.character(向量)`：数那一档走 `r_num_str`（15 位），逻辑那一档走 `r_lgl_str`；
      两格都要问缺失（碰上就当场报 —— 没有 `NA_character_`）。 */
+  /* 字符向量上"只要相等、不要 collation"那一族（`sort` / `order` 照旧当场报）。 */
+  ['r_sv1', []],
+  ['r_uniq_str', []],
+  ['r_dup_str', []],
+  ['r_match_str', ['r_na']],
+  ['r_in_str', []],
+  ['r_in1_str', []],
+  ['r_union_str', ['r_in1_str']],
+  ['r_isect_str', ['r_in1_str']],
+  ['r_sdiff_str', ['r_in1_str']],
+  ['r_head_str', []],
+  ['r_tail_str', []],
   ['r_as_str_v', ['r_is_na', 'r_num_str']],
   ['r_as_str_lv', ['r_is_na', 'r_lgl_str']],
   ['r_starts_v', ['r_starts']],
@@ -1070,7 +1082,12 @@ function typeOfExpr(x, types) {
       }
       /* `%in%`：左边是向量就逐元素出逻辑向量，左边一格数就出三态标量。 */
       if (op === '%in%') {
-        return isVecTy(typeOfExpr(kids(x)[1], types)) ? RLGL : RLGL1;
+        const lt3 = typeOfExpr(kids(x)[1], types);
+        /* 串那一侧：字符向量进 → 逻辑向量，一格串进 → 一格 bool（`r_in1_str` 回 bool，
+           不是三态 —— 串这一侧没有 `NA`）。 */
+        if (isStrVec(lt3)) return RLGL;
+        if (lt3.kind === 'string') return BOOL;
+        return isVecTy(lt3) ? RLGL : RLGL1;
       }
       /* **向量那一问要摆在最前**：`xs > 2` 回的是**逻辑向量**，不是一格布尔 ——
          摆在 `return BOOL` 后面的话永远到不了（`sum(xs > 2)` 就会说"实参不是向量"）。 */
@@ -1312,6 +1329,8 @@ function applyTy(fn, x, types) {
     case 'match': case 'order': return RIVEC;
     case 'unique': case 'union': case 'intersect': case 'setdiff': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
+      /* 串那一侧出的还是字符向量（只用"相等"那一族，见 `callOf`）。 */
+      if (isStrVec(t) || t.kind === 'string') return RSTRV;
       return isIvecTy(t) ? RIVEC : RVEC;
     }
     case 'duplicated': return RLGL;
@@ -2821,7 +2840,16 @@ function exprOf(x, types, want) {
       if (op === '%in%') {
         const lt2 = typeOfExpr(l, types);
         const rt2 = typeOfExpr(r, types);
-        if (isStrVec(lt2) || isStrVec(rt2)) throw new Error(strvGap('%in%'));
+        /* 串那一侧接了（只用"相等"）：右边是字符向量时，左边是串就回一格 bool、
+           是字符向量就逐元素出逻辑向量。 */
+        if (isStrVec(rt2) || rt2.kind === 'string' || isStrVec(lt2) || lt2.kind === 'string') {
+          if (!(isStrVec(lt2) || lt2.kind === 'string') || !(isStrVec(rt2) || rt2.kind === 'string')) {
+            throw new Error('r->IR: `%in%` 一边是串一边是数 —— R 那边会把数收成串，这一档不替你收');
+          }
+          const tbl = isStrVec(rt2) ? exprOf(r, types) : lglCall('r_sv1', exprOf(r, types));
+          if (isStrVec(lt2)) return lglCall('r_in_str', exprOf(l, types), tbl);
+          return lglCall('r_in1_str', exprOf(l, types), tbl);
+        }
         const tbl = isVecTy(rt2) ? exprOf(r, types) : lglCall('r_vec1', asReal(exprOf(r, types), rt2));
         if (isVecTy(lt2)) return lglCall('r_in_v', exprOf(l, types), tbl);
         return lglCall('r_in1', asReal(exprOf(l, types), lt2), tbl);
@@ -3559,12 +3587,14 @@ function callOf(x, types, extra, want) {
       case 'head': case 'tail': {
         /* 第二格是"取几格"，缺省 6（R 的文档）；也认 `n=`。 */
         const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
-        if (isStrVec(t)) throw new Error(strvGap(fn));
-        if (!isVecTy(t)) throw new Error(`r->IR: ${fn}() 的第一格实参不是向量（是 ${t.kind}）`);
+        if (!isStrVec(t) && !isVecTy(t)) throw new Error(`r->IR: ${fn}() 的第一格实参不是向量（是 ${t.kind}）`);
         const named = namedArg(x, 'n');
         let cnt = { kind: 'int', value: 6 };
         if (named !== undefined) cnt = asIntE(exprOf(named, types), typeOfExpr(named, types));
         else if (n >= 2) cnt = asIntE(ev(1), typeOfExpr(all[1], types));
+        /* 字符向量那一侧**接了**：按下标挑，与 collation 无关（`sort` 那一格才要）。
+           负的 `n`（R 里是"去掉末尾几格"）两边都还没接。 */
+        if (isStrVec(t)) return lglCall(fn === 'head' ? 'r_head_str' : 'r_tail_str', ev(0), cnt);
         return lglCall(`r_${fn}`, ev(0), cnt);
       }
       case 'diff': {
@@ -3875,6 +3905,11 @@ function callOf(x, types, extra, want) {
       case 'order': case 'cumprod': case 'cummax': case 'cummin': {
         if (n !== 1) throw new Error(`r->IR: ${fn}() 要一格向量实参（给了 ${n}）`);
         const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        /* `unique` / `duplicated` 在**字符向量**上接了：只用"相等"，不要 collation。
+           同一个 case 里的 `order` / `which.max` 那几格还是当场报（要排序）。 */
+        if (isStrVec(t) && (fn === 'unique' || fn === 'duplicated')) {
+          return lglCall(fn === 'unique' ? 'r_uniq_str' : 'r_dup_str', ev(0));
+        }
         if (isStrVec(t)) throw new Error(strvGap(fn));
         if (!isVecTy(t)) throw new Error(`r->IR: ${fn}() 的实参不是向量（是 ${t.kind}）`);
         const gen = {
@@ -3887,7 +3922,22 @@ function callOf(x, types, extra, want) {
       case 'match': case 'union': case 'intersect': case 'setdiff': {
         if (n !== 2) throw new Error(`r->IR: ${fn}() 要两格实参（给了 ${n}）`);
         const tys = all.map((a) => (a === null ? REAL : typeOfExpr(a, types)));
-        if (tys.some(isStrVec)) throw new Error(strvGap(fn));
+        /**
+         * **串那一侧接了**（2026-09-26）：这四格只用"两个串是不是同一个"，而那是逐字节的、
+         * 与 locale 无关 —— 与要 collation 的 `sort` / `order` 是两回事（见 SPEC 第四节
+         * 第 12 条）。一格串也收（先摆成长度 1 的字符向量）。
+         */
+        if (tys.some((t) => isStrVec(t) || t.kind === 'string')) {
+          if (tys.some((t) => !isStrVec(t) && t.kind !== 'string')) {
+            throw new Error(`r->IR: ${fn}() 一边是串一边是数 —— R 那边会把数收成串（`
+              + '`as.character`），这一档不替你收，写明白一点');
+          }
+          const sv = (kk) => (isStrVec(tys[kk]) ? ev(kk) : lglCall('r_sv1', ev(kk)));
+          const gens = {
+            match: 'r_match_str', union: 'r_union_str', intersect: 'r_isect_str', setdiff: 'r_sdiff_str',
+          };
+          return lglCall(gens[fn], sv(0), sv(1));
+        }
         /* 标量也收（R 里 `match(2, t)` 是常用写法）—— 先摆成长度 1 的向量。 */
         const asVec = (kk) => (isVecTy(tys[kk]) ? ev(kk) : lglCall('r_vec1', asReal(ev(kk), tys[kk])));
         const gen = {
@@ -5123,6 +5173,8 @@ const STRV_FNS = new Set([
   /* base 那四条字符向量常量 + `strrep` 在字符向量上那一格。 */
   'r_sv_letters', 'r_sv_upper', 'r_sv_month', 'r_sv_mabb', 'r_strrep_v', 'r_chartr_v',
   'r_as_str_v', 'r_as_str_lv',
+  'r_sv1', 'r_uniq_str', 'r_dup_str', 'r_match_str', 'r_in_str', 'r_in1_str',
+  'r_union_str', 'r_isect_str', 'r_sdiff_str', 'r_head_str', 'r_tail_str',
 ]);
 
 /** 这一批由 `setFnDecl` 发（集合与位置那一族，见 `FN_DEPS` 上那段账）。 */
@@ -5628,6 +5680,176 @@ function strvFnDecl(name) {
               : { kind: 'call', fn: { kind: 'name', name: useFn(NUM_STR) }, args: [el, I(15)] }],
           },
         ], nm('n')),
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  if (name === 'r_sv1') {
+    /** 一格串摆成长度 1 的字符向量（与数那一侧的 `r_vec1` 同一个用处）。 */
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'a', type: STR }],
+      ret: RSTRV,
+      body: [
+        { kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), I(0)) },
+        { kind: 'builtin-stmt', name: 'apush', args: [nm('o'), nm('a')] },
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  if (name === 'r_uniq_str' || name === 'r_dup_str') {
+    /**
+     * 字符向量上的 `unique` / `duplicated` —— **只要"相等"，不要 collation**。
+     *
+     * 这是这一族与 `sort` / `order` 的分水岭：排序要 R 的 locale 排序规则
+     * （`Scollate`，见第四节第 12 条），而"这两个串是不是同一个"是逐字节的、与 locale
+     * 无关 —— 所以这几格接得住，排序那两格照旧当场报。
+     */
+    const uniq = name === 'r_uniq_str';
+    const seen = nm('sn');
+    return {
+      kind: 'fn',
+      name,
+      params: P,
+      ret: uniq ? RSTRV : RLGL,
+      body: [
+        letI('n', svLen(v)),
+        ...(uniq
+          ? [{ kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), I(0)) }]
+          : vecNewAs('o', nm('n'))),
+        loop([
+          { kind: 'let', name: 'sn', type: BOOL, init: { kind: 'bool', value: false } },
+          {
+            kind: 'for',
+            init: letI('j', I(0)),
+            cond: b('<', nm('j'), i),
+            post: set('j', b('+', nm('j'), I(1))),
+            body: [iff(b('==', svGet(v, i), svGet(v, nm('j'))),
+              [{ kind: 'assign', target: seen, value: { kind: 'bool', value: true } }])],
+          },
+          uniq
+            ? iff({ kind: 'unop', op: '!', operand: seen },
+              [{ kind: 'builtin-stmt', name: 'apush', args: [nm('o'), svGet(v, i)] }])
+            : vecSet(nm('o'), i, { kind: 'ternary', cond: seen, then: { kind: 'real', value: 1 }, else_: { kind: 'real', value: 0 } }),
+        ], nm('n')),
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  if (name === 'r_match_str' || name === 'r_in_str') {
+    /** `match(v, w)` 回位置（找不到 `NA`）、`v %in% w` 回真假 —— 都只用"相等"。 */
+    const mat = name === 'r_match_str';
+    const w = nm('w');
+    const hit = nm('h');
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RSTRV }, { name: 'w', type: RSTRV }],
+      ret: mat ? RIVEC : RLGL,
+      body: [
+        letI('n', svLen(v)),
+        letI('m', svLen(w)),
+        ...vecNewAs('o', nm('n')),
+        loop([
+          letI('h', I(-1)),
+          {
+            kind: 'for',
+            init: letI('j', I(0)),
+            cond: b('&&', b('<', nm('j'), nm('m')), b('<', hit, I(0))),
+            post: set('j', b('+', nm('j'), I(1))),
+            body: [iff(b('==', svGet(v, i), svGet(w, nm('j'))), [set('h', nm('j'))])],
+          },
+          iff(b('<', hit, I(0)),
+            [vecSet(nm('o'), i, mat
+              ? { kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] }
+              : { kind: 'real', value: 0 })],
+            [vecSet(nm('o'), i, mat
+              ? call1('toreal', b('+', hit, I(1)))
+              : { kind: 'real', value: 1 })]),
+        ], nm('n')),
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  if (name === 'r_in1_str') {
+    /** `一格串 %in% w` —— 回真假（那一格能直接进 `if`）。 */
+    const w = nm('w');
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'a', type: STR }, { name: 'w', type: RSTRV }],
+      ret: BOOL,
+      body: [
+        letI('m', svLen(w)),
+        loop([iff(b('==', nm('a'), svGet(w, i)), [{ kind: 'return', values: [{ kind: 'bool', value: true }] }])], nm('m')),
+        { kind: 'return', values: [{ kind: 'bool', value: false }] },
+      ],
+    };
+  }
+  if (name === 'r_union_str' || name === 'r_isect_str' || name === 'r_sdiff_str') {
+    /**
+     * 三格集合运算在字符向量上。R 的口径（量出来的）：**都先去重、按出现次序**——
+     * `union` 是"第一条的去重 + 第二条里没在第一条出现过的"、`intersect` 是"第一条里
+     * 也在第二条里的（去重）"、`setdiff` 是"第一条里不在第二条里的（去重）"。
+     */
+    const w = nm('w');
+    const inW = (e, tbl) => ({ kind: 'call', fn: { kind: 'name', name: useFn('r_in1_str') }, args: [e, tbl] });
+    const out = nm('o');
+    const push = (e) => ({ kind: 'builtin-stmt', name: 'apush', args: [out, e] });
+    const both = name === 'r_union_str';
+    const keep = name === 'r_isect_str'
+      ? (e) => inW(e, w)
+      : (e) => ({ kind: 'unop', op: '!', operand: inW(e, w) });
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RSTRV }, { name: 'w', type: RSTRV }],
+      ret: RSTRV,
+      body: [
+        letI('n', svLen(v)),
+        { kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), I(0)) },
+        /* 第一条：去重（用 `o` 自己当"见过没有"的表）+ 那一格该不该留。 */
+        loop([iff(b('&&', { kind: 'unop', op: '!', operand: inW(svGet(v, i), out) },
+          both ? { kind: 'bool', value: true } : keep(svGet(v, i))), [push(svGet(v, i))])], nm('n')),
+        ...(both ? [
+          letI('m', svLen(w)),
+          {
+            kind: 'for',
+            init: letI('j', I(0)),
+            cond: b('<', nm('j'), nm('m')),
+            post: set('j', b('+', nm('j'), I(1))),
+            body: [iff({ kind: 'unop', op: '!', operand: inW(svGet(w, nm('j')), out) },
+              [push(svGet(w, nm('j')))])],
+          },
+        ] : []),
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_head_str' || name === 'r_tail_str') {
+    /** 字符向量上的 `head` / `tail` —— 按下标挑，与 collation 无关。 */
+    const kk = nm('k');
+    const from = name === 'r_head_str' ? I(0) : b('-', nm('n'), kk);
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RSTRV }, { name: 'k', type: INT }],
+      ret: RSTRV,
+      body: [
+        letI('n', svLen(v)),
+        letI('c', kk),
+        iff(b('>', nm('c'), nm('n')), [set('c', nm('n'))]),
+        iff(b('<', nm('c'), I(0)), [set('c', I(0))]),
+        { kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), I(0)) },
+        letI('a', name === 'r_head_str' ? I(0) : b('-', nm('n'), nm('c'))),
+        {
+          kind: 'for',
+          init: letI('i', I(0)),
+          cond: b('<', i, nm('c')),
+          post: set('i', b('+', i, I(1))),
+          body: [{ kind: 'builtin-stmt', name: 'apush', args: [nm('o'), svGet(v, b('+', nm('a'), i))] }],
+        },
         { kind: 'return', values: [nm('o')] },
       ],
     };
