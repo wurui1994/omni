@@ -642,6 +642,16 @@ function eachAssign(x, fn) {
 const isListCall = (node) => isList(node) && tag(node) === 'call'
   && tag(kids(node)[0]) === 'sym' && nameOf(kids(node)[0]) === 'list';
 
+/** `m$k` 里那个键（右边是名字或串字面量 —— R 两种都收）。 */
+const isDollar = (node) => isList(node) && tag(node) === 'bin'
+  && String(leaf(kids(node)[0])) === '$';
+function dollarKey(node) {
+  const k = kids(node)[2];
+  if (tag(k) === 'sym') return nameOf(k);
+  if (tag(k) === 'str') return String(leaf(kids(k)[0]));
+  throw new Error('r->IR: `$` 右边只接名字或串字面量');
+}
+
 /**
  * 用 `[[…]]` 读写过的名字，**加上"被 `list(…)` 赋过"的那些** —— R 的 `list` 这么用就是
  * 关联表（见文件头第 5 条）。
@@ -654,6 +664,8 @@ const isListCall = (node) => isList(node) && tag(node) === 'call'
 function dictNames(x, out = new Set()) {
   if (!isList(x)) return out;
   if (tag(x) === 'sub2' && tag(kids(x)[0]) === 'sym') out.add(nameOf(kids(x)[0]));
+  /* `m$k` 与 `m[["k"]]` 是同一件事（R 里 `$` 就是按名字取），所以这一格也算。 */
+  if (isDollar(x) && tag(kids(x)[1]) === 'sym') out.add(nameOf(kids(x)[1]));
   if (isAssign(x)) {
     const { target, value } = assignParts(x);
     if (tag(target) === 'sym' && isListCall(value)) out.add(nameOf(target));
@@ -736,6 +748,11 @@ function typeOfExpr(x, types) {
     }
     case 'bin': {
       const op = String(leaf(kids(x)[0]));
+      /* `m$k` —— 表上按名字取（那张表的值类型就是它的类型）。 */
+      if (op === '$') {
+        const d = typeOfExpr(kids(x)[1], types);
+        return d !== undefined && d.kind === 'map' ? d.value : INT;
+      }
       /* `%in%`：左边是向量就逐元素出逻辑向量，左边一格数就出三态标量。 */
       if (op === '%in%') {
         return isVecTy(typeOfExpr(kids(x)[1], types)) ? RLGL : RLGL1;
@@ -947,6 +964,8 @@ function inferTypes(body, params, seed) {
     const writes = [];
     eachAssign(body, ({ target, value }) => {
       if (tag(target) === 'sub2' && mangle(nameOf(kids(target)[0])) === mangle(d)) writes.push(value);
+      if (isDollar(target) && tag(kids(target)[1]) === 'sym'
+          && mangle(nameOf(kids(target)[1])) === mangle(d)) writes.push(value);
       /* `m <- list(a = 1, tol = 1e-8)` 里那几格也是"往这张表里写" —— 值类型要算它们，
          不然 `list(a = 1.5)` 会落成 `dict<string,int>`，`dset` 那一步当场报。 */
       if (tag(target) === 'sym' && mangle(nameOf(target)) === mangle(d) && isListCall(value)) {
@@ -1872,6 +1891,18 @@ function exprOf(x, types, want) {
         return lglCall('r_in1', asReal(exprOf(l, types), lt2), tbl);
       }
       if (op === '$' || op === '@' || op === '::' || op === ':::' || op === '~' || op === '?') {
+        /* `m$k` —— 表上按名字取。R 里 `$` 还能取 data.frame 的列、S4 的槽、环境里的名字，
+           那几档都没有（见 SPEC §4 第 4 条），所以只接"左边是一张表"这一种。
+           R 的 `$` 还会**部分匹配**（`cfg$to` 能取到 `tol`）—— 这儿不做，写全名。 */
+        if (op === '$') {
+          const dt = typeOfExpr(l, types);
+          if (dt === undefined || dt.kind !== 'map') {
+            throw new Error(`r->IR: \`$\` 只接"左边是一张表（\`list(名字 = 值)\`）"那一种`
+              + `（左边推出来是 ${dt === undefined ? '不知道' : dt.kind}）——`
+              + ' data.frame 的列、S4 的槽、环境那三档都没有（见 ext/r/SPEC.md 第四节第 4 条）');
+          }
+          return call1('dget', exprOf(l, types), { kind: 'string', value: dollarKey(x) });
+        }
         throw new Error(`r->IR: \`${op}\` 还没接`);
       }
       /* **向量化**：一边是向量就逐元素算（R 里这是常态，不是特例）。 */
@@ -2457,10 +2488,19 @@ function callOf(x, types, extra, want) {
         return { kind: 'block-expr', stmts, value: tv };
       }
       case 'is.null': {
-        /* `is.null(m[["k"]])` 是 R 里问"这张表有没有这个键"的写法（缺键回 NULL）。
-           **只认这一种形状** —— 别的 `is.null` 当场报，不假装。 */
-        if (n !== 1 || all[0] === null || tag(all[0]) !== 'sub2') {
-          throw new Error('r->IR: is.null() 只接 `is.null(x[["k"]])` 那一种形状（问表里有没有这个键）');
+        /* `is.null(m[["k"]])` 与 `is.null(m$k)` 是 R 里问"这张表有没有这个键"的写法
+           （缺键回 NULL）。**只认这两种形状** —— 别的 `is.null` 当场报，不假装。 */
+        if (n !== 1 || all[0] === null || !(tag(all[0]) === 'sub2' || isDollar(all[0]))) {
+          throw new Error('r->IR: is.null() 只接 `is.null(x[["k"]])` 与 `is.null(x$k)` 两种形状'
+            + '（问表里有没有这个键）');
+        }
+        if (isDollar(all[0])) {
+          return {
+            kind: 'unop',
+            op: '!',
+            operand: call1('dhas', exprOf(kids(all[0])[1], types),
+              { kind: 'string', value: dollarKey(all[0]) }),
+          };
         }
         const obj = kids(all[0])[0];
         const key = kids(kids(all[0])[1])[0];
@@ -2945,6 +2985,24 @@ function assignOf(x, types) {
        （那格量一直是 double），而方言那侧一个名字只有一种类型，所以写的时候对齐。 */
     if (want !== undefined && want.kind === 'real' && vt.kind === 'int') v = asReal(v, vt);
     return { kind: 'assign', target: { kind: 'name', name }, value: v };
+  }
+  /* `m$k <- v` —— 与 `m[["k"]] <- v` 同一件事（值类型也一起推，见 `inferTypes` 的 dicts）。 */
+  if (isDollar(target)) {
+    const obj = kids(target)[1];
+    const ot2 = typeOfExpr(obj, types);
+    if (ot2 === undefined || ot2.kind !== 'map') {
+      throw new Error('r->IR: `$` 的左边要是一张表（`list(名字 = 值)`）'
+        + ` —— 推出来是 ${ot2 === undefined ? '不知道' : ot2.kind}`);
+    }
+    const vt3 = typeOfExpr(value, types);
+    const v3 = ot2.value !== undefined && ot2.value.kind === 'real' && vt3.kind === 'int'
+      ? asReal(exprOf(value, types), vt3)
+      : exprOf(value, types);
+    return {
+      kind: 'builtin-stmt',
+      name: 'dset',
+      args: [exprOf(obj, types), { kind: 'string', value: dollarKey(target) }, v3],
+    };
   }
   if (t === 'sub1' || t === 'sub2') {
     const obj = kids(target)[0];

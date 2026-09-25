@@ -305,6 +305,10 @@ adapter 自己消化五件事（`ext/r/adapter.js` 文件头有账）：
    有一格是 double 整张表就装 double，于是后面 `m[["k"]] <- 3` 那个 3 自动加宽
    （不加宽方言那侧报"dset 的值要是 real，这里是 int"，量出来的）。
    `list(1, 2)`（**位置**实参）当场报：R 那儿它是按位置存的，而这一层的表只有"按名字取"。
+   **`m$k` 与 `m[["k"]]` 是同一件事**（R 里 `$` 就是按名字取）：读、写（`m$k <- v`）、
+   问有没有（`is.null(m$k)`）三格都接了，落的都是 `dget` / `dset` / `dhas`。
+   R 的 `$` 还会**部分匹配**（`cfg$to` 取到 `tol`）—— 这儿不做，写全名；
+   `$` 的左边不是表（data.frame 的列 / S4 的槽 / 环境）当场报。
 
 一格 `hooks` 都没有：`dset` / `dget` 与向量上的 `pload` / `pstore` 由 adapter 直接发
 （它知道类型），`cat` 落成一串 `write`（**不是 `print`**：方言的 `print` 自带换行，
@@ -443,7 +447,9 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
    顶层自动印也跟着这张表走：回 void 的函数（体尾是 `cat(…)` 那种）不印，别的印。
 6. `print` 那一层只接**一格实参**（`digits=` / `quote=` 那几个命名实参没接），
    串里的引号与反斜杠**不转义**（R 印 `"a\"b"`，我们印 `"a"b"`），
-   `list` 的 `print` 没接（那要 `$名字` 那一层）。
+   `list` 的 `print` 没接：R 印一张 list 要一行一行 `$名字` 地印，而这一层的表**问不出
+   它有哪些键**（方言的字典只有 `dnew` / `dget` / `dset` / `dhas` / `dlen`，没有"列出键"
+   那一格）。`names(m)` 同理 —— 要补就得先给核心方言加一格算子，那不属于 R 这一刀。
    **命名实参过一张白名单**（`adapter.js` 的 `NAMED_OK`）：认得的是 `cat` 的 `sep=`、
    `paste` 的 `sep=` / `collapse=`、聚合那一族的 `na.rm=`（`sum` / `prod` / `mean` /
    `max` / `min` / `range` / `var` / `sd` / `any` / `all`）、`head`/`tail` 的 `n=`、

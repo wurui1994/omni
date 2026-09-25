@@ -33,3 +33,13 @@ cat(who[["name"]], "住在", who[["city"]], "\n")
 # 拿表里的数接着算
 tot <- cfg[["n"]] * 2 + cfg[["tol"]]
 cat(tot, "\n")
+
+# `m$k` 与 `m[["k"]]` 是同一件事（R 里 `$` 就是按名字取）—— 读、写、问有没有都接了。
+# R 的 `$` 还会**部分匹配**（`cfg$to` 能取到 `tol`）：这儿不做，写全名。
+cat(cfg$n, cfg$tol, "\n")
+cfg$more <- 4
+cat(cfg$more, length(cfg), "\n")
+cat(is.null(cfg$zz), is.null(cfg$n), "\n")
+who$city <- "sf"
+cat(who$name, "搬到", who$city, "\n")
+cat(cfg[["n"]] + cfg$tol, "\n")
