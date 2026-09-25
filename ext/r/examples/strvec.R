@@ -94,3 +94,10 @@ print(rep("ab", 3))
 print(rep(c("a", "b"), 2))
 print(rep(c("a", "b"), each = 2))
 cat(paste(rep("-", 5), collapse = ""), "\n")
+
+# `ifelse(test, "y", "n")` —— 两支是串时出一条字符向量（R 的常用写法）
+v <- c(-1, 0, 3)
+print(ifelse(v > 0, "pos", "non-pos"))
+print(ifelse(c(TRUE, FALSE), "y", "n"))
+cat(ifelse(TRUE, "a", "b"), ifelse(1 > 2, "a", "b"), "\n")
+# test 里有 NA 时 R 挑出一格 NA_character_，这一档没有那种值 —— 当场停下来，不静默印 "NA"

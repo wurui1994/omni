@@ -246,6 +246,8 @@ const FN_DEPS = new Map([
   ['r_is_false', ['r_is_na']],
   ['r_ifelse1', ['r_is_na', 'r_na']],
   ['r_ifelse', ['r_is_na', 'r_na']],
+  /* 两支是串那一档：test 里有 NA 就停下来（没有 `NA_character_`），所以要问 `r_is_na`。 */
+  ['r_ifelse_s', ['r_is_na']],
   ['r_vec1', []],
   /* 串那一族（`substr` 要量长度、`startsWith` 要读两遍、`sprintf` 的宽度要补空格）。 */
   ['r_substr', []],
@@ -1083,6 +1085,11 @@ function applyTy(fn, x, types) {
     case 'xor': return args.some((a) => isVecTy(typeOfExpr(a, types))) ? RLGL : RLGL1;
     case 'isTRUE': case 'isFALSE': return BOOL;
     case 'ifelse': {
+      const sArgs = posArgs(x);
+      /* 两支是串 → 出字符向量（test 是向量）或者一格串（test 是标量）。 */
+      if (sArgs.length === 3 && [1, 2].some((k) => typeOfExpr(sArgs[k], types).kind === 'string')) {
+        return isVecTy(typeOfExpr(sArgs[0], types)) ? RSTRV : STR;
+      }
       const lgl = args.length === 3
         && [1, 2].every((k) => {
           const t = typeOfExpr(args[k], types);
@@ -3194,6 +3201,18 @@ function callOf(x, types, extra, want) {
            （`yes` / `no` 按回收取，标量先用 `r_vec1` 摆成长度 1 的向量）。 */
         if (n !== 3) throw new Error(`r->IR: ifelse() 要三格实参（给了 ${n}）`);
         const tys = all.map((a, k) => (a === null ? REAL : typeOfExpr(a, types)));
+        /* **两支是串**那一档：R 出的是字符向量（`ifelse(v > 0, "pos", "neg")` 是常用写法）。
+           `test` 是一格标量时就是一格三元；是向量时逐格挑（`r_ifelse_s`）。 */
+        if (tys[1].kind === 'string' || tys[2].kind === 'string') {
+          if (tys[1].kind !== 'string' || tys[2].kind !== 'string') {
+            throw new Error('r->IR: ifelse() 的 `yes` / `no` 一格是串、一格不是 ——'
+              + ' R 那儿会往串那边收，这一层的两种存法之间不自动过（写 `as.character(…)`）');
+          }
+          if (!isVecTy(tys[0])) {
+            return { kind: 'ternary', cond: condOf(all[0], types), then: ev(1), else_: ev(2) };
+          }
+          return lglCall('r_ifelse_s', ev(0), ev(1), ev(2));
+        }
         if (!isVecTy(tys[0])) {
           return lglCall('r_ifelse1', asLgl(ev(0), tys[0]),
             asReal(ev(1), tys[1]), asReal(ev(2), tys[2]));
@@ -4261,7 +4280,7 @@ function strFnDecl(name) {
 const STRV_FNS = new Set([
   'r_cat_str', 'r_print_str', 'r_join_str', 'r_rev_str', 'r_nchar_v', 'r_upper_v', 'r_lower_v',
   'r_pick_str', 'r_mask_str', 'r_split', 'r_at_name', 'r_nm_at',
-  'r_gsub', 'r_gsub_v', 'r_grepl_v', 'r_grep_i', 'r_grep_s', 'r_rep_str',
+  'r_gsub', 'r_gsub_v', 'r_grepl_v', 'r_grep_i', 'r_grep_s', 'r_rep_str', 'r_ifelse_s',
 ]);
 
 /** 这一批由 `setFnDecl` 发（集合与位置那一族，见 `FN_DEPS` 上那段账）。 */
@@ -4796,6 +4815,47 @@ function strvFnDecl(name) {
             body: [{ kind: 'builtin-stmt', name: 'apush', args: [nm('o'), svGet(v, i)] }],
           }], nm('n'))],
         },
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  if (name === 'r_ifelse_s') {
+    /* `ifelse(test, "y", "n")` —— test 是逻辑向量，两支是串，出一条字符向量。
+       test 里有 `NA` 时 R 挑出一格 `NA_character_`，这一档没有那种值 —— **当场停下来**
+       （与 `r_mask_str` 同一条：不给一个看着像对的答案）。 */
+    const at = vecGet(nm('p'), i);
+    return {
+      kind: 'fn',
+      name,
+      params: [
+        { name: 'p', type: RLGL }, { name: 'y', type: STR }, { name: 'z', type: STR },
+      ],
+      ret: RSTRV,
+      body: [
+        letI('n', vecLen(nm('p'))),
+        { kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), nm('n')) },
+        loop([
+          {
+            kind: 'if',
+            cond: { kind: 'call', fn: { kind: 'name', name: useFn('r_is_na') }, args: [at] },
+            then: [{
+              kind: 'builtin-stmt',
+              name: 'fail',
+              args: [{ kind: 'string', value: 'NA in ifelse() over strings: NA_character_ 还没有' }],
+            }],
+            else_: null,
+          },
+          {
+            kind: 'assign',
+            target: svGet(nm('o'), i),
+            value: {
+              kind: 'ternary',
+              cond: b('!=', at, { kind: 'real', value: 0 }),
+              then: nm('y'),
+              else_: nm('z'),
+            },
+          },
+        ], nm('n')),
         { kind: 'return', values: [nm('o')] },
       ],
     };
