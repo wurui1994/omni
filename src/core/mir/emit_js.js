@@ -40,10 +40,34 @@ import {
   CVT_SEXT8, CVT_SEXT16, CVT_FCVT, CVT_NAMES,
 } from './ir.js';
 
-/* `setjmp` 那一族：这条路上**做不到**（它要「同一帧的同一条指令上再回一次」，而发出来的
- * JS 没有 pc 可以回）。所以在这儿明说，让上层退回解释器 —— 不是假装能跑。 */
-const JS_NOJMP = new Set(['setjmp', '_setjmp', 'sigsetjmp', '__sigsetjmp',
-  'longjmp', '_longjmp', 'siglongjmp']);
+/**
+ * `setjmp` / `longjmp` 那一族的名字。
+ *
+ * **这两个不是 libc 里的普通调用**：`setjmp` 要「返回两次」。从前这条腿撞上就抛
+ * （`JS_NOJMP`），理由写的是"发出来的 JS 没有 pc 可以回"。那句话只对了一半 ——
+ * 回不去一条**指令**是真的，但这一份发代码器的形状让"回到某一条指令**之后**"变得可表达：
+ *
+ *   1. 槽（`s0`…）与 SSA 值（`v0`…）全是**函数作用域**的 `let` —— 所以"帧"在
+ *      longjmp 之后原样在那儿，不需要保存/恢复任何东西；
+ *   2. 函数体是**结构化**的（BLOCK/LOOP/IF 落成带标签的 JS 块）—— 所以从函数开头
+ *      **重新走一遍、把沿路的语句跳过去**，就能落到任意一条指令上。
+ *
+ * 于是做法是（`sjPlan` 算路、`func` 发码）：
+ *   - 带 `setjmp` 的函数整个身子套一层 `$RETRY: for(;;) { try { … } catch { … } }`；
+ *   - `$rs`（resume site）是"这一趟要回到哪条指令"：0 = 正常从头跑；
+ *   - 每一段**不在路上**的语句裹一层 `if ($rs === 0) { … }` —— 导航时跳过去；
+ *   - 路上的区域照原样开（IF 的条件换成"$rs 指着我这一支吗"）；
+ *   - 到了那条 `setjmp` 调用点就把 `$rs` 清零，后面的代码照常跑。
+ *
+ * "跳过去"这件事与 `mir/interp.js` 的语义**一致**：那条腿也不恢复槽，落回去时帧里
+ * 是当时的值（C11 7.13.2.1 只保证 `volatile` 的自动变量，别的是未定义行为）。
+ * 两条腿在这一点上一样，`tests/c/run.js` 的"JS 腿 == 解释腿"才站得住。
+ *
+ * R 的错误机制整个建在这一对上（`errors.c` 的 `R_ToplevelExec`、`context.c` 的
+ * `RCNTXT` + `R_jumpctxt`），所以这一格是 R 的 C 核心上 JS 腿的**必经之路**（ADR-0047）。
+ */
+const SETJMP_NAMES = new Set(['setjmp', '_setjmp', 'sigsetjmp', '__sigsetjmp']);
+const LONGJMP_NAMES = new Set(['longjmp', '_longjmp', 'siglongjmp']);
 
 /** 一个类型码的零值文本（槽的初值；i32 是 **number** 那一格，见文件头第三条约定）。 */
 function jsZeroText(t) {
@@ -120,7 +144,8 @@ const JS_CMP = new Map([
  */
 const JS_PROLOGUE = `'use strict';
 const { memInit, memData, memSize, memGrow, memLoadFn, memStoreFn, memLoadFnN, memStoreFnN,
-  callLibc, hasLibc, isExitCall, failRt, flushOut, libcAtExit, setFnPtrCaller } = $rt;
+  callLibc, hasLibc, isExitCall, failRt, flushOut, libcAtExit, setFnPtrCaller,
+  sjTok, sjSet, sjThrow, sjCatch } = $rt;
 const $W = (x) => BigInt.asIntN(64, x);
 const $U = (x) => BigInt.asUintN(64, x);
 const $INT_MIN = -9223372036854775808n;
@@ -306,6 +331,11 @@ class JsFromMir {
          * 所以 i32 的实参在门口装一次、回值在门口卸一次。这两次换算留在这里不上推：
          * 「语义只有一份」比「少一次 BigInt」重要，而 libc 调用不在内层循环里。 */
         const entry = this.mir.cabi[f.a[i]];
+        /* `setjmp` / `longjmp` 的**桩体**：调用点已经在 `func` 里改写过了，所以这儿
+         * 只会在"有人拿函数指针去调这个桩"时走到 —— 那一格明说不支持，不静默回 0。 */
+        if (SETJMP_NAMES.has(entry) || LONGJMP_NAMES.has(entry)) {
+          return `failRt(${JSON.stringify(`${entry}: 只能在直接调用点上发（函数指针绕不过去）`)})`;
+        }
         const as = f.argsOf(f.b[i]).map((r) => (this.refType(f, r) === T_I32
           ? `BigInt(${this.ref(f, r)})` : this.ref(f, r)));
         const call = `$ccall(${JSON.stringify(entry)}, [${as.join(', ')}])`;
@@ -386,6 +416,66 @@ class JsFromMir {
     return `${f.op[s] === OP.LOOP ? 'continue' : 'break'} L${s};`;
   }
 
+  /**
+   * 哪几个 MIR 函数是 `setjmp` / `longjmp` 的**桩**。
+   *
+   * C 前端给每个外部符号发一个桩函数（体里就一条 CCALL），调用点是对桩的 `CALL` ——
+   * 所以"要回到的那条指令"是**调用方**的那条 CALL，不是桩里的 CCALL。按桩里那条 CCALL
+   * 的入口名认，而不是按函数名认：名字可以被 `#define` 改（`__sigsetjmp`），入口名不会。
+   */
+  sjStubs() {
+    const m = new Map();
+    for (let no = 0; no < this.mir.funcs.length; no++) {
+      const f = this.mir.funcs[no];
+      for (let i = 0; i < f.count(); i++) {
+        if (f.op[i] !== OP.CCALL) continue;
+        const e = this.mir.cabi[f.a[i]];
+        if (SETJMP_NAMES.has(e)) m.set(no, 'setjmp');
+        else if (LONGJMP_NAMES.has(e)) m.set(no, 'longjmp');
+      }
+    }
+    return m;
+  }
+
+  /**
+   * 一个函数里的 `setjmp` 落点，以及"从函数开头走到它"要经过哪些区域。
+   *
+   * 回 null = 这个函数里没有 `setjmp`，那就一个 `try` 都不多发（既有的那几条轴
+   * 一个字节都不该变）。
+   *
+   * `pathIdx` 是**路上的那些指令下标**：落点自己，加上每一层包着它的区域的
+   * 开头 / `ELSE` / `END`（这三样是 JS 的块结构，必须照原样发出来）。
+   * `thenSites` 记的是"这个 IF 的 **then** 一支底下有哪些落点" —— 导航的时候
+   * IF 的条件要换成"$rs 指着我这一支吗"，而不是原来那个条件。
+   */
+  sjPlan(f, endOf, elseOf) {
+    const isSite = (i) => f.op[i] === OP.CALL && this.sjStub.get(f.a[i]) === 'setjmp';
+    const sites = [];
+    const pathIdx = new Set();
+    const thenSites = new Map();
+    const stack = [];
+    for (let i = 0; i < f.count(); i++) {
+      const op = f.op[i];
+      if (op === OP.BLOCK || op === OP.LOOP || op === OP.IF) stack.push(i);
+      else if (op === OP.END) stack.pop();
+      if (!isSite(i)) continue;
+      sites.push(i);
+      pathIdx.add(i);
+      for (const r of stack) {
+        pathIdx.add(r);
+        if (elseOf[r] >= 0) pathIdx.add(elseOf[r]);
+        pathIdx.add(endOf[r]);
+        /* IF：落点在 then 那一支还是 else 那一支，看它在 `ELSE` 之前还是之后。 */
+        if (f.op[r] === OP.IF && (elseOf[r] < 0 || i < elseOf[r])) {
+          if (!thenSites.has(r)) thenSites.set(r, []);
+          thenSites.get(r).push(i);
+        }
+      }
+    }
+    if (sites.length === 0) return null;
+    return { sites, pathIdx, thenSites, maxSite: sites[sites.length - 1] };
+  }
+
   func(no) {
     const f = this.mir.funcs[no];
     const { endOf, elseOf } = this.regions(f);
@@ -402,32 +492,78 @@ class JsFromMir {
     for (const i of used) vs.push(`v${i}`);
     if (vs.length > 0) L.push(`  let ${vs.join(', ')};`);
 
+    /* ---- `setjmp` 那一层（见 `SETJMP_NAMES` 的头注）。没有落点就一个字节都不多发。 */
+    const sj = this.sjPlan(f, endOf, elseOf);
     const stack = [];
     let ind = '  ';
-    const push = (s) => L.push(ind + s);
+    if (sj !== null) {
+      L.push('  let $rs = 0;');
+      L.push('  let $jv = 0;');
+      /* 一趟调用一个记号：同一个函数在栈上有好几份时（递归），longjmp 要认出是哪一份。 */
+      L.push('  const $TOK = sjTok();');
+      L.push('  $RETRY: for (;;) {');
+      L.push('    try {');
+      ind = '      ';
+    }
+    /* 一段"不在路上"的语句攒在这儿：到了路上的那条指令（或者区域的头尾）就落盘，
+       落的时候裹一层 `if ($rs === 0)` —— 导航的时候整段跳过去。 */
+    let group = [];
+    let groupInd = ind;
+    let groupAt = 0;
+    const flush = () => {
+      if (group.length === 0) return;
+      /* 最后一个落点之后的那些段永远不会被跳过，不必裹。 */
+      if (sj !== null && groupAt < sj.maxSite) {
+        L.push(`${groupInd}if ($rs === 0) {`);
+        for (const g of group) L.push(g);
+        L.push(`${groupInd}}`);
+      } else {
+        for (const g of group) L.push(g);
+      }
+      group = [];
+    };
+    const push = (s) => {
+      if (sj === null) { L.push(ind + s); return; }
+      if (group.length === 0) { groupInd = ind; groupAt = this.at; }
+      group.push(ind + s);
+    };
+    /** 路上那几条：先把攒着的落盘，再原样发出去（它们是 JS 的块结构，不能被裹）。 */
+    const pushPath = (s) => { flush(); L.push(ind + s); };
+    const onPath = (i) => sj !== null && sj.pathIdx.has(i);
+
     for (let i = 0; i < f.count(); i++) {
+      this.at = i;
       const op = f.op[i];
       const x = f.aux[i];
-      if (op === OP.BLOCK) { push(`L${i}: {`); stack.push(i); ind += '  '; continue; }
-      if (op === OP.LOOP) { push(`L${i}: while (true) {`); stack.push(i); ind += '  '; continue; }
+      const emit = onPath(i) ? pushPath : push;
+      if (op === OP.BLOCK) { emit(`L${i}: {`); stack.push(i); ind += '  '; continue; }
+      if (op === OP.LOOP) { emit(`L${i}: while (true) {`); stack.push(i); ind += '  '; continue; }
       if (op === OP.IF) {
-        push(`L${i}: if (${this.ref(f, f.a[i])} === true) {`);
+        /* 导航中（`$rs !== 0`）：这一支底下有没有那个落点，有就进，没有就走 else。
+           原来那个条件在导航时**不看** —— 它的输入是上一趟算出来的，重算没有意义。 */
+        const c = `${this.ref(f, f.a[i])} === true`;
+        const th = sj === null ? null : sj.thenSites.get(i);
+        const cond = onPath(i)
+          ? `$rs === 0 ? (${c}) : (${th === undefined ? 'false' : th.map((p) => `$rs === ${p}`).join(' || ')})`
+          : c;
+        emit(`L${i}: if (${cond}) {`);
         stack.push(i);
         ind += '  ';
         continue;
       }
-      if (op === OP.ELSE) { ind = ind.slice(2); push('} else {'); ind += '  '; continue; }
+      if (op === OP.ELSE) { ind = ind.slice(2); emit('} else {'); ind += '  '; continue; }
       if (op === OP.END) {
         const s = stack.pop();
         ind = ind.slice(2);
         /* LOOP 落到底是**退出**循环（wasm 的 loop 不自动回头），所以补一条 break。
          * 少这一句就是死循环 —— 而它只在"真的能落到底"时才发得出来（不可达的话
          * V8 也不在意，那一句就是死代码）。 */
-        if (f.op[s] === OP.LOOP) push(`  break L${s};`);
-        push('}');
+        if (f.op[s] === OP.LOOP) (onPath(i) ? pushPath : push)(`  break L${s};`);
+        (onPath(i) ? pushPath : push)('}');
         continue;
       }
-      if (op === OP.BR) { push(this.jump(f, stack, x)); continue; }
+      if (op === OP.BR) { emit(this.jump(f, stack, x)); continue; }
+
       if (op === OP.BRIF) {
         push(`if (${this.ref(f, f.a[i])} === true) ${this.jump(f, stack, x)}`);
         continue;
@@ -458,10 +594,42 @@ class JsFromMir {
         push(`${st}(${this.ref(f, f.a[i])}, ${memOff(x)}, ${v});`);
         continue;
       }
+      /* ---- `setjmp` / `longjmp` 的调用点（见 `SETJMP_NAMES` 的头注） */
+      if (op === OP.CALL && this.sjStub.has(f.a[i])) {
+        const as = f.argsOf(f.b[i]).map((r) => this.ref(f, r));
+        if (this.sjStub.get(f.a[i]) === 'longjmp') {
+          /* 不回来 —— 抛一个记号，中间那些帧靠 JS 的异常自然退掉。 */
+          push(`sjThrow(${as[0]}, ${as.length > 1 ? as[1] : '0'});`);
+          continue;
+        }
+        /* 落点。三种情形要分开，**不能只写"是我就收、否则装一次"**：
+         *   - `$rs === i`：这一跳是回到我这儿的 —— 拿回值、把导航关掉；
+         *   - `$rs === 0`：正常跑到这儿 —— 往那个 `jmp_buf` 上装一次，回 0；
+         *   - 别的（`$rs` 指着**另一个**落点）：什么都不做，让导航继续往下走。
+         *     少了这一支，同一个函数里第二个 `setjmp` 就永远到不了。 */
+        const zero = f.t[i] === T_I32 ? '0' : '0n';
+        const set = used.has(i) ? `v${i} = ${zero}; sjSet(${as[0]}, $TOK, ${i});`
+          : `sjSet(${as[0]}, $TOK, ${i});`;
+        const back = used.has(i) ? `v${i} = $jv; $rs = 0;` : '$rs = 0;';
+        pushPath(`if ($rs === ${i}) { ${back} } else if ($rs === 0) { ${set} }`);
+        continue;
+      }
       const e = this.expr(f, i);
       if (used.has(i)) push(`v${i} = ${e};`);
       else if (f.t[i] === T_VOID || this.effectful(f.op[i])) push(`${e};`);
       // 没人读、又没有副作用的纯运算：整条丢掉（降级器留下的死值不少）
+    }
+    flush();
+    if (sj !== null) {
+      L.push('      break $RETRY;');
+      L.push('    } catch ($e) {');
+      L.push('      const $t = sjCatch($e, $TOK);');
+      L.push('      if ($t === null) throw $e;');
+      L.push('      $rs = $t.site;');
+      L.push('      $jv = $t.val;');
+      L.push('      continue $RETRY;');
+      L.push('    }');
+      L.push('  }');
     }
     L.push('}');
     return L;
@@ -479,12 +647,9 @@ class JsFromMir {
 
   emit() {
     const mir = this.mir;
-    for (const e of mir.cabi) {
-      if (JS_NOJMP.has(e)) {
-        throw new OmniError(`mir.emit_js: 这条路发不出 ${e}（它要回到同一帧的同一条指令，`
-          + '发出来的 JS 没有那个 pc）—— 用 --backend interp');
-      }
-    }
+    /* 哪几个函数是 `setjmp` / `longjmp` 的桩 —— 要在发函数体**之前**算好
+     * （调用点的改写要查这张表）。 */
+    this.sjStub = this.sjStubs();
     const L = [JS_PROLOGUE];
     for (let i = 0; i < mir.globals.length; i++) L.push(`let $g${i} = undefined;`);
     const bodies = [];

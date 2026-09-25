@@ -564,6 +564,18 @@ function jsLegCase(group, f, incDirs = []) {
 
 for (const f of pick('gen')) jsLegCase('gen', f);
 
+/* `sys/` 也上这条腿（ADR-0047：`setjmp` / `longjmp` 现在发得出来了）。
+ *
+ * 为什么这一组值得单列：`04-setjmp.c` 是**唯一**要"同一条指令上再回一次"的用例，
+ * 而发出来的 JS 没有 pc —— 它是靠"从函数开头重走一遍、把沿路的语句跳过去"落回去的
+ * （`mir/emit_js.js` 的 `SETJMP_NAMES` 头注）。那套导航对不对，只有这一组看得见，
+ * 而且它里头刻意摆了"落点藏在 then 一支的循环里"与"落点藏在 else 一支里"两种形状。
+ * SDK 头取不到就与上面 4.5 那一组一样整组跳。 */
+for (const f of pick('sys')) {
+  if (SDK_INC === null) { skip++; continue; }
+  jsLegCase('sys', f);
+}
+
 // -------------------------------- 4.7 abi/：按值收发 struct，与 cc 编的 `.o` 对账
 //
 // 前面那几组都在「我们自己两条腿一致」或者「与 tcc -run 一致」上。这一组问的是**另一件
