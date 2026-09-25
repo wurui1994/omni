@@ -87,14 +87,19 @@ want('stats+LAPACK/lm 的系数',
   'fit <- lm(c(1,2,3.1) ~ c(1,2,3)); cat(round(coef(fit)[2], 4), class(fit), "\\n")', '1.05 lm');
 want('methods/S4 起得来',
   'library(methods); setClass("P", representation(x="numeric")); cat(isVirtualClass("P"), slotNames("P"), "\\n")', 'FALSE x');
+/* 产物一律落 `.omni-cache/r-rt/libR/` 下（与 `home/` 同级）—— 不用 `tempdir()`：
+   那个目录 R 一退就删，出了事连"那份文件长什么样"都看不着。 */
+const ART = join(ROOT, '.omni-cache/r-rt/libR');
+const png = join(ART, 'test-quartz.png');
+rmSync(png, { force: true });
 want('quartz/R 自己的 Cocoa 设备出 PNG',
-  'f <- tempfile(fileext=".png"); quartz(type="png", file=f, width=4, height=3); plot(1:10); dev.off();'
-  + ' cat(capabilities("aqua"), file.size(f) > 1000, "\\n")', 'TRUE TRUE');
+  `quartz(type="png", file=${JSON.stringify(png)}, width=4, height=3); plot(1:10); dev.off();`
+  + ` cat(capabilities("aqua"), file.size(${JSON.stringify(png)}) > 1000, "\\n")`, 'TRUE TRUE');
 
 if (!existsSync(join(LIB, 'ggplot2'))) {
   skip('ggplot2 没装（node ext/r/install-cran.js）');
 } else {
-  const pdf = join(ROOT, '.omni-cache/r-rt/libR/test-gg.pdf');
+  const pdf = join(ART, 'test-gg.pdf');
   rmSync(pdf, { force: true });
   want('ggplot2/ggsave 出真 PDF',
     'library(ggplot2); d <- data.frame(x=1:10, y=(1:10)^2);'

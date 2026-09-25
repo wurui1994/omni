@@ -6,8 +6,18 @@
 #
 # 这一份**不进 `tests/r/oracle.js`**（那一轴是编译器那一档、逐字节对 Rscript，而这儿用的
 # 是 ggplot2）。它的判据在 `tests/r/libr.js` 里。
+#
+# 出来的 PDF 落在 **`.omni-cache/r-rt/libR/demo-ggplot.pdf`**（与 `home/` 同级）——
+# 不落 R 的 `tempdir()`：那个目录 R 一退就删，印出来的路径过后连 `file` 都打不开
+# （量出来的）。落点是从 `R_HOME` 推出来的，所以与"从哪个目录敲命令"无关。
 
 library(ggplot2)
+
+home <- Sys.getenv("R_HOME")
+if (!nzchar(home)) {
+  stop("这一份要在我们自己那份 libR 上跑：omni run ext/r/libr-demo/ggplot.R")
+}
+outdir <- dirname(home)   # .omni-cache/r-rt/libR
 
 d <- data.frame(
   x = 1:20,
@@ -25,7 +35,7 @@ p <- ggplot(d, aes(x, y, colour = g)) +
   ) +
   theme_minimal(base_size = 11)
 
-out <- file.path(tempdir(), "omni-libr-ggplot.pdf")
+out <- file.path(outdir, "demo-ggplot.pdf")
 ggsave(out, p, width = 6, height = 4)
 cat("PDF:", out, file.size(out), "字节\n")
 

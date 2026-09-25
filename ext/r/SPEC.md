@@ -671,6 +671,12 @@ node tests/r/libr.js          # 这一档的尺子：八格都真跑
 判据是 `tests/r/libr.js` 第 2 格；而且那一轴每一格现在都判"输出里一行 Error 都没有" ——
 只看退出码与"要的那一行在不在"是发现不了这种病的。
 
+**产物一律落 `.omni-cache/r-rt/libR/`**（与 `home/` 同级）：demo 的
+`demo-ggplot.pdf`、尺子的 `test-gg.pdf` / `test-quartz.png`。**不用 R 的 `tempdir()`** ——
+那个目录 R 一退就删，印出来的路径过后连 `file` 都打不开，出了事想看看"那份 PDF 长什么样"
+都没机会（量出来的）。落点从 `R_HOME` 推（`dirname(Sys.getenv("R_HOME"))`），
+所以与"从哪个目录敲命令"无关。
+
 **跑一份脚本不用手敲那一串**：`omni run x.R` 一句管到底 —— 编译器那一档接得住就走它
 （快 17~76 倍），接不住就**自己换到这一档**，并把"为什么换"印在 stderr 上（不闷着换）。
 登记在 `langs.js` 的 `runFallback` 上、落在 `ext/r/libr-run.js`；`build` 上不换（那一档给不出产物）。
