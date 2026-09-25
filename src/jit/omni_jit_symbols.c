@@ -87,6 +87,28 @@ const omni_jit_sym OMNI_JIT_SYMS[] = {
   { "omni_r_pow", (void *)omni_r_pow },
   { "omni_r_round", (void *)omni_r_round },
   { "omni_r_sqrt", (void *)omni_r_sqrt },
+  /* **超越函数那一族**（从前这张表里只有上面那几格"代数"的）：EVAL 两门语言满地
+     `sin/cos/tan/exp/log`，`tigrou/balls2k.pss` 一份就要 6 个 —— 少一个这条腿就停在
+     `omni-jit: unresolved: omni_r_cos`。名单照 omni.h 的 `omni_r_*` 那一段抄全，
+     别只补眼下报缺的那几个（下一份脚本会缺另外几个）。 */
+  { "omni_r_sin", (void *)omni_r_sin },
+  { "omni_r_cos", (void *)omni_r_cos },
+  { "omni_r_tan", (void *)omni_r_tan },
+  { "omni_r_asin", (void *)omni_r_asin },
+  { "omni_r_acos", (void *)omni_r_acos },
+  { "omni_r_atan", (void *)omni_r_atan },
+  { "omni_r_atan2", (void *)omni_r_atan2 },
+  { "omni_r_sinh", (void *)omni_r_sinh },
+  { "omni_r_cosh", (void *)omni_r_cosh },
+  { "omni_r_tanh", (void *)omni_r_tanh },
+  { "omni_r_exp", (void *)omni_r_exp },
+  { "omni_r_log", (void *)omni_r_log },
+  { "omni_r_log10", (void *)omni_r_log10 },
+  { "omni_r_cbrt", (void *)omni_r_cbrt },
+  { "omni_r_hypot", (void *)omni_r_hypot },
+  /* `(gfxarr "名字" a0..a3 数组)`：带一整块数组的宿主调用（§19.1）。它与上面那几格
+     `omni_gfx_*` 是一族，漏在表外同一个后果。 */
+  { "omni_gfx_arr", (void *)omni_gfx_arr },
   { "omni_read_text", (void *)omni_read_text },
   { "omni_refid", (void *)omni_refid },
   { "omni_run_entry", (void *)omni_run_entry },
@@ -128,10 +150,14 @@ const omni_jit_sym OMNI_JIT_SYMS[] = {
          线程查（`omni_arena_slot`），IR 里要重建快路径就得先调它。 ---- */
 #ifdef OMNI_NO_TLS
   { "omni_arena_slot", (void *)omni_arena_slot },
-#else
-  { "omni_arena_ptr", (void *)&omni_arena_ptr },
-  { "omni_arena_end", (void *)&omni_arena_end },
 #endif
+  /* **认 `_Thread_local` 的那条路上这两格不在表里**：`&omni_arena_ptr` 是线程局部量的
+     地址，**不是编译期常量** —— 摆进静态初值里 clang 直接报
+     `initializer element is not a compile-time constant`，而它卡住的不是某个脚本，是
+     "the jit host failed to build with clang" ⇒ **整条 jit 腿一个脚本都起不来**
+     （2026-09-25 在 `tigrou/balls2k.pss` 上撞出来的）。改成在 `omni_jit_symbol()` 里
+     现取：那一趟就跑在建表这条线程上，取到的正是它自己那一份 —— 与上面那段注写的
+     意思一样，而且比"建表时取一次"更准。 */
 
   /* ---- libc：IR 里**直接** declare 的那两个 ---- */
   { "fflush", (void *)fflush },
@@ -152,6 +178,11 @@ const omni_jit_sym OMNI_JIT_SYMS[] = {
 
 void *omni_jit_symbol(const char *name) {
   if (name == NULL) return NULL;
+#ifndef OMNI_NO_TLS
+  /* 线程局部那两格：现取地址（理由见表里那段注）。 */
+  if (strcmp(name, "omni_arena_ptr") == 0) return (void *)&omni_arena_ptr;
+  if (strcmp(name, "omni_arena_end") == 0) return (void *)&omni_arena_end;
+#endif
   for (int i = 0; OMNI_JIT_SYMS[i].name != NULL; i++) {
     if (strcmp(OMNI_JIT_SYMS[i].name, name) == 0) return OMNI_JIT_SYMS[i].addr;
   }

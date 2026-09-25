@@ -1387,7 +1387,28 @@ class LlvmEmitter {
         throw new OmniError(`${NOPE} op '${entry.name}'（函数 ${f.name}）`);
       }
       const refs = f.argsOf(f.b[i]);
+      /* **`gfxcall` 是"个数 + 补零"那一档**（不是变参）：方言那一格实参个数随脚本变，
+         而运行时的真符号是平的 —— 名字 + 个数 + 十二格 double。补零这件事在 backend-c
+         里是 `case 'gfx_call'` 做的（HIR 那一层），这条腿从 MIR 出发，所以得自己补。
+         漏了这一格的后果不是发错码，是**整条 jit 腿跑不起来**：
+         `llvm: gfx_call.string 要 14 个实参，实得 1`（`tigrou/balls2k.pss` 上量到的）。 */
+      if (entry.name === 'gfx_call.string') {
+        const vs = refs.slice(1).map((r) => `double ${this.val(r)}`);
+        const n = vs.length;
+        while (vs.length < 12) vs.push('double 0.0');
+        const as = [`${d.params[0]} ${this.val(refs[0])}`, `i64 ${n}`, ...vs];
+        this.line(`  ${dst} = call ${d.ret} @${d.sym}(${as.join(', ')})`);
+        return;
+      }
       if (refs.length !== d.params.length) {
+        /* `(gfxframefn …)`：**这条腿上记下不用**（与 interp 那条腿同一条口径 ——
+           原生这一侧自己有帧循环，要"页面驱动"的只有浏览器那一档）。方言那一格把函数名
+           放在 `func` 上、`args` 是空的，所以到这儿就是"0 个实参"；递一格空指针过去，
+           运行时那一侧收下不看。不接这一格的话整条 jit 腿在任何用了 GL 的脚本上都起不来。 */
+        if (entry.name === 'gfx_frame_fn.int' && refs.length === 0) {
+          this.line(`  ${dst} = call ${d.ret} @${d.sym}(ptr null)`);
+          return;
+        }
         throw new OmniError(`llvm: ${entry.name} 要 ${d.params.length} 个实参，实得 ${refs.length}`);
       }
       const args = refs.map((r, k) => `${d.params[k]} ${this.val(r)}`);

@@ -32,6 +32,8 @@
 #include <llvm-c/LLJIT.h>
 #include <llvm-c/Orc.h>
 #include <llvm-c/Target.h>
+#include <llvm-c/TargetMachine.h>
+#include <llvm-c/Transforms/PassBuilder.h>
 
 #include "omni_jit_symbols.h"
 
@@ -426,6 +428,60 @@ int main(int argc, char **argv) {
     }
   }
   LLVMModuleRef mod = mods[0];
+
+  /* **中端优化管线**（2026-09-25）。LLJIT 只做 codegen —— 它**不跑一个 IR 通道**，
+     于是这条腿等于 `clang -O0` 的中端配上后端的寄存器分配。量出来的差就是这一格：
+     `tigrou/balls2k.pss` 上 jit 5.5ms/帧、同一份 IR 走 clang -O2 是 0.3~0.4ms/帧。
+     而这条腿是**主要基准**（要与原版的 x87 JIT 平齐，clang 是上限），所以默认就跑
+     `default<O2>` —— 与 clang -O2 同一条管线，两边的差从此只剩"我们发的 IR 长什么样"。
+
+     `OMNI_JIT_OPT=0` 关掉（查"是不是优化改坏了答案"用），`=1/=2/=3` 选档。
+     **档位要进对象码缓存的名字**：那份缓存的键是 IR 的内容，不含这一格 ——
+     不带上它的话 `OMNI_JIT_OPT=0` 会安静地端上一份 O2 编好的对象码（同一类"会跑错
+     程序的缓存"，见 cli.js 里 runtimeObjectsSelf 那段注）。 */
+  int optlvl = 2;
+  {
+    const char *ov = getenv("OMNI_JIT_OPT");
+    if (ov != NULL && ov[0] != '\0') optlvl = atoi(ov);
+    if (optlvl < 0) optlvl = 0;
+    if (optlvl > 3) optlvl = 3;
+  }
+  if (omni_objcache[0] != '\0') {
+    size_t n = strlen(omni_objcache);
+    if (n + 4 < sizeof omni_objcache) snprintf(omni_objcache + n, 4, ".O%d", optlvl);
+  }
+  if (optlvl > 0) {
+    char pipe[32];
+    snprintf(pipe, sizeof pipe, "default<O%d>", optlvl);
+    /* TargetMachine 递进去是为了让通道看得见这台机器的 CPU 与特性（向量化那一族
+       靠它）。拿不到就递 NULL —— 管线照跑，只是少了目标信息，不该因此不优化。 */
+    LLVMTargetMachineRef tm = NULL;
+    char *triple = LLVMGetDefaultTargetTriple();
+    char *terr = NULL;
+    LLVMTargetRef tgt = NULL;
+    if (triple != NULL && LLVMGetTargetFromTriple(triple, &tgt, &terr) == 0 && tgt != NULL) {
+      char *cpu = LLVMGetHostCPUName();
+      char *feat = LLVMGetHostCPUFeatures();
+      tm = LLVMCreateTargetMachine(tgt, triple, cpu == NULL ? "" : cpu,
+                                   feat == NULL ? "" : feat,
+                                   LLVMCodeGenLevelAggressive, LLVMRelocDefault,
+                                   LLVMCodeModelJITDefault);
+      if (cpu != NULL) LLVMDisposeMessage(cpu);
+      if (feat != NULL) LLVMDisposeMessage(feat);
+    }
+    if (terr != NULL) LLVMDisposeMessage(terr);
+    LLVMPassBuilderOptionsRef pbo = LLVMCreatePassBuilderOptions();
+    for (int mi = 0; mi < nmods; mi++) {
+      LLVMErrorRef perr = LLVMRunPasses(mods[mi], pipe, tm, pbo);
+      if (perr != NULL) return omni_jit_fail(perr, "cannot run the opt pipeline");
+    }
+    LLVMDisposePassBuilderOptions(pbo);
+    if (tm != NULL) LLVMDisposeTargetMachine(tm);
+    if (triple != NULL) LLVMDisposeMessage(triple);
+    if (getenv("OMNI_JIT_TRACE") != NULL) {
+      fprintf(stderr, "omni-jit: opt %s on %d module(s)\n", pipe, nmods);
+    }
+  }
 
   LLVMOrcJITDylibRef jd = LLVMOrcLLJITGetMainJITDylib(jit);
   /* 进程符号搜索**故意不装**（从前那句 LLVMOrcCreateDynamicLibrarySearchGeneratorForProcess

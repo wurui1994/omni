@@ -2475,5 +2475,78 @@ node tests/eval/perf.js --only balls2k`）—— 对 §30.3 那个同口径参�
 顺带一条判据口径：**时间片不够要印 `--`、不算红**。"它慢"与"它坏"分不开的时候，
 一条 200ms/帧 的路会被报成"跑不起来"（踩过一次）。
 
+## 32. **主要基准是 LLVM JIT**（要与原版的 x87 JIT 平齐；clang 是上限）
+
+用户 2026-09-25 定的口径。理由与 §15 那一节的第 3 条是同一件事：这门语言是**改一个字
+就要看见画面**的，出成品那条 cc 路的整趟时间不重要 —— 所以真正要做好的是 jit 那一档。
+对照的两端：**下界**是原版 polydraw 的 x87 JIT（`balls2k` 同口径 0.636ms/帧，§30.3），
+**上界**是同一份程序走 clang -O2（0.3~0.4ms/帧，§31.3）。
+
+### 32.1 它从前**一个 GL 脚本都跑不起来**（四格，全是缺口不是慢）
+
+`node tests/eval/perf.js --only balls2k` 里那句 `FAIL [jit] 跑不起来` 背后是四个独立的洞，
+一个接一个挡着（每修一个才看得见下一个）：
+
+1. `llvm: gfx_call.string 要 14 个实参，实得 1` —— `(gfxcall 名字 实参…)` 是**"个数 + 补零"**
+   那一档（不是变参）：运行时的真符号是平的（名字 + 个数 + 十二格 double）。
+   backend-c 在 HIR 那一层补零（`case 'gfx_call'`），而这条腿从 MIR 出发，得自己补。
+2. `llvm: gfx_frame_fn.int 要 1 个实参，实得 0` —— `(gfxframefn …)` 把函数名放在 `func` 上、
+   `args` 是空的。这条腿上**记下不用**（与 interp 同口径：原生这侧自己有帧循环），
+   递一格空指针过去。
+3. `the jit host failed to build with clang: initializer element is not a compile-time constant`
+   —— `omni_jit_symbols.c` 里 `{ "omni_arena_ptr", &omni_arena_ptr }`：那是**线程局部**量的
+   地址，不是编译期常量。挪进 `omni_jit_symbol()` 里现取（那一趟就跑在建表这条线程上，
+   比"建表时取一次"更准）。注意这一格卡住的不是某个脚本，是**整条腿**。
+4. `omni-jit: unresolved: omni_r_cos`（一份脚本就缺 6 个）—— 宿主符号表里只有"代数"那几格，
+   超越函数一族与 `omni_gfx_arr` 都不在。照 omni.h 抄全（别只补眼下报缺的那几个）。
+
+修完：`balls2k` jit 跑起来了，**出的 PNG 与 c 腿逐字节相同**。
+
+### 32.2 第一刀：LLJIT **不跑任何中端通道**（5.5 -> 3.9ms/帧）
+
+`LLVMOrcCreateLLJIT` 只做 codegen —— 它一个 IR 通道都不跑，于是这条腿等于
+"clang -O0 的中端 + 后端的寄存器分配"。既然它是主要基准，就在 `omni_jit.c` 里把
+`LLVMRunPasses(mod, "default<O2>", tm, opts)` 摆在 `AddLLVMIRModule` 之前（与 clang -O2
+**同一条管线**），`OMNI_JIT_OPT=0..3` 选档、缺省 2。
+
+坑一格：**档位要进对象码缓存的名字**（`omni_objcache` 后面接 `.O<档>`）。那份缓存的键是
+IR 的内容、不含档位 —— 不带上它的话 `OMNI_JIT_OPT=0` 会安静地端上一份 O2 编好的对象码
+（与 cli.js 里 `runtimeObjectsSelf` 那一格同一类"会跑错程序的缓存"）。
+
+判据那一行（`--only balls2k`，clang -O2 那一趟）：
+
+```
+  启动(ms)  每帧avg(ms)  每帧max(ms)   fps  参考(ms)   比参考   模式
+      1818          4.0          4.3   250       5.2    0.78x   jit
+       432          6.0          8.0   167       5.2    1.16x   js
+       652        176.0        189.0     6       5.2   34.11x   interp
+       909          0.4          0.5  2500       5.2    0.08x   c
+```
+
+两件事看得见：
+* 每帧 4.0ms 已经在 60fps 线里头，对 framebench 那一栏是 0.78x；但对 §30.3 那个
+  **真 x87 JIT 的 0.636ms 还差 6.3 倍** —— 那才是要平齐的线；
+* **启动 1818ms 红了**（线是 1000ms）：中端管线 + JIT 编译的钱花在这儿。对象码缓存
+  （`--objcache`）救得了复跑，救不了"改完一个字"那一趟 —— 这一格是下一轮要单独算的账
+  （候选：只给热函数上 O2、或者 O1 起步再按需升档）。
+
+### 32.3 剩下那 10 倍在哪：**IR 里 1366 处不可内联的运行时调用**
+
+同一份 `balls2k` 的 jit IR（8614 行）里：
+
+* `omni_arr_f64_get` **484** 处、`omni_arr_f64_set` **330** 处
+* `omni_trunc` **552** 处（下标取整）
+* `omni_r_pow` 9 处、`omni_gfx_call` 19 处
+
+这三族在 **C 那条腿上是宏**（`omni.h` 的 `OMNI__AGET` / `OMNI__ASET` / `omni_trunc`），
+clang 直接内联成"一次无符号比较 + 一条 load"；而这条腿发的是 `call @omni_arr_f64_get`，
+函数体不在模块里 ⇒ **`default<O2>` 也内联不了**，LICM/GVN 更看不穿它。
+1366 次不可内联的调用就是 3.9ms 与 0.35ms 之间那一个数量级。
+
+下一刀（未做）：在发射的模块里给这三族各补一份 `internal alwaysinline` 的 IR 函数体，
+形状照 `omni.h` 那三个宏逐句来（null 判 + 一次 `icmp uge` + `getelementptr`/`load`），
+让 O2 自己把它们吃掉。**这比在后端手写基本块更稳**：控制流交给内联器，
+而"与 C 腿逐句相同"这件事看得见（两边都能指到 omni.h 的那三行）。
+
 
 
