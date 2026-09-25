@@ -1390,6 +1390,32 @@ const isApplyCall = (node, name) => isList(node) && tag(node) === 'call'
   && tag(kids(node)[0]) === 'sym' && nameOf(kids(node)[0]) === name;
 
 /**
+ * 不认识的那个名字，**指一条路**。
+ *
+ * 分三档说：包那一层（`library`）、表格与属性那一层（`data.frame` / `names`）、
+ * 剩下的（base 里我们还没接的那些）。CRAN 的包那一档是 libR（ADR-0046，SPEC 第五节）——
+ * 编译器这一档永远接不住 ggplot2 那 13.5 万行 R，说清楚比让人猜快。
+ */
+const PKG_FNS = new Set(['library', 'require', 'requireNamespace', 'attachNamespace', 'loadNamespace']);
+const TBL_FNS = new Set([
+  'data.frame', 'matrix', 'names', 'setNames', 'colnames', 'rownames', 'attr', 'attributes',
+  'nrow', 'ncol', 'dim', 'cbind', 'rbind', 'apply', 'aggregate', 'merge', 'table', 'factor',
+]);
+function gapHint(fn) {
+  if (PKG_FNS.has(fn)) {
+    return '包那一层（`library()` / 命名空间）在编译器这一档没有。CRAN 的包（ggplot2 / Rcpp…）'
+      + '走的是 **libR 那一档**：`node ext/r/build-libR.js` + `node ext/r/install-cran.js`，'
+      + '再用 `.omni-cache/r-rt/libR/home/bin/exec/R -f 那份脚本`（见 ext/r/SPEC.md 第五节）';
+  }
+  if (TBL_FNS.has(fn)) {
+    return '表格与属性那一层（`data.frame` / `names` / `dim` / `class`）还没有'
+      + '（见 ext/r/SPEC.md 第四节第 4 条）—— 向量、字符向量与 `list()` 当表用那三格有';
+  }
+  return '编译器这一档只认 `BUILTINS` 那张表里的内建（见 ext/r/SPEC.md 第三节）'
+    + '与这份源码里自己定义的函数。如果它是某个包里的，那一档是 libR（SPEC 第五节）';
+}
+
+/**
  * `sapply` / `lapply` / `Reduce` / `Filter` —— **把那段匿名函数摊开**，不造函数值。
  *
  * R 里这几格收的是一个函数。这一档没有闭包与函数值那一层（方言有 `fnref` / `call-value`，
@@ -2696,8 +2722,12 @@ function callOf(x, types, extra, want) {
   const ptys = fnParams.get(mangle(fn));
   const pnames = fnFormals.get(mangle(fn));
   if (pnames === undefined) {
-    /* 表外的名字（不是这份源码里定的函数）：照原样发，让链接期去说 */
-    return { kind: 'call', fn: { kind: 'name', name: mangle(fn) }, args: all.map((a, i) => ev(i)) };
+    /* **不认识的名字当场报，而且报 R 的那个名字。**
+       从前这儿是"照原样发，让链接期去说" —— 于是 `data.frame(…)` 报的是
+       `未声明的函数 'data_frame'`（mangle 之后的名字，源码里根本没有这个词），
+       `library(ggplot2)` 报的是 `未声明的函数 'library'` 加一句"`ggplot2` 没声明"。
+       两条都让人以为是链接出了问题，而实情是**这一格还没接**。 */
+    throw new Error(`r->IR: R 的 \`${fn}()\` 还没接 —— ${gapHint(fn)}`);
   }
   const bound = bindArgs(fn, pnames, fnDefs.get(mangle(fn)) ?? [], x, extra !== undefined);
   return {
