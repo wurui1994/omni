@@ -2315,3 +2315,62 @@ prelude 里"手展开"那句说的是函数**体内**少跳一层，不是调用
 
 
 
+
+## 30. 第三根尺子：**原版 polydraw**（MSVC x86 + x87 JIT）
+
+先前实时那一栏的"参考"来自 `c_impl` 的 `framebench`。**那个参考本身是被改慢过的实现** ——
+`c_impl` 没有原版的 x87 JIT，而工作树里的 `polydraw_src/eval.c` 也**不是原版**
+（8254 行、`__asm` 计数 0；原版 6122 行、3 处 `__asm`，`kasm87` 把脚本编成 x87 机器码）。
+为了在 clang 下编过，那一份把 JIT 换成了约 2100 行 C 解释器。所以这一节建的是真原版。
+
+### 30.1 怎么建的（可复现）
+
+* **源码**：`cd ~/Documents/polydraw && git show 559ed7a:polydraw_src.zip`（`add origin source code`
+  那个提交里的 zip 才是原始版本，不要用工作树里的 `polydraw_src/`）；
+* **编译**：`ssh wurui@computer.local`（Windows 11 + VS 18 Community），
+  `vcvars32.bat` → `cl /O2 polydraw.c eval.c kplib.c /link /FORCE:MULTIPLE opengl32 glu32 …`。
+  **必须 x86**：`kplib.c` 有 9 处 32 位内联汇编。`/FORCE:MULTIPLE` 是因为 `mysrand` 在
+  `polydraw.c:1736` 与 `eval.c:7785` 各定义一次（原版就这样，语义相同）——**不改源码**；
+* **`/bench:N` 那五处补丁**（注释用英文与原文一致）：全局三个量 / 命令行认 `/bench:` /
+  `if (!ActiveApp) Sleep(100)` 那道门在基准档不挡（ssh 会话拿不到焦点）/ 交帧后计帧
+  （第 1 帧 `wglSwapIntervalEXT(0)` 关垂直同步、**前 30 帧预热**、满 N 帧写
+  `polydraw_bench.txt` 再退）/ **跳过那句礼让 `Sleep(1)`**（见下）。
+
+### 30.2 两个口径陷阱（都咬过一次）
+
+1. **`Sleep(1)` 是 15.6ms**。原版主循环里"脚本没有 `@f` 片元段就 `Sleep(1)`"
+   （`if ((!shadn[2]) || (!gevalfunc))`）在默认定时器粒度下实际睡 15.6ms，把**所有无着色器
+   的脚本钉死在 ~63.4fps**。第一趟量出来十几份整整齐齐 15.75~15.79ms，全是这个，不是渲染成本。
+   跳过那一句之后：`examples/opengl/28_peaks` 15.795 -> **0.107ms/帧**。
+2. **带空格的文件名被 `Start-Process -ArgumentList` 拆成两个实参**，静默跳过 —— 17 份
+   （`snake tube` / `disco ball` / `town textured` 全在里头，正好是我们最在意的那几份）。
+   要包一层引号。
+
+### 30.3 同口径（都 320×240）那四份 HEAVY
+
+* `tigrou/balls2k`：原版 **0.636ms** / 我们 c 腿 10.8ms（**17.0x**）/ js 腿 7.3ms
+* `ken/drawsph`：原版 **0.823ms** / c 2.0ms（2.4x）/ js 8.7ms
+* `tigrou/snake tube`：原版 **1.331ms** / c 5.4ms（4.1x）/ js 11.5ms
+* `tigrou/disco ball`：原版 **5.656ms** / c 36.7ms（6.5x）/ js 56ms
+
+**分辨率对原版几乎没影响**（`balls2k` 0.627→0.636、`disco ball` 6.52→5.66、`tree` 与
+`curvybuild` 纹丝不动）⇒ **原版的瓶颈也在语言/CPU 那一侧，不在填充率**。所以我们那几倍
+差距同样不能靠少画像素解决，只能从语言侧与批数上砍。
+
+### 30.4 整份语料的形状（103 份，表在 `tests/eval/pdref-fps.tsv`）
+
+最快一档 **0.089ms/帧**（`examples/opengl/04_rect`、`06_five_circles`）；
+原版自己**低于 60fps 的只有两份**：`tigrou/tree` 10.288ms、`ken/curvybuild` 32.353ms ——
+这两份不该进"实时"那一栏的判据，应当单列（`curvybuild` 正是我们裁过"参考错"的那一份，
+原版自己也只有 30fps，说明它本身就重）。
+
+同一场景走不走脚本着色器差 **37 倍**：`disco ball shader` 0.177ms、
+`disco blur shader +blur` 0.432ms，而固定管线那份 `disco ball` 6.517ms（640×480）——
+**原版也是靠"把活儿丢给 GPU"取胜的**，与 §29.7 那一刀（把批并起来、少发 draw call）同一个方向。
+
+### 30.5 因此要改的两件事
+
+1. `tests/eval/perf.js` 那一栏的参考数（10.7 / 4.7 / 13.7 / 38.8ms）**系统性偏慢 2~16 倍**，
+   换成 30.3 这一份。换完那三行会从"比参考快"变成"比参考慢 2.4~17 倍" —— 账更难看，但是真的；
+2. 下一刀的靶子从 `disco ball` 换成 **`balls2k`（17x）**：它走脚本自己的 `drawsph` + 着色器、
+   每球一个四边形，是"语言那一半"最纯的对照（`disco ball` 还混着 4000 段批的 draw call）。

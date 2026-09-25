@@ -1,0 +1,106 @@
+# 原版 polydraw（MSVC x86 + x87 JIT）每帧毫秒 —— 640x480，垂直同步关，30 帧预热，300 帧计时
+# 建法与口径见 docs/design/eval-realtime-gpu.md 第 30 节；源码取自 polydraw 仓库 559ed7a:polydraw_src.zip
+# 脚本	fps	ms/帧
+examples\opengl\04_rect.pss	11253.53	0.089
+examples\opengl\06_five_circles.pss	11294.20	0.089
+examples\02_primitives_noshader.pss	11012.41	0.091
+examples\opengl\03_point.pss	11032.98	0.091
+examples\01_minimal_noshader.pss	10868.66	0.092
+examples\opengl\01_hello_rect.pss	10813.97	0.092
+examples\opengl\28_peaks.pss	10787.53	0.093
+examples\05_explicit_main_and_funcs.pss	10583.47	0.094
+examples\opengl\27_bmp_load_UNSUPPORTED.pss	10569.78	0.095
+examples\opengl\02_house.pss	10271.90	0.097
+examples\opengl\14_wire_sphere.pss	10312.65	0.097
+examples\opengl\23_gl2ps_UNSUPPORTED.pss	10027.44	0.100
+examples\opengl\18_curve.pss	9759.68	0.102
+examples\opengl\20_axis_grid.pss	9131.14	0.110
+examples\opengl\19_curve2.pss	8909.88	0.112
+examples\opengl\11_transform_cube.pss	8825.42	0.113
+examples\opengl\05_rotate_points.pss	8758.77	0.114
+examples\opengl\13_saddle.pss	8772.44	0.114
+examples\opengl\21_curve_grid.pss	8795.00	0.114
+examples\opengl\26_texture_procedural.pss	8801.99	0.114
+examples\opengl\09_element.pss	8666.39	0.115
+examples\opengl\16_planeclip_UNSUPPORTED.pss	8724.46	0.115
+examples\opengl\25_offscreen_capture.pss	8733.29	0.115
+ken\showmouse.pss	8713.61	0.115
+examples\opengl\07_auto_rotate_cube.pss	8587.97	0.116
+examples\opengl\15_paraboloid_UNSUPPORTED.pss	8602.79	0.116
+examples\opengl\08_getinfo_UNSUPPORTED.pss	8534.32	0.117
+examples\04_required_shader.pss	8496.73	0.118
+examples\opengl\17_surface_glu_UNSUPPORTED.pss	8489.52	0.118
+examples\opengl\10_ortho_poly_UNSUPPORTED.pss	8418.00	0.119
+examples\opengl\22_text_UNSUPPORTED.pss	8417.44	0.119
+ken\mipmap.pss	8387.34	0.119
+ken\interference_asm.pss	8304.43	0.120
+ken\interference.pss	8079.11	0.124
+examples\03_custom_shader.pss	7999.72	0.125
+examples\opengl\12_mesh_surface.pss	7966.54	0.126
+ken\poster.pss	7892.64	0.127
+ken\orthoglobe.pss	7792.11	0.128
+	7599.15	0.132
+	7599.61	0.132
+	7455.56	0.134
+	7238.53	0.138
+ken\multiarb_asm.pss	7264.36	0.138
+	7200.67	0.139
+	7210.95	0.139
+examples\opengl\24_shader_hello.pss	7124.84	0.140
+	7113.76	0.141
+	7029.40	0.142
+	7045.94	0.142
+ken\cubetex.pss	7050.58	0.142
+	6997.23	0.143
+ken\ceilflor2.pss	6984.38	0.143
+	6936.95	0.144
+	6938.69	0.144
+	6892.91	0.145
+	6916.31	0.145
+	6920.30	0.145
+ken\geo_test.pss	6903.77	0.145
+	6770.59	0.148
+ken\geo_duptris.pss	6714.86	0.149
+	6615.61	0.151
+ken\driftbox.pss	6318.54	0.158
+ken\texture3d.pss	5999.30	0.167
+ken\gspiral.pss	5849.55	0.171
+tigrou\fractal rainbow.pss	5848.35	0.171
+tigrou\disco ball shader.pss	5640.89	0.177
+ken\texture.pss	5348.75	0.187
+tigrou\clock.pss	4512.15	0.222
+tigrou\fractal.pss	3890.40	0.257
+tigrou\twister.pss	3750.44	0.267
+tigrou\town no texture.pss	3562.84	0.281
+ken\heightmap.pss	3538.15	0.283
+tigrou\sphere ellipsis.pss	3408.55	0.293
+tigrou\dominos.pss	3323.19	0.301
+tigrou\ballsk.pss	3267.07	0.306
+tigrou\you massive clod.pss	2951.05	0.339
+tigrou\cubes.pss	2493.83	0.401
+tigrou\funky.pss	2416.89	0.414
+tigrou\disco blur shader +blur.pss	2313.24	0.432
+tigrou\cubes reflection.pss	1858.00	0.538
+ken\drawcone2_asm.pss	1757.19	0.569
+tigrou\balls2k.pss	1594.56	0.627
+tigrou\gears.pss	1486.69	0.673
+tigrou\particules morphing.pss	1461.81	0.684
+ken\creepers_asm.pss	1408.16	0.710
+tigrou\menger sponge.pss	1378.10	0.726
+tigrou\menger tower.pss	1314.01	0.761
+tigrou\particules sparks.pss	1264.65	0.791
+tigrou\snake stars.pss	1228.26	0.814
+tigrou\town textured.pss	1160.47	0.862
+ken\drawsph.pss	999.78	1.000
+tigrou\ribbons invasion.pss	829.22	1.206
+ken\drawcone2.pss	786.25	1.272
+tigrou\snake tube.pss	713.67	1.401
+tigrou\metaballs.pss	622.33	1.607
+ken\gpgpu.pss	495.26	2.019
+tigrou\sphere.pss	457.22	2.187
+ken\balls.pss	448.69	2.229
+ken\drawsph_asm.pss	388.50	2.574
+tigrou\metaballs cube.pss	341.92	2.925
+tigrou\disco ball.pss	153.45	6.517
+tigrou\tree.pss	97.51	10.255
+ken\curvybuild.pss	30.79	32.483
