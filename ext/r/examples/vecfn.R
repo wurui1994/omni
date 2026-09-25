@@ -91,3 +91,21 @@ cat(length(seq_len(0)), "\n")
 # 零长那一格（R 印类型名）
 print(diff(c(1)))
 print(head(xs, 0))
+
+# **任意多格实参**：`max` / `min` / `sum` / `prod` / `range` 把那几格先摊平成一条向量
+# （与 `c(…)` 同一段代码），再走单实参那一格 —— 于是缺失那条规矩只有一份实现。
+# R 的口径是"有 `NA` 就是 `NA`、只有 `NaN` 才是 `NaN`"（`max(NaN, NA)` 也是 `NA`）。
+cat(max(1, 5, 3), min(2, 1, 7), "\n")
+cat(max(c(1, 2), 5), min(c(4, 9), 2), "\n")
+cat(sum(1, 2, 3), sum(c(1, 2), c(3, 4), 10), "\n")
+cat(prod(2, 3, 4), "\n")
+print(range(1, 5, 3))
+cat(max(1, NA), max(1, NA, na.rm = TRUE), "\n")
+cat(max(1, NaN), max(NA, NaN), max(NaN, NA), "\n")
+# 一格标量也收（R 的 `sum(5)` 就是 5）
+cat(sum(5), max(5), mean(5), "\n")
+# `mean(1, 2)` 在 R 里答的是 1（第二格是 trim=）—— 这一层不假装，当场报
+
+# `sort(x, decreasing = TRUE)` —— 升着排完倒过来（相等的那几格分不出来，所以与 R 一样）
+print(sort(xs, decreasing = TRUE))
+print(sort(c(2, NA, 1), decreasing = TRUE))

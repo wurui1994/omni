@@ -171,8 +171,9 @@ const FN_DEPS = new Map([
   ['r_cat_lgl', ['r_is_na']],
   ['r_sum', []],
   ['r_mean', ['r_sum']],
-  ['r_max', []],
-  ['r_min', []],
+  /* `max` / `min` 要把 `NA` 与 `NaN` 分开记（R 的口径见那两段账），所以要问那三格。 */
+  ['r_max', ['r_is_na', 'r_is_nan', 'r_na']],
+  ['r_min', ['r_is_na', 'r_is_nan', 'r_na']],
   ['r_vec_pick', []],
   ['r_vec_mask', ['r_is_na', 'r_na']],
   ['r_rev', []],
@@ -482,6 +483,49 @@ function vecNewAs(nm, n) {
     { kind: 'assign', target: { kind: 'deref', expr: v }, value: asReal(n, INT) },
   ];
 }
+
+/**
+ * **把几段摊平成一条数值向量**（`c(…)` 就是它，`sum` / `max` 那几格"任意多实参"也是它）。
+ *
+ * `parts` 的每一格要么是 `{vec:false, value}`（一格标量表达式），要么是
+ * `{vec:true, name}`（**已经存进临时量**的一条向量 —— 那几条 `let` 由调用方摆在 `pre` 里，
+ * 因为长度与取值各要读一遍，不能把那格表达式求两次）。
+ *
+ * 方言里"造"与"填"是两件事（`pnew` 是值、`pstore` 是语句），所以回的是一格 `block-expr`。
+ */
+function numCatOf(pre, parts) {
+  const vr = (nm) => ({ kind: 'name', name: nm });
+  /* 总长度：标量那几格是常数，先加起来（`.sx` 里就少一串 `(bin "+" … (int 1))`）。 */
+  const flat = parts.filter((p) => !p.vec).length;
+  const len = parts.filter((p) => p.vec)
+    .reduce((acc, p) => b('+', acc, vecLen(vr(p.name))), { kind: 'int', value: flat });
+  const tmp = fresh('vec');
+  const stmts = [...pre, ...vecNewAs(tmp, len)];
+  const out = vr(tmp);
+  if (parts.every((p) => !p.vec)) {
+    /* 全是标量：下标是字面量，不必要那格写指针。 */
+    parts.forEach((p, i) => stmts.push(vecSet(out, { kind: 'int', value: i }, p.value)));
+    return { kind: 'block-expr', stmts, value: out };
+  }
+  const k = fresh('ck');
+  stmts.push({ kind: 'let', name: k, type: INT, init: { kind: 'int', value: 0 } });
+  const bump = { kind: 'assign', target: vr(k), value: b('+', vr(k), { kind: 'int', value: 1 }) };
+  for (const p of parts) {
+    if (!p.vec) {
+      stmts.push(vecSet(out, vr(k), p.value), bump);
+      continue;
+    }
+    const j = fresh('cj');
+    stmts.push({
+      kind: 'for',
+      init: { kind: 'let', name: j, type: INT, init: { kind: 'int', value: 0 } },
+      cond: b('<', vr(j), vecLen(vr(p.name))),
+      post: { kind: 'assign', target: vr(j), value: b('+', vr(j), { kind: 'int', value: 1 }) },
+      body: [vecSet(out, vr(k), vecGet(vr(p.name), vr(j))), bump],
+    });
+  }
+  return { kind: 'block-expr', stmts, value: out };
+}
 const NA_FNS = new Map([
   ['r_na', 'omni_r_na_into'],
   ['r_is_na', 'omni_r_is_na_p'],
@@ -627,6 +671,7 @@ const NAMED_OK = new Map([
   ['head', new Set(['n'])], ['tail', new Set(['n'])],
   ['rep', new Set(['times'])],
   ['seq', new Set(['by'])],
+  ['sort', new Set(['decreasing'])],
   ['strsplit', new Set(['fixed'])],
   ['grepl', new Set(['fixed'])], ['sub', new Set(['fixed'])], ['gsub', new Set(['fixed'])],
   ['grep', new Set(['fixed', 'value'])],
@@ -2866,7 +2911,6 @@ function callOf(x, types, extra, want) {
         }
         /* **一律 double** —— R 的 `c(10, 20, 30)` 是 double 向量（要 integer 得写 `10L`）。
            这一格原来按实参推 int/real，于是 `c(1, 2) + 0.5` 会在元素类型上打架。 */
-        const vr = (nm) => ({ kind: 'name', name: nm });
         const pre = [];
         const parts = all.map((a, i) => {
           const t = a === null ? REAL : typeOfExpr(a, types);
@@ -2875,36 +2919,7 @@ function callOf(x, types, extra, want) {
           pre.push({ kind: 'let', name: nm, type: RVEC, init: ev(i) });
           return { vec: true, name: nm };
         });
-        /* 总长度：标量那几格是常数，先加起来（`.sx` 里就少一串 `(bin "+" … (int 1))`）。 */
-        const flat = parts.filter((p) => !p.vec).length;
-        const len = parts.filter((p) => p.vec)
-          .reduce((acc, p) => b('+', acc, vecLen(vr(p.name))), { kind: 'int', value: flat });
-        const tmp = fresh('vec');
-        const stmts = [...pre, ...vecNewAs(tmp, len)];
-        const out = vr(tmp);
-        if (parts.every((p) => !p.vec)) {
-          /* 全是标量：下标是字面量，不必要那格写指针。 */
-          parts.forEach((p, i) => stmts.push(vecSet(out, { kind: 'int', value: i }, p.value)));
-          return { kind: 'block-expr', stmts, value: out };
-        }
-        const k = fresh('ck');
-        stmts.push({ kind: 'let', name: k, type: INT, init: { kind: 'int', value: 0 } });
-        const bump = { kind: 'assign', target: vr(k), value: b('+', vr(k), { kind: 'int', value: 1 }) };
-        for (const p of parts) {
-          if (!p.vec) {
-            stmts.push(vecSet(out, vr(k), p.value), bump);
-            continue;
-          }
-          const j = fresh('cj');
-          stmts.push({
-            kind: 'for',
-            init: { kind: 'let', name: j, type: INT, init: { kind: 'int', value: 0 } },
-            cond: b('<', vr(j), vecLen(vr(p.name))),
-            post: { kind: 'assign', target: vr(j), value: b('+', vr(j), { kind: 'int', value: 1 }) },
-            body: [vecSet(out, vr(k), vecGet(vr(p.name), vr(j))), bump],
-          });
-        }
-        return { kind: 'block-expr', stmts, value: out };
+        return numCatOf(pre, parts);
       }
       case 'list': {
         /* 空表的**值类型**这一层答不出来（R 里它就是空的），所以听上游那格 `want`——
@@ -2986,14 +3001,43 @@ function callOf(x, types, extra, want) {
       }
       case 'sort': case 'cumsum': case 'prod': case 'range': case 'diff':
       case 'var': case 'sd': {
-        if (n !== 1) {
-          throw new Error(`r->IR: ${fn}() 这一批只接一格向量实参（给了 ${n}）——`
-            + ' `decreasing=` / `na.rm=` 那几个命名实参没接');
+        /* `prod` 与 `range` 在 R 里也收**任意多格**（先摊平成一条向量，见 `numCatOf`）；
+           别的几格只有一格向量。 */
+        const many = fn === 'prod' || fn === 'range';
+        if (n !== 1 && !many) {
+          throw new Error(`r->IR: ${fn}() 只接一格向量实参（给了 ${n}）`);
         }
-        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
-        if (isStrVec(t)) throw new Error(strvGap(fn));
-        if (!isVecTy(t)) throw new Error(`r->IR: ${fn}() 的实参不是向量（是 ${t.kind}）`);
-        return lglCall(`r_${fn}`, dropNa(ev(0)));
+        if (n === 0) throw new Error(`r->IR: ${fn}() 一格实参都没给`);
+        const tyOf = (k) => {
+          const t = all[k] === null ? REAL : typeOfExpr(all[k], types);
+          if (isStrVec(t) || t.kind === 'string') throw new Error(strvGap(fn));
+          if (t.kind === 'map') throw new Error(`r->IR: ${fn}() 的实参是一张 list`);
+          return t;
+        };
+        let src;
+        if (n === 1) {
+          const t = tyOf(0);
+          /* `prod(5)` / `range(5)` 那种一格标量：摊成长度 1 的向量（R 也是这么答的）。 */
+          if (!isVecTy(t)) {
+            if (!many) throw new Error(`r->IR: ${fn}() 的实参不是向量（是 ${t.kind}）`);
+            src = numCatOf([], [{ vec: false, value: asReal(ev(0), t) }]);
+          } else src = ev(0);
+        } else {
+          const pre = [];
+          const parts = all.map((a, k) => {
+            const t = tyOf(k);
+            if (!isVecTy(t)) return { vec: false, value: asReal(ev(k), t) };
+            const nm = fresh('ai');
+            pre.push({ kind: 'let', name: nm, type: RVEC, init: ev(k) });
+            return { vec: true, name: nm };
+          });
+          src = numCatOf(pre, parts);
+        }
+        const got = lglCall(`r_${fn}`, dropNa(src));
+        /* `sort(x, decreasing = TRUE)` —— 升着排完倒过来。相等的那几格分不出来
+           （double 上全排序的结果是唯一的），所以与 R 逐字节一致。 */
+        if (fn === 'sort' && trueFlag(x, 'decreasing')) return lglCall('r_rev', got);
+        return got;
       }
       case 'head': case 'tail': {
         /* 第二格是"取几格"，缺省 6（R 的文档）；也认 `n=`。 */
@@ -3082,17 +3126,46 @@ function callOf(x, types, extra, want) {
         return lglCall(fn === 'any' ? 'r_any' : 'r_all', dropNa(ev(0)));
       }
       case 'sum': case 'mean': case 'max': case 'min': {
-        /* 向量那一档走生成出来的函数；标量那一档（`max(a, b)`）归 `pmax`/`pmin` 那张表。 */
-        if (n !== 1) {
-          throw new Error(`r->IR: ${fn}() 这一批只接一格向量实参（给了 ${n}）——`
-            + ' 两格数取大小写 `pmax` / `pmin`（R 的 `max(a, b)` 要"任意多格实参"那一层）');
+        /**
+         * **任意多格实参**（`max(1, 5, 3)` / `sum(xs, 10)`）—— 办法是先把那几格**摊平成
+         * 一条向量**（`numCatOf`，与 `c(…)` 同一段代码），再走单实参那一格生成出来的函数。
+         *
+         * 为什么不是两两折（`max(a, b)` 那种）：缺失那一层会分叉。R 的口径是"有 `NA` 就
+         * 是 `NA`、只有 `NaN` 才是 `NaN`"（`max(NaN, NA)` 也是 `NA`，量出来的），
+         * 两两折要把这条规矩再写一遍；摊平之后 `r_max` 里那一份就是唯一的一份。
+         *
+         * **`mean` 不在这一档**：R 的 `mean(1, 2)` 答的是 `1`（第二格是 `trim=`），
+         * 所以它多给一格就当场报，不假装。
+         */
+        if (n === 0) throw new Error(`r->IR: ${fn}() 一格实参都没给`);
+        if (fn === 'mean' && n !== 1) {
+          throw new Error('r->IR: mean() 只接一格实参 —— R 的 `mean(1, 2)` 答的是 `1`'
+            + '（第二格是 `trim=`），这一层不假装接住');
         }
-        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
-        if (!isVecTy(t)) throw new Error(`r->IR: ${fn}() 的实参不是向量（是 ${t.kind}）`);
         const name = useFn({
           sum: 'r_sum', mean: 'r_mean', max: 'r_max', min: 'r_min',
         }[fn]);
-        return { kind: 'call', fn: { kind: 'name', name }, args: [dropNa(ev(0))] };
+        const one = (k) => {
+          const t = all[k] === null ? REAL : typeOfExpr(all[k], types);
+          if (isStrVec(t) || t.kind === 'string') throw new Error(strvGap(fn));
+          if (t.kind === 'map') throw new Error(`r->IR: ${fn}() 的实参是一张 list`);
+          return t;
+        };
+        if (n === 1) {
+          const t = one(0);
+          /* 一格标量（`sum(5)` / `max(x[1])`）在 R 里就是它自己（`mean` 也一样）。 */
+          if (!isVecTy(t)) return asReal(ev(0), t);
+          return { kind: 'call', fn: { kind: 'name', name }, args: [dropNa(ev(0))] };
+        }
+        const pre = [];
+        const parts = all.map((a, k) => {
+          const t = one(k);
+          if (!isVecTy(t)) return { vec: false, value: asReal(ev(k), t) };
+          const nm = fresh('ai');
+          pre.push({ kind: 'let', name: nm, type: RVEC, init: ev(k) });
+          return { vec: true, name: nm };
+        });
+        return { kind: 'call', fn: { kind: 'name', name }, args: [dropNa(numCatOf(pre, parts))] };
       }
       case 'which.max': case 'which.min': case 'unique': case 'duplicated':
       case 'order': case 'cumprod': {
@@ -5553,19 +5626,33 @@ function vecFnDecl(name) {
   }
   if (name === 'r_max' || name === 'r_min') {
     const op = name === 'r_max' ? '>' : '<';
+    cabiUsed.add('omni_r_nan');
+    rmathSig('omni_r_nan');
+    const nanQ = { kind: 'call', fn: { kind: 'name', name: useFn('r_is_nan') }, args: [elem] };
+    const T = { kind: 'bool', value: true };
     return {
       kind: 'fn', name, params: P, ret: REAL,
       /* 空向量在 R 里回 `-Inf` / `Inf` 并且**发一句警告**；这一版没有警告那条通道，
          所以空向量这一格当场报（在 `r_sum` 之外唯一与 R 不同的地方，明写在 SPEC）。
          **缺失要传下去**：R 的 `max(c(1, NA))` 是 `NA`，而按 `>` 比是躲不过去的
-         （`NaN > x` 恒假，于是 NA 会被"跳过"、答成 1）—— 所以每格先问一句。 */
+         （`NaN > x` 恒假，于是 NA 会被"跳过"、答成 1）—— 所以每格先问一句。
+         **`NA` 与 `NaN` 要分开记**：R 的口径是"有 `NA` 就是 `NA`、只有 `NaN` 才是 `NaN`"
+         （`max(c(1, NaN))` 是 `NaN`、`max(c(NaN, NA))` 是 `NA` —— 量出来的，与次序无关）。
+         从前这儿见着缺失就当场回 `NA`，于是 `max(1, NaN)` 答 `NA` 而 R 答 `NaN`。 */
       body: [
         declLen(),
         { kind: 'let', name: 's', type: REAL, init: vecGet(v, { kind: 'int', value: 0 }) },
+        { kind: 'let', name: 'sna', type: BOOL, init: { kind: 'bool', value: false } },
+        { kind: 'let', name: 'snan', type: BOOL, init: { kind: 'bool', value: false } },
         loop([{
           kind: 'if',
           cond: naQ(elem),
-          then: [{ kind: 'return', values: [{ kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] }] }],
+          then: [{
+            kind: 'if',
+            cond: nanQ,
+            then: [{ kind: 'assign', target: { kind: 'name', name: 'snan' }, value: T }],
+            else_: [{ kind: 'assign', target: { kind: 'name', name: 'sna' }, value: T }],
+          }],
           else_: [{
             kind: 'if',
             cond: b(op, elem, acc),
@@ -5573,6 +5660,18 @@ function vecFnDecl(name) {
             else_: null,
           }],
         }], 0),
+        {
+          kind: 'if',
+          cond: { kind: 'name', name: 'sna' },
+          then: [{ kind: 'return', values: [{ kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] }] }],
+          else_: null,
+        },
+        {
+          kind: 'if',
+          cond: { kind: 'name', name: 'snan' },
+          then: [{ kind: 'return', values: [{ kind: 'ccall', sym: 'omni_r_nan', args: [] }] }],
+          else_: null,
+        },
         { kind: 'return', values: [acc] },
       ],
     };

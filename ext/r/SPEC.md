@@ -202,9 +202,19 @@ R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不�
 `sort` 把 `NA` **丢掉**（`na.last = NA` 是默认）、`max` / `min` / `range` **传下去**
 （`max(c(1, NA))` 是 `NA` —— 按 `>` 比是躲不过去的：`NaN > x` 恒假会把 NA 悄悄跳过，
 所以那一格每元素先问一句 `is.na`）、`cumsum` / `prod` / `var` / `sd` 按浮点自然传播。
+`max` / `min` 里 **`NA` 与 `NaN` 还要分开记**：R 的口径是"有 `NA` 就是 `NA`、只有 `NaN`
+才是 `NaN`"，而且**与次序无关**（`max(c(1, NaN))` 是 `NaN`、`max(c(NaN, NA))` 是 `NA`
+—— 量出来的）。从前这儿见着缺失就当场回 `NA`，于是 `max(1, NaN)` 答 `NA` 而 R 答 `NaN`。
 
 `na.rm = TRUE` 那一格**先滤再算**（`r_drop_na` 抄出一条没有缺失的）：这与"每个函数里各自
 跳过"同解，而且 `mean` 的分母跟着变小、一处写法九个函数都对。只认字面量 `TRUE` / `FALSE`。
+
+**`max` / `min` / `sum` / `prod` / `range` 收任意多格实参**（`max(1, 5, 3)` /
+`sum(xs, 10)`）：办法是先把那几格**摊平成一条向量**（`numCatOf`，与 `c(…)` 同一段代码），
+再走单实参那一格 —— 于是上面那几条缺失的规矩只有一份实现，不必在"两两折"里再写一遍。
+**`mean` 不在这一档**：R 的 `mean(1, 2)` 答的是 `1`（第二格是 `trim=`），所以它多给一格
+就当场报，不假装。`sort(x, decreasing = TRUE)` 是"升着排完倒过来"（相等的那几格在 double
+上分不出来，所以与 R 逐字节一致）。
 
 ### 字符向量：**另一种存法**（`(arr string)`）
 
@@ -537,8 +547,9 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
    **命名实参过一张白名单**（`adapter.js` 的 `NAMED_OK`）：认得的是 `cat` 的 `sep=`、
    `paste` 的 `sep=` / `collapse=`、聚合那一族的 `na.rm=`（`sum` / `prod` / `mean` /
    `max` / `min` / `range` / `var` / `sd` / `any` / `all`）、`head`/`tail` 的 `n=`、
-   `rep` 的 `times=`、`seq` 的 `by=`、`numeric(n)` 那一族的 `length=`。
-   **表外的一律当场报** —— `decreasing=` / `each=` / `length.out=` / `na.last=` /
+   `rep` 的 `times=`、`seq` 的 `by=`、`numeric(n)` 那一族的 `length=`、`sort` 的
+   `decreasing=`、找与换那一族的 `fixed=` / `value=`。
+   **表外的一律当场报** —— `each=` / `length.out=` / `na.last=` / `ignore.case=` /
    `digits=` / `quote=` 都在表外。这张表是为了躲一种静默答错：从前认不出来的命名实参
    被**直接丢掉**，于是 `sum(x, na.rm = TRUE)` 答 `NA` 而 R 答 4（量出来的）。
    `na.rm = TRUE` 的落法是**先滤一遍再算**（`r_drop_na`），与"每个函数里各自跳过"同解；
