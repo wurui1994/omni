@@ -838,7 +838,16 @@ class JsEmitter {
       // 多维数组那一刀之后 `Array.isArray` 分不开向量与行（见 prelude 的 $acopy）。
       case 'ArrNew': return `$anew(${this.expr(e.count)}, ${this.expr(e.zero)}, ${jsElemCopy(e.type)})`;
       case 'ArrLen': return `$alen(${this.expr(e.arr)})`;
-      case 'ArrGet': return `$aget(${this.expr(e.arr)}, ${this.expr(e.index)})`;
+      case 'ArrGet': {
+        const arr = this.expr(e.arr);
+        const d = this.aDepth ?? 0;
+        if (!JS_SIMPLE.test(arr) || d >= 8) return `$aget(${arr}, ${this.expr(e.index)})`;
+        this.aDepth = d + 1;
+        const idx = this.expr(e.index);
+        this.aDepth = d;
+        return `($I${d} = ${idx}, ${arr} === null ? $rt_error("null reference")`
+          + ` : ${arr}[$I${d}] ?? $agetslow(${arr}, $I${d}))`;
+      }
       case 'ArrSet': return `$aset(${this.expr(e.arr)}, ${this.expr(e.index)}, ${this.expr(e.value)}, ${jsElemCopy(e.arr.type)})`;
       case 'ArrPush': return `$apush(${this.expr(e.arr)}, ${this.expr(e.value)}, ${jsElemCopy(e.arr.type)})`;
 
