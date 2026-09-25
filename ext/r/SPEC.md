@@ -103,9 +103,16 @@ r-source/src/nmath/*.c  ──ext/r/build.js（我们那份纯 JS 的 ninja）�
 `dnorm`/`pnorm`/`qnorm` 与 `dbinom`/`pbinom`/`dpois`/`ppois`/`dgamma`/`pgamma`/`dbeta`/
 `pbeta`/`dt`/`pt`/`dchisq`/`pchisq`、`besselI`/`besselJ`/`besselK`/`besselY`。
 
-libm 那一族（`sqrt` `exp` `log` `log2` `log10` `floor` `ceiling` 与三角/双曲）落方言的
+libm 那一族（`sqrt` `exp` `log` `log10` `floor` `ceiling` 与三角/双曲）落方言的
 `rmath` —— R 自己这几个也是直接调 libm，不在 nmath 里。`log(x, base)` 那种两格的**当场报**：
 那一档要我们替它算（`log(x)/log(b)`），而"替它算"与"照它算"是两件事。
+
+**`log2` 接不住**（量出来 2026-09-26）：方言的 `rmath` 名单（`src/core/sexpr/lower.js` 的
+`RMATH`，"C99 math.h ∩ ECMA-262 Math"）里没有 `log2` —— C 与 JS 其实都有这个函数，是那张表
+漏了；补它要动五条腿，是另一刀。从前这儿照旧发 `(rmath "log2" …)`，于是 `print(log2(8))`
+一路走到 `.sx` 才撞上 `(rmath) 不认识 'log2'`：那是**方言**的话（对着写 R 的人没用），
+而且那时已经过了换档那道门，libR 接不上，用户一个答案都拿不到。现在在 adapter 里就报，
+于是退到 libR，答案是对的。
 
 `NaN` / `Inf` / `-Inf` 三格真值由**我们自己那份** `rt/omni_rna.c` 给（R 那边它们在解释器里）；
 `is.finite` 用 R 自己的 `R_finite`。印法照 R 的三处特例（`NaN` / `Inf` / `-Inf`），
@@ -455,8 +462,12 @@ R 那儿挑出的是 `NA_character_`，这一档没有那种值，与 `v[掩码]
 （`sum` / `mean` / `max` / `min` / `length` / `var` / `sd`）**自己就丢名字**
 （`duplicated` 这一格 2026-09-25 那次记错了 —— 补量出来它是丢名字的那一批，
 `duplicated(c(x=1,y=1,z=2))` 印的是 `[1] FALSE  TRUE FALSE`）。
-后一批照常算（`NAME_DROP_OK` 那张表），前一批里 `is.na` / `is.nan` / `is.finite` /
-`is.infinite` 四格**名字跟着走**（`NAME_KEEP`），别的**报** —— 静默丢掉的话 `print` 会少印
+后一批照常算（`NAME_DROP_OK` 那张表），前一批里**逐元素、位置不动**的那些名字跟着走
+（`NAME_KEEP`，2026-09-26）：`is.na` / `is.nan` / `is.finite` / `is.infinite`（出逻辑向量）
+与数学那一族 `abs` / `sqrt` / `exp` / `log` / `log10` / `floor` / `ceiling` / `trunc` /
+`round` / `signif` / `sin` / `cos` / `tan` / `cumsum` / `cumprod` / `zapsmall`（出数值向量）。
+`sort` / `rev` / `head` / `tail` / `diff` 在 R 里也带名字，可它们**动位置或动长度** ——
+名字那一条要跟着重排，还没接，照旧**报** —— 静默丢掉的话 `print` 会少印
 名字那一行，而例子的判据是逐字节对 `Rscript`，那种错最难查。真要丢就自己写 `unname(v)`。
 
 **带名字的逻辑向量**（`print(v > 1)` / `c(a = TRUE, b = FALSE)` / `setNames(c(TRUE, NA), ns)` /

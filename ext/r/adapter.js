@@ -585,12 +585,23 @@ const NAME_DROP_OK = new Set([
 ]);
 /**
  * **名字跟得住的那几格** —— R 把名字带过去，这一档也带（见 `namesExprOf` 里同一批名字）。
- * 都是"逐元素问一句"那种：长度不变、位置不动，所以名字那一条原样跟着。
+ * 都是"逐元素、位置不动"那种：长度不变、第 i 格还在第 i 格，所以名字那一条原样跟着。
+ *
+ * 分两拨只为算类型时好分：前一拨出**逻辑**向量（`RNLGL`），后一拨出**数值**向量（`RNVEC`）。
+ * `sort` / `rev` / `head` / `tail` / `diff` 在 R 里也带名字，可它们**动位置或动长度** ——
+ * 名字那一条要跟着重排，不在这一刀里，照旧当场报。
  *
  * `duplicated` **不**在这儿 —— 量出来（`Rscript`，2026-09-26）R 自己就把名字丢了
  * （`duplicated(c(x=1,y=1,z=2))` 印的是 `[1] FALSE  TRUE FALSE`），它归 `NAME_DROP_OK`。
  */
-const NAME_KEEP = new Set(['is.na', 'is.nan', 'is.finite', 'is.infinite']);
+const NAME_KEEP_LGL = new Set(['is.na', 'is.nan', 'is.finite', 'is.infinite']);
+/** 逐元素的数学那一族（量出来 R 全带名字）—— 累加那几格位置也不动，所以也在这儿。 */
+const NAME_KEEP_NUM = new Set([
+  'abs', 'sqrt', 'exp', 'log', 'log2', 'log10', 'floor', 'ceiling', 'trunc',
+  'round', 'signif', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
+  'sinh', 'cosh', 'tanh', 'cumsum', 'cumprod', 'cummax', 'cummin', 'zapsmall',
+]);
+const NAME_KEEP = new Set([...NAME_KEEP_LGL, ...NAME_KEEP_NUM]);
 /** 第 i 格（0 起）。方言的 `{kind:'index'}` 落成 `(aget …)`，赋值那侧落 `(aset …)`。 */
 const svGet = (v, i) => ({ kind: 'index', obj: v, index: i });
 const svLen = (v) => call1('alen', v);
@@ -1226,6 +1237,10 @@ function applyTy(fn, x, types) {
 /** 一次调用的结果类型。内建各自说，用户函数按"这门语言的数"算（见文件头第 4 条）。 */function typeOfCall(x, types) {
   const fn = tag(kids(x)[0]) === 'sym' ? nameOf(kids(x)[0]) : null;
   const args = argsOf(x).map((a) => a.value).filter((v) => v !== null);
+  /* 逐元素、位置不动的数学那一族（`NAME_KEEP_NUM`）：带名字的向量进来，名字跟着出去。
+     摆在 `RMATH` 那一问之前 —— 不然 `sqrt(v)` 会落回没名字的 `RVEC`。 */
+  if (fn !== null && NAME_KEEP_NUM.has(fn) && args.length > 0
+      && isNamedTy(typeOfExpr(args[0], types))) return RNVEC;
   /* R 自己的 C 那一族回的都是 `double` —— 这是 nmath 的形状，不是我们的选择。
      第一格实参是向量时逐元素，于是回的是一格向量（`sqrt(xs)` / `round(xs, 1)`）。 */
   if (fn !== null && RMATH.has(fn)) {
@@ -3639,6 +3654,23 @@ function callOf(x, types, extra, want) {
       case 'floor': case 'ceiling':
       case 'sin': case 'cos': case 'tan': case 'asin': case 'acos': case 'atan':
       case 'sinh': case 'cosh': case 'tanh': {
+        /**
+         * **`log2` 这一格接不住**（量出来 2026-09-26）：方言的 `rmath` 那张名单
+         * （`src/core/sexpr/lower.js` 的 `RMATH`，"C99 math.h ∩ ECMA-262 Math"）里
+         * 没有 `log2` —— 两边其实都有这个函数，是那张表漏了。
+         *
+         * 从前这儿照旧发 `(rmath "log2" …)`，于是 `print(log2(8))` 一路走到 `.sx` 才撞上
+         * `(rmath) 不认识 'log2'` —— 那是**方言**的话，对着写 R 的人毫无用处，而且那时
+         * 已经过了换档那道门，libR 那一档接不上，用户一个答案都拿不到。
+         *
+         * 所以在这儿就报：换档那道门看见 `r->IR:` 会退到 libR，答案**是对的**。
+         * 真接它要改方言那张表（五条腿都得动），那是另一刀。
+         */
+        if (fn === 'log2') {
+          throw new Error('r->IR: log2() 还没接 —— 方言的 `rmath` 名单里没有 log2'
+            + '（C99 与 Math.* 都有，是那张表漏了，接它要动五条腿）。'
+            + '这一层里写 `log(x) / log(2)` 能算，只是末位可能与 R 的 log2 差一个 ulp');
+        }
         if (n !== 1) {
           throw new Error(`r->IR: ${fn}() 这一批只接一格实参（给了 ${n}）——`
             + ' 两格那一档（`log(x, base)`）要我们替它算，而"替它算"与"照它算"是两件事');

@@ -75,3 +75,20 @@ print(setNames(c(TRUE, NA, FALSE), c("p", "qq", "r")))
 print(setNames(c(TRUE, NA), c("yes", "dunno")))
 # 零长那一档印的是 `named logical(0)`
 print(setNames(c(TRUE)[c(FALSE)], character(0)))
+
+# 逐元素、**位置不动**的那几格名字也跟着（2026-09-26 接了 —— 量出来 R 全带名字）：
+# 数学那一族与累加那一族。动位置或动长度的（`sort` / `rev` / `head` / `diff`）还是当场报。
+m <- c(a = 1, bb = 4, ccc = 9.25)
+print(sqrt(m))
+print(abs(-m))
+print(round(m, 1))
+print(floor(m))
+print(exp(c(p = 0, q = 1)))
+print(log(c(p = 1, q = 100)))
+print(log10(c(p = 1, q = 100)))
+print(cumsum(m))
+print(cumprod(c(a = 2, b = 3)))
+print(signif(m, 2))
+# 套起来也跟得住（名字跟着**变量**走，中间那一格是个表达式）
+print(round(sqrt(m), 3))
+print(sqrt(m) * 2)
