@@ -228,3 +228,19 @@ cat(sprintf("%.17g", sd(bb)), "\n")
 cat(sprintf("%.17g", cov(bb, c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7))), "\n")
 cat(sprintf("%.17g", cor(bb, c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7))), "\n")
 cat(sprintf("%.17g", mean(bb)), "\n")
+
+# `quantile(x, probs, names = FALSE)` —— R 的默认 **type 7**（与 `median` 同一条）。
+# 只接 `names = FALSE`：R 默认回的是带名字的向量（`0% 25% …`），而这一档名字跟着变量走。
+# 抄 `quantile.default` 时两处不改写：`(1-h)*a + h*b`（不是 `a + h*(b-a)`）与
+# `x[hi] != qs` 那道闸门 —— 印到 17 位才看得出差别
+q1 <- c(3, 1, 4, 1, 5, 9, 2, 6)
+print(quantile(c(1, 2, 3, 4), names = FALSE))
+print(quantile(c(1, 2, 3, 4), 0.5, names = FALSE))
+print(quantile(c(1, 2, 3, 4), c(0.1, 0.9), names = FALSE))
+print(quantile(q1, c(0, 0.25, 0.5, 0.75, 1), names = FALSE))
+print(quantile(c(5), 0.5, names = FALSE))
+print(quantile(c(1, 2), 0.5, names = FALSE))
+print(quantile(c(2, 1, 3), c(0.33, 0.66), names = FALSE))
+print(quantile(q1, 0.5, names = FALSE))
+print(median(q1))
+cat(sprintf("%.17g", quantile(c(1 / 3, 2 / 7, 3 / 11), 0.42, names = FALSE)), "\n")

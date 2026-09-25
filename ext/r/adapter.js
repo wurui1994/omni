@@ -230,6 +230,10 @@ const FN_DEPS = new Map([
   ['r_median', ['r_sort', 'r_any_na', 'r_na']],
   /* `cov` / `cor`：两条一样长的向量。`cor` 的分母照 R 的 `cov.c`——**两个 sqrt 分开乘**
      （不是 `sqrt(varx*vary)`），最后一位就靠这个对上。 */
+  /* `quantile` 的 type 7（照 `quantile.default` 抄）+ 不给 `probs` 时那五格。 */
+  ['r_qdef', []],
+  ['r_no_na', ['r_any_na']],
+  ['r_quantile', ['r_sort']],
   ['r_cov', ['r_mean']],
   ['r_cor', ['r_cov', 'r_var', 'r_mean']],
   ['r_rep_s', []],
@@ -782,6 +786,7 @@ const NAMED_OK = new Map([
   ['sum', NA_RM], ['prod', NA_RM], ['mean', NA_RM], ['max', NA_RM], ['min', NA_RM],
   ['range', NA_RM], ['var', NA_RM], ['sd', NA_RM], ['any', NA_RM], ['all', NA_RM],
   ['median', NA_RM],
+  ['quantile', new Set(['probs', 'names', 'na.rm', 'type'])],
   ['diff', new Set(['lag'])],
   ['casefold', new Set(['upper'])],
   ['format', new Set(['nsmall', 'width'])],
@@ -828,7 +833,7 @@ const BUILTINS = new Set([
   /* base 里"向量进向量出"那一族 + 两格统计量。`seq` 与 `rep` 是造向量的。 */
   'sort', 'cumsum', 'prod', 'range', 'diff', 'head', 'tail', 'var', 'sd', 'rep', 'seq', 'rep_len',
   /* 两条向量的那两格统计量（`var(x, y)` 与 `cov(x, y)` 是同一件事）。 */
-  'cor', 'cov',
+  'cor', 'cov', 'quantile',
   /* 数格子、问缺失、插一段、换几格 —— 后两格与 `x[k] <- v` 同一套口径（见 `r_replace`）。 */
   'tabulate', 'anyNA', 'append', 'replace',
   /* 集合与位置那一族（见 `setFnDecl`）。`%in%` 是个算子，不在这张表里。 */
@@ -1319,6 +1324,8 @@ function applyTy(fn, x, types) {
     case 'median': return REAL;
     /* `cor` / `cov` 回一格数（两条向量进）。 */
     case 'cor': case 'cov': return REAL;
+    /* `quantile` 回一条数值向量（`names = FALSE` 那一档 —— 见 `callOf`）。 */
+    case 'quantile': return RVEC;
     /* `rank` 并列取平均 —— 出来的可能带小数（`rank(c(2,2,1))` 是 `2.5 2.5 1.0`），
        所以一律数值向量，不跟着进去那条是不是整数走。 */
     case 'rank': return RVEC;
@@ -3682,6 +3689,50 @@ function callOf(x, types, extra, want) {
             : lglCall('r_in1', asReal(ev(0), ts[0]), asVec(1));
         }
         return lglCall(fn === 'setequal' ? 'r_setequal' : 'r_find_int', asVec(0), asVec(1));
+      }
+      case 'quantile': {
+        /**
+         * `quantile(x, probs, names = FALSE)` —— **只接 `names = FALSE`**：R 默认回的是
+         * 一条**带名字**的向量（`0% 25% 50% 75% 100%`），而这一档的名字是**跟着变量**走的
+         * （见第二节"带名字的向量"），一格表达式交不出"值 + 名字"两样东西。
+         * `names = FALSE` 那一档 R 回的就是裸向量，我们答得准。
+         *
+         * `type=` 只认 7（R 的默认）。缺失那一格：R 在 `na.rm = FALSE` 时**报错**
+         * （不是悄悄丢掉），而我们的 `r_sort` 会丢 —— 所以没写 `na.rm = TRUE` 时
+         * 先过一道 `r_any_na` 的运行期闸门。
+         */
+        if (n < 1) throw new Error('r->IR: quantile() 一格实参都没给');
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        if (isStrVec(t) || t.kind === 'string') throw new Error(strvGap('quantile'));
+        if (!isVecTy(t)) throw new Error(`r->IR: quantile() 的第一格实参不是向量（是 ${t.kind}）`);
+        const nmArg = namedArg(x, 'names');
+        if (nmArg === undefined || trueFlag(x, 'names')) {
+          throw new Error('r->IR: quantile() 要明写 `names = FALSE` —— R 默认回的是一条**带名字**'
+            + '的向量（`0% 25% …`），而这一档的名字跟着变量走（见 ext/r/SPEC.md 第二节），'
+            + '一格表达式交不出"值 + 名字"两样东西');
+        }
+        const tyArg2 = namedArg(x, 'type');
+        if (tyArg2 !== undefined) {
+          const tl = tag(tyArg2) === 'num' ? String(leaf(kids(tyArg2)[0])) : null;
+          if (tl !== '7' && tl !== '7L') {
+            throw new Error('r->IR: quantile() 只接 `type = 7`（R 的默认那一种），别的九种没接');
+          }
+        }
+        const pn = namedArg(x, 'probs');
+        let probs = null;
+        if (pn !== undefined) {
+          const pt = typeOfExpr(pn, types);
+          probs = isVecTy(pt) ? exprOf(pn, types) : lglCall('r_vec1', asReal(exprOf(pn, types), pt));
+        } else if (n >= 2) {
+          const pt = typeOfExpr(all[1], types);
+          probs = isVecTy(pt) ? ev(1) : lglCall('r_vec1', asReal(ev(1), pt));
+        } else probs = lglCall('r_qdef');
+        /* `na.rm = TRUE` 先滤（`dropNa`）；没写就拦一道 —— R 那边是报错。 */
+        const src = dropNa(ev(0));
+        if (!naRmOn()) {
+          return lglCall('r_quantile', lglCall('r_no_na', src), probs);
+        }
+        return lglCall('r_quantile', src, probs);
       }
       case 'cor': case 'cov': {
         /** `cor(x, y)` / `cov(x, y)` —— 两条一样长的数值向量（`var(x, y)` 也走这儿）。 */
@@ -8480,6 +8531,138 @@ function vecFnDecl(name) {
           cond: b('<', i, kk),
           post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
           body: [vecSet(out, i, vecGet(v, b('+', i, off)))],
+        },
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_no_na') {
+    /**
+     * "这条向量里不许有缺失" —— 有就当场报，没有原样回。
+     *
+     * 给 `quantile` 用：R 在 `na.rm = FALSE`（默认）时碰上 `NA` 是**报错**
+     * （"missing values and NaN's not allowed if 'na.rm' is FALSE"），而我们的 `r_sort`
+     * 会把缺失悄悄丢掉 —— 那就成了"少几格数据算出来的分位数"，是静默答错。
+     */
+    return {
+      kind: 'fn', name, params: P, ret: RVEC,
+      body: [
+        {
+          kind: 'if',
+          cond: { kind: 'call', fn: { kind: 'name', name: useFn('r_any_na') }, args: [v] },
+          then: [{
+            kind: 'builtin-stmt',
+            name: 'fail',
+            args: [{
+              kind: 'string',
+              value: "quantile(): 这条向量里有 NA，而 na.rm = FALSE —— R 那边也报"
+                + "（missing values and NaN's not allowed if 'na.rm' is FALSE）",
+            }],
+          }],
+          else_: null,
+        },
+        { kind: 'return', values: [v] },
+      ],
+    };
+  }
+  if (name === 'r_qdef') {
+    /** `quantile` 不给 `probs` 时的那五格（R 的默认 `seq(0, 1, 0.25)`）。 */
+    const out = { kind: 'name', name: 'o' };
+    return {
+      kind: 'fn', name, params: [], ret: RVEC,
+      body: [
+        ...vecNewAs('o', { kind: 'int', value: 5 }),
+        ...[0, 0.25, 0.5, 0.75, 1].map((q, k) => vecSet(out, { kind: 'int', value: k }, { kind: 'real', value: q })),
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_quantile') {
+    /**
+     * `quantile(x, probs)` —— R 的**默认 type 7**（`?quantile` 的第七种，也是 `median`
+     * 那一条）。照 `quantile.default` 抄：
+     *
+     * ```r
+     * index <- 1 + (n - 1) * probs
+     * lo <- floor(index); hi <- ceiling(index)
+     * qs <- x[lo]
+     * i <- which(index > lo & x[hi] != qs)
+     * h <- (index - lo)[i]
+     * qs[i] <- (1 - h) * qs[i] + h * x[hi][i]
+     * ```
+     *
+     * 两处照抄不改写：**`(1-h)*a + h*b`**（不是 `a + h*(b-a)` —— 那两种写法在最后一位
+     * 上会分家）与 **`x[hi] != qs` 那道闸门**（相等时一个字都不动，于是 `h` 是 0 那几格
+     * 不会去乘 0）。
+     *
+     * `probs` 出了 `[0, 1]` 当场报（R 那边也报）。缺失那一格在调用点上拦（R 的
+     * `na.rm = FALSE` 是报错，不是悄悄丢掉 —— 而我们的 `r_sort` 会丢）。
+     */
+    const w = { kind: 'name', name: 'w' };
+    const sv = { kind: 'name', name: 'q' };
+    const out = { kind: 'name', name: 'o' };
+    const j = { kind: 'name', name: 'j' };
+    const idx = { kind: 'name', name: 'ix' };
+    const lo = { kind: 'name', name: 'lo' };
+    const hi = { kind: 'name', name: 'hi' };
+    const a1 = { kind: 'name', name: 'a1' };
+    const b1 = { kind: 'name', name: 'b1' };
+    const hh = { kind: 'name', name: 'h' };
+    const rm = (f, e) => call1('rmath', { kind: 'strlit', value: f }, e);
+    const at1 = (e) => vecGet(sv, b('-', call1('toint', e), { kind: 'int', value: 1 }));
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RVEC }, { name: 'w', type: RVEC }],
+      ret: RVEC,
+      body: [
+        {
+          kind: 'let',
+          name: 'q',
+          type: RVEC,
+          init: { kind: 'call', fn: { kind: 'name', name: useFn('r_sort') }, args: [v] },
+        },
+        { kind: 'let', name: 'n', type: INT, init: vecLen(sv) },
+        { kind: 'let', name: 'm', type: INT, init: vecLen(w) },
+        ...vecNewAs('o', { kind: 'name', name: 'm' }),
+        {
+          kind: 'for',
+          init: { kind: 'let', name: 'j', type: INT, init: { kind: 'int', value: 0 } },
+          cond: b('<', j, { kind: 'name', name: 'm' }),
+          post: { kind: 'assign', target: j, value: b('+', j, { kind: 'int', value: 1 }) },
+          body: [
+            {
+              kind: 'if',
+              cond: b('||', b('<', vecGet(w, j), { kind: 'real', value: 0 }),
+                b('>', vecGet(w, j), { kind: 'real', value: 1 })),
+              then: [{
+                kind: 'builtin-stmt',
+                name: 'fail',
+                args: [{ kind: 'string', value: "quantile(): probs 出了 [0, 1]（R 那边也报 'probs' outside [0,1]）" }],
+              }],
+              else_: null,
+            },
+            {
+              kind: 'let',
+              name: 'ix',
+              type: REAL,
+              init: b('+', { kind: 'real', value: 1 },
+                b('*', call1('toreal', b('-', { kind: 'name', name: 'n' }, { kind: 'int', value: 1 })), vecGet(w, j))),
+            },
+            { kind: 'let', name: 'lo', type: REAL, init: rm('floor', idx) },
+            { kind: 'let', name: 'hi', type: REAL, init: rm('ceil', idx) },
+            { kind: 'let', name: 'a1', type: REAL, init: at1(lo) },
+            { kind: 'let', name: 'b1', type: REAL, init: at1(hi) },
+            {
+              kind: 'if',
+              cond: b('&&', b('>', idx, lo), b('!=', b1, a1)),
+              then: [
+                { kind: 'let', name: 'h', type: REAL, init: b('-', idx, lo) },
+                vecSet(out, j, b('+', b('*', b('-', { kind: 'real', value: 1 }, hh), a1), b('*', hh, b1))),
+              ],
+              else_: [vecSet(out, j, a1)],
+            },
+          ],
         },
         { kind: 'return', values: [out] },
       ],
