@@ -371,8 +371,12 @@ static double g_gmx = 320.0, g_gmy = 240.0, g_gkeys[256];
 static int64_t g_gbst = 0;
 static int g_ginput = 0;
 
-/* 把 OMNI_MOUSE / OMNI_KEYS 读一次（strtod 认十进制、strtol 带 0 认 0x 前缀）。 */
+/* 把 OMNI_MOUSE / OMNI_KEYS 读一次（strtod 认十进制、strtol 带 0 认 0x 前缀）。
+   **窗口那一档**（`--mode view`）例外：来源是窗口，所以每次都重新问一遍 ——
+   那一格在下面 `gfx_input_win`，由 `gfx_input` 先试。 */
+static int gfx_input_win(void);
 static void gfx_input(void) {
+  if (gfx_input_win()) return;
   if (g_ginput) return;
   g_ginput = 1;
   for (int i = 0; i < 256; i++) g_gkeys[i] = 0.0;
@@ -490,6 +494,12 @@ typedef int (*gfx_gl_texfile_fn)(int, const char *, int);
 /* `gluniform*v`（句柄, 分量数, 整数吗, 个数, 数组）与 `glgettex`（槽, 宽, 高, 上限, 出）。 */
 typedef int (*gfx_gl_univ_fn)(double, int, int, long, const double *);
 typedef int (*gfx_gl_gettex_fn)(int, int, int, long, double *);
+/* **窗口那一档**（`--mode view`，任务 #24）：开窗口 / 交一帧 / 读输入 / 写标题。
+   老库上 dlsym 不到就当这一族没有 —— 那就还是离屏（与"挂不上就回落"同一手）。 */
+typedef int (*gfx_gl_win_fn)(int, int, const char *);
+typedef int (*gfx_gl_winpresent_fn)(const unsigned char *);
+typedef int (*gfx_gl_wininput_fn)(double *, double *, long *, unsigned char *);
+typedef void (*gfx_gl_wintitle_fn)(const char *);
 
 static struct {
   int tried, on;
@@ -511,7 +521,29 @@ static struct {
   gfx_gl_texfile_fn texfile;
   gfx_gl_univ_fn univ;
   gfx_gl_gettex_fn gettex;
+  gfx_gl_win_fn win;
+  gfx_gl_winpresent_fn winpresent;
+  gfx_gl_wininput_fn wininput;
+  gfx_gl_wintitle_fn wintitle;
 } g_gl;
+
+/* 窗口那一档活着没有（0 = 离屏那一半）。关掉之后置 0 —— `nextframe` 看它收摊。
+   `g_glwin_was` 记"开过窗口" —— 两格分开是因为"从来没开出来（回落离屏）"与
+   "开过、现在关了"要走的路不一样：前者照旧按帧数跑完，后者立刻收摊。 */
+static int g_glwin = 0, g_glwin_was = 0;
+
+/* 窗口那一档的输入：**每次都重新问**（鼠标在动、键在按）。回 1 = 这一档管了。
+   `mousx/mousy` 按画布坐标（设备那侧按窗口/帧缓冲比例折算过），`keystatus[]` 按
+   DOS 扫描码 —— 与 `OMNI_MOUSE`/`OMNI_KEYS` 那一档同一套口径，所以脚本一个字不用改。 */
+static int gfx_input_win(void) {
+  if (!g_glwin || g_gl.wininput == NULL) return 0;
+  unsigned char ks[256];
+  long b = 0;
+  if (g_gl.wininput(&g_gmx, &g_gmy, &b, ks) != 0) return 0;
+  g_gbst = (int64_t)b;
+  for (int i = 0; i < 256; i++) g_gkeys[i] = ks[i] ? 1.0 : 0.0;
+  return 1;
+}
 
 /* `(gfxdef …)` 登记进来的那几份串（着色器原文与名字表）。它们**在设备开起来之前**就来了
    （产物开头那一摊登记语句），所以先存下来，GL 那一档挂上之后再一趟补给插件。 */
@@ -589,8 +621,27 @@ static int gfx_gl_need(void) {
     g_gl.texfile = (gfx_gl_texfile_fn)dlsym(h, "omni_ev_gl_texfile");
     g_gl.univ = (gfx_gl_univ_fn)dlsym(h, "omni_ev_gl_univ");
     g_gl.gettex = (gfx_gl_gettex_fn)dlsym(h, "omni_ev_gl_gettex");
+    g_gl.win = (gfx_gl_win_fn)dlsym(h, "omni_ev_gl_win");
+    g_gl.winpresent = (gfx_gl_winpresent_fn)dlsym(h, "omni_ev_gl_win_present");
+    g_gl.wininput = (gfx_gl_wininput_fn)dlsym(h, "omni_ev_gl_win_input");
+    g_gl.wintitle = (gfx_gl_wintitle_fn)dlsym(h, "omni_ev_gl_win_title");
     if (g_gl.open == NULL || g_gl.batch == NULL || g_gl.read == NULL) continue;
-    if (g_gl.open((int)g_gw, (int)g_gh) != 0) {
+    /* **`--mode view`：先试窗口**，开不出来（没装 GLFW / 不在主线程 / 没显示）
+       就退回离屏那一半 —— 画面照样出得来，只是没有窗口。 */
+    if (gfx_mode() == 2 && g_gl.win != NULL && g_gl.winpresent != NULL) {
+      const char *ti = getenv("OMNI_GFX_TITLE");
+      if (g_gl.win((int)g_gw, (int)g_gh, ti != NULL && ti[0] != '\0' ? ti : "omni") == 0) {
+        g_glwin = 1;
+        g_glwin_was = 1;
+        /* 开成了印一行 —— 判据靠它认"这一趟真有窗口"（与下面那两行"挂不上/开不出来"
+           同一档口径：**stderr 上一句话说清这一趟走的是哪条路**）。 */
+        fprintf(stderr, "#gfx view 窗口 %lldx%lld\n", (long long)g_gw, (long long)g_gh);
+      } else {
+        fprintf(stderr, "#gfx view 开不出窗口（%s）—— 这一趟走离屏\n",
+                g_gl.err != NULL ? g_gl.err() : "没话");
+      }
+    }
+    if (!g_glwin && g_gl.open((int)g_gw, (int)g_gh) != 0) {
       fprintf(stderr, "#gfx gl 开不出来（%s）—— 这一趟走 CPU 备选\n",
               g_gl.err != NULL ? g_gl.err() : "没话");
       return 0;
@@ -943,6 +994,54 @@ static void gfx_cone(double x0, double y0, double r0, double x1, double y1, doub
 /* `refresh()`：交出这一帧 —— 写表面文件 + stdout 上印一行指针（与 JS 那一侧一字不差）。 */
 static void gfx_present(void) {
   if (!g_gon) return;
+  /* **窗口那一档**（`--mode view`）：贴到窗口上就是"交帧"。合成那一步与下面离屏那一档
+     **同一句话**（GPU 那层当底、宿主那层盖上去）—— 所以 view 与 render 两档的画面
+     逐字节相同，判据可以直接比。`OMNI_GFX_OUT` 给了的话顺带把这一帧也写出去
+     （只留最后一帧），那是判据要的那个口子。 */
+  if (g_glwin) {
+    int64_t *fb = g_gfb;
+    if (g_gl.read(g_glpx) == 0) {
+      for (int64_t i = 0; i < g_gw * g_gh; i++) {
+        if (g_gfb[i] >= 0) { g_gout[i] = g_gfb[i]; continue; }
+        const unsigned char *q = g_glpx + i * 4;
+        g_gout[i] = ((int64_t)q[0] << 16) | ((int64_t)q[1] << 8) | (int64_t)q[2];
+      }
+      fb = g_gout;
+      /* 贴上去那一张按合成后的结果重填（宿主那一层盖过的格子要跟着变）。 */
+      for (int64_t i = 0; i < g_gw * g_gh; i++) {
+        unsigned char *q = g_glpx + i * 4;
+        q[0] = (unsigned char)((g_gout[i] >> 16) & 255);
+        q[1] = (unsigned char)((g_gout[i] >> 8) & 255);
+        q[2] = (unsigned char)(g_gout[i] & 255);
+        q[3] = 255;
+      }
+    }
+    if (g_gl.winpresent(g_glpx) == 0) g_glwin = 0;   /* 窗口关了 */
+    const char *vp = getenv("OMNI_GFX_OUT");
+    if (vp != NULL && vp[0] != '\0') {
+      omni_gfx_emit(omni_str_new(vp, (int64_t)strlen(vp)), g_gw, g_gh, NULL, fb);
+    }
+    /* 标题上写 fps（一秒一次）—— 与 polydraw-view 那一手同一格，顺带当"帧在推进"的证据。 */
+    if (g_gl.wintitle != NULL) {
+      static double t0 = -1;
+      static long nf = 0;
+      double now = gfx_now_ms();
+      nf++;
+      if (t0 < 0) t0 = now;
+      if (now - t0 >= 1000.0) {
+        char buf[256];
+        const char *ti = getenv("OMNI_GFX_TITLE");
+        snprintf(buf, sizeof(buf), "%s — %.1f fps",
+                 ti != NULL && ti[0] != '\0' ? ti : "omni",
+                 (double)nf * 1000.0 / (now - t0));
+        g_gl.wintitle(buf);
+        t0 = now;
+        nf = 0;
+      }
+    }
+    g_gdirty = 0;
+    return;
+  }
   const char *p = getenv("OMNI_GFX_OUT");
   if (p == NULL || p[0] == '\0') p = ".omni-cache/gfx/frame.png";
   int64_t *fb = g_gfb;
@@ -968,6 +1067,9 @@ static void gfx_present(void) {
 static void gfx_frame_setup(void) {
   g_gonly = gfx_int_env("OMNI_GFX_FRAME", -1);
   int64_t n = g_gonly >= 0 ? g_gonly + 1 : gfx_int_env("OMNI_FRAMES", 1);
+  /* **窗口那一档**：默认**没有上限** —— 收摊的是"窗口关了"，不是帧数。
+     `OMNI_FRAMES=N` 仍然管用（判据要一个能自己停下来的口子）。 */
+  if (g_glwin && getenv("OMNI_FRAMES") == NULL && g_gonly < 0) n = (int64_t)1 << 62;
   g_gframes = n > 0 ? n : 1;
   const char *p = getenv("OMNI_GFX_PERF");
   g_gperf = (p != NULL && strcmp(p, "1") == 0) ? 1 : 0;
@@ -993,6 +1095,8 @@ static void gfx_frame_end(void) {
   /* **点着名要的那一帧一定交**（`--frame N`）—— 与 `host/gfx-cpu.js` 的 `frameEnd`
      逐句相同：一个像素都没画的脚本给出的是一张清过的图，不是"没有图"。 */
   if (g_gonly >= 0 && g_gfno - 1 == g_gonly) { gfx_need(); gfx_present(); return; }
+  /* 窗口那一档：**每帧都交**（不看 dirty）—— 真实时循环，这一格就是 swap + poll。 */
+  if (g_glwin) { gfx_present(); return; }
   if (g_gdirty && g_gonly < 0) gfx_present();
 }
 
@@ -1241,6 +1345,11 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
     gfx_need();
     if (g_gframes < 0) gfx_frame_setup();
     if (g_gfno > 0) gfx_frame_end();
+    /* 窗口那一档：窗口一关就收摊（`gfx_present` 里把 `g_glwin` 置了 0）。 */
+    if (g_glwin_was && g_glwin == 0) {
+      gfx_perf_report();
+      return 0.0;
+    }
     if (g_gfno >= g_gframes) { gfx_perf_report(); return 0.0; }
     g_gfno += 1;
     g_gtprev = gfx_now_ms();

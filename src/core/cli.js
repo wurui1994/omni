@@ -5273,8 +5273,10 @@ function timeoutBudgetS(name, dflt) {
  *   omni run x.pss --frame 30 -o out.png  走到第 30 帧、**只交出那一帧**（前 30 帧真跑过去）
  *   omni run x.pss --w 640 --h 480        画布尺寸（默认 320×240）
  *   omni run x.pss --perf                 每帧耗时与 fps 印到 stderr（`#perf gfx …`）
- *   omni run x.pss --mode view            有窗口地跑 —— **这条腿上还没有窗口**（任务 #24），
- *                                         当场说清楚；浏览器里的 Studio 就是 view 那一档
+ *   omni run x.pss --mode view            **有窗口地跑**（任务 #24 已落地）：窗口在本机
+ *                                         OpenGL 设备里，所以这一格会自己补上 `--gfx gl`
+ *                                         与 `--backend c`；关窗就退。开不出窗口
+ *                                         （没装 GLFW / 没有显示）自己回落离屏并说一句
  *
  * `--mode` 这格名字与类型模式（`mixed|dynamic|static`，ADR-0008）共用 —— 取值不重叠，
  * 所以只认 `render`/`view` 这两个值，别的原样留给那一档。
@@ -5299,11 +5301,16 @@ function applyGfxFlags(verb, path, rest) {
     setEnv(name, String(Math.trunc(k)));
   };
   const m = val('--mode');
+  /* **`--mode view`：有窗口地跑**（任务 #24 落地）。三条：
+       - 窗口在**本机 OpenGL 设备**里（`src/runtime-gl/omni_ev_gl.c` 的 `omni_ev_gl_win`），
+         所以没明说 `--gfx` 的时候自己把 `gl` 那一档打开 —— CPU 备选贴不了窗口；
+       - 只有**原生腿**有意思（js 腿不 dlopen 插件），所以顺手把 `--backend c` 补上；
+       - 开不出窗口（没装 GLFW / 没有显示 / 不在主线程）设备会自己回落离屏并在 stderr
+         上印 `#gfx view 开不出窗口` —— 不当硬错误，与"挂不上就回落"同一档口径。 */
   if (m === 'view') {
-    throw new OmniError('--mode view 要一格窗口，而这条腿上还没有本机 OpenGL 设备'
-      + '（任务 #24，docs/design/eval-realtime-gpu.md 第 2.2 节）——'
-      + ' 现在能实时看的是 `omni serve` 那一页（浏览器 WebGL2 直通 GPU）；'
-      + ' 离屏出图用默认的 `--mode render`');
+    setEnv('OMNI_GFX_MODE', 'view');
+    if (val('--gfx') === undefined) rest.push('--gfx', 'gl');
+    if (!rest.includes('--backend')) rest.push('--backend', 'c');
   }
   if (m === 'render') setEnv('OMNI_GFX_MODE', 'render');
   num('--frame', 'OMNI_GFX_FRAME');

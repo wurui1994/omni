@@ -15,7 +15,7 @@
 // 没有 `OpenGL.framework`（不是 macOS）就整份**跳过**，不算红 —— 与 `omni_r3.c` 那一侧
 // "拿不到插件就回落 CPU"同一条口径。
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -180,6 +180,93 @@ for (const [name, minFill, minColors] of [['04-shader.pss', 0.9, 1000],
     }
     if (d >= (a.length / 4) * 0.5) ok('04-shader.pss 的 uniform 真喂进去了（第 0 帧 ≠ 第 30 帧）', `${d} 格不同`);
     else no('04-shader.pss 的 uniform 真喂进去了', `只有 ${d} 格不同（时间那格 uniform 没动）`);
+  }
+}
+
+/* ── 第四节：**窗口那一档**（`--mode view`，任务 #24）────────────────────────────
+ *
+ * 看不见窗口也要能判，所以四条都是**量出来的**：
+ *   1. 真开出窗口 —— stderr 上有 `#gfx view 窗口 WxH`（开不出来会印 `#gfx view 开不出窗口`，
+ *      那就整节**跳过**：没装 GLFW 的机器上不算红，与"挂不上就回落"同一档口径）；
+ *   2. 窗口那张帧缓冲里**真有像素**（`OMNI_GFX_WINDBG=1` 印非黑格数，读在 swap 之前）；
+ *   3. **view 与 render 两档逐字节相同** —— 这一条是这一刀的核心：窗口只是"多贴一步"，
+ *      合成与画那条路一个字没改。挑 `02-gl.pss`（它不读 `klock`，所以 view 的墙上时钟
+ *      与 render 的确定性时钟不影响这一比）；
+ *   4. **输入来源是窗口，不是 `OMNI_MOUSE`**：探针脚本按 `mousx/mousy` 画个圆，
+ *      `OMNI_MOUSE=1,2` 时 render 那趟圆心在 (1,2)，view 那趟**不在** ——
+ *      光标不在窗口上就夹到边上，总之不听环境变量那一格。
+ */
+{
+  const winRun = (src, file, extra) => spawnSync(process.execPath,
+    [join(ROOT, 'src/cli.js'), 'run', src, '--backend', 'c'],
+    { encoding: 'utf8', cwd: ROOT, timeout: 120000,
+      env: { ...process.env, OMNI_GFX: 'gl', OMNI_GFX_MODE: 'view', OMNI_FRAMES: '3',
+        OMNI_GFX_OUT: file, ...extra } });
+  const offRun = (src, file, extra) => spawnSync(process.execPath,
+    [join(ROOT, 'src/cli.js'), 'run', src, '--backend', 'c'],
+    { encoding: 'utf8', cwd: ROOT, timeout: 120000,
+      env: { ...process.env, OMNI_GFX: 'gl', OMNI_FRAMES: '3', OMNI_GFX_OUT: file, ...extra } });
+
+  const pv = join(out, '02-gl.view.rgba');
+  const rv = winRun(join(ROOT, 'ext/polydraw/examples/02-gl.pss'), pv, { OMNI_GFX_WINDBG: '1' });
+  const ev = rv.stderr ?? '';
+  if (!ev.includes('#gfx view 窗口')) {
+    process.stdout.write('  --   这台机器上开不出窗口（没装 GLFW / 没有显示）—— 窗口那一节跳过\n');
+  } else {
+    ok('`--mode view` 真开出窗口', /#gfx view 窗口 \S+/.exec(ev)[0]);
+    const m = /#gfx win 第 \d+ 帧 非黑 (\d+)\/(\d+)/.exec(ev);
+    if (m !== null && Number(m[1]) > 0) {
+      ok('窗口那张帧缓冲里真有像素（读在 swap 之前）', `非黑 ${m[1]}/${m[2]}`);
+    } else {
+      no('窗口那张帧缓冲里真有像素', `没量到（${ev.trim().slice(0, 200)}）`);
+    }
+    const pr = join(out, '02-gl.render.rgba');
+    const rr = offRun(join(ROOT, 'ext/polydraw/examples/02-gl.pss'), pr);
+    if (rr.status !== 0 || !existsSync(pv) || !existsSync(pr)) {
+      no('view 与 render 两档都出得来一帧', (rr.stderr ?? '').trim().slice(0, 200));
+    } else {
+      const a = rgba(pv);
+      const b = rgba(pr);
+      let diff = 0;
+      for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) diff++;
+      if (diff === 0) ok('view 与 render 两档逐字节相同（窗口只是多贴一步）');
+      else no('view 与 render 两档逐字节相同', `${diff} 个字节不同`);
+    }
+    /* 输入来源。探针脚本写在缓存里（两句话，不值得进语料）。 */
+    const probe = join(out, 'mouse.kc');
+    writeFileSync(probe, '()\n{\n   cls(0,0,0);\n   setcol(255,255,255);\n'
+      + '   drawsph(mousx,mousy,3);\n}\n');
+    const center = (p) => {
+      const b = rgba(p);
+      let n = 0;
+      let sx = 0;
+      let sy = 0;
+      const w = 320;
+      for (let i = 0; i < b.length; i += 4) {
+        if (!(b[i] | b[i + 1] | b[i + 2])) continue;
+        n++;
+        sx += (i / 4) % w;
+        sy += Math.floor((i / 4) / w);
+      }
+      return n === 0 ? null : [Math.round(sx / n), Math.round(sy / n)];
+    };
+    const pm = join(out, 'mouse.view.rgba');
+    const pc = join(out, 'mouse.render.rgba');
+    winRun(probe, pm, { OMNI_MOUSE: '1,2' });
+    offRun(probe, pc, { OMNI_MOUSE: '1,2' });
+    const cv = existsSync(pm) ? center(pm) : null;
+    const cr = existsSync(pc) ? center(pc) : null;
+    /* 圆被画布边裁掉一半，所以**重心不等于圆心** —— 量到 (2,2) 而不是 (1,2)。
+       所以这儿判"差 2 格以内"，别把裁剪当成读错了环境变量。 */
+    const near = (c, x, y) => c !== null && Math.abs(c[0] - x) <= 2 && Math.abs(c[1] - y) <= 2;
+    if (!near(cr, 1, 2)) {
+      no('输入那一族：render 那一档听 OMNI_MOUSE', `重心 ${JSON.stringify(cr)}（该在 (1,2) 附近）`);
+    } else if (cv !== null && cv[0] === cr[0] && cv[1] === cr[1]) {
+      no('输入那一族：view 那一档听窗口（不是 OMNI_MOUSE）', '两档重心一样，说明还在读环境变量');
+    } else {
+      ok('输入那一族：view 听窗口、render 听 OMNI_MOUSE',
+        `view ${JSON.stringify(cv)} / render ${JSON.stringify(cr)}`);
+    }
   }
 }
 

@@ -60,8 +60,9 @@
 > 四档 —— `host`（设备在宿主，CPU 备选 + 那格帧缓冲，默认）、`gl`（本机 OpenGL：
 > 离屏 core profile，挂不上就回落 host 并在 stderr 上印一行 `#gfx gl …`）、
 > `ir`（产物自带光栅器）、`null`（只记账不画，量语言那一半用）。
-> 上面那张表里"本机 OpenGL = 默认 + 一格窗口"还没到：现在是**离屏出一帧 PNG**，
-> 窗口那一格在任务 #17。GLSL 也不是"原文直送"了 —— **编译期翻成对齐后的 GLSL**（§13.2/§13.7）。
+> 上面那张表里"本机 OpenGL = 默认"那一半还没到（默认仍是 `host`）；
+> **窗口那一格 2026-09-26 落地了**（`--mode view`，正本在 §13.9）。GLSL 也不是"原文直送"了
+> —— **编译期翻成对齐后的 GLSL**（§13.2/§13.7）。
 
 GL 那两条腿的调用**一对一直通**：`glbegin` → `glBegin`、`glvertex` → `glVertex3d`、
 `gluniform1f` → `glUniform1f`。**不重新实现管线**，这是这一刀的全部要点。
@@ -770,6 +771,50 @@ uniform 句柄 / 常量属性 / 纹理四格式），ABI 多这几个：
 * `05-shader-geom.pss` 非黑 9216、9217 种颜色；`06-texture.pss` 非黑 76780、4096 种颜色
   （棋盘正好 64×64 = 4096 —— 纹理真上传真采样了）；
 * `04-shader.pss` 第 0 帧与第 30 帧 **76632 格不同** —— 时间那格 uniform 真喂进去了。
+
+### 13.10 已落地（2026-09-26）：**窗口与真实时帧循环**（`--mode view`，任务 #24）
+
+`omni run x.pss --mode view` 开一个真窗口、实时跑、**关窗就退**。这一格会自己补上
+`--gfx gl` 与 `--backend c`（窗口在本机 OpenGL 设备里，CPU 备选贴不了窗口；
+js 腿不 dlopen 插件）。ABI 多这四个（老库上 dlsym 不到就当没有 —— 还是离屏）：
+
+    _win(w,h,标题)        开窗口；与 `_open` **二者只调一个**
+    _win_present(rgba)    把宿主合成好的那一帧贴上去 + swap + poll；回 0 = 窗口关了
+    _win_input(mx,my,bst,keys[256])  输入快照（画布坐标 / 位掩码 / DOS 扫描码）
+    _win_title(串)        标题栏（fps 写这儿）
+
+**四条定下来的选择**：
+
+1. **GLFW 是 `dlopen` 来的，不是链进来的**。这份插件本来就是"顺手编一下、拿不到就回落"
+   的东西，链期依赖 `/opt/homebrew/lib/libglfw` 会让**没装 GLFW 的机器连离屏那一半都没了**。
+   所以按名字找四个候选路径，找不到只回落窗口这一格；
+2. **渲染路径一个字不改**：照旧画进 FBO，窗口只多一步"贴上去"。于是 view 与 render
+   两档的画面是同一条路算出来的 —— 判据直接**逐字节比**（第四节，已绿）。
+   代价是每帧一次 `glReadPixels` + 一次上传（320×240 = 300KB）；真要省得把宿主 2D
+   那层也搬上 GPU，那是另一刀；
+3. **上下文仍然由 `g_ctx` 那一格代表**：GLFW 的上下文底下也是 `CGLContextObj`，
+   `glfwMakeContextCurrent` 之后 `CGLGetCurrentContext()` 存进 `g_ctx` —— 于是设备里
+   几十处 `CGLSetCurrentContext(g_ctx)` 一句都不用动；
+4. **`glfwInit` 只在真主线程上叫**。macho 那一档链的时候给了 512MB 主栈
+   （`cli.js` 的 `-Wl,-stack_size,0x20000000`），所以 `omni_run_entry` 不开大栈线程、
+   程序体就在主线程上 —— 这条腿上成立。不成立就回落（`pthread_main_np()` 先查一次，
+   不去赌：`omni_r3_gl.c` 头注里那一课的上半句就是"在大栈线程上 glfwInit 会 SIGTRAP"）。
+
+两格量出来才知道的事：
+
+* **`nextframe` 在 view 档默认没有帧数上限** —— 收摊的是"窗口关了"。`OMNI_FRAMES=N`
+  仍然管用（判据要一个能自己停下来的口子）；
+* **光标不在窗口上时 GLFW 报的坐标可以是负的或超出画布**，而脚本拿它当下标
+  （`drawsph(mousx,mousy,3)`）。所以设备把它**夹回画布里** —— 原版那一档的语义本来
+  就是"光标在窗口里"（一开机在正中）。
+
+判据（`tests/gl/run.js` 第四节，**15/15**）：真开出窗口 / 窗口那张帧缓冲里非黑 40892
+（读在 swap **之前**，swap 之后后台缓冲未定义）/ **view 与 render 逐字节相同** /
+输入那一族 view 听窗口、render 听 `OMNI_MOUSE`（探针按 `mousx,mousy` 画圆，两档重心不同）。
+
+**还欠的一格**：vsync。`glfwSwapInterval(1)` 叫了，可量到的是 1900 fps ——
+这个进程不是 .app 包、窗口没被激活，合成器没有节流它。当量尺用是好事（真帧成本），
+当"看"用会白烧 CPU；要治得另开一刀（自己按时间睡，或者做成 .app 包）。
 
 ## 14. 第六刀的设计：**画布文字**（`printg` / `printchar`，语料里 178 次）
 

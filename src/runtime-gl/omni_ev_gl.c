@@ -167,31 +167,10 @@ static GLuint ev_compile(GLenum kind, const char *src) {
  * 开设备：CGL legacy 上下文 + 一格 RGBA8/DEPTH24 的 FBO + 一格 VBO + 内建那对着色器。
  * 回 0 = 成了；非 0 = 这台机器上没有这条腿（话在 `omni_ev_gl_error()` 里）。
  */
-int omni_ev_gl_open(int w, int h) {
-  if (g_on) return 0;
-  if (w <= 0 || h <= 0) { ev_err("尺寸要是正数", NULL); return 1; }
-  CGLPixelFormatAttribute attrs[] = {
-    kCGLPFAAccelerated,
-    /* **core profile**（见头注第 1 条）：Apple Silicon 上这一格给到 4.1 core。 */
-    kCGLPFAOpenGLProfile, (CGLPixelFormatAttribute)kCGLOGLPVersion_3_2_Core,
-    kCGLPFAColorSize, (CGLPixelFormatAttribute)24,
-    kCGLPFADepthSize, (CGLPixelFormatAttribute)24,
-    (CGLPixelFormatAttribute)0,
-  };
-  CGLPixelFormatObj pix = NULL;
-  GLint npix = 0;
-  if (CGLChoosePixelFormat(attrs, &pix, &npix) != kCGLNoError || pix == NULL) {
-    ev_err("CGLChoosePixelFormat 失败（这台机器上没有可用的 GL）", NULL);
-    return 1;
-  }
-  if (CGLCreateContext(pix, NULL, &g_ctx) != kCGLNoError) {
-    CGLDestroyPixelFormat(pix);
-    ev_err("CGLCreateContext 失败", NULL);
-    return 1;
-  }
-  CGLDestroyPixelFormat(pix);
-  CGLSetCurrentContext(g_ctx);
-
+/* 上下文有了之后那一半：FBO、内建 program、VAO/VBO、初态。
+   **两档共用** —— 离屏（`omni_ev_gl_open`，CGL 自己开上下文）与窗口
+   （`omni_ev_gl_win`，上下文是 GLFW 的）都走这一份，于是"画"那条路只有一条。 */
+static int ev_setup(int w, int h) {
   /* core profile 里画之前**必须绑一格 VAO**（没有默认 VAO —— 不绑就是 INVALID_OPERATION，
      画面全黑而且一行错都没有：踩过）。 */
   glGenVertexArrays(1, &g_vao);
@@ -249,6 +228,33 @@ int omni_ev_gl_open(int w, int h) {
   g_st_mat_ok = 0;
   g_st_mat_prog = 0;
   return 0;
+}
+
+int omni_ev_gl_open(int w, int h) {
+  if (g_on) return 0;
+  if (w <= 0 || h <= 0) { ev_err("尺寸要是正数", NULL); return 1; }
+  CGLPixelFormatAttribute attrs[] = {
+    kCGLPFAAccelerated,
+    /* **core profile**（见头注第 1 条）：Apple Silicon 上这一格给到 4.1 core。 */
+    kCGLPFAOpenGLProfile, (CGLPixelFormatAttribute)kCGLOGLPVersion_3_2_Core,
+    kCGLPFAColorSize, (CGLPixelFormatAttribute)24,
+    kCGLPFADepthSize, (CGLPixelFormatAttribute)24,
+    (CGLPixelFormatAttribute)0,
+  };
+  CGLPixelFormatObj pix = NULL;
+  GLint npix = 0;
+  if (CGLChoosePixelFormat(attrs, &pix, &npix) != kCGLNoError || pix == NULL) {
+    ev_err("CGLChoosePixelFormat 失败（这台机器上没有可用的 GL）", NULL);
+    return 1;
+  }
+  if (CGLCreateContext(pix, NULL, &g_ctx) != kCGLNoError) {
+    CGLDestroyPixelFormat(pix);
+    ev_err("CGLCreateContext 失败", NULL);
+    return 1;
+  }
+  CGLDestroyPixelFormat(pix);
+  CGLSetCurrentContext(g_ctx);
+  return ev_setup(w, h);
 }
 
 /** 清屏（打包好的 `0xRRGGBB`）。 */
@@ -1178,3 +1184,363 @@ int omni_ev_gl_read(unsigned char *out) {
 
 /** 这台设备开着没有（宿主用它决定回落 CPU 备选）。 */
 int omni_ev_gl_ready(void) { return g_on; }
+
+
+/* ══ 窗口那一档（`--mode view`，任务 #24）══════════════════════════════════════
+ *
+ * 三条硬规矩（定下来的，别改）：
+ *
+ * 1. **GLFW 是 `dlopen` 来的，不是链进来的**。这份插件本来就是"顺手编一下、拿不到就
+ *    回落"的东西（`cli.js` 的 `glPlugin()`），要是链期依赖 `/opt/homebrew/lib/libglfw`，
+ *    没装 GLFW 的机器上整份插件都编不出来 —— 连离屏那一半一起没了。所以按名字找、
+ *    找不到就**只回落窗口这一格**，离屏照旧。
+ * 2. **渲染路径一个字不改**：照旧画进 FBO（`ev_setup` 那一格），窗口只多一步
+ *    "把宿主合成好的一帧贴到 0 号帧缓冲 + swap"。于是 view 与 render 两档的画面
+ *    是**同一条路**算出来的 —— 判据可以拿 view 的一帧去跟 render 的逐字节比。
+ *    代价：每帧一次 `glReadPixels` + 一次上传（320×240 是 300KB，先这样；
+ *    真要省那一趟得把宿主 2D 那层也搬上 GPU，那是另一刀）。
+ * 3. **上下文仍然由 `g_ctx` 那一格代表**。GLFW 的上下文底下也是 `CGLContextObj` ——
+ *    `glfwMakeContextCurrent` 之后 `CGLGetCurrentContext()` 取出来存进 `g_ctx`，
+ *    于是这一份里几十处 `CGLSetCurrentContext(g_ctx)` 一句都不用动。
+ *
+ * 线程那一条（`omni_r3_gl.c` 头注里那一课的下半句）：`glfwInit` 必须在**真主线程**上。
+ * 这条腿上成立 —— macho 那一档链的时候给了 512MB 主栈（`cli.js` 的
+ * `-Wl,-stack_size,0x20000000`），所以 `omni_run_entry` 不开大栈线程、程序体就在主线程上。
+ * 不成立的时候（主栈 < 256MB）`glfwInit` 会失败或 SIGTRAP —— 所以这儿**先查一次**
+ * `pthread_main_np()`，不是主线程就直接回落离屏，不去赌。
+ */
+#include <dlfcn.h>
+#include <pthread.h>
+
+/* GLFW 的常量（ABI 稳定，照 glfw3.h 抄，免掉编译期对那份头文件的依赖）。 */
+#define EVW_CONTEXT_VERSION_MAJOR 0x00022002
+#define EVW_CONTEXT_VERSION_MINOR 0x00022003
+#define EVW_OPENGL_FORWARD_COMPAT 0x00022006
+#define EVW_OPENGL_PROFILE        0x00022008
+#define EVW_OPENGL_CORE_PROFILE   0x00032001
+#define EVW_PRESS                 1
+
+static struct {
+  void *lib;
+  int (*init)(void);
+  void (*terminate)(void);
+  void (*window_hint)(int, int);
+  void *(*create_window)(int, int, const char *, void *, void *);
+  void (*destroy_window)(void *);
+  void (*make_current)(void *);
+  void (*swap_interval)(int);
+  void (*swap_buffers)(void *);
+  void (*poll_events)(void);
+  int (*should_close)(void *);
+  void (*get_cursor_pos)(void *, double *, double *);
+  int (*get_mouse_button)(void *, int);
+  int (*get_key)(void *, int);
+  void (*get_fb_size)(void *, int *, int *);
+  void (*get_win_size)(void *, int *, int *);
+  void (*set_title)(void *, const char *);
+  int (*get_attrib)(void *, int);
+  void (*show_window)(void *);
+} evw;
+static void *g_win;
+static GLuint g_blit_prog, g_blit_vao, g_blit_vbo, g_blit_tex;
+
+static int evw_load(void) {
+  static const char *names[] = {
+    "libglfw.3.dylib", "libglfw.dylib",
+    "/opt/homebrew/lib/libglfw.3.dylib", "/usr/local/lib/libglfw.3.dylib",
+    NULL,
+  };
+  if (evw.lib != NULL) return 0;
+  for (int i = 0; names[i] != NULL; i++) {
+    evw.lib = dlopen(names[i], RTLD_LAZY | RTLD_LOCAL);
+    if (evw.lib != NULL) break;
+  }
+  if (evw.lib == NULL) { ev_err("找不到 libglfw（窗口那一档回落离屏）", NULL); return 1; }
+#define EVW_SYM(field, name) \
+  do { \
+    *(void **)&evw.field = dlsym(evw.lib, name); \
+    if (evw.field == NULL) { ev_err("libglfw 里没有 %s", name); return 1; } \
+  } while (0)
+  EVW_SYM(init, "glfwInit");
+  EVW_SYM(terminate, "glfwTerminate");
+  EVW_SYM(window_hint, "glfwWindowHint");
+  EVW_SYM(create_window, "glfwCreateWindow");
+  EVW_SYM(destroy_window, "glfwDestroyWindow");
+  EVW_SYM(make_current, "glfwMakeContextCurrent");
+  EVW_SYM(swap_interval, "glfwSwapInterval");
+  EVW_SYM(swap_buffers, "glfwSwapBuffers");
+  EVW_SYM(poll_events, "glfwPollEvents");
+  EVW_SYM(should_close, "glfwWindowShouldClose");
+  EVW_SYM(get_cursor_pos, "glfwGetCursorPos");
+  EVW_SYM(get_mouse_button, "glfwGetMouseButton");
+  EVW_SYM(get_key, "glfwGetKey");
+  EVW_SYM(get_fb_size, "glfwGetFramebufferSize");
+  EVW_SYM(get_win_size, "glfwGetWindowSize");
+  EVW_SYM(set_title, "glfwSetWindowTitle");
+  EVW_SYM(get_attrib, "glfwGetWindowAttrib");
+  EVW_SYM(show_window, "glfwShowWindow");
+#undef EVW_SYM
+  return 0;
+}
+
+/* 贴一帧用的那一格 program：两个三角铺满，纹理坐标上下翻
+   （宿主给的一帧是**上下正**的，而 GL 的 0 号帧缓冲原点在左下）。 */
+static const char *EVW_VS =
+  "#version 410 core\n"
+  "layout(location=0) in vec2 p;\n"
+  "out vec2 uv;\n"
+  "void main(){ uv = vec2((p.x+1.0)*0.5, (1.0-p.y)*0.5); gl_Position = vec4(p,0.0,1.0); }\n";
+static const char *EVW_FS =
+  "#version 410 core\n"
+  "uniform sampler2D src;\n"
+  "in vec2 uv;\n"
+  "out vec4 o;\n"
+  "void main(){ o = vec4(texture(src, uv).rgb, 1.0); }\n";
+
+static int evw_blit_setup(void) {
+  GLuint vs = ev_compile(GL_VERTEX_SHADER, EVW_VS);
+  GLuint fs = ev_compile(GL_FRAGMENT_SHADER, EVW_FS);
+  if (vs == 0 || fs == 0) return 1;
+  g_blit_prog = glCreateProgram();
+  glAttachShader(g_blit_prog, vs);
+  glAttachShader(g_blit_prog, fs);
+  glLinkProgram(g_blit_prog);
+  GLint ok = 0;
+  glGetProgramiv(g_blit_prog, GL_LINK_STATUS, &ok);
+  if (!ok) { ev_err("贴帧那格 program 链不上", NULL); return 1; }
+  static const float quad[12] = { -1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1 };
+  glGenVertexArrays(1, &g_blit_vao);
+  glBindVertexArray(g_blit_vao);
+  glGenBuffers(1, &g_blit_vbo);
+  glBindBuffer(GL_ARRAY_BUFFER, g_blit_vbo);
+  glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+  glEnableVertexAttribArray(0);
+  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, NULL);
+  glGenTextures(1, &g_blit_tex);
+  glBindTexture(GL_TEXTURE_2D, g_blit_tex);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glBindVertexArray(g_vao);
+  return 0;
+}
+
+/**
+ * 开窗口那一档。回 0 = 成了（之后 `omni_ev_gl_ready()` 也是 1）；非 0 = 回落离屏。
+ * 与 `omni_ev_gl_open` **二者只调一个**。
+ */
+int omni_ev_gl_win(int w, int h, const char *title) {
+  if (g_on) return 1;
+  if (w <= 0 || h <= 0) { ev_err("尺寸要是正数", NULL); return 1; }
+  if (pthread_main_np() == 0) {
+    ev_err("窗口那一档要真主线程（现在在别的线程上），回落离屏", NULL);
+    return 1;
+  }
+  if (evw_load() != 0) return 1;
+  if (evw.init() == 0) { ev_err("glfwInit 失败", NULL); return 1; }
+  evw.window_hint(EVW_CONTEXT_VERSION_MAJOR, 3);
+  evw.window_hint(EVW_CONTEXT_VERSION_MINOR, 2);
+  evw.window_hint(EVW_OPENGL_PROFILE, EVW_OPENGL_CORE_PROFILE);
+  evw.window_hint(EVW_OPENGL_FORWARD_COMPAT, 1);
+  g_win = evw.create_window(w, h, title != NULL ? title : "omni", NULL, NULL);
+  if (g_win == NULL) { ev_err("开窗口失败", NULL); evw.terminate(); return 1; }
+  evw.make_current(g_win);
+  /* GLFW 的上下文底下就是 CGLContextObj —— 存进 g_ctx，这一份里别处一句不用改。 */
+  g_ctx = CGLGetCurrentContext();
+  if (g_ctx == NULL) { ev_err("拿不到窗口上下文的 CGLContextObj", NULL); return 1; }
+  evw.swap_interval(1);
+  if (ev_setup(w, h) != 0) return 1;
+  if (evw_blit_setup() != 0) { g_on = 0; return 1; }
+  return 0;
+}
+
+/** 窗口开着没有（宿主用它决定 `nextframe` 该怎么回）。 */
+int omni_ev_gl_win_on(void) { return g_win != NULL; }
+
+/**
+ * 交一帧：把宿主合成好的那张 RGBA（`w*h*4`，上下正）贴到窗口上，然后 swap + poll。
+ * 回 1 = 窗口还开着（接着画）；回 0 = 该收摊了。
+ */
+int omni_ev_gl_win_present(const unsigned char *rgba) {
+  if (g_win == NULL) return 0;
+  CGLSetCurrentContext(g_ctx);
+  int fw = g_w, fh = g_h;
+  evw.get_fb_size(g_win, &fw, &fh);
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  glViewport(0, 0, fw, fh);
+  glDisable(GL_DEPTH_TEST);
+  glDisable(GL_CULL_FACE);
+  glDisable(GL_BLEND);
+  glUseProgram(g_blit_prog);
+  glBindVertexArray(g_blit_vao);
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, g_blit_tex);
+  if (rgba != NULL) {
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, g_w, g_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+  }
+  glUniform1i(glGetUniformLocation(g_blit_prog, "src"), 0);
+  glDrawArrays(GL_TRIANGLES, 0, 6);
+  /* 判据那一格（`OMNI_GFX_WINDBG=1`）：**窗口那张帧缓冲**里非黑像素的个数 +
+     窗口看得见没有。看不见窗口也能判"这一帧真贴上去了" —— 必须在 swap **之前**读，
+     swap 之后后台缓冲的内容是未定义的（polydraw 那条腿上踩过同一格）。 */
+  if (getenv("OMNI_GFX_WINDBG") != NULL) {
+    static long nf = 0;
+    if ((nf++ % 30) == 0) {
+      unsigned char *px = (unsigned char *)malloc((size_t)fw * (size_t)fh * 4);
+      long nz = 0;
+      if (px != NULL) {
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, fw, fh, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        for (long i = 0; i < (long)fw * (long)fh * 4; i += 4) {
+          if (px[i] | px[i + 1] | px[i + 2]) nz++;
+        }
+        free(px);
+      }
+      fprintf(stderr, "#gfx win 第 %ld 帧 非黑 %ld/%ld（%dx%d，看得见=%d）\n",
+              nf - 1, nz, (long)fw * (long)fh, fw, fh,
+              evw.get_attrib(g_win, 0x00020004 /* GLFW_VISIBLE */));
+    }
+  }
+  evw.swap_buffers(g_win);
+  evw.poll_events();
+  /* 画那条路的状态全靠"记住上一次"那几格（`g_st_*`）—— 这一趟把 program/视口/VAO
+     都换过了，所以把那几格作废，下一帧会自己重设。 */
+  g_st_prog = 0;
+  g_st_vp = -1;
+  g_st_depth = -1;
+  g_st_cull = -1;
+  g_st_blend = -1;
+  g_st_bound = 0;
+  g_st_mat_ok = 0;
+  g_st_mat_prog = 0;
+  g_vattr_dirty = 1;
+  glBindVertexArray(g_vao);
+  glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
+  glViewport(0, 0, g_vpw, g_vph);
+  return evw.should_close(g_win) ? 0 : 1;
+}
+
+/** 标题栏（fps 那一行往这儿写 —— 与 polydraw-view 那一手同一格）。 */
+void omni_ev_gl_win_title(const char *s) {
+  if (g_win != NULL && s != NULL) evw.set_title(g_win, s);
+}
+
+/* GLFW 的键码 -> DOS 扫描码（EVAL 的 `keystatus[]` 用的是后者）。
+   只列脚本用得到的那些；对不上的忽略。 */
+static int evw_scan_of(int key) {
+  switch (key) {
+    case 256: return 0x01;  /* ESC       */
+    case 49:  return 0x02;  /* 1         */
+    case 50:  return 0x03;
+    case 51:  return 0x04;
+    case 52:  return 0x05;
+    case 53:  return 0x06;
+    case 54:  return 0x07;
+    case 55:  return 0x08;
+    case 56:  return 0x09;
+    case 57:  return 0x0a;
+    case 48:  return 0x0b;  /* 0         */
+    case 45:  return 0x0c;  /* -         */
+    case 61:  return 0x0d;  /* =         */
+    case 259: return 0x0e;  /* BACKSPACE */
+    case 258: return 0x0f;  /* TAB       */
+    case 81:  return 0x10;  /* Q         */
+    case 87:  return 0x11;  /* W         */
+    case 69:  return 0x12;  /* E         */
+    case 82:  return 0x13;  /* R         */
+    case 84:  return 0x14;  /* T         */
+    case 89:  return 0x15;  /* Y         */
+    case 85:  return 0x16;  /* U         */
+    case 73:  return 0x17;  /* I         */
+    case 79:  return 0x18;  /* O         */
+    case 80:  return 0x19;  /* P         */
+    case 257: return 0x1c;  /* ENTER     */
+    case 341: return 0x1d;  /* LCTRL     */
+    case 65:  return 0x1e;  /* A         */
+    case 83:  return 0x1f;  /* S         */
+    case 68:  return 0x20;  /* D         */
+    case 70:  return 0x21;  /* F         */
+    case 71:  return 0x22;  /* G         */
+    case 72:  return 0x23;  /* H         */
+    case 74:  return 0x24;  /* J         */
+    case 75:  return 0x25;  /* K         */
+    case 76:  return 0x26;  /* L         */
+    case 340: return 0x2a;  /* LSHIFT    */
+    case 90:  return 0x2c;  /* Z         */
+    case 88:  return 0x2d;  /* X         */
+    case 67:  return 0x2e;  /* C         */
+    case 86:  return 0x2f;  /* V         */
+    case 66:  return 0x30;  /* B         */
+    case 78:  return 0x31;  /* N         */
+    case 77:  return 0x32;  /* M         */
+    case 344: return 0x36;  /* RSHIFT    */
+    case 32:  return 0x39;  /* SPACE     */
+    case 265: return 0xc8;  /* UP        */
+    case 263: return 0xcb;  /* LEFT      */
+    case 262: return 0xcd;  /* RIGHT     */
+    case 264: return 0xd0;  /* DOWN      */
+    case 266: return 0xc9;  /* PAGEUP    */
+    case 267: return 0xd1;  /* PAGEDOWN  */
+    case 260: return 0xd2;  /* INSERT    */
+    case 261: return 0xd3;  /* DELETE    */
+    default:  return -1;
+  }
+}
+
+/* 上面那张表里的 GLFW 键码（查的时候按这个数组走一遍，省掉 0..348 全查）。 */
+static const int EVW_KEYS[] = {
+  256, 49, 50, 51, 52, 53, 54, 55, 56, 57, 48, 45, 61, 259, 258,
+  81, 87, 69, 82, 84, 89, 85, 73, 79, 80, 257, 341,
+  65, 83, 68, 70, 71, 72, 74, 75, 76, 340,
+  90, 88, 67, 86, 66, 78, 77, 344, 32,
+  265, 263, 262, 264, 266, 267, 260, 261, -1,
+};
+
+/**
+ * 输入快照：鼠标位置（**按画布坐标**，Retina 上帧缓冲是窗口的两倍，这儿折算过）、
+ * 三个鼠标键的位掩码、`keys[256]` 按 DOS 扫描码置 0/1。回 0 = 有窗口、填好了。
+ */
+int omni_ev_gl_win_input(double *mx, double *my, long *bst, unsigned char *keys) {
+  if (g_win == NULL) return 1;
+  double cx = 0, cy = 0;
+  int ww = 1, wh = 1;
+  evw.get_cursor_pos(g_win, &cx, &cy);
+  evw.get_win_size(g_win, &ww, &wh);
+  if (ww <= 0) ww = 1;
+  if (wh <= 0) wh = 1;
+  double px = cx * (double)g_w / (double)ww;
+  double py = cy * (double)g_h / (double)wh;
+  /* **夹回画布里**。光标不在窗口上的时候 GLFW 报的是"相对窗口"的坐标 —— 可以是负的、
+     也可以比画布大，而脚本拿它当下标（`drawsph(mousx,mousy,3)` 这种），落在外头就
+     什么都不画。原版那一档的语义是"光标在窗口里"（一开机在正中），所以这儿夹住。 */
+  if (px < 0) px = 0;
+  if (py < 0) py = 0;
+  if (px > (double)(g_w - 1)) px = (double)(g_w - 1);
+  if (py > (double)(g_h - 1)) py = (double)(g_h - 1);
+  if (mx != NULL) *mx = px;
+  if (my != NULL) *my = py;
+  if (bst != NULL) {
+    long b = 0;
+    if (evw.get_mouse_button(g_win, 0) == EVW_PRESS) b |= 1;
+    if (evw.get_mouse_button(g_win, 1) == EVW_PRESS) b |= 2;
+    if (evw.get_mouse_button(g_win, 2) == EVW_PRESS) b |= 4;
+    *bst = b;
+  }
+  if (keys != NULL) {
+    memset(keys, 0, 256);
+    for (int i = 0; EVW_KEYS[i] >= 0; i++) {
+      if (evw.get_key(g_win, EVW_KEYS[i]) != EVW_PRESS) continue;
+      int s = evw_scan_of(EVW_KEYS[i]);
+      if (s >= 0 && s < 256) keys[s] = 1;
+    }
+  }
+  return 0;
+}
+
+/** 收摊（窗口关掉）。 */
+void omni_ev_gl_win_close(void) {
+  if (g_win == NULL) return;
+  evw.destroy_window(g_win);
+  g_win = NULL;
+  evw.terminate();
+}
