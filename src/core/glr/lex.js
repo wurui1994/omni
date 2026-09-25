@@ -116,7 +116,11 @@ function readBrackets(node, diags, suppress) {
       const w = b.items[2];
       let weight = 1;
       if (w !== undefined) {
-        const n = isAtom(w) ? Number.parseInt(w.value, 10) : Number.NaN;
+        /* 不是原子就给 -1（落进下面同一条报错分支）—— **不用 `Number.NaN`**：
+           它不在封闭子集里（ADR-0011 决策 2），而这一份要过自举那道门
+           （`tests/mir/run.js` 的 `lower/cli.js`）。解析不出数时 `parseInt` 自己
+           回的就是 NaN，而 `Number.isInteger(NaN)` 是假 —— 两条路本来就同一支。 */
+        const n = isAtom(w) ? Number.parseInt(w.value, 10) : -1;
         if (!Number.isInteger(n) || n < 1) {
           diags.error(w.span, 'the third item of a (brackets …) entry is how many levels this opener pushes (a positive integer)');
         } else weight = n;

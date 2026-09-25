@@ -14,21 +14,35 @@
 //   3. **缺了就现场编。** `omni run x.R` 不该要求人先记住去敲一句构建命令；
 //      编不出来当场报，并且把那句命令印出来 —— 不许悄悄退回"我们自己算"（那正是这一版
 //      要去掉的东西）。
+//
+// ## 为什么这一份只用封闭 ABI
+//
+// 这份文件被 `ext/r/adapter.js` import，而 adapter 在 `langs.js` 上 —— 也就是**从
+// `src/cli.js` 走得到**，而那棵树整棵要能被我们自己那台 JS 前端降级（`tests/mir/run.js`
+// 的 `lower/cli.js` 那道门）。`node:fs` / `node:child_process` / `node:path` / `node:url`
+// 都不在那个子集里（ADR-0011 决策 2），所以这一份改成：文件在不在走 `exists`、
+// 起子进程走 `spawn`、路径就是字符串拼 `/`、树根走 `treeRoot()`。
+//
+// 动态库的后缀**不问平台**（封闭表里没有"我在哪个系统上"这一格），改成
+// **两个名字都试、哪个在用哪个** —— `build.js` 只会造出其中一个，所以这一句不含歧义。
 
-import { existsSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { exists, spawn, env } from '../../../src/core/host/native.js';
+import { treeRoot } from '../../../src/core/host/treeroot.js';
 import { cDeclsOf, cSysInclude } from '../../../src/core/lang/c.js';
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const ROOT = join(HERE, '..', '..', '..');
-const OUT = join(ROOT, '.omni-cache', 'r-rt');
-const GEN = join(OUT, 'include');
-const HDR = join(GEN, 'Rmath.h');
+/* 都是函数而不是常量：树根要问宿主（`installDir`），而模块求值期不该碰宿主 ——
+   路径推到第一次真要用的时候再算。 */
+const here = () => `${treeRoot()}/ext/r/rt`;
+const outDir = () => `${treeRoot()}/.omni-cache/r-rt`;
+const genDir = () => `${outDir()}/include`;
+const hdr = () => `${genDir()}/Rmath.h`;
 
 /** `libomniRmath` 落在哪儿。与 `ext/r/build.js` 里那一格必须是同一条路径。 */
-export const RMATH_LIB = join(OUT, `libomniRmath${process.platform === 'darwin' ? '.dylib' : '.so'}`);
+export function rmathLib() {
+  const base = `${outDir()}/libomniRmath`;
+  const so = `${base}.so`;
+  return exists(so) ? so : `${base}.dylib`;
+}
 
 /** 一趟里只编一次、只读一次那份头。 */
 let sigs = null;
@@ -42,18 +56,19 @@ let built = false;
  * `node build.js` 同一条理由（`build/cli.js` 文件头）。
  */
 function ensure() {
-  if (existsSync(HDR) && existsSync(RMATH_LIB)) return;
+  const ok = () => exists(hdr()) && exists(rmathLib());
+  if (ok()) return;
   if (built) {
-    throw new Error(`r->IR: R 的 C 运行时编不出来 —— 手敲一遍看它说什么：\n`
-      + `  node ext/r/build.js`);
+    throw new Error('r->IR: R 的 C 运行时编不出来 —— 手敲一遍看它说什么：\n'
+      + '  node ext/r/build.js');
   }
   built = true;
-  const r = spawnSync(process.execPath, [join(HERE, '..', 'build.js'), '-j', '8'], {
-    cwd: ROOT, encoding: 'utf8', maxBuffer: 32 << 20,
-  });
-  if (r.status !== 0 || !existsSync(HDR) || !existsSync(RMATH_LIB)) {
+  /* 哪个 node：与 `bootstrap.js` 同一条口径（`OMNI_NODE` 没设就是 PATH 上那个）。 */
+  const nodeExe = env('OMNI_NODE') === undefined ? 'node' : env('OMNI_NODE');
+  const r = spawn(nodeExe, [`${treeRoot()}/ext/r/build.js`, '-j', '8'], 'c');
+  if (r[0] !== 0 || !ok()) {
     throw new Error('r->IR: R 的 C 运行时编不出来 —— '
-      + `${String(r.stderr ?? '').split('\n').filter((s) => s !== '').slice(-3).join(' / ')}\n`
+      + `${String(r[2] ?? '').split('\n').filter((s) => s !== '').slice(-3).join(' / ')}\n`
       + '  （手敲一遍：node ext/r/build.js）');
   }
 }
@@ -70,9 +85,9 @@ function ensure() {
 export function rmathSigs() {
   if (sigs !== null) return sigs;
   ensure();
-  const opts = { includeDirs: [GEN, join(HERE)], sysIncludeDirs: cSysInclude() };
+  const opts = { includeDirs: [genDir(), here()], sysIncludeDirs: cSysInclude() };
   sigs = new Map();
-  for (const h of [HDR, join(HERE, 'omni_rna.h'), join(HERE, 'omni_rng.h')]) {
+  for (const h of [hdr(), `${here()}/omni_rna.h`, `${here()}/omni_rng.h`]) {
     const got = cDeclsOf(h, opts, [['MATHLIB_STANDALONE', '1']]);
     for (const d of got.decls) {
       sigs.set(d.name, { ret: d.ret, params: d.params, variadic: d.variadic === true });

@@ -15,7 +15,8 @@ import { Diagnostics, SourceFile, OmniError } from '../source/diag.js';
 import {
   readText, stderr, exists, readDir,
 } from '../host/native.js';
-import { pickLang, treeRoot, LANGS } from './langs.js';
+import { pickLang, LANGS } from './langs.js';
+import { treeRoot } from '../host/treeroot.js';
 
 /**
  * **换行当分号**（登记处那一行的 `asi`，EVAL 那两门要）。

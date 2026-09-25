@@ -38,7 +38,7 @@
 //   4. 内建只认下面 `BUILTINS` 那一张表，表外的名字当用户函数调（调不到就是链接期的错）。
 
 import { isList, tag, kids, leaf } from '../../src/core/lower/cst.js';
-import { RMATH_LIB, rmathSig } from './rt/ffi.js';
+import { rmathLib, rmathSig } from './rt/ffi.js';
 
 /* ─── R 的数值运行时：**R 自己的 C 代码** ────────────────────────────────────
  *
@@ -7206,7 +7206,7 @@ export function rToIR(tree) {
      次序照名字排：出来的 `.sx` 要能进快照，不能随 Map 的插入序变。 */
   const ffi = [];
   if (cabiUsed.size > 0) {
-    ffi.push({ kind: 'lib', name: RMATH_LIB });
+    ffi.push({ kind: 'lib', name: rmathLib() });
     for (const sym of [...cabiUsed].sort()) {
       const sig = rmathSig(sym);
       ffi.push({ kind: 'cabi', sym, ret: sig.ret, params: sig.params });
