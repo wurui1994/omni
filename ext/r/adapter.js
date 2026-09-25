@@ -3603,6 +3603,17 @@ function callOf(x, types, extra, want) {
         if (all[0] !== null && isStrVec(typeOfExpr(all[0], types))) {
           return { kind: 'call', fn: { kind: 'name', name: useFn('r_nchar_v') }, args: [ev(0)] };
         }
+        /**
+         * **不是串的那一档要在这儿报。** R 的 `nchar(NA)` 是 `NA`（整数那种）、
+         * `nchar(123)` 是 3（先 `as.character`）。这一层的 `NA` 是个 double，落下去
+         * 撞的是方言那句 `(slen …) 的第一个参数要是 string，这里是 real` ——
+         * 那是**方言**的话，而且已经过了换档那道门，libR 接不上，一个答案都拿不到。
+         */
+        const nt = all[0] === null ? STR : typeOfExpr(all[0], types);
+        if (nt.kind !== 'string') {
+          throw new Error(`r->IR: nchar() 收的不是串（是 ${nt.kind}）—— R 会先 as.character`
+            + '（`nchar(NA)` 是 `NA`、`nchar(123)` 是 3），这一档还没接');
+        }
         return call1('slen', ev(0));
       }
       case 'paste0': case 'paste': {
@@ -7985,6 +7996,12 @@ function vecFnDecl(name) {
     const op = name === 'r_max' ? '>' : '<';
     cabiUsed.add('omni_r_nan');
     rmathSig('omni_r_nan');
+    /* 空向量那一格要 `±Inf`：`Inf` 由 `rt/omni_rna.c` 给（与 `NONNUM` 那张表同一格），
+       `-Inf` 就是 `0 - Inf`。`min` 回 `Inf`、`max` 回 `-Inf`（R 的口径）。 */
+    cabiUsed.add('omni_r_posinf');
+    rmathSig('omni_r_posinf');
+    const posinf = { kind: 'ccall', sym: 'omni_r_posinf', args: [] };
+    const emptyExtreme = name === 'r_min' ? posinf : b('-', { kind: 'real', value: 0 }, posinf);
     const nanQ = { kind: 'call', fn: { kind: 'name', name: useFn('r_is_nan') }, args: [elem] };
     const T = { kind: 'bool', value: true };
     return {
@@ -7998,6 +8015,23 @@ function vecFnDecl(name) {
          从前这儿见着缺失就当场回 `NA`，于是 `max(1, NaN)` 答 `NA` 而 R 答 `NaN`。 */
       body: [
         declLen(),
+        /**
+         * **空向量那一格从前只写在注释里，没真拦住** —— `min(integer(0))` 会去读第 0 格
+         * 元素（那时长度是 0），于是运行期撞 `pointer out of bounds`，而且 `print` 的
+         * 前半行已经印出去了（量出来的，2026-09-26）。
+         *
+         * 量出来 R 回的是 `min(integer(0))` → `Inf`、`max(numeric(0))` → `-Inf`，外带一句
+         * **警告**（走 stderr）。从前这儿写的打算是"当场报"，理由是没有警告那条通道；
+         * 现在改成**照 R 的值答**：警告走的是 stderr，stdout 那一侧两边逐字节相同，
+         * 而"回收长度不是整倍数"那一格早就是同一个办法（算 R 的值、不发那句警告）——
+         * 两处规矩该一致。少一句警告明写在 SPEC。
+         */
+        {
+          kind: 'if',
+          cond: b('==', { kind: 'name', name: 'n' }, { kind: 'int', value: 0 }),
+          then: [{ kind: 'return', values: [emptyExtreme] }],
+          else_: null,
+        },
         { kind: 'let', name: 's', type: REAL, init: vecGet(v, { kind: 'int', value: 0 }) },
         { kind: 'let', name: 'sna', type: BOOL, init: { kind: 'bool', value: false } },
         { kind: 'let', name: 'snan', type: BOOL, init: { kind: 'bool', value: false } },

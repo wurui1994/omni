@@ -244,3 +244,14 @@ print(quantile(c(2, 1, 3), c(0.33, 0.66), names = FALSE))
 print(quantile(q1, 0.5, names = FALSE))
 print(median(q1))
 cat(sprintf("%.17g", quantile(c(1 / 3, 2 / 7, 3 / 11), 0.42, names = FALSE)), "\n")
+
+# 空向量上的 `min` / `max`（2026-09-26 补的一刀）：R 回 `Inf` / `-Inf`，外带一句**警告**
+# —— 警告走 stderr，所以 stdout 两边照样逐字节相同，那句话不发（与"回收长度不是整倍数"
+# 那一格同一个办法）。从前这儿只在注释里写着"当场报"，实际上没拦住：去读第 0 格元素，
+# 运行期撞 `pointer out of bounds`，而 `print` 的前半行已经印出去了。
+print(min(integer(0)))
+print(max(numeric(0)))
+ez <- c(1, 2)
+print(min(ez[ez > 5]))
+print(max(ez[ez > 5]))
+cat(min(numeric(0)), max(numeric(0)), "\n")
