@@ -308,6 +308,45 @@ omni run x.pss --mode view              有窗口地跑 —— **这条腿上还
 初值按运行期算（`RScript.htm` §Init 第三条）。结构体是**一块摊平的 double**
 （`a[i].f` = `a[i*格数 + 字段偏移]`），带类型的形参就是把那一块传过去。
 
+#### 8.3.1 整块赋值与整块传参（2026-09-26，一刀治好 14 份）
+
+口径逐字抄 `RScript.htm` 的 Other notes：「When assigning structures or passing them as
+parameters, the compiler will allow the operation only if the size of the source and
+destination matches.」—— 所以这两件事**是这门语言本来就有的**，唯一的约束是
+两边槽数相同。语料自己还写着注（`games/box.kc:43`）：
+
+    obox=box; // copy entire array of structures :) [works for normal arrays without '[]' too]
+
+先前我们在这儿当场报「结构体不能整块赋值/传值」，**14 份 `.kc` 卡在这一句**
+（`otouch[i] = ntouch[i]`、`pgs = gs`、`box=tbox`、`clear(box[i],box,pn,i)` …）。
+
+落法（`ext/polydraw/adapter.js`）：
+
+* `blockWalk` —— 把原来 `fieldRef` 里那台"一路吃 `[]` 与 `.`"的机器抽出来，**不要求落到
+  一个数**；`fieldRef` 变成"它 + 一句标量检查"。
+* `blockOperand` —— 回 `{ name, off, slots }`；`blockAssignOf` 两边都是整块就逐槽拷
+  （≤ 8 槽摊开写，`point3d` 这一族是 3 槽、每帧几百次；再大走一格 while）。
+* 传参那一半在 `blockArg` 里：整块那一支**排在 `fieldRef` 之前** —— `clear(box[i],…)`
+  递的是一整个 `box_t`，偏移要按结构体大小算，不是"第 i 个 double"。
+
+**两个把"作用域"暴露出来的坑**（都真红过）：
+
+1. `C.arrs` / `C.svars` 那两张表**不分函数**。形参上的整块（`rotit (s[132], …)`）
+   登记在 `C.arrs` 里，于是另一个函数里的局部标量 `s = sin(ang)`
+   （`games/megaminx.kc:379`）看着也像一整块。所以"光凭名字是个数组"那一支标成
+   **weak**，只在右边也是整块时才算数。
+2. 函数体里的 `static point3d r`（`kjoust3d.kc:833`）在别的函数里是同名局部标量
+   （942 行 `r = (j*.34)%.3`）—— `bodyOf` 本来就为这种名字补了一格 `let`（`foreign`
+   那一段），现在把这批名字记进 `C.localReal`，整块那一族先问它一句。
+
+**判据**：`tests/lower/run.js evaldraw` 多一格 `blockcopy`
+（`ext/evaldraw/examples/blockcopy.kc`，四行期望是手算的 —— 与实现无关的那种"尺子"），
+`evaldraw` 35/35、`polydraw` 11/11、出图正确性那一轴一格没退。
+
+按份数看这一刀之后语料里那 14 份的下场：`box` / `particles` / `kjoust3d` 这一族
+不再卡在这一句（转成"超时"或别的名字），`megaminx`/`pyraminx` 变成缺 `readtouch`、
+`asteroids`/`set` 变成缺 `net_me` —— 整块那一类**在账上归零**。
+
 ### 8.4 宿主面的平签名：**十二格** double
 
 `omni_gfx_call(名字, 个数, a0..a11)` —— 元数最大的是 `setcam`（位置 3 格 + 三个方向
@@ -490,7 +529,7 @@ program 与 uniform —— 全是"只有设备做得到"的东西。`glquad` 的
 这一跳（48 -> 141）几乎全是**着色器那一族**：`glsetshader`/`glgetuniformloc`/`glquad`
 那些在 CPU 备选上只能"收下不用"的名字，到本机 GL 上是真做。剩下 80 份没过的大头
 按份数排：**20 超时**（算得久 >25s，是性能不是缺能力）、**14 份"取到的是一整块"**
-（`&结构体`/`&数组` 那一族，任务 #27）、5 份 `&` 只接名字、3 份 `gl_settexf3` 的
+（整块赋值与整块传参 —— 已补，见 §8.3.1）、5 份 `&` 只接名字、3 份 `gl_settexf3` 的
 形参口径、零碎的解析与宿主名字十几格。
 
 剩下的账（按份数排，`--gfx null` 那一趟）：10 超时（算得久，不是坏）、

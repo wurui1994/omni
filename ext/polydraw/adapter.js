@@ -517,6 +517,11 @@ function blockArg(raw, C, fname) {
       + `而 \`${nm}\` 既不是数组/结构体、也没被取过地址`);
   }
   if (isList(x) && (tag(x) === 'index' || tag(x) === 'field')) {
+    /* **整块**那一支先看（`clear(box[i],…)` 递的是一整个 `box_t`、`g.play` 递的是一整排）：
+       偏移按结构体大小算，不是按"第 i 个 double"。放在 `fieldRef` 之前 —— 那一格
+       只认落到一个数的路径，整块会当场报。 */
+    const b = blockOperand(x, C);
+    if (b !== null && b.weak !== true) return { name: b.name, off: asReal2(blockSlot(b, null, C)) };
     /* 结构体那条路（`&p.x`、`&vt[i].f`）：偏移就是 `fieldRef` 算出来的那个数。 */
     const fr = fieldRef(x, C);
     if (fr !== null) return { name: fr.name, off: asReal2(withOff(fr.name, fr.index, C)) };
@@ -1198,6 +1203,12 @@ function exprStmtOf(e, C) {
     /* 宿主那一侧的量先看 —— 它不是一格左值，写它是**再问设备一句**。 */
     const ht = hostTargetOf(kids(e)[1], C);
     if (ht !== null) return [hostStore(ht, op, exprOf(kids(e)[2], C), C)];
+    /* **整块赋值**（`otouch[i] = ntouch[i]` / `obox = box`）：说明书里明写着的一格，
+       只有 `=` 有这个意思（`+=` 那一族落不到整块上）。 */
+    if (op === '=') {
+      const blk = blockAssignOf(kids(e)[1], kids(e)[2], C);
+      if (blk !== null) return blk;
+    }
     const tgt = targetOf(kids(e)[1], C);
     const val = exprOf(kids(e)[2], C);
     if (op === '=') return [{ kind: 'assign', target: tgt, value: val }];
@@ -1588,6 +1599,22 @@ function declTyped(C, preDecls, tyName, one, where) {
  * 累加偏移、把"现在是什么类型、还剩几维"更新掉。
  */
 function fieldRef(x, C) {
+  const r = blockWalk(x, C);
+  if (r === null) return null;
+  if (r.dims.length > 0 || r.ty !== null) {
+    throw new Error(`eval->IR: \`${r.name}\` 这一处取到的是一整块（结构体或数组），`
+      + '不是一个数 —— 只有整块赋值（`a = b`）那一格接得住整块');
+  }
+  const total = (C.arrs.get(r.name) ?? [1])[0];
+  return { name: r.name, index: clampIdx(r.off, total) };
+}
+
+/**
+ * `fieldRef` 的**原料**：一路吃下 `[]` 与 `.`，回 `{ name, off, ty, dims }`。
+ * 与 `fieldRef` 的差别只有一处 —— **它不要求落到一个数**，所以整块那一族
+ * （`otouch[i] = ntouch[i]`、`obox = box`）也能问它要偏移与形状。
+ */
+function blockWalk(x, C) {
   const walk = (e) => {
     if (!isList(e)) return null;
     const t = tag(e);
@@ -1635,14 +1662,90 @@ function fieldRef(x, C) {
     }
     return null;
   };
-  const r = walk(x);
-  if (r === null) return null;
-  if (r.dims.length > 0 || r.ty !== null) {
-    throw new Error(`eval->IR: \`${r.name}\` 这一处取到的是一整块（结构体或数组），`
-      + '不是一个数 —— 这门语言里结构体不能整块赋值/传值');
+  return walk(x);
+}
+
+/**
+ * **整块那一族的操作数**：`{ name, off, slots }`，不是整块就回 `null`。
+ *
+ * 口径（`RScript.htm` 的 Other notes，逐字）：「When assigning structures or passing them
+ * as parameters, the compiler will allow the operation only if the size of the source and
+ * destination matches.」—— 所以**整块赋值是这门语言本来就有的**，唯一的约束是
+ * 两边槽数相同；语料里 `games/box.kc:43` 自己还写着注：
+ * `obox=box; // copy entire array of structures :) [works for normal arrays without '[]' too]`
+ * （"普通数组不带 `[]` 也一样"那半句就是下面 `C.arrs` 那一支）。
+ */
+function blockOperand(x, C) {
+  /* 这一格在本函数里已经摊成一格 real 局部量了（见 `bodyOf` 里 `localReal` 的注）——
+     那它就是个标量，不是那个同名的整块。 */
+  if (isList(x) && tag(x) === 'name' && C.localReal !== undefined
+    && C.localReal.has(idOf(x))) return null;
+  const r = blockWalk(x, C);
+  if (r !== null) {
+    if (r.dims.length === 0 && r.ty === null) return null;   /* 落到一个数 -> 照旧走标量那条路 */
+    const slots = r.dims.reduce((a, b) => a * b, 1) * structSize(r.ty ?? 'double', C);
+    return { name: r.name, off: r.off, slots };
   }
-  const total = (C.arrs.get(r.name) ?? [1])[0];
-  return { name: r.name, index: clampIdx(r.off, total) };
+  /* 没有类型的那一族（`static a[4]`）：整个名字就是一整块。
+     这一支标成 **weak** —— 形参上的整块（`rotit (s[132], …)`）也登记在 `C.arrs` 里，
+     而那张表**不分函数**，于是另一个函数里的局部标量 `s = sin(ang)`（megaminx.kc:379）
+     在这儿看着也像"一整块"。所以 weak 那一支只在**右边也是一整块**时才算数。 */
+  if (isList(x) && tag(x) === 'name' && C.arrs.has(idOf(x)) && !C.svars.has(idOf(x))) {
+    const slots = C.arrs.get(idOf(x)).reduce((a, b) => a * b, 1);
+    return slots > 1 ? { name: idOf(x), off: iNum(0), slots, weak: true } : null;
+  }
+  return null;
+}
+
+/** 整块那一格的槽下标：偏移 + 第 k 格，再过越界那一夹（与标量那条路同一手）。 */
+function blockSlot(b, k, C) {
+  const total = (C.arrs.get(b.name) ?? [1]).reduce((a, c) => a * c, 1);
+  const off = k === null ? b.off : bin('+', b.off, typeof k === 'number' ? iNum(k) : k);
+  return withOff(b.name, clampIdx(off, total), C);
+}
+
+/**
+ * **整块赋值**（`otouch[i] = ntouch[i]` / `obox = box` / `pgs = gs`）：两边都是整块就
+ * 逐槽拷一趟，不是就回 `null`（照旧走标量那条路）。
+ *
+ * 小块（≤ 8 槽，`point3d` 这一族是 3）摊开写 —— 这是每帧几百次的热路径；
+ * 大块（整个结构体数组）走一格 while，省代码量。
+ */
+function blockAssignOf(lhsNode, rhsNode, C) {
+  const d = blockOperand(lhsNode, C);
+  if (d === null) return null;
+  const s = blockOperand(rhsNode, C);
+  if (s === null) {
+    if (d.weak) return null;   /* 见 `blockOperand` 里 weak 那一段的注 */
+    throw new Error(`eval->IR: \`${d.name}\` 这一处是一整块（${d.slots} 槽），`
+      + '右边却不是同样的一块 —— 整块只能整块赋（说明书：两边大小要相同）');
+  }
+  if (d.slots !== s.slots) {
+    throw new Error(`eval->IR: 整块赋值两边大小不同（左 ${d.slots} 槽、右 ${s.slots} 槽）`
+      + ' —— 说明书只许"大小相同"那一种');
+  }
+  const put = (k) => ({
+    kind: 'assign',
+    target: { kind: 'index', obj: nameRef(d.name), index: blockSlot(d, k, C) },
+    value: { kind: 'index', obj: nameRef(s.name), index: blockSlot(s, k, C) },
+  });
+  if (d.slots <= 8) {
+    const out = [];
+    for (let k = 0; k < d.slots; k++) out.push(put(k));
+    return out;
+  }
+  const i = C.fresh('bk');
+  return [
+    { kind: 'let', name: i, type: REAL, init: num(0) },
+    {
+      kind: 'while',
+      cond: bin('<', toInt(nameRef(i)), iNum(d.slots)),
+      body: [
+        put(toInt(nameRef(i))),
+        { kind: 'assign', target: nameRef(i), value: bin('+', nameRef(i), num(1)) },
+      ],
+    },
+  ];
 }
 
 /**
@@ -2075,6 +2178,16 @@ function bodyOf(blk, params, C, curFn) {
       },
     });
   }
+  /**
+   * **这一份函数里被摊成一格 real 局部量的名字**（下面那个循环推进去的）。
+   *
+   * 为什么要记一笔：`C.svars` / `C.arrs` 那两张表**不分函数**，而 `static point3d r`
+   * 这种"函数体里的 static"在别的函数里往往是个同名的局部标量
+   * （`games/kjoust3d/kjoust3d.kc`：833 行声明 `static point3d r`，942 行另一个函数
+   * 里 `r = (j*.34)%.3`）。整块那一族（`blockOperand`）只看名字会把后者也当成一整块，
+   * 于是 `r = 一个数` 报"整块只能整块赋"。这张表就是那一格的判据。
+   */
+  const localReal = new Set();
   for (const n of written) {
     if (autoNames.has(n) || C.boxed.has(n)) continue;
     if (params.includes(n) || (C.globals.has(n) && !foreign.has(n))) continue;
@@ -2082,8 +2195,13 @@ function bodyOf(blk, params, C, curFn) {
        没人读的死变量，而写它已经落成 `(gfxcall "set…" …)` 了。 */
     if (C.gfxHost && (HOST_VARS.includes(n) || HOST_ARRS.includes(n))) continue;
     lets.push({ kind: 'let', name: n, type: REAL });
+    localReal.add(n);
   }
-  return [...lets, ...stmtsOf(kids(blk), C)];
+  const prevLocalReal = C.localReal;
+  C.localReal = localReal;
+  const out = [...lets, ...stmtsOf(kids(blk), C)];
+  C.localReal = prevLocalReal;
+  return out;
 }
 
 /**

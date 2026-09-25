@@ -729,6 +729,19 @@ export const EVTAIL = ['a=7'];
 export const EVARRVIEW = ['all=39 tail=13', 'view=12', 'p=1,102,3'];
 
 /**
+ * **整块赋值与整块传参**（`ext/evaldraw/examples/blockcopy.kc`）。
+ *
+ * 口径是 `RScript.htm` 的 Other notes：「When assigning structures or passing them as
+ * parameters, the compiler will allow the operation only if the size of the source and
+ * destination matches.」四行分别钉住：一整个结构体（`b[1] = a[2]` —— 偏移按结构体大小算，
+ * 不是"第 i 个 double"）、一整排结构体（`b = a`）、**普通数组不带 `[]` 也一样**（`d = c`）、
+ * 一整个结构体当实参递下去改得动调用方（`bump(a[1])`）。
+ * 先前这四样一律当场报，14 份 `.kc` 卡在这儿（口径与坑在
+ * `docs/design/eval-realtime-gpu.md` §8.3.1）。
+ */
+export const EVBLOCKCOPY = ['one=3,30,300', 'all=1,300', 'plain=1,4', 'arg=3,22,203'];
+
+/**
  * **cpp 的类模板**（`ext/cpp/examples/ctmpl.cpp`）。`Box<int>` 落成一格叫 `Box__int` 的
  * 普通记录、方法叫 `Box__int_get`。第五、六行钉住"同一格实例只造一遍"（两个变量各自独立、
  * 互不串味），最后一行钉住类模板的记录当**返回值**交出去。期望输出由 `c++` 给。

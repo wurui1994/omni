@@ -1,0 +1,37 @@
+// ext/evaldraw/examples/blockcopy.kc —— **整块赋值与整块传参**
+//
+// 口径逐字抄 `RScript.htm` 的 Other notes：「When assigning structures or passing them as
+// parameters, the compiler will allow the operation only if the size of the source and
+// destination matches.」—— 两件事都是这门语言本来就有的，唯一的约束是两边槽数相同。
+// 语料自己还写着注（`games/box.kc:43`）：
+//   obox=box; // copy entire array of structures :) [works for normal arrays without '[]' too]
+//
+// 这一份判四样（语料里那 14 份 `.kc` 靠的就是它们）：
+//   * `b[1] = a[2]` —— 一整个结构体（偏移按结构体大小算，不是"第 i 个 double"）；
+//   * `b = a` —— 一整排结构体；
+//   * `d = c` —— 普通数组不带 `[]` 也一样（那句注里的后半句）；
+//   * `bump(a[1])` —— 一整个结构体**当实参**递下去，改得动调用方那一块。
+//
+// 主函数在最前（这门语言的形状是"主函数 + 若干函数"）。
+
+struct { x, y, z; } pt_t;
+
+static pt_t a[3], b[3];
+static c[4] = {1,2,3,4};
+static d[4];
+
+()
+{
+   for(i=0;i<3;i++) { a[i].x = i+1; a[i].y = (i+1)*10; a[i].z = (i+1)*100; }
+   b[1] = a[2];
+   printf("one=%g,%g,%g\n", b[1].x, b[1].y, b[1].z);
+   b = a;
+   printf("all=%g,%g\n", b[0].x, b[2].z);
+   d = c;
+   printf("plain=%g,%g\n", d[0], d[3]);
+   bump(a[1]);
+   printf("arg=%g,%g,%g\n", a[1].x, a[1].y, a[1].z);
+}
+
+//收一整个结构体（带类型的形参）—— 拿到的是同一块，所以改得动调用方
+bump(pt_t q) { q.x = q.x + 1; q.y = q.y + 2; q.z = q.z + 3; return(0); }
