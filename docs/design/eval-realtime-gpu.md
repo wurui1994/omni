@@ -104,6 +104,42 @@ per frame"）：宿主每帧
 * **浏览器（已落地）**：`nextframe` **直接回 0**（产物那条 while 一轮都不转）——
   帧循环在页面这边，见下。
 
+### 帧循环有**两种写法**，`refresh()` 要认出第二种（2026-09-26）
+
+上头那个模型（宿主每帧调一次 body）是 EvalDraw 文档里写的那一种，但**语料里还有一种**：
+
+```c
+()
+{
+   while (1)
+   {
+      … 画 …
+      refresh(); Sleep(5);
+   }
+}
+```
+
+帧循环**写在脚本里**。这一族的 body 一趟都回不来，于是 `nextframe` 只被调过一次、
+`refresh()` 从前只管"交一帧"—— **程序永远不结束**。扫描里那 21 份
+（`demos/minsurf.kc` / `clippy.kc` / `games/lab3d.kc` …）报的"timeout >25s"
+**全是这个，不是算得慢**（`minsurf` 量过：40 秒里交了 378 帧图，一直在转）。
+
+落法：`refresh()` 在**同一次 body 里来第二回起**，自己把一帧结算掉 ——
+`frameEnd()` -> 预算用完就收摊 -> 帧号 +1。三件事值得记：
+
+* **分界不能用"有没有人调过 `nextframe`"**：产物的入口永远是
+  `while (nextframe()) eval$frame();`，那一格永远是 1（这么判等于没判，踩过）。
+  用"一次 body 里第几回 `refresh`"：标准写法一次最多一回，脚本自己循环那一族第二回就来了。
+  于是**标准那一族的行为一个字节都没变**；
+* **收摊只能"退出进程"**：脚本那个 `while(1)` 没有出口。C 那侧是 `exit(0)`；
+  JS 那侧**不能 `process.exit`**（ADR-0011 决议 2 把它挡在闭合 ABI 外、`check:self` 会报）
+  —— 用这条腿现成的那一手：抛一格带 `$exit` 的错（`host/native.js:457` 立的规矩），
+  `cli.js` 那一处 `evalJs` 外头接住当正常退出；
+* 顺带治好两格：`numframes` 与 `klock` 在这一族上从前**永远是 0**（帧号没人加），
+  所以脚本里 `dtim = tim - otim` 一直是 0。
+
+两条腿逐句相同（`runtime/omni_fmt.c` 的 `refresh` 与 `host/gfx-cpu.js` 的 `refresh/0`）。
+
 ### 浏览器那一档：帧函数交出去，`requestAnimationFrame` 反复调
 
 产物在浏览器里是**主线程同步**跑的（`browser-main.js` 的 `runArgv`），`while` 会把页面卡死。

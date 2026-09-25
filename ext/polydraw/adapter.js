@@ -75,6 +75,37 @@ const HOST_VARS = ['xres', 'yres', 'numframes', 'mousx', 'mousy', 'bstatus',
 /** 宿主那侧按下标读的量。 */
 const HOST_ARRS = ['keystatus'];
 /**
+ * **设备/联网不在场时，说明书自己给的那几个值**（不是"猜一个数"）。
+ *
+ * * `evaldraw.txt:1422` —— `using6dof`「1 if using a 6 degree of freedom input device,
+ *   else 0」：我们这条腿上没有那台磁场追踪器 ⇒ **0**；
+ * * `:1423` —— `usingstereo`「0 if not using stereo mode」⇒ **0**；
+ * * `:1719` —— `net_players`「Number of connected users, including own machine:
+ *   1 when not connected」⇒ **1**；
+ * * `:1721` —— `net_me`「Index of current player. Range: {0 .. net_players-1}」⇒ **0**。
+ *
+ * 这四格在我们这儿是**常量**（没有设备、没有联网），所以就地折成那个数，不问设备。
+ */
+const ABSENT_VARS = new Map([
+  ['using6dof', 0], ['usingstereo', 0], ['net_players', 1], ['net_me', 0],
+]);
+/**
+ * 同一格口径的**函数**：设备/对方不在，所以"什么都没读到" ⇒ **回 0，出参一格不动**。
+ *
+ * * `readmag6d(设备号, &x,&y,&z, …)` —— 回的是读到几组；没有追踪器就是 0；
+ * * `net_recv(&from,&val)` / `net_recv(&from,buf,leng)` —— `evaldraw.txt:1732`：
+ *   「Returns the # of values read, or 0 if nothing」；
+ * * `net_send(to,val)` / `net_send(to,buf,leng)` —— `:1728`：「Returns the number of
+ *   values actually transmitted; 0 if failed」。
+ *
+ * **实参一格都不算**（它们全是 `&x` / `&a[i]` 这种出参，单独过 `exprOf` 会当场报）——
+ * 而这正好也是对的：没读到东西就不该动它们（静态量本来是 0）。代价是实参里的副作用
+ * 不发生 —— 这一族的实参全是纯粹的地址，语料里没有例外。
+ * 语料里靠这一族的五份：`magpong` / `magpong2` / `magsword` / `bowling` / `kpool`
+ * （全都按回来的个数判"有没有设备"），加上联网那四份。
+ */
+const ABSENT_FNS = new Set(['readmag6d', 'net_recv', 'net_send']);
+/**
  * **脚本写得动的那几格**。那张表里它们全是"名字 -> 一格 double 的地址"
  * （`polydraw.c:2217-2222`），所以**每一格都写得动** —— 从前这儿只放了两格，
  * `tigrou/ballsk.pss:17` 的 `xres = 50;` 于是当场报错。分两类：
@@ -346,6 +377,12 @@ function exprOf(x, C, want = 'val') {
     /* 宿主的那批常量（PolyDraw 的 `GL_TRIANGLE_FAN` 之类：`myext[]` 里它们是
        "名字 -> 一格 double"）。值照 `GL/gl.h`，不是我们自己编的号。 */
     if (C.host.consts?.has(n)) return num(C.host.consts.get(n));
+    /* **设备/联网不在场那四格**（见 `ABSENT_VARS` 的头注：值是说明书给的）。
+       被本函数里的量盖住就不算（与 `enum` 那一格同一手）。 */
+    if (ABSENT_VARS.has(n) && C.shadow?.has(n) !== true) {
+      const v = num(ABSENT_VARS.get(n));
+      return want === 'cond' ? truthy(v) : v;
+    }
     /* **宿主给的那几格量**（`xres` / `yres` / `numframes`）：在宿主调用那条路上，
        读它们就是问设备一句 —— 每帧都可能不一样，所以不能折成常量。 */
     if (C.gfxHost && HOST_VARS.includes(n)) {
@@ -610,6 +647,10 @@ function callOf(x, C) {
     }
     return { kind: 'call', fn: nameRef(n), args: out };
   }
+  /* **设备/对方不在场那一族**（`readmag6d` / `net_recv` / `net_send`，见 `ABSENT_FNS`
+     的头注）：回 0，**实参一格都不算** —— 它们全是出参地址，算它们会当场报。
+     摆在脚本自己那张表**后头**：脚本写了同名函数就以它为准。 */
+  if (ABSENT_FNS.has(n)) return num(0);
   const hostish = C.gfxHost
     && (C.host.draw?.has(`${n}/${rawArgs.length}`) === true
       || HOST_FNS0.includes(n)

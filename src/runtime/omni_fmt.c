@@ -535,6 +535,10 @@ static struct {
    `g_glwin_was` 记"开过窗口" —— 两格分开是因为"从来没开出来（回落离屏）"与
    "开过、现在关了"要走的路不一样：前者照旧按帧数跑完，后者立刻收摊。 */
 static int g_glwin = 0, g_glwin_was = 0;
+/* **这一次 body 里 `refresh` 来了几回**（`nextframe` 那一格清零）。
+   EvalDraw 那一族把 `while(1){ …; refresh(); }` 写在脚本里 —— 一次 body 里会来很多回，
+   `refresh` 那一格据此分流（见那儿的注）。 */
+static long g_grefr = 0;
 
 /* 窗口那一档的输入：**每次都重新问**（鼠标在动、键在按）。回 1 = 这一档管了。
    `mousx/mousy` 按画布坐标（设备那侧按窗口/帧缓冲比例折算过），`keystatus[]` 按
@@ -1356,11 +1360,36 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
     return 0.0;
   }
   if (!strcmp(nm, "rgb") && argc == 3) return (double)gfx_rgb(a0, a1, a2);
-  if (!strcmp(nm, "refresh") && argc == 0) { gfx_need(); gfx_present(); return 0.0; }
+  if (!strcmp(nm, "refresh") && argc == 0) {
+    gfx_need();
+    /* **帧循环写在脚本里**那一族（EvalDraw 的 `()` 模式：`while(1){ …; refresh(); }`，
+       语料里 21 份这么写）：设备这侧一次 `nextframe` 都收不到，于是从前这儿只是
+       "交一帧"、脚本那个 `while(1)` 永远不回来 —— 扫描里那 21 份"超时"**全是这个，
+       不是算得慢**（`demos/minsurf.kc` 量过：图出来了、然后一直转）。
+       所以这儿要把一帧走完：结算 -> 预算用完就收摊 -> 帧号 +1。
+       **收摊只能 `exit`**：脚本那个 `while(1)` 没有出口，这是唯一停得下来的地方。
+       顺带治好两格：`numframes` 与 `klock` 从前在这一族上永远是 0（帧号没人加）。
+
+       **怎么分清两种写法**：不能看"有没有人调过 `nextframe`" —— 产物的入口永远是
+       `while (nextframe()) eval$frame();`，所以那一格永远是 1（踩过：这么判等于没判）。
+       真正的分界是**一次 body 里调了几次 `refresh`**：
+         * 标准写法（宿主每帧调一次 body）一次最多一回 —— 那一回照旧只"交图"；
+         * 脚本自己 `while(1)` 那一族第二回就来了 —— 从第二回起才结算帧、查预算。
+       于是标准那一族的行为一个字节都没变。 */
+    g_grefr += 1;
+    if (g_grefr < 2) { gfx_present(); return 0.0; }
+    if (g_gframes < 0) { gfx_frame_setup(); g_gfno = 1; }
+    gfx_frame_end();
+    if ((g_glwin_was && g_glwin == 0) || g_gfno >= g_gframes) { gfx_perf_report(); exit(0); }
+    g_gfno += 1;
+    g_gtprev = gfx_now_ms();
+    return 0.0;
+  }
   /* **帧循环那一格**（与 host/gfx-cpu.js 的 nextframe 一字不差）：产物自己 while 着问它
      "还画不画下一帧" —— 于是循环在设备里。这一档画 OMNI_FRAMES 帧（默认 1）。 */
   if (!strcmp(nm, "nextframe") && argc == 0) {
     gfx_need();
+    g_grefr = 0;
     if (g_gframes < 0) gfx_frame_setup();
     if (g_gfno > 0) gfx_frame_end();
     /* 窗口那一档：窗口一关就收摊（`gfx_present` 里把 `g_glwin` 置了 0）。 */

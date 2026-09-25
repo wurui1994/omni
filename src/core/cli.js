@@ -6581,7 +6581,17 @@ function main(argv) {
         // eval / Function(src) 要编译器在运行期在场（ADR-0020 P6）：跑在本进程里的这一条
         // 装得上那格钩子，编成独立产物的场合装不上 —— 那时那两个 op 当场报错
         installSrcEvalHook((m, o) => target('js').emit(m, o));
-        evalJs(js);
+        /* **带 `$exit` 的错是"正常收摊"**（`host/native.js:457` 立的那个规矩：这条腿上
+           "退出进程"就是抛它）。图形那一格用它停下**脚本自己写的那个 `while(1)`**
+           （`host/gfx-cpu.js` 的 `refresh`，帧数够了就抛）—— 不接住就成了一片栈。 */
+        try {
+          evalJs(js);
+        } catch (e) {
+          if (e === null || typeof e !== 'object' || !('$exit' in e)) throw e;
+          profJsFinish();
+          statReport(cr);
+          return e.$exit;
+        }
         vStep('exec in-process (node host, new Function)');
         profJsFinish();
         /* `run --stat` 在这条腿上**有账可报**（第一百四十七片第五格）：时间 + 各层的账

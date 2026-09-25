@@ -552,8 +552,30 @@ export function gfxCall(name, args) {
       return 0;
     case 'rgb/3': return rgb(a(0), a(1), a(2));
     /* `refresh()`：**交出这一帧**。CPU 这一档就是写表面 + 印一行指针
-       （GL 那两档在各自的设备里是交换缓冲）。 */
-    case 'refresh/0': need(320, 240); present(); return 0;
+       （GL 那两档在各自的设备里是交换缓冲）。
+       **一次 body 里来第二回起，它还要把一帧结算掉**（与 `omni_fmt.c` 的 refresh
+       逐句相同）：EvalDraw 那一族把帧循环写在脚本里（`while(1){ …; refresh(); }`），
+       `nextframe` 一趟都回不来 —— 不在这儿收摊就是死循环（语料里 21 份这么写）。
+       分界用"一次 body 里第几回"，不是"有没有人调过 nextframe"（入口永远调它）。 */
+    case 'refresh/0': {
+      need(320, 240);
+      D.refr = (D.refr ?? 0) + 1;
+      if (D.refr < 2) { present(); return 0; }
+      if (D.frames < 0) { frameSetup(); D.fno = 1; }
+      frameEnd();
+      if (D.fno >= D.frames) {
+        perfReport();
+        /* 收摊。**不能 `process.exit`**（ADR-0011 决议 2：它不在闭合 ABI 里，`check:self`
+           当场报）—— 用这条腿现成的那一手：抛一格带 `$exit` 的错（`host/native.js:457`
+           与 `host/browser.js:318` 都是这么"退出进程"的）。 */
+        const e = new Error('gfx: 帧数够了（脚本自己那个 while 没有出口）');
+        e.$exit = 0;
+        throw e;
+      }
+      D.fno += 1;
+      D.tPrev = nowMs();
+      return 0;
+    }
     /**
      * **帧循环的那一格**（`(gfxcall "nextframe")`）：产物自己 `while` 着问它
      * "还画不画下一帧"，于是**循环在设备里**（design 文档第 3 节）：
@@ -567,6 +589,7 @@ export function gfxCall(name, args) {
      */
     case 'nextframe/0': {
       need(320, 240);
+      D.refr = 0;
       if (D.frames < 0) frameSetup();
       if (D.fno > 0) frameEnd();
       if (D.fno >= D.frames) { perfReport(); return 0; }
