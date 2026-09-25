@@ -140,3 +140,37 @@ print(rep_len(c(1, 2, 3), 2))
 print(rep_len(c(5), 3))
 print(rep_len(7, 4))
 cat(length(rep_len(c(1, 2), 5)), "\n")
+
+# `tabulate(bin, nbins)`：数每一格 1..nbins 出现了几次。三种格子都不记 ——
+# 缺失、`<= 0`、`> nbins`；值先朝零截（`2.7` 记进第 2 格）。
+# 不给 `nbins` 时默认长度是 `as.integer(max(1, bin))` —— 所以 `c(2.7, 2.2, 1.9)` 只有两格
+print(tabulate(c(2, 3, 3, 5, 1, 3)))
+print(tabulate(c(2, 3, 3), nbins = 5))
+print(tabulate(c(1, 2, 3), nbins = 2))
+print(tabulate(c(0, -1, 4, 4)))
+print(tabulate(c(1, NA, 2, 2)))
+print(tabulate(c(2.7, 2.2, 1.9)))
+print(tabulate(1:4))
+cat(tabulate(c(1, 1, 3)), "\n")
+cat(length(tabulate(c(3))), "\n")
+print(tabulate(c(1, 2), nbins = 0))
+# `anyNA(x)`：**`NaN` 也算**（R 的 `is.na(NaN)` 是 TRUE）
+print(anyNA(c(1, 2, 3)))
+print(anyNA(c(1, NA, 3)))
+print(anyNA(c(NA)))
+print(anyNA(3))
+print(anyNA(c(1, NaN)))
+# `append(x, values, after)`：插在第 `after` 格之后，不给就接到最后
+print(append(c(1, 2), c(3, 4)))
+print(append(c(1, 2, 3), c(9), after = 1))
+print(append(c(1, 2, 3), c(9), after = 0))
+print(append(c(1, 2, 3), c(8, 9), after = 3))
+print(append(c(1, 2), 7))
+# `replace(x, k, v)` 就是 `x[k] <- v`：`v` 短了循环取、`k` 超长就接长（空档 NA）、`k` 是 0 空动作
+print(replace(c(1, 2, 3), 2, 9))
+print(replace(c(1, 2, 3, 4), c(1, 3), c(7, 8)))
+print(replace(c(1, 2, 3, 4), c(2, 3), 0))
+print(replace(c(1, 2, 3), 1, NA))
+print(replace(c(1, 2), 5, 9))
+print(replace(c(1, 2), 0, 9))
+cat(replace(c(5, 6), 2, 1), "\n")

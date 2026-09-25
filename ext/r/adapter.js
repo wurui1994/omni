@@ -190,6 +190,18 @@ const FN_DEPS = new Map([
   ['r_cummax', ['r_is_na', 'r_na']],
   ['r_cummin', ['r_is_na', 'r_na']],
   ['r_rep_len', []],
+  /* `tabulate`：缺失与非正数与超出 nbins 的那几格都不记，所以要问 `r_is_na`。
+     不给 `nbins` 时的那个默认长度是另一格（`r_tab_n` —— R 的默认实参是 `max(1, bin)`）。 */
+  ['r_tab_n', ['r_is_na']],
+  ['r_tabulate', ['r_is_na']],
+  /* 不给 `nbins` 的那一格：默认长度要把那条向量读一遍，所以"读两遍"这件事塞进一格
+     函数里（形参只求值一次）—— 调用点上摆不下临时量。 */
+  ['r_tab_a', ['r_tabulate', 'r_tab_n']],
+  ['r_any_na', ['r_is_na']],
+  ['r_append', []],
+  ['r_append_e', ['r_append']],
+  /* `replace(x, k, v)` 就是 `x[k] <- v`，所以越界那一条也接长（借 `r_ext`）。 */
+  ['r_replace', ['r_is_na', 'r_ext', 'r_na']],
   ['r_prod', []],
   ['r_range', ['r_is_na', 'r_na']],
   ['r_diff', []],
@@ -695,6 +707,8 @@ const NAMED_OK = new Map([
   ['numeric', new Set(['length'])], ['double', new Set(['length'])],
   ['integer', new Set(['length'])], ['logical', new Set(['length'])],
   ['character', new Set(['length'])],
+  ['tabulate', new Set(['nbins'])],
+  ['append', new Set(['after'])],
 ]);
 
 /**
@@ -716,6 +730,8 @@ const BUILTINS = new Set([
   'print', 'invisible', 'xor', 'isTRUE', 'isFALSE', 'ifelse',
   /* base 里"向量进向量出"那一族 + 两格统计量。`seq` 与 `rep` 是造向量的。 */
   'sort', 'cumsum', 'prod', 'range', 'diff', 'head', 'tail', 'var', 'sd', 'rep', 'seq', 'rep_len',
+  /* 数格子、问缺失、插一段、换几格 —— 后两格与 `x[k] <- v` 同一套口径（见 `r_replace`）。 */
+  'tabulate', 'anyNA', 'append', 'replace',
   /* 集合与位置那一族（见 `setFnDecl`）。`%in%` 是个算子，不在这张表里。 */
   'which.max', 'which.min', 'match', 'unique', 'duplicated',
   'union', 'intersect', 'setdiff', 'order', 'cumprod', 'cummax', 'cummin',
@@ -1156,6 +1172,15 @@ function applyTy(fn, x, types) {
     case 'cumsum': case 'diff': case 'cumprod': case 'cummax': case 'cummin': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
       return isIvecTy(t) ? RIVEC : RVEC;
+    }
+    /* `tabulate` 数的是"几次"，所以回**整数向量**（零长印 `integer(0)`）；
+       `anyNA` 回一格真假（它自己从不回 `NA`，所以是 bool 而不是三态的 `RLGL1`）。
+       `append` / `replace` 出来的元素类型跟着第一格进去的那条走。 */
+    case 'tabulate': return RIVEC;
+    case 'anyNA': return BOOL;
+    case 'append': case 'replace': {
+      const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
+      return isVecTy(t) ? t : RVEC;
     }
     case 'range': case 'seq': return RVEC;
     /* 集合与位置那一族：位置回一格 int，别的回向量（`duplicated` 回逻辑向量）。
@@ -3239,6 +3264,54 @@ function callOf(x, types, extra, want) {
         if (named !== undefined) cnt = asIntE(exprOf(named, types), typeOfExpr(named, types));
         else if (n >= 2) cnt = asIntE(ev(1), typeOfExpr(all[1], types));
         return lglCall(`r_${fn}`, ev(0), cnt);
+      }
+      case 'tabulate': {
+        /**
+         * `tabulate(bin, nbins)` —— 不给 `nbins` 时走 `r_tab_a`（默认长度 `max(1, bin)`，
+         * 见那两格函数上的账）。字符向量那一侧没接。
+         */
+        if (n < 1) throw new Error('r->IR: tabulate() 至少要一格实参');
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        if (isStrVec(t) || t.kind === 'string') throw new Error(strvGap('tabulate'));
+        const vec = isVecTy(t) ? ev(0) : lglCall('r_vec1', asReal(ev(0), t));
+        const named = namedArg(x, 'nbins');
+        let kk = null;
+        if (named !== undefined) kk = asIntE(exprOf(named, types), typeOfExpr(named, types));
+        else if (n >= 2) kk = asIntE(ev(1), typeOfExpr(all[1], types));
+        return kk === null ? lglCall('r_tab_a', vec) : lglCall('r_tabulate', vec, kk);
+      }
+      case 'anyNA': {
+        /** `anyNA(x)`：一格标量也认（摊成长度 1 的向量）。串那一侧没有 `NA`，所以报。 */
+        if (n !== 1) throw new Error(`r->IR: anyNA() 要一格实参（给了 ${n}）`);
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        if (isStrVec(t) || t.kind === 'string') throw new Error(strvGap('anyNA'));
+        return lglCall('r_any_na', isVecTy(t) ? ev(0) : lglCall('r_vec1', asReal(ev(0), t)));
+      }
+      case 'append': {
+        /** `append(x, values, after)` —— 不给 `after` 就接到最后（走 `r_append_e`）。 */
+        if (n < 2) throw new Error(`r->IR: append() 要两格实参（给了 ${n}）`);
+        const t0 = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        const t1 = all[1] === null ? REAL : typeOfExpr(all[1], types);
+        if (isStrVec(t0) || t0.kind === 'string' || isStrVec(t1) || t1.kind === 'string') {
+          throw new Error(strvGap('append'));
+        }
+        if (isNamedTy(t0)) throw new Error('r->IR: append() 在带名字的向量上还没接（名字那一条要跟着插）');
+        const av = isVecTy(t0) ? ev(0) : lglCall('r_vec1', asReal(ev(0), t0));
+        const bv = isVecTy(t1) ? ev(1) : lglCall('r_vec1', asReal(ev(1), t1));
+        const named = namedArg(x, 'after');
+        let at = null;
+        if (named !== undefined) at = asIntE(exprOf(named, types), typeOfExpr(named, types));
+        else if (n >= 3) at = asIntE(ev(2), typeOfExpr(all[2], types));
+        return at === null ? lglCall('r_append_e', av, bv) : lglCall('r_append', av, bv, at);
+      }
+      case 'replace': {
+        /** `replace(x, list, values)` —— 与 `x[k] <- v` 同一套口径（见 `r_replace`）。 */
+        if (n !== 3) throw new Error(`r->IR: replace() 要三格实参（给了 ${n}）`);
+        const ts = [0, 1, 2].map((k) => (all[k] === null ? REAL : typeOfExpr(all[k], types)));
+        if (ts.some((t) => isStrVec(t) || t.kind === 'string')) throw new Error(strvGap('replace'));
+        if (isNamedTy(ts[0])) throw new Error('r->IR: replace() 在带名字的向量上还没接（名字那一条要跟着走）');
+        const asVec = (k) => (isVecTy(ts[k]) ? ev(k) : lglCall('r_vec1', asReal(ev(k), ts[k])));
+        return lglCall('r_replace', asVec(0), asVec(1), asVec(2));
       }
       case 'rep_len': {
         /** `rep_len(x, n)`：循环取到长度 `n`。字符向量那一侧还没接（存法不同）。 */
@@ -6648,6 +6721,114 @@ function vecFnDecl(name) {
       ],
     };
   }
+  if (name === 'r_tab_n') {
+    /**
+     * `tabulate(bin)` 不给 `nbins` 时的**那个默认长度**。R 的默认实参写的是
+     * `nbins = max(1, bin, na.rm = TRUE)`，而 `.Internal` 收的是 `as.integer(nbins)`
+     * —— 所以 `tabulate(c(2.7, 2.2, 1.9))` 的长度是 **2**（不是 3），印出来是 `1 2`。
+     *
+     * 为什么单独一格函数、不摊在调用点上：`max(1, v)` 要把那条向量读一遍，而调用点上
+     * 摆不下临时量（`tabulate(f(x))` 里 `f(x)` 只该求值一次）。
+     */
+    return {
+      kind: 'fn', name, params: P, ret: INT,
+      body: [
+        declLen(),
+        { kind: 'let', name: 's', type: REAL, init: { kind: 'real', value: 1 } },
+        loop([{
+          kind: 'if',
+          cond: b('&&', { kind: 'unop', op: '!', operand: naQ(elem) }, b('>', elem, acc)),
+          then: [{ kind: 'assign', target: acc, value: elem }],
+          else_: null,
+        }], 0),
+        /* `s >= 1`（初值就是 1），所以 `floor` 与 R 的 `as.integer` 朝零截同解。 */
+        { kind: 'return', values: [call1('toint', call1('rmath', { kind: 'strlit', value: 'floor' }, acc))] },
+      ],
+    };
+  }
+  if (name === 'r_tabulate') {
+    /**
+     * `tabulate(bin, nbins)`：数**每一格 1..nbins 出现了几次**。
+     *
+     * 三种格子都不记（R 的口径，量出来的）：缺失、`<= 0`、`> nbins`。值先朝零截
+     * （`tabulate(c(2.7))` 记进第 2 格）。回的是**整数向量** —— 零长时印 `integer(0)`。
+     */
+    const out = { kind: 'name', name: 'o' };
+    const kk = { kind: 'name', name: 'k' };
+    const j = { kind: 'name', name: 'j' };
+    const t = { kind: 'name', name: 't' };
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RVEC }, { name: 'k', type: INT }],
+      ret: RIVEC,
+      body: [
+        declLen(),
+        ...vecNewAs('o', kk),
+        /* `pnew` 开出来的内存**不保证是零**（`r_ext` 那段账也记着这件事），所以先清一遍。 */
+        {
+          kind: 'for',
+          init: { kind: 'let', name: 'j', type: INT, init: { kind: 'int', value: 0 } },
+          cond: b('<', j, kk),
+          post: { kind: 'assign', target: j, value: b('+', j, { kind: 'int', value: 1 }) },
+          body: [vecSet(out, j, { kind: 'real', value: 0 })],
+        },
+        loop([{
+          kind: 'if',
+          cond: { kind: 'unop', op: '!', operand: naQ(elem) },
+          then: [
+            { kind: 'let', name: 't', type: INT, init: call1('toint', call1('rmath', { kind: 'strlit', value: 'floor' }, elem)) },
+            {
+              kind: 'if',
+              cond: b('&&', b('>=', t, { kind: 'int', value: 1 }), b('<=', t, kk)),
+              then: [vecSet(out, b('-', t, { kind: 'int', value: 1 }),
+                b('+', vecGet(out, b('-', t, { kind: 'int', value: 1 })), { kind: 'real', value: 1 }))],
+              else_: null,
+            },
+          ],
+          else_: null,
+        }], 0),
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_tab_a') {
+    /** `tabulate(bin)`（不给 `nbins`）：默认长度由 `r_tab_n` 量出来。 */
+    return {
+      kind: 'fn', name, params: P, ret: RIVEC,
+      body: [{
+        kind: 'return',
+        values: [{
+          kind: 'call',
+          fn: { kind: 'name', name: 'r_tabulate' },
+          args: [v, { kind: 'call', fn: { kind: 'name', name: 'r_tab_n' }, args: [v] }],
+        }],
+      }],
+    };
+  }
+  if (name === 'r_any_na') {
+    /**
+     * `anyNA(x)`：这条向量里有没有缺失。**`NaN` 也算**（R 的 `is.na(NaN)` 是 TRUE，
+     * 量出来 `anyNA(c(1, NaN))` 是 TRUE）—— 而 `r_is_na` 底下就是 `isnan`，正是这个口径。
+     *
+     * 不在循环里直接 `return`：一格 bool 攒着，读完再回 —— 少一条从循环体里跳出去的边。
+     */
+    const f = { kind: 'name', name: 'f' };
+    return {
+      kind: 'fn', name, params: P, ret: BOOL,
+      body: [
+        declLen(),
+        { kind: 'let', name: 'f', type: BOOL, init: { kind: 'bool', value: false } },
+        loop([{
+          kind: 'if',
+          cond: naQ(elem),
+          then: [{ kind: 'assign', target: f, value: { kind: 'bool', value: true } }],
+          else_: null,
+        }], 0),
+        { kind: 'return', values: [f] },
+      ],
+    };
+  }
   if (name === 'r_cumsum') {
     const out = { kind: 'name', name: 'o' };
     return {
@@ -6736,6 +6917,60 @@ function vecFnDecl(name) {
       ],
     };
   }
+  if (name === 'r_append' || name === 'r_append_e') {
+    /**
+     * `append(x, values, after)`：把 `values` **插在第 `after` 格之后**。
+     * `after = 0` 是插到最前面、`after = length(x)` 是接到最后（那也是不写时的默认）。
+     *
+     * 为什么"接到最后"是**另一格函数**而不是拿 `after = -1` 当暗号：R 那边负的 `after`
+     * 是报错（量出来 `append(c(1,2,3), 9, after = -1)` 报"只有负下标里才能有零"），
+     * 拿它当暗号就是把一格 R 会拒的输入悄悄当成了默认 —— 那是静默答错。
+     */
+    const a = { kind: 'name', name: 'a' };
+    const bb = { kind: 'name', name: 'b' };
+    const at = { kind: 'name', name: 'at' };
+    const out = { kind: 'name', name: 'o' };
+    const na = { kind: 'name', name: 'na' };
+    const nb = { kind: 'name', name: 'nb' };
+    if (name === 'r_append_e') {
+      return {
+        kind: 'fn',
+        name,
+        params: [{ name: 'a', type: RVEC }, { name: 'b', type: RVEC }],
+        ret: RVEC,
+        body: [{
+          kind: 'return',
+          values: [{ kind: 'call', fn: { kind: 'name', name: 'r_append' }, args: [a, bb, vecLen(a)] }],
+        }],
+      };
+    }
+    const i1 = { kind: 'name', name: 'i1' };
+    const i2 = { kind: 'name', name: 'i2' };
+    const i3 = { kind: 'name', name: 'i3' };
+    const forN = (nm, from, cnt, body) => ({
+      kind: 'for',
+      init: { kind: 'let', name: nm, type: INT, init: from },
+      cond: b('<', { kind: 'name', name: nm }, cnt),
+      post: { kind: 'assign', target: { kind: 'name', name: nm }, value: b('+', { kind: 'name', name: nm }, { kind: 'int', value: 1 }) },
+      body,
+    });
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'a', type: RVEC }, { name: 'b', type: RVEC }, { name: 'at', type: INT }],
+      ret: RVEC,
+      body: [
+        { kind: 'let', name: 'na', type: INT, init: vecLen(a) },
+        { kind: 'let', name: 'nb', type: INT, init: vecLen(bb) },
+        ...vecNewAs('o', b('+', na, nb)),
+        /* 前一段、插进来的那一段、后一段 —— 三趟抄。 */
+        forN('i1', { kind: 'int', value: 0 }, at, [vecSet(out, i1, vecGet(a, i1))]),
+        forN('i2', { kind: 'int', value: 0 }, nb, [vecSet(out, b('+', at, i2), vecGet(bb, i2))]),
+        forN('i3', at, na, [vecSet(out, b('+', i3, nb), vecGet(a, i3))]),
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
   if (name === 'r_ext') {
     /**
      * `x[k] <- v` 里 `k` 超出长度时把向量**接长到 k 格**，空档填 `NA`（R 的口径）。
@@ -6770,6 +7005,86 @@ function vecFnDecl(name) {
             then: [vecSet(out, i, vecGet(v, i))],
             else_: [vecSet(out, i, { kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] })],
           }],
+        },
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_replace') {
+    /**
+     * `replace(x, k, v)` 在 R 里就是 `x[k] <- v` 的函数写法 —— 所以这一格与那一格
+     * **同一套口径**：
+     *
+     *   * `v` 比 `k` 短就**循环取**（量出来 `replace(c(1,2,3,4), c(2,3), 0)` 是 `1 0 0 4`）
+     *   * `k` 超出长度就**接长**，空档填 `NA`（`replace(c(1,2), 5, 9)` 是 `1 2 NA NA 9`）
+     *     —— 借的正是 `x[k] <- v` 那一格的 `r_ext`
+     *   * `k` 是 0 的那一格**什么都不写**（R 那边 `x[0] <- 9` 是个空动作）
+     *
+     * 下标是负数那一档（R 里是"除了这几格"）**没接** —— 当场报而不是当成正的写进去。
+     */
+    const ix = { kind: 'name', name: 'ix' };
+    const val = { kind: 'name', name: 'val' };
+    const out = { kind: 'name', name: 'o' };
+    const m = { kind: 'name', name: 'm' };
+    const nv = { kind: 'name', name: 'nv' };
+    const j = { kind: 'name', name: 'j' };
+    const kk = { kind: 'name', name: 'k' };
+    const at = vecGet(ix, j);
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RVEC }, { name: 'ix', type: RVEC }, { name: 'val', type: RVEC }],
+      ret: RVEC,
+      body: [
+        declLen(),
+        { kind: 'let', name: 'm', type: INT, init: vecLen(ix) },
+        { kind: 'let', name: 'nv', type: INT, init: vecLen(val) },
+        /* 先抄一份 —— `replace` 不改进来的那条（R 的赋值是值语义）。 */
+        ...vecNewAs('o', len),
+        {
+          kind: 'for',
+          init: { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
+          cond: b('<', i, len),
+          post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
+          body: [vecSet(out, i, vecGet(v, i))],
+        },
+        {
+          kind: 'for',
+          init: { kind: 'let', name: 'j', type: INT, init: { kind: 'int', value: 0 } },
+          cond: b('<', j, m),
+          post: { kind: 'assign', target: j, value: b('+', j, { kind: 'int', value: 1 }) },
+          body: [
+            {
+              kind: 'if',
+              cond: naQ(at),
+              then: [{
+                kind: 'builtin-stmt',
+                name: 'fail',
+                args: [{ kind: 'string', value: 'replace(): 下标里有 NA —— 写到哪一格说不清' }],
+              }],
+              else_: null,
+            },
+            { kind: 'let', name: 'k', type: INT, init: call1('toint', at) },
+            {
+              kind: 'if',
+              cond: b('<', kk, { kind: 'int', value: 0 }),
+              then: [{
+                kind: 'builtin-stmt',
+                name: 'fail',
+                args: [{ kind: 'string', value: 'replace(): 负下标还没接（R 那边它是"除了这几格"）' }],
+              }],
+              else_: null,
+            },
+            {
+              kind: 'if',
+              cond: b('>=', kk, { kind: 'int', value: 1 }),
+              then: [
+                { kind: 'assign', target: out, value: { kind: 'call', fn: { kind: 'name', name: useFn('r_ext') }, args: [out, kk] } },
+                vecSet(out, b('-', kk, { kind: 'int', value: 1 }), vecGet(val, b('%', j, nv))),
+              ],
+              else_: null,
+            },
+          ],
         },
         { kind: 'return', values: [out] },
       ],

@@ -176,8 +176,9 @@ nmath 那一族**只在第一格实参上**逐元素，别的格先存进临时�
 R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不假装。
 
 进出都是向量的几格：`rev` / `seq_along` / `which` / `sort` / `cumsum` / `cumprod` /
-`cummax` / `cummin` / `diff` / `range` / `head` / `tail` / `rep` / `rep_len` / `seq`；
-出一格数的几格：`sum` / `mean` / `max` / `min` / `prod` / `var` / `sd`。
+`cummax` / `cummin` / `diff` / `range` / `head` / `tail` / `rep` / `rep_len` / `seq` /
+`tabulate` / `append` / `replace`；
+出一格数的几格：`sum` / `mean` / `max` / `min` / `prod` / `var` / `sd` / `anyNA`。
 `which` 回的是**位置**（数值向量），`NA` 直接丢 —— 与 `xs[m]` 不同
 （那边 `NA` 挑出一格 `NA`），这两条口径是 R 自己分开的。
 
@@ -186,6 +187,23 @@ R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不�
 都是假，那一格会被当成"没它大"跳过 —— 印出来是 `1 1 3`，是个**静默的错答案**。
 所以那两格里有一个 `bad` 记着"见过缺失了没有"。`rep_len(x, n)` 是循环取到长度 `n`
 （短了从头再来、长了截掉），字符向量那一侧还没接。
+
+后四格是 2026-09-26 加的：
+
+* `tabulate(bin, nbins)` 数每一格 `1..nbins` 出现了几次。**三种格子都不记**：缺失、
+  `<= 0`、`> nbins`；值先朝零截（`tabulate(c(2.7))` 记进第 2 格）。不给 `nbins` 时
+  R 的默认实参是 `as.integer(max(1, bin, na.rm = TRUE))` —— 所以 `c(2.7, 2.2, 1.9)`
+  的长度是 **2** 而不是 3。回的是整数向量（零长印 `integer(0)`）。
+* `anyNA(x)`：**`NaN` 也算**（R 的 `is.na(NaN)` 是 TRUE，而 `r_is_na` 底下就是 `isnan`）。
+* `append(x, values, after)` 插在第 `after` 格之后。不给 `after` 是"接到最后"，走的是
+  **另一格函数**（`r_append_e`）而不是拿 `after = -1` 当暗号 —— R 那边负的 `after`
+  是报错，拿它当暗号就是把一格 R 会拒的输入悄悄当成了默认。
+* `replace(x, k, v)` 在 R 里就是 `x[k] <- v` 的函数写法，所以与那一格**同一套口径**：
+  `v` 比 `k` 短就循环取、`k` 超长就接长（空档 `NA`，借的是 `r_ext`）、`k` 是 0 是空动作。
+  下标是负数那一档（"除了这几格"）**没接**，当场报。
+
+带名字的向量在 `append` / `replace` 上**没接**（名字那一条要跟着插/跟着走），当场报；
+字符向量那一侧四格都没接。
 
 ### 集合与位置那一族（判据 `ext/r/examples/setfn.R`）
 
@@ -669,6 +687,16 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
       `NA_character_` 没有（见第 11 条）—— 空串就是空串，不是缺失。
     连带的两格：`strsplit` 接了两种形状、`grepl` / `grep` / `sub` / `gsub` 接了
     **按字面找**那一档（都在第三节）—— 正则本身还是没有。
+
+13. `identical()` **没接，而且不是"还没写"那种没接** —— 它要的是"两条向量的
+    `typeof` 一不一样"，而这一档**分不出 R 的 integer 向量与 double 向量**：
+    `c(1, 2, 3)` 与 `c(1L, 2L, 3L)` 在 `typeOfExpr` 里都落成 `RVEC`（那个 `case 'c'`
+    只分"有没有串 / 是不是全逻辑"），标量那一侧 `1` 与 `1L` 也都落成 `int`（见第三节
+    第 4 条：类型按**字面量的写法**分，而"看着像整数"的 `1` 就写成了 `int`）。
+    量出来的 R 口径（2026-09-26）：`identical(1, 1L)` 是 **FALSE**、
+    `identical(c(1,2,3), c(1L,2L,3L))` 也是 **FALSE**。照值比就会答 TRUE ——
+    那是**静默答错**，所以这一格宁可不接。要接它得先把"整数向量"从 `RVEC` 里分出来
+    （`RIVEC` 现在只是个印法记号，不是一种存法），那是另一刀。
 
 ## 五、另一档：libR（ADR-0046）
 
