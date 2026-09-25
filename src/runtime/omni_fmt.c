@@ -540,6 +540,26 @@ static int g_glwin = 0, g_glwin_was = 0;
    `refresh` 那一格据此分流（见那儿的注）。 */
 static long g_grefr = 0;
 
+/* **`klock` 在这一帧里来了第几回** + 上一回给出去的值（帧号一推就清零）。见 gfx_klock_sec。 */
+static long g_gkn = 0;
+static double g_gklast = 0.0;
+
+/* `klock()` / `klock(0)` 的秒数 —— 与 host/gfx-cpu.js 的 `klockSec()` 同一句话：
+   view 模式是真墙上时间；render 模式是确定性时钟（帧号/60），**但同一帧里第二次起
+   往前走一帧的量**（语料里有"把帧限速写在脚本里"那个写法：
+   `otim = tim; do { tim = klock(); } while (tim-otim < 1/60);` —— magpong2 那一族。
+   钉死的时钟让它永远出不来）。一帧读一次的脚本逐字节不变。 */
+static double gfx_klock_sec (void) {
+  double base, v;
+  if (gfx_mode() == 2) return gfx_now_ms() / 1000.0;
+  base = (double)(g_gfno > 0 ? g_gfno - 1 : 0) / 60.0;
+  if (g_gkn == 0) { g_gkn = 1; g_gklast = base; return base; }
+  v = base + (double)g_gkn / 60.0;
+  if (v < g_gklast + 1.0 / 60.0) v = g_gklast + 1.0 / 60.0;
+  g_gkn += 1; g_gklast = v;
+  return v;
+}
+
 /* 窗口那一档的输入：**每次都重新问**（鼠标在动、键在按）。回 1 = 这一档管了。
    `mousx/mousy` 按画布坐标（设备那侧按窗口/帧缓冲比例折算过），`keystatus[]` 按
    DOS 扫描码 —— 与 `OMNI_MOUSE`/`OMNI_KEYS` 那一档同一套口径，所以脚本一个字不用改。 */
@@ -723,12 +743,33 @@ static void gfx_line(double x0, double y0, double x1, double y1, int64_t c) {
   }
 }
 
-static void gfx_disc(double cx, double cy, double r, int64_t c) {
-  int64_t ri = gfx_rnd(r);
-  for (int64_t dy = -ri; dy <= ri; dy++) {
+/* 填充圆：逐行算半弦长，一行一段。
+ *
+ * **两层循环都夹到画布里**（2026-09-26）：三维那一档投影出来的半径在 z 接近近平面时会炸到
+ * 上百万，不夹的话这儿要转 r*r 趟 —— conetest.kc 就是这么超时的。夹完画出来的像素一个不差：
+ * 圆心先取整（对整数 x，gfx_rnd(cx)+x 与 gfx_rnd(cx+x) 相等），画布外那些格本来就被
+ * gfx_px 丢掉。回 1 表示这一格圆把整块画布盖满了（gfx_cone 靠它停下来）。 */
+static int gfx_disc (double cx, double cy, double r, int64_t c) {
+  int64_t ri, cxi, cyi, dy0, dy1, mx, my;
+  /* 半径先夹到 2^30：再大也只是"盖满画布"，但 ri*ri 得留在 int64 里。 */
+  if (!(r >= 0.0)) return 0;
+  ri = (r > 1073741824.0) ? 1073741824 : gfx_rnd(r);
+  if (!(cx > -1e15 && cx < 1e15 && cy > -1e15 && cy < 1e15)) return 0;
+  cxi = gfx_rnd(cx); cyi = gfx_rnd(cy);
+  if (cxi + ri < 0 || cyi + ri < 0 || cxi - ri >= g_gw || cyi - ri >= g_gh) return 0;
+  dy0 = (-ri > -cyi) ? -ri : -cyi;
+  dy1 = (ri < g_gh - 1 - cyi) ? ri : g_gh - 1 - cyi;
+  for (int64_t dy = dy0; dy <= dy1; dy++) {
     int64_t dx = (int64_t)floor(sqrt((double)(ri * ri - dy * dy)));
-    for (int64_t x = -dx; x <= dx; x++) gfx_px(cx + (double)x, cy + (double)dy, c);
+    int64_t x0 = (-dx > -cxi) ? -dx : -cxi;
+    int64_t x1 = (dx < g_gw - 1 - cxi) ? dx : g_gw - 1 - cxi;
+    for (int64_t x = x0; x <= x1; x++) gfx_px((double)(cxi + x), (double)(cyi + dy), c);
   }
+  /* 盖满的判据是到画布最远那个角的距离 <= ri：那样每一行的 floor(sqrt(ri*ri-dy*dy)) 都
+     >= 该行要的半弦长，所以这是准的，不是估的。 */
+  mx = (cxi > g_gw - 1 - cxi) ? cxi : g_gw - 1 - cxi;
+  my = (cyi > g_gh - 1 - cyi) ? cyi : g_gh - 1 - cyi;
+  return (ri * ri >= mx * mx + my * my) ? 1 : 0;
 }
 
 static void gfx_circ(double cx, double cy, double r, int64_t c) {
@@ -993,11 +1034,49 @@ double omni_gfx_arr(omni_str name, double a0, double a1, double a2, double a3,
   return 0.0;
 }
 
-static void gfx_cone(double x0, double y0, double r0, double x1, double y1, double r1, int64_t c) {  double dx = x1 - x0, dy = y1 - y0;
-  int64_t n = (int64_t)floor(sqrt(dx * dx + dy * dy) + 1.0);
-  for (int64_t i = 0; i <= n; i++) {
+/* 一条轴上可见 t 区间的界（lo <= p0 + t*d <= hi）：`hi_side` 为 0 取下界、1 取上界。
+   d == 0 那一档要么整条都在（0..1）、要么整条都不在（回 2 / -1 配成空区间）。 */
+static double gfx_taxis (double p0, double d, double lo, double hi, int hi_side) {
+  if (d == 0.0) {
+    if (p0 < lo || p0 > hi) return hi_side ? -1.0 : 2.0;
+    return hi_side ? 1.0 : 0.0;
+  }
+  if (d > 0.0) return hi_side ? (hi - p0) / d : (lo - p0) / d;
+  return hi_side ? (lo - p0) / d : (hi - p0) / d;
+}
+
+/* drawcone(x,y,r,x2,y2,r2) 是粗线：沿线铺圆。
+ *
+ * **两处夹**（2026-09-26，与 gfx_disc 那一刀同源）：n 是屏幕空间长度，三维投影一炸它也炸。
+ * 一、i 只走沾画布的那一段（线段按 ±(rmax+2) 的余量夹一趟，扔掉的那些圆一个像素都画不出来）；
+ * 二、某一格圆一旦盖满画布就停 —— 整条 cone 同一个颜色 c，后面那些圆只会把同样的颜色写回
+ * 同一片格子，出图逐字节相同。 */
+static void gfx_cone (double x0, double y0, double r0, double x1, double y1, double r1, int64_t c) {
+  double dx = x1 - x0, dy = y1 - y0;
+  double len = sqrt(dx * dx + dy * dy) + 1.0;
+  double mg, tlo, thi, a, b;
+  int64_t n, i, ie;
+  if (!(len >= 1.0) || len > 1e15) return;
+  n = (int64_t)floor(len);
+  mg = ((r0 > r1) ? r0 : r1);
+  if (!(mg > 0.0)) mg = 0.0;
+  mg += 2.0;
+  tlo = 0.0; thi = 1.0;
+  a = gfx_taxis(x0, dx, -mg, (double)(g_gw - 1) + mg, 0);
+  b = gfx_taxis(y0, dy, -mg, (double)(g_gh - 1) + mg, 0);
+  if (a > tlo) tlo = a;
+  if (b > tlo) tlo = b;
+  a = gfx_taxis(x0, dx, -mg, (double)(g_gw - 1) + mg, 1);
+  b = gfx_taxis(y0, dy, -mg, (double)(g_gh - 1) + mg, 1);
+  if (a < thi) thi = a;
+  if (b < thi) thi = b;
+  if (!(thi >= tlo)) return;
+  i = (int64_t)ceil(tlo * (double)n);
+  ie = (int64_t)floor(thi * (double)n);
+  if (ie > n) ie = n;
+  for (; i <= ie; i++) {
     double t = (double)i / (double)n;
-    gfx_disc(x0 + t * dx, y0 + t * dy, r0 + t * (r1 - r0), c);
+    if (gfx_disc(x0 + t * dx, y0 + t * dy, r0 + t * (r1 - r0), c)) return;
   }
 }
 
@@ -1382,6 +1461,7 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
     gfx_frame_end();
     if ((g_glwin_was && g_glwin == 0) || g_gfno >= g_gframes) { gfx_perf_report(); exit(0); }
     g_gfno += 1;
+    g_gkn = 0;                        /* 新一帧：klock 那个"帧内第几次"从头数 */
     g_gtprev = gfx_now_ms();
     return 0.0;
   }
@@ -1399,24 +1479,21 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
     }
     if (g_gfno >= g_gframes) { gfx_perf_report(); return 0.0; }
     g_gfno += 1;
+    g_gkn = 0;                        /* 新一帧：klock 那个"帧内第几次"从头数 */
     g_gtprev = gfx_now_ms();
     return 1.0;
   }
   if (!strcmp(nm, "numframes") && argc == 0) { gfx_need(); return (double)(g_gfno > 0 ? g_gfno - 1 : 0); }
   /* `klock()`：秒。**render 模式下是确定性时钟**（帧号 / 60，照 c_impl 的 1/60 clock scale）
-     —— 与 host/gfx-cpu.js 那一格一字不差，所以三条腿仍然逐字节相同。view 模式才是墙上时间。 */
-  if (!strcmp(nm, "klock") && argc == 0) {
-    return gfx_mode() == 2 ? gfx_now_ms() / 1000.0
-                           : (double)(g_gfno > 0 ? g_gfno - 1 : 0) / 60.0;
-  }
+     —— 与 host/gfx-cpu.js 的 `klockSec()` 一字不差，所以三条腿仍然逐字节相同。
+     view 模式才是墙上时间。**同一帧里第二次起往前走一帧的量**（见那边的头注：
+     magpong2 那一族把帧限速写在脚本里，钉死的时钟让它出不来）。 */
+  if (!strcmp(nm, "klock") && argc == 0) { return gfx_klock_sec(); }
   /* `klock(i)`：0 与 klock() 同；|i| 在 1..9 是日期分量（i>0 本地、i<0 UTC）——
      口径照 polydraw_src/polydraw.c:1662 的 myklock，与 host/gfx-cpu.js 的 klockParts 同。 */
   if (!strcmp(nm, "klock") && argc == 1) {
     int i = (int)a0;
-    if (i == 0) {
-      return gfx_mode() == 2 ? gfx_now_ms() / 1000.0
-                             : (double)(g_gfno > 0 ? g_gfno - 1 : 0) / 60.0;
-    }
+    if (i == 0) { return gfx_klock_sec(); }
     if (i > -10 && i < 10) {
       struct timespec ts;
       clock_gettime(CLOCK_REALTIME, &ts);

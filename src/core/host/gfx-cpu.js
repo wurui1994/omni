@@ -99,6 +99,27 @@ const QUERY = new Set(['nextframe', 'numframes', 'klock', 'xres', 'yres',
   'mousx', 'mousy', 'bstatus', 'setbstatus', 'keystatus', 'setkeystatus', 'rgb']);
 
 /**
+ * **`klock()` / `klock(0)` 的秒数**。`view` 模式是真墙上时间；`render` 模式是
+ * **确定性时钟**（帧号 / 60，照 c_impl 的 `pdrl_set_clock_scale(ctx, 1/60)`）——
+ * 离屏画一帧要出一份能逐字节比的图，墙上时间在那儿是噪声。
+ *
+ * **同一帧里第二次起要往前走**（2026-09-26）：语料里有"把帧限速写在脚本里"那个写法
+ * （`otim = tim; do { tim = klock(); } while (tim-otim < 1/60);` —— `magpong2` 那一族）。
+ * 钉死的时钟让它永远出不来，`--gfx host` 上就是死循环。规矩是：
+ * **一帧里头一次仍回钉死那个值**（所以"一帧读一次"的脚本逐字节不变），
+ * 之后每一次再往前一帧的量（1/60）。仍然是确定性的 —— 一个字都不读墙上时间。
+ */
+function klockSec() {
+  if (modeOf() === 'view') return nowMs() / 1000;
+  const base = (D.fno > 0 ? D.fno - 1 : 0) / 60;
+  const n = D.kn ?? 0;
+  D.kn = n + 1;
+  const v = n === 0 ? base : Math.max(base + n / 60, (D.klast ?? base) + 1 / 60);
+  D.klast = v;
+  return v;
+}
+
+/**
  * **`klock(i)` 的日期那一族**（口径照 `polydraw_src/polydraw.c:1662` 的 `myklock`）：
  *
  *   i = 0        从开跑起的秒数（render 模式下是"帧号/60"的确定性时钟，见下面那一格）
@@ -333,13 +354,34 @@ function line(x0, y0, x1, y1, c) {
   }
 }
 
-/** 填充圆：逐行算半弦长，一行一段。 */
+/**
+ * 填充圆：逐行算半弦长，一行一段。
+ *
+ * **两层循环都夹到画布里**（2026-09-26）：三维那一档投影出来的半径在 `z` 接近近平面时
+ * 会炸到上百万，不夹的话这儿要转 `r²` 趟 —— `conetest.kc` 就是这么超时的。
+ * 夹完画出来的像素**一个不差**：圆心先取整（对整数 `x`，`rnd(cx)+x` 与 `rnd(cx+x)` 相等），
+ * 画布外那些格本来就被 `px` 丢掉。
+ *
+ * 回 true = **这一格圆把整块画布盖满了**（`cone` 靠它停下来）。
+ */
 function disc(cx, cy, r, c) {
   const ri = rnd(r);
-  for (let dy = -ri; dy <= ri; dy++) {
+  if (!(ri >= 0)) return false;
+  const cxi = rnd(cx);
+  const cyi = rnd(cy);
+  if (cxi + ri < 0 || cyi + ri < 0 || cxi - ri >= D.w || cyi - ri >= D.h) return false;
+  const dy0 = Math.max(-ri, -cyi);
+  const dy1 = Math.min(ri, D.h - 1 - cyi);
+  for (let dy = dy0; dy <= dy1; dy++) {
     const dx = Math.floor(Math.sqrt(ri * ri - dy * dy));
-    for (let x = -dx; x <= dx; x++) px(cx + x, cy + dy, c);
+    const x1 = Math.min(dx, D.w - 1 - cxi);
+    for (let x = Math.max(-dx, -cxi); x <= x1; x++) px(cxi + x, cyi + dy, c);
   }
+  /* 盖满的判据是**到画布最远那个角的距离** ≤ `ri`：那样每一行的 `floor(sqrt(ri²-dy²))`
+     都 ≥ 该行要的半弦长，所以这是准的，不是估的。 */
+  const mx = Math.max(cxi, D.w - 1 - cxi);
+  const my = Math.max(cyi, D.h - 1 - cyi);
+  return ri * ri >= mx * mx + my * my;
 }
 
 /** 描边圆：中点画圆 + 八分对称。 */
@@ -362,14 +404,38 @@ function circ(cx, cy, r, c) {
   }
 }
 
-/** `drawcone(x,y,r,x2,y2,r2)` 是**粗线**：沿线铺圆（形状对、边缘比真梯形略毛）。 */
+/** 一条轴上可见 `t` 区间的下界（`lo <= p0 + t*d <= hi`）；`d === 0` 那一档整条都不在就回 2。 */
+function axLo(p0, d, lo, hi) {
+  if (d === 0) return (p0 < lo || p0 > hi) ? 2 : 0;
+  return d > 0 ? (lo - p0) / d : (hi - p0) / d;
+}
+
+/** 同上的上界；`d === 0` 那一档整条都不在就回 -1（与 `axLo` 的 2 配成空区间）。 */
+function axHi(p0, d, lo, hi) {
+  if (d === 0) return (p0 < lo || p0 > hi) ? -1 : 1;
+  return d > 0 ? (hi - p0) / d : (lo - p0) / d;
+}
+
+/**
+ * `drawcone(x,y,r,x2,y2,r2)` 是**粗线**：沿线铺圆（形状对、边缘比真梯形略毛）。
+ *
+ * **两处夹**（2026-09-26，与 `disc` 那一刀同源）：`n` 是屏幕空间长度，三维投影一炸它也炸。
+ * 一、`i` 只走**沾画布的那一段**（线段按 `±(rmax+2)` 的余量夹一趟，扔掉的那些圆一个像素
+ * 都画不出来）；二、某一格圆一旦盖满画布就**停** —— 整条 cone 同一个颜色 `c`，后面那些圆
+ * 只会把同样的颜色写回同一片格子，出图逐字节相同。
+ */
 function cone(x0, y0, r0, x1, y1, r1, c) {
   const dx = x1 - x0;
   const dy = y1 - y0;
   const n = Math.floor(Math.hypot(dx, dy) + 1);
-  for (let i = 0; i <= n; i++) {
+  if (!(n >= 1) || n > 1e15) return;
+  const mg = Math.max(r0, r1, 0) + 2;
+  const tlo = Math.max(0, axLo(x0, dx, -mg, D.w - 1 + mg), axLo(y0, dy, -mg, D.h - 1 + mg));
+  const thi = Math.min(1, axHi(x0, dx, -mg, D.w - 1 + mg), axHi(y0, dy, -mg, D.h - 1 + mg));
+  const ie = Math.min(n, Math.floor(thi * n));
+  for (let i = Math.ceil(tlo * n); i <= ie; i++) {
     const t = i / n;
-    disc(x0 + t * dx, y0 + t * dy, r0 + t * (r1 - r0), c);
+    if (disc(x0 + t * dx, y0 + t * dy, r0 + t * (r1 - r0), c)) break;
   }
 }
 
@@ -573,6 +639,7 @@ export function gfxCall(name, args) {
         throw e;
       }
       D.fno += 1;
+      D.kn = 0;                         /* 新一帧：`klock` 那个"帧内第几次"从头数 */
       D.tPrev = nowMs();
       return 0;
     }
@@ -594,22 +661,19 @@ export function gfxCall(name, args) {
       if (D.fno > 0) frameEnd();
       if (D.fno >= D.frames) { perfReport(); return 0; }
       D.fno += 1;
+      D.kn = 0;                         /* 新一帧：`klock` 那个"帧内第几次"从头数 */
       D.tPrev = nowMs();
       return 1;
     }
     case 'numframes/0': need(320, 240); return D.fno > 0 ? D.fno - 1 : 0;
     /**
-     * `klock()`：秒。**render 模式下是确定性时钟**（帧号 / 60，照 c_impl 的
-     * `pdrl_set_clock_scale(ctx, 1/60)`）—— 离屏画一帧要出一份能逐字节比的图，
-     * 墙上时间在那儿是噪声。`view` 模式（有窗口地跑）才是真墙上时间。
+     * `klock()`：秒。见 `klockSec()` 的头注（render 模式是确定性时钟、一帧里第二次起往前走）。
      */
     case 'klock/0':
-      return modeOf() === 'view' ? nowMs() / 1000 : (D.fno > 0 ? D.fno - 1 : 0) / 60;
+      return klockSec();
     /* `klock(i)`：0 与 klock() 同；|i| 在 1..9 是日期分量（见 `klockParts` 的头注）。 */
     case 'klock/1':
-      if (Math.trunc(a(0)) === 0) {
-        return modeOf() === 'view' ? nowMs() / 1000 : (D.fno > 0 ? D.fno - 1 : 0) / 60;
-      }
+      if (Math.trunc(a(0)) === 0) return klockSec();
       return klockParts(a(0));
     /* `FRAMEINIT`（`evaldraw.txt:40`）：第一帧回 1、之后回 0 —— 脚本拿它当"这一帧
        要不要重新初始化"。`refresh`/`nextframe` 那一格推帧号，所以这儿只读。 */

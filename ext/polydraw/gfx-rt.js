@@ -223,20 +223,55 @@ export function gfxFnDecls(defW, defH) {
         [ex(call('gfx_disc', [nm('cx'), nm('cy'), nm('r')]))]),
       ret(num(0)),
     ]),
-    /* 填充圆：逐行算半弦长，一行一段。 */
+    /* 填充圆：逐行算半弦长，一行一段。
+     *
+     * **两层循环都夹到画布里**（2026-09-26）：三维那一档投影出来的半径会在 `z` 接近
+     * `ZNEAR` 时炸到上百万，不夹的话这儿要转 `r²` 趟 —— `conetest.kc` 就是这么超时的
+     * （采样 100% 落在 `gfx_cone -> gfx_disc -> gfx_px`）。夹完画出来的像素**一个不差**：
+     * 圆心先取整（`round(cx)+x` 与 `round(cx+x)` 对整数 `x` 相等），画布外那些格
+     * 本来就被 `gfx_px` 丢掉。 */
     fn('gfx_disc', ['cx', 'cy', 'r'], [
+      ex(call('gfx_need', [])),
       letR('ri', call('gfx_round', [nm('r')])),
+      iff(bin('<', nm('ri'), num(0)), [ret(num(0))]),
+      letR('cxi', call('gfx_round', [nm('cx')])),
+      letR('cyi', call('gfx_round', [nm('cy')])),
+      /* 整个圆压根不沾画布：一趟都不用转。 */
+      iff(bin('||', bin('||', bin('<', bin('+', nm('cxi'), nm('ri')), num(0)),
+        bin('<', bin('+', nm('cyi'), nm('ri')), num(0))),
+      bin('||', bin('>=', bin('-', nm('cxi'), nm('ri')), nm('gfx_w')),
+        bin('>=', bin('-', nm('cyi'), nm('ri')), nm('gfx_h')))),
+      [ret(num(0))]),
       letR('dy', bin('-', num(0), nm('ri'))),
-      whil(bin('<=', nm('dy'), nm('ri')), [
+      letR('dye', nm('ri')),
+      iff(bin('<', nm('dy'), bin('-', num(0), nm('cyi'))), [set('dy', bin('-', num(0), nm('cyi')))]),
+      iff(bin('>', nm('dye'), bin('-', bin('-', nm('gfx_h'), num(1)), nm('cyi'))),
+        [set('dye', bin('-', bin('-', nm('gfx_h'), num(1)), nm('cyi')))]),
+      whil(bin('<=', nm('dy'), nm('dye')), [
         letR('dx', rm('floor', [rm('sqrt', [bin('-',
           bin('*', nm('ri'), nm('ri')), bin('*', nm('dy'), nm('dy')))])])),
         letR('x', bin('-', num(0), nm('dx'))),
-        whil(bin('<=', nm('x'), nm('dx')), [
-          ex(call('gfx_px', [bin('+', nm('cx'), nm('x')), bin('+', nm('cy'), nm('dy')), nm('gfx_col')])),
+        letR('xe', nm('dx')),
+        iff(bin('<', nm('x'), bin('-', num(0), nm('cxi'))), [set('x', bin('-', num(0), nm('cxi')))]),
+        iff(bin('>', nm('xe'), bin('-', bin('-', nm('gfx_w'), num(1)), nm('cxi'))),
+          [set('xe', bin('-', bin('-', nm('gfx_w'), num(1)), nm('cxi')))]),
+        whil(bin('<=', nm('x'), nm('xe')), [
+          ex(call('gfx_px', [bin('+', nm('cxi'), nm('x')), bin('+', nm('cyi'), nm('dy')), nm('gfx_col')])),
           set('x', bin('+', nm('x'), num(1))),
         ]),
         set('dy', bin('+', nm('dy'), num(1))),
       ]),
+      /* 回 1 表示"这一格圆把整块画布盖满了"—— `gfx_cone` 靠它停下来（见那儿的注）。
+         判据是**到画布最远那个角的距离** ≤ `ri`：那样每一行的 `floor(sqrt(ri²-dy²))`
+         都 ≥ 该行需要的半弦长，所以是准的，不是估的。 */
+      letR('mx', nm('cxi')),
+      iff(bin('>', bin('-', bin('-', nm('gfx_w'), num(1)), nm('cxi')), nm('mx')),
+        [set('mx', bin('-', bin('-', nm('gfx_w'), num(1)), nm('cxi')))]),
+      letR('my', nm('cyi')),
+      iff(bin('>', bin('-', bin('-', nm('gfx_h'), num(1)), nm('cyi')), nm('my')),
+        [set('my', bin('-', bin('-', nm('gfx_h'), num(1)), nm('cyi')))]),
+      iff(bin('>=', bin('*', nm('ri'), nm('ri')),
+        bin('+', bin('*', nm('mx'), nm('mx')), bin('*', nm('my'), nm('my')))), [ret(num(1))]),
       ret(num(0)),
     ]),
     /* 描边圆：中点画圆 + 八分对称。 */
@@ -262,20 +297,66 @@ export function gfxFnDecls(defW, defH) {
       ]),
       ret(num(0)),
     ]),
+    /* 一条轴上的可见 `t` 区间（`lo <= p0 + t*d <= hi`）：`gfx_ta` 是下界、`gfx_tb` 是上界。
+       `d == 0` 那一档要么整条都在（0..1）、要么整条都不在（回一对空区间 2 > -1）。 */
+    fn('gfx_ta', ['p0', 'd', 'lo', 'hi'], [
+      iff(bin('==', nm('d'), num(0)),
+        [iff(bin('||', bin('<', nm('p0'), nm('lo')), bin('>', nm('p0'), nm('hi'))), [ret(num(2))]),
+          ret(num(0))]),
+      iff(bin('>', nm('d'), num(0)), [ret(bin('/', bin('-', nm('lo'), nm('p0')), nm('d')))]),
+      ret(bin('/', bin('-', nm('hi'), nm('p0')), nm('d'))),
+    ]),
+    fn('gfx_tb', ['p0', 'd', 'lo', 'hi'], [
+      iff(bin('==', nm('d'), num(0)),
+        [iff(bin('||', bin('<', nm('p0'), nm('lo')), bin('>', nm('p0'), nm('hi'))), [ret(num(-1))]),
+          ret(num(1))]),
+      iff(bin('>', nm('d'), num(0)), [ret(bin('/', bin('-', nm('hi'), nm('p0')), nm('d')))]),
+      ret(bin('/', bin('-', nm('lo'), nm('p0')), nm('d'))),
+    ]),
     /* `drawcone(x,y,r,x2,y2,r2)` 是**粗线**：这一版沿线铺圆（形状对、边缘比真梯形略毛）。
-       要逐像素对上旧实现得按 `evaldraw.txt` 那一格补 —— 记在任务 #20 里。 */
+       要逐像素对上旧实现得按 `evaldraw.txt` 那一格补 —— 记在任务 #20 里。
+     *
+     * **两处夹**（2026-09-26，与 `gfx_disc` 那一刀同源）：三维投影出来的坐标与半径在
+     * `z` 接近 `ZNEAR` 时会到上百万，`n` 是屏幕空间长度所以也跟着炸。
+     * 一、`i` 只走**沾画布的那一段**（把线段按 `±(rmax+2)` 的余量夹一趟，扔掉的那些圆
+     * 一个像素都画不出来）；二、某一格圆一旦把整块画布盖满就**停** —— 整条 cone 是同一个
+     * `gfx_col`，后面那些圆只会把同样的颜色写进同一片格子，出图逐字节相同。 */
     fn('gfx_cone', ['x0', 'y0', 'r0', 'x1', 'y1', 'r1'], [
+      ex(call('gfx_need', [])),
       letR('dx', bin('-', nm('x1'), nm('x0'))),
       letR('dy', bin('-', nm('y1'), nm('y0'))),
       letR('n', rm('floor', [bin('+', rm('hypot', [nm('dx'), nm('dy')]), num(1))])),
-      letR('i', num(0)),
-      whil(bin('<=', nm('i'), nm('n')), [
+      /* 长度算不出来（NaN）或大到没法当步数用：这条 cone 画不出东西。 */
+      iff(bin('||', bin('!=', nm('n'), nm('n')),
+        bin('||', bin('<', nm('n'), num(1)), bin('>', nm('n'), num(1e15)))), [ret(num(0))]),
+      letR('rm', nm('r0')),
+      iff(bin('>', nm('r1'), nm('rm')), [set('rm', nm('r1'))]),
+      iff(bin('<', nm('rm'), num(0)), [set('rm', num(0))]),
+      letR('mg', bin('+', nm('rm'), num(2))),
+      letR('tlo', call('gfx_ta', [nm('x0'), nm('dx'), bin('-', num(0), nm('mg')),
+        bin('+', bin('-', nm('gfx_w'), num(1)), nm('mg'))])),
+      letR('thi', call('gfx_tb', [nm('x0'), nm('dx'), bin('-', num(0), nm('mg')),
+        bin('+', bin('-', nm('gfx_w'), num(1)), nm('mg'))])),
+      letR('t2', call('gfx_ta', [nm('y0'), nm('dy'), bin('-', num(0), nm('mg')),
+        bin('+', bin('-', nm('gfx_h'), num(1)), nm('mg'))])),
+      letR('t3', call('gfx_tb', [nm('y0'), nm('dy'), bin('-', num(0), nm('mg')),
+        bin('+', bin('-', nm('gfx_h'), num(1)), nm('mg'))])),
+      iff(bin('>', nm('t2'), nm('tlo')), [set('tlo', nm('t2'))]),
+      iff(bin('<', nm('t3'), nm('thi')), [set('thi', nm('t3'))]),
+      iff(bin('<', nm('tlo'), num(0)), [set('tlo', num(0))]),
+      iff(bin('>', nm('thi'), num(1)), [set('thi', num(1))]),
+      letR('i', rm('ceil', [bin('*', nm('tlo'), nm('n'))])),
+      letR('ie', rm('floor', [bin('*', nm('thi'), nm('n'))])),
+      iff(bin('>', nm('ie'), nm('n')), [set('ie', nm('n'))]),
+      letR('go', num(1)),
+      whil(bin('&&', bin('!=', nm('go'), num(0)), bin('<=', nm('i'), nm('ie'))), [
         letR('t', bin('/', nm('i'), nm('n'))),
-        ex(call('gfx_disc', [
+        letR('cov', call('gfx_disc', [
           bin('+', nm('x0'), bin('*', nm('t'), nm('dx'))),
           bin('+', nm('y0'), bin('*', nm('t'), nm('dy'))),
           bin('+', nm('r0'), bin('*', nm('t'), bin('-', nm('r1'), nm('r0')))),
         ])),
+        iff(bin('!=', nm('cov'), num(0)), [set('go', num(0))]),
         set('i', bin('+', nm('i'), num(1))),
       ]),
       ret(num(0)),
