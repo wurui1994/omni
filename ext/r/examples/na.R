@@ -35,3 +35,25 @@ cat(NA + 1, "\n", sep = "")
 cat(is.finite(NA), "\n", sep = "")
 cat(exp(Inf), "\n", sep = "")
 cat(log(0), "\n", sep = "")
+
+# 这四格**在一条向量上**逐元素出一条逻辑向量（2026-09-26 接了 —— 从前只有标量那一档，
+# 给一条向量会一路走到 `.sx` 才撞上 `(toreal E) 的参数要是 int，这里是 real*`）。
+# 出来的值只有 TRUE / FALSE，**没有 NA**：这四格都是"问一句"，`is.finite(NA)` 是 FALSE。
+xs <- c(1, NA, NaN, Inf, -Inf, 2.5)
+print(is.na(xs))
+print(is.nan(xs))
+print(is.finite(xs))
+print(is.infinite(xs))
+print(!is.na(xs))
+# 接着用：按"不缺失"挑出来、数一数
+print(xs[!is.na(xs)])
+cat(sum(is.na(xs)), "\n", sep = "")
+cat(any(is.na(xs)), " ", all(is.finite(xs)), "\n", sep = "")
+# 带名字的向量上名字**跟着走**（R 也是；`duplicated` 相反，R 自己就丢）
+v <- c(a = 1, b = NA, ccc = 3)
+print(is.na(v))
+print(is.finite(v))
+print(!is.na(v))
+print(duplicated(c(x = 1, y = 1, z = 2)))
+# 零长那一档
+print(is.na(numeric(0)))

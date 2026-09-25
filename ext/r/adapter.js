@@ -276,6 +276,12 @@ const FN_DEPS = new Map([
   ['r_unique', ['r_same']],
   ['r_dup', ['r_same']],
   ['r_any_dup', ['r_same']],
+  /* 向量上的 `is.na` / `is.nan` 那两格体里问的是标量那一档；`is.finite` / `is.infinite`
+     直接 ccall，没有生成出来的依赖。 */
+  ['r_na_v', ['r_is_na']],
+  ['r_nan_v', ['r_is_nan']],
+  ['r_fin_v', []],
+  ['r_inf_v', []],
   /* 这三格的体里用 `r_in1` 问"另一条里有没有这一格"（`setFnDecl2` 的 `inW`）——
      登记漏了的话它只在"源码里还另有一处 `%in%`"时凑巧能链上（量出来的：`print.R` 里
      单写 `intersect(1:2, 3:4)` 报 `未声明的函数 'r_in1'`）。 */
@@ -572,9 +578,19 @@ const NAME_DROP_OK = new Set([
   'names', 'setNames', 'unname', 'print', 'invisible', 'cat',
   'paste', 'paste0', 'sprintf', 'length', 'sum', 'mean', 'max', 'min', 'prod',
   'var', 'sd', 'range', 'any', 'all', 'unique', 'seq_along', 'seq_len',
+  /* `duplicated` 量出来 R 自己也丢名字（2026-09-26）—— 从前这张表外，于是带名字的向量上报。 */
+  'duplicated',
   'as.character', 'as.numeric', 'as.integer',
   'is.numeric', 'is.character', 'is.logical', 'stop', 'stopifnot',
 ]);
+/**
+ * **名字跟得住的那几格** —— R 把名字带过去，这一档也带（见 `namesExprOf` 里同一批名字）。
+ * 都是"逐元素问一句"那种：长度不变、位置不动，所以名字那一条原样跟着。
+ *
+ * `duplicated` **不**在这儿 —— 量出来（`Rscript`，2026-09-26）R 自己就把名字丢了
+ * （`duplicated(c(x=1,y=1,z=2))` 印的是 `[1] FALSE  TRUE FALSE`），它归 `NAME_DROP_OK`。
+ */
+const NAME_KEEP = new Set(['is.na', 'is.nan', 'is.finite', 'is.infinite']);
 /** 第 i 格（0 起）。方言的 `{kind:'index'}` 落成 `(aget …)`，赋值那侧落 `(aset …)`。 */
 const svGet = (v, i) => ({ kind: 'index', obj: v, index: i });
 const svLen = (v) => call1('alen', v);
@@ -977,6 +993,12 @@ function namesExprOf(x, types) {
     if (as.length < 1 || !isStrVec(typeOfExpr(as[0], types))) return null;
     return exprOf(as[0], types);
   }
+  /* 逐元素问一句那几格（`NAME_KEEP`）：长度不变、位置不动，名字**原样跟着**。
+     这儿只看第一格实参 —— 那几格都是一元的。 */
+  if (NAME_KEEP.has(fn)) {
+    const as = posArgs(x);
+    return as.length < 1 ? null : namesExprOf(as[0], types);
+  }
   if (fn === 'setNames') {
     const as = posArgs(x);
     if (as.length !== 2) throw new Error(`r->IR: setNames() 要两格实参（给了 ${as.length}）`);
@@ -1216,8 +1238,15 @@ function applyTy(fn, x, types) {
   }
   /* `r*` 那一族出的是**长度 n 的向量**（R 里 `rnorm(1)` 也是一格长度 1 的向量）。 */
   if (fn !== null && RRAND.has(fn)) return RVEC;
-  if (fn !== null && PRED.has(fn)) return BOOL;
-  if (fn === 'is.na' || fn === 'is.nan') return BOOL;
+  /**
+   * `is.na` / `is.nan` / `is.finite` / `is.infinite` —— 标量那一档回布尔，**一条向量**上
+   * 逐元素回一条逻辑向量（R 也是），带名字的向量上名字**跟着走**（量出来的）。
+   */
+  if (fn !== null && (PRED.has(fn) || fn === 'is.na' || fn === 'is.nan')) {
+    const t0 = args.length > 0 ? typeOfExpr(args[0], types) : REAL;
+    if (isVecTy(t0)) return isNamedTy(t0) ? RNLGL : RLGL;
+    return BOOL;
+  }
   switch (fn) {
     /* `paste(v, collapse=s)` 把一条向量连成**一格串**；不给 `collapse` 而有向量参与时
        逐元素出一条**字符向量**（`paste0("#", 1:3)`）。 */
@@ -1385,6 +1414,7 @@ function applyTy(fn, x, types) {
       if (isStrVec(t) || t.kind === 'string') return RSTRV;
       return isIvecTy(t) ? RIVEC : RVEC;
     }
+    /* `duplicated` 回"这一格前面见过没有" —— **名字不跟着**（R 自己就丢，量出来的）。 */
     case 'duplicated': return RLGL;
     /* `numeric(n)` 那一族：出一条零向量（`logical(n)` 是一条 FALSE 的逻辑向量）。
        `integer(n)` 的零长印 `integer(0)` —— 元素类型不一样。 */
@@ -3219,7 +3249,7 @@ function callOf(x, types, extra, want) {
    * 这一档只带值：静默带过去的话 `print` 会少印名字那一行。用户函数也算 —— 名字那一条
    * 是**跟着变量**走的，传不进被调方。
    */
-  if (fn !== null && !NAME_DROP_OK.has(fn)
+  if (fn !== null && !NAME_DROP_OK.has(fn) && !NAME_KEEP.has(fn)
       && all.some((a) => a !== null && isNamedTy(typeOfExpr(a, types)))) {
     throw new Error(`r->IR: ${fn}() 收了一格**带名字的向量** —— 这一档名字只跟着`
       + '逐元素算术与 `names` / `setNames` / `unname` / `v["a"]` 走（见 ext/r/SPEC.md 第二节）。'
@@ -3242,21 +3272,30 @@ function callOf(x, types, extra, want) {
     ? { kind: 'call', fn: { kind: 'name', name: useFn('r_drop_na') }, args: [e] }
     : e);
 
-  /* `is.na` / `is.nan`：走那两格按指针的生成函数（载荷不能按值过，见 `PTR_REAL` 那段）。 */
+  /* `is.na` / `is.nan`：走那两格按指针的生成函数（载荷不能按值过，见 `PTR_REAL` 那段）。
+     一条向量进来时走 `r_na_v` / `r_nan_v`，逐元素出一条逻辑向量。 */
   if (fn === 'is.na' || fn === 'is.nan') {
     if (n !== 1) throw new Error(`r->IR: ${fn}() 要正好一格实参（给了 ${n}）`);
     const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+    if (isVecTy(t)) {
+      const nv = useFn(fn === 'is.na' ? 'r_na_v' : 'r_nan_v');
+      return { kind: 'call', fn: { kind: 'name', name: nv }, args: [ev(0)] };
+    }
     const name = useFn(fn === 'is.na' ? 'r_is_na' : 'r_is_nan');
     return { kind: 'call', fn: { kind: 'name', name }, args: [asReal(ev(0), t)] };
   }
 
-  /* `is.finite` / `is.infinite`：C 回 int，包一格 `!= 0` 成布尔。 */
+  /* `is.finite` / `is.infinite`：C 回 int，包一格 `!= 0` 成布尔；向量上走生成出来的那格。 */
   if (fn !== null && PRED.has(fn)) {
     if (n !== 1) throw new Error(`r->IR: ${fn}() 要正好一格实参（给了 ${n}）`);
     const sym = PRED.get(fn);
+    const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+    if (isVecTy(t)) {
+      const nv = useFn(fn === 'is.finite' ? 'r_fin_v' : 'r_inf_v');
+      return { kind: 'call', fn: { kind: 'name', name: nv }, args: [ev(0)] };
+    }
     cabiUsed.add(sym);
     rmathSig(sym);
-    const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
     return b('!=', { kind: 'ccall', sym, args: [asReal(ev(0), t)] }, { kind: 'int', value: 0 });
   }
 
@@ -5384,6 +5423,7 @@ const SET_FNS = new Set([
   'r_same', 'r_which_max', 'r_which_min', 'r_cumprod', 'r_pmax', 'r_pmin',
   'r_ord_lt', 'r_order', 'r_match', 'r_in_v', 'r_in1', 'r_unique', 'r_dup', 'r_any_dup',
   'r_union', 'r_intersect', 'r_setdiff', 'r_setequal', 'r_find_int',
+  'r_na_v', 'r_nan_v', 'r_fin_v', 'r_inf_v',
 ]);
 
 /**
@@ -5746,6 +5786,38 @@ function setFnDecl2(name) {
         letI('m', vecLen(w)),
         forTo('j', nm('m'), [iff(same(nm('a'), vecGet(w, j)), [ret(R(1))])]),
         ret(R(0)),
+      ],
+    };
+  }
+  /**
+   * `is.na` / `is.nan` / `is.finite` / `is.infinite` **在一条向量上** —— 逐元素出一条
+   * 逻辑向量。这几格从前只有标量那一档：`is.na(c(1, NA))` 会一路走到 `.sx` 才撞上
+   * `(toreal E) 的参数要是 int，这里是 real*`，报的是方言那层的话（不是 R 的话）。
+   *
+   * 出来的值只有 1 / 0，**没有 NA** —— R 里这四格都是"问一句"，`is.na(NA)` 是 TRUE、
+   * `is.finite(NA)` / `is.nan(NA)` / `is.infinite(NA)` 都是 FALSE（量出来的）。
+   */
+  if (name === 'r_na_v' || name === 'r_nan_v' || name === 'r_fin_v' || name === 'r_inf_v') {
+    /* `is.finite` 用 R 自己的 `R_finite`，`is.infinite` 用 `rt/omni_rna.c` 那一格；
+       另两格走已有的 `r_is_na` / `r_is_nan`（载荷不能按值过，见 `PTR_REAL`）。 */
+    const sym = name === 'r_fin_v' ? 'R_finite' : (name === 'r_inf_v' ? 'omni_r_is_infinite' : null);
+    if (sym !== null) { cabiUsed.add(sym); rmathSig(sym); }
+    const elem = vecGet(v, i);
+    const q = sym !== null
+      ? b('!=', { kind: 'ccall', sym, args: [elem] }, I(0))
+      : cal(name === 'r_na_v' ? 'r_is_na' : 'r_is_nan', elem);
+    return {
+      kind: 'fn',
+      name,
+      params: P1,
+      ret: RLGL,
+      body: [
+        letI('n', vecLen(v)),
+        ...vecNewAs('o', nm('n')),
+        forTo('i', nm('n'), [
+          vecSet(o, i, { kind: 'ternary', cond: q, then: R(1), else_: R(0) }),
+        ]),
+        ret(o),
       ],
     };
   }

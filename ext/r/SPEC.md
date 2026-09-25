@@ -128,6 +128,13 @@ R 那两条区别由此立住：`is.na(NaN)` 真、`is.nan(NA)` 假。
 
 `is.finite` / `is.infinite` 照旧**按值**过：`Inf` 没有载荷可丢。
 
+这四格**在一条向量上**也接了（2026-09-26，判据 `ext/r/examples/na.R`）：逐元素出一条逻辑
+向量（`r_na_v` / `r_nan_v` / `r_fin_v` / `r_inf_v`），值只有 TRUE / FALSE —— 它们都是
+"问一句"，`is.finite(NA)` / `is.nan(NA)` / `is.infinite(NA)` 都是 FALSE（量出来的）。
+从前只有标量那一档，给一条向量不是报 R 的话，而是一路走到 `.sx` 才撞上方言那层的
+`(toreal E) 的参数要是 int，这里是 real*` —— 那句话对着用户毫无用处。
+带名字的向量上名字**跟着走**（`NAME_KEEP`，见第二节）。
+
 ### 由此定下的一条：**R 的向量不能用 `(arr real)`**
 
 "载荷能存在哪儿"一路量下来还有第四格，它把向量那一层的表示定死了：
@@ -441,12 +448,15 @@ R 那儿挑出的是 `NA_character_`，这一档没有那种值，与 `v[掩码]
 `[1] …` —— R 里名字被丢掉之后也是这样。`v["不存在的名字"]` 回 `NA`、名字印 `<NA>`，
 这也是 R 自己的答案（量出来的，不是我们编的）。
 
-**跟不住的地方一律当场报。** 量出来的（`Rscript`，2026-09-25）：R 里
+**跟不住的地方一律当场报。** 量出来的（`Rscript`，2026-09-25 / 补量 2026-09-26）：R 里
 `sort` / `rev` / `head` / `tail` / `cumsum` / `abs` / `sqrt` / `round` / `is.na` /
-`which.max` / `duplicated` / `c(v, 4)` / `v[v > 1]` / `v[c(1,3)]` **都把名字带过去**，
-而 `range` / `unique` / `seq_along` / `as.character` / `paste` / 汇总那一族
-（`sum` / `mean` / `max` / `min` / `length` / `var` / `sd`）**自己就丢名字**。
-后一批照常算（`NAME_DROP_OK` 那张表），前一批**报** —— 静默丢掉的话 `print` 会少印
+`which.max` / `c(v, 4)` / `v[v > 1]` / `v[c(1,3)]` **都把名字带过去**，
+而 `range` / `unique` / `duplicated` / `seq_along` / `as.character` / `paste` / 汇总那一族
+（`sum` / `mean` / `max` / `min` / `length` / `var` / `sd`）**自己就丢名字**
+（`duplicated` 这一格 2026-09-25 那次记错了 —— 补量出来它是丢名字的那一批，
+`duplicated(c(x=1,y=1,z=2))` 印的是 `[1] FALSE  TRUE FALSE`）。
+后一批照常算（`NAME_DROP_OK` 那张表），前一批里 `is.na` / `is.nan` / `is.finite` /
+`is.infinite` 四格**名字跟着走**（`NAME_KEEP`），别的**报** —— 静默丢掉的话 `print` 会少印
 名字那一行，而例子的判据是逐字节对 `Rscript`，那种错最难查。真要丢就自己写 `unname(v)`。
 
 **带名字的逻辑向量**（`print(v > 1)` / `c(a = TRUE, b = FALSE)` / `setNames(c(TRUE, NA), ns)` /
