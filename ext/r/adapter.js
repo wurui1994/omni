@@ -589,7 +589,10 @@ const NAME_DROP_OK = new Set([
  *
  * 分两拨只为算类型时好分：前一拨出**逻辑**向量（`RNLGL`），后一拨出**数值**向量（`RNVEC`）。
  * `sort` / `rev` / `head` / `tail` / `diff` 在 R 里也带名字，可它们**动位置或动长度** ——
- * 名字那一条要跟着重排，不在这一刀里，照旧当场报。
+ * 名字那一条要跟着动。`rev` / `head` / `tail` 这三格接了（2026-09-26）：名字那一条走
+ * 字符向量上同名的那几格辅助函数（`r_rev_str` / `r_head_str` / `r_tail_str`），
+ * 与值那一侧同一个规矩。`sort` 要的是**排序的那个置换**（值排完之后名字得跟着重排，
+ * 得先有 `order` 再按它挑一遍），`diff` 还要丢掉第一格 —— 那两格还没接，照旧当场报。
  *
  * `duplicated` **不**在这儿 —— 量出来（`Rscript`，2026-09-26）R 自己就把名字丢了
  * （`duplicated(c(x=1,y=1,z=2))` 印的是 `[1] FALSE  TRUE FALSE`），它归 `NAME_DROP_OK`。
@@ -601,7 +604,7 @@ const NAME_KEEP_NUM = new Set([
   'round', 'signif', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
   'sinh', 'cosh', 'tanh', 'cumsum', 'cumprod', 'cummax', 'cummin', 'zapsmall',
 ]);
-const NAME_KEEP = new Set([...NAME_KEEP_LGL, ...NAME_KEEP_NUM]);
+const NAME_KEEP = new Set([...NAME_KEEP_LGL, ...NAME_KEEP_NUM, 'rev', 'head', 'tail']);
 /** 第 i 格（0 起）。方言的 `{kind:'index'}` 落成 `(aget …)`，赋值那侧落 `(aset …)`。 */
 const svGet = (v, i) => ({ kind: 'index', obj: v, index: i });
 const svLen = (v) => call1('alen', v);
@@ -1006,9 +1009,27 @@ function namesExprOf(x, types) {
   }
   /* 逐元素问一句那几格（`NAME_KEEP`）：长度不变、位置不动，名字**原样跟着**。
      这儿只看第一格实参 —— 那几格都是一元的。 */
-  if (NAME_KEEP.has(fn)) {
+  if (NAME_KEEP_LGL.has(fn) || NAME_KEEP_NUM.has(fn)) {
     const as = posArgs(x);
     return as.length < 1 ? null : namesExprOf(as[0], types);
+  }
+  /**
+   * `rev` / `head` / `tail` —— 位置动了，所以名字那一条也得**跟着动**：走字符向量上
+   * 同名的那几格辅助函数（`r_rev_str` / `r_head_str` / `r_tail_str`），与值那一侧
+   * 同一个规矩（取几格的算法也照 `callOf` 那一段抄：缺省 6，也认 `n=`）。
+   */
+  if (fn === 'rev' || fn === 'head' || fn === 'tail') {
+    const as = posArgs(x);
+    if (as.length < 1) return null;
+    const ns = namesExprOf(as[0], types);
+    if (ns === null) return null;
+    if (fn === 'rev') return { kind: 'call', fn: { kind: 'name', name: useFn('r_rev_str') }, args: [ns] };
+    const nArg = namedArg(x, 'n');
+    let cnt = { kind: 'int', value: 6 };
+    if (nArg !== undefined) cnt = asIntE(exprOf(nArg, types), typeOfExpr(nArg, types));
+    else if (as.length >= 2) cnt = asIntE(exprOf(as[1], types), typeOfExpr(as[1], types));
+    const h = useFn(fn === 'head' ? 'r_head_str' : 'r_tail_str');
+    return { kind: 'call', fn: { kind: 'name', name: h }, args: [ns, cnt] };
   }
   if (fn === 'setNames') {
     const as = posArgs(x);

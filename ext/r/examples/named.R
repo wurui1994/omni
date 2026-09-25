@@ -92,3 +92,18 @@ print(signif(m, 2))
 # 套起来也跟得住（名字跟着**变量**走，中间那一格是个表达式）
 print(round(sqrt(m), 3))
 print(sqrt(m) * 2)
+
+# 位置动了那几格：`rev` / `head` / `tail` 的名字**跟着动**（2026-09-26 接了 ——
+# 名字那一条走字符向量上同名的那几格辅助函数）。`sort` 要排序的那个置换、`diff` 还要
+# 丢掉第一格，那两格还没接。
+kv <- c(a = 1, bb = 4, ccc = 9.25, d = 2)
+print(rev(kv))
+print(head(kv, 2))
+print(tail(kv, 2))
+print(head(kv))          # 缺省取 6 格（比长度大就整条）
+print(tail(kv, n = 3))   # `n =` 也认
+print(rev(rev(kv)))
+print(head(rev(kv), 2))
+print(rev(c(p = TRUE, q = FALSE)))
+print(names(rev(kv)))
+print(tail(kv, 0))       # 零长那一档
