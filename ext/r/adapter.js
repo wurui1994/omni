@@ -258,6 +258,8 @@ const FN_DEPS = new Map([
   ['r_lower', []],
   ['r_pick_str', []],
   ['r_sat1', []],
+  ['r_nm_pos', []],
+  ['r_nm_pick', []],
   ['r_mask_str', ['r_is_na']],
   ['r_drop_na', ['r_is_na']],
   /* 集合与位置那一族（`match` / `%in%` / `unique` / `order`…）。"两格值算不算同一格"
@@ -981,6 +983,30 @@ function namesExprOf(x, types) {
     const op = String(leaf(kids(x)[0]));
     if (op !== '!' && op !== '-') return null;
     return namesExprOf(kids(x)[1], types);
+  }
+  /**
+   * `v[掩码]` / `v[下标向量]` / `v[-1]` —— R 把挑出来的那几格**名字也挑过去**。
+   * 名字那一条走字符向量上同一对辅助函数（`r_mask_str` / `r_pick_str`），下标那一格
+   * 原样交过去，于是"掩码短了从头再来"、"下标 0 跳过"、"负下标是丢掉"这几条两边一定
+   * 同解 —— 它们只写在 `r_vec_pick` / `r_pick_str` 里，这儿不抄。
+   *
+   * 一格标量下标（`v[2]`）**不在这儿** —— 那一格出来的是一格数，名字那一条在
+   * `print` 那侧单独摆（见 `r_nm_pos`）。
+   */
+  if (tag(x) === 'sub1') {
+    const ns = namesExprOf(kids(x)[0], types);
+    if (ns === null) return null;
+    const ks = kids(x).slice(1).map((k) => kids(k)[0]).filter((k) => k !== undefined);
+    if (ks.length !== 1) return null;
+    const kt = typeOfExpr(ks[0], types);
+    if (isVecTy(kt)) {
+      const h = useFn(isLglTy(kt) ? 'r_mask_str' : 'r_nm_pick');
+      return { kind: 'call', fn: { kind: 'name', name: h }, args: [ns, exprOf(ks[0], types)] };
+    }
+    if (isNegSub(ks[0])) {
+      return lglCall('r_nm_pick', ns, lglCall('r_vec1', asReal(exprOf(ks[0], types), kt)));
+    }
+    return null;
   }
   if (tag(x) !== 'call' || tag(kids(x)[0]) !== 'sym') return null;
   const fn = nameOf(kids(x)[0]);
@@ -2872,11 +2898,9 @@ function indexRead(x, types) {
       return lglCall('r_at_name', o, ns, exprOf(keys[0], types));
     }
     if (isVecTy(kt)) {
-      /* 挑出来的那几格 R 会把**名字也挑过去** —— 这一档跟不住，当场报。 */
-      if (isNamedTy(ot) || isNamedTy(kt)) {
-        throw new Error('r->IR: 在**带名字的向量**上按掩码 / 按位置挑还没接'
-          + '（R 会把挑出来的那几格名字也带过去）—— 要不带名字就写 `unname(…)`');
-      }
+      /* 挑出来的那几格 R 会把**名字也挑过去** —— 名字那一条在 `namesExprOf` 的 `sub1`
+         那一格走同一对辅助函数（2026-09-26 接了）。下标本身带名字的那种
+         （`v[w]` 里 w 也有名字）R 的答案是"名字跟着被挑的那条走"，这儿一样。 */
       const helper = isLglTy(kt) ? 'r_vec_mask' : 'r_vec_pick';
       return { kind: 'call', fn: { kind: 'name', name: useFn(helper) }, args: [o, exprOf(keys[0], types)] };
     }
@@ -4656,10 +4680,12 @@ function printValStmt(node, types) {
     const kt = typeOfExpr(keys[0], types);
     const nn = fresh('p1n');
     /* 下标是串就在名字那条里找（找不到 R 印 `<NA>`，`r_nm_at` 就答这个）；
-       下标是数就直接取那一格（`v[1]` 的名字是 `names(v)[1]`）。 */
+       下标是数就取那一格名字（`v[1]` 的名字是 `names(v)[1]`）—— 越界那一格 R 也印
+       `<NA>`（值那侧是 `NA`，见 `r_at1`），所以走 `r_nm_pos` 而不是裸着 `aget`
+       （裸着读的是界外内存）。 */
     const one = kt.kind === 'string'
       ? lglCall('r_nm_at', ns, exprOf(keys[0], types))
-      : svGet(ns, zeroBased(exprOf(keys[0], types), kt));
+      : lglCall('r_nm_pos', ns, asIntE(exprOf(keys[0], types), kt));
     return {
       kind: 'block',
       stmts: [
@@ -5507,7 +5533,7 @@ function strFnDecl(name) {
 /** 这一批由 `strvFnDecl` 发（形状都是"一条 `(arr string)` 进"）。 */
 const STRV_FNS = new Set([
   'r_cat_str', 'r_print_str', 'r_join_str', 'r_rev_str', 'r_nchar_v', 'r_upper_v', 'r_lower_v',
-  'r_pick_str', 'r_mask_str', 'r_split', 'r_at_name', 'r_nm_at', 'r_sat1',
+  'r_pick_str', 'r_mask_str', 'r_split', 'r_at_name', 'r_nm_at', 'r_sat1', 'r_nm_pos', 'r_nm_pick',
   'r_gsub', 'r_gsub_v', 'r_grepl_v', 'r_grep_i', 'r_grep_s', 'r_rep_str', 'r_ifelse_s',
   'r_substr_v', 'r_trim_v', 'r_starts_v', 'r_ends_v',
   /* base 那四条字符向量常量 + `strrep` 在字符向量上那一格。 */
@@ -6438,6 +6464,21 @@ function strvFnDecl(name) {
       ],
     };
   }
+  if (name === 'r_nm_pos') {
+    /* 名字那一条里第 i 格（1 起）。越界 R 印的是 `<NA>`（`c(a=1,b=2)[5]` 印
+       `<NA>` 一行、`NA` 一行），所以这儿也答 `<NA>` —— 裸着 `aget` 读的是界外内存。 */
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'ns', type: RSTRV }, { name: 'i', type: INT }],
+      ret: STR,
+      body: [
+        letI('n', svLen(nm('ns'))),
+        iff(b('||', b('<', nm('i'), I(1)), b('>', nm('i'), nm('n'))), [{ kind: 'return', values: [S('<NA>')] }]),
+        { kind: 'return', values: [svGet(nm('ns'), b('-', nm('i'), I(1)))] },
+      ],
+    };
+  }
   if (name === 'r_gsub') {
     /* 一格串上按**定串**换：`all` 是 0 就只换第一处（`sub`），1 是全换（`gsub`）。
        从 `pos` 往后找用的是"把剩下那段切出来再 `sfind`" —— 方言的 `sfind` 只从头找。
@@ -6770,13 +6811,17 @@ function strvFnDecl(name) {
       ],
     };
   }
-  if (name === 'r_pick_str' || name === 'r_mask_str') {
+  if (name === 'r_pick_str' || name === 'r_mask_str' || name === 'r_nm_pick') {
     /* `labels[c(1,3)]`（按位置挑）与 `labels[nchar(labels) > 2]`（按掩码挑）。
-       两处与 R 不同，都明写在 SPEC：越界在 R 里出 `NA_character_`，这儿 `(aget …)`
-       当场报（我们没有串的缺失）；掩码里的 `NA` 在 R 里也挑出一格 `NA`，这儿停下来。 */
+       两处与 R 不同，都明写在 SPEC：越界在 R 里出 `NA_character_`，这儿**报**
+       （我们没有串的缺失）；掩码里的 `NA` 在 R 里也挑出一格 `NA`，这儿停下来。
+
+       `r_nm_pick` 是同一份代码的**名字那一档**：它挑的是带名字的向量的名字那一条，
+       越界那一格 R 印的是 `<NA>`（值那侧回 `NA`，见 `r_vec_pick`）—— 那是个**印出来的
+       样子**而不是缺失值，所以这一档回 `"<NA>"` 这个串，不报。两档只差这一处。 */
     const p = { kind: 'name', name: 'p' };
     const cnt = nm('k');
-    if (name === 'r_pick_str') {
+    if (name === 'r_pick_str' || name === 'r_nm_pick') {
       /* 与数值那一侧的 `r_vec_pick` 是**同三条规矩**（正数挑、0 跳过、负数丢、混着报）——
          只是抄的是 `(arr string)`。判正负是运行期的事，所以那三条在这儿也写一遍。 */
       const jj = nm('j');
@@ -6817,11 +6862,21 @@ function strvFnDecl(name) {
               [{ kind: 'builtin-stmt', name: 'apush', args: [nm('o'), svGet(v, i)] }])], nm('n')),
             { kind: 'return', values: [nm('o')] },
           ]),
-          forJ2(nm('m'), [iff(b('!=', at2, { kind: 'real', value: 0 }), [{
-            kind: 'builtin-stmt',
-            name: 'apush',
-            args: [nm('o'), svGet(v, b('-', call1('toint', at2), I(1)))],
-          }])]),
+          /* 全是正数 → 按位置挑，下标 0 跳过。越界那一格：名字那一档回 `<NA>`
+             （R 印出来就是这个），字符向量那一档**报** —— R 给的是 `NA_character_`，
+             这一层没有那种值（从前这儿裸着 `aget`，运行期撞界）。 */
+          forJ2(nm('m'), [iff(b('!=', at2, { kind: 'real', value: 0 }), [
+            letI('pj', call1('toint', at2)),
+            iff(b('>', nm('pj'), nm('n')),
+              name === 'r_nm_pick'
+                ? [{ kind: 'builtin-stmt', name: 'apush', args: [nm('o'), S('<NA>')] }]
+                : [{
+                  kind: 'builtin-stmt',
+                  name: 'fail',
+                  args: [{ kind: 'string', value: 's[下标]: 有一格越界 —— R 挑出 NA_character_，这一层没有串的缺失' }],
+                }],
+              [{ kind: 'builtin-stmt', name: 'apush', args: [nm('o'), svGet(v, b('-', nm('pj'), I(1)))] }]),
+          ])]),
           { kind: 'return', values: [nm('o')] },
         ],
       };

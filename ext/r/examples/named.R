@@ -118,3 +118,18 @@ print(head(sort(sv), 2))
 print(sort(c(b = 3, a = 1, d = NA)))   # 缺失连名字一起丢
 print(sort(c(z = 2, y = 2, x = 1)))    # 同值的次序是唯一的（原下标当最后一把钥匙）
 print(sort(c(only = 1)))
+
+# 挑出来那几格的名字也跟着（2026-09-26 接了）：掩码、下标向量、写着负号的那一档，
+# 名字那一条走字符向量上同一对辅助函数，于是"掩码短了从头再来"、"下标 0 跳过"、
+# "负下标是丢掉"这几条两边一定同解。
+pk <- c(a = 1, bb = 4, ccc = 9)
+print(pk[pk > 1])
+print(pk[c(1, 3)])
+print(pk[c(TRUE, FALSE, TRUE)])
+print(pk[-2])
+print(pk[c(1, 0, 2)])    # 下标 0 跳过
+print(pk[c(3, 1)])       # 次序按下标那条走
+print(pk[c(1, 5)])       # 越界那一格：值是 NA、名字印 `<NA>`
+print(pk[pk > 100])      # 一格都没挑着 → 零长
+print(names(pk[-1]))
+cat(sum(pk[pk > 1]), "\n")
