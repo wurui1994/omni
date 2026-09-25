@@ -43,11 +43,28 @@ const RSRC = refDir('r-source', 'R_SRC');
 
 /** 产物落缓存（约定：生成出来的东西不进版本库，也不进临时目录）。 */
 export const OUT = join(ROOT, '.omni-cache', 'r-rt', 'js');
-export const AMALGAM = join(OUT, 'nmath-all.c');
+/** 摊平出来的那一份，**不带 `main`** —— 两个驱动各 `#include` 它一次。 */
+export const LIB_C = join(OUT, 'nmath-lib.c');
+/** 驱动一：66 格数的探子（`tests/r/cjs.js` 的前七道门）。 */
+export const AMALGAM = join(OUT, 'nmath-probe.c');
 export const PROBE_R = join(OUT, 'probe.R');
+/** 驱动二：往 stdout 印一张 SVG（"画到浏览器里"那一格）。 */
+export const PLOT_C = join(OUT, 'nmath-plot.c');
+export const PLOT_R = join(OUT, 'plot.R');
 /** 三份生成出来的头在这儿（`ext/r/build.js` 造的）—— 编这份 `.c` 要 `-I` 它。 */
 export const GEN_INC = join(ROOT, '.omni-cache', 'r-rt', 'include');
 export const INCS = [GEN_INC, join(RSRC, 'src/nmath'), join(RSRC, 'src/include')];
+
+/**
+ * 那张图的口径 —— **C 与 R 两边都从这一处读**，所以画布不会各自飘。
+ *
+ * 坐标一律印到**三位小数**：两边的 libm 不是同一份，而三位小数把那点差（1e-16 量级）
+ * 吃掉了 —— 于是"同一张图"这句话可以判**逐字节**，不必落到"看着差不多"。
+ */
+export const PLOT = {
+  w: 480, h: 320, ml: 44, mr: 12, mt: 16, mb: 34, x0: -4, x1: 4, n: 161, ymax: 0.45,
+};
+
 
 /**
  * 探子：**一格一行，C 与 R 的写法摆在一起**。
@@ -194,8 +211,9 @@ export function amalgamate() {
   const clash = new Set([...seen].filter(([, fs]) => fs.length > 1).map(([nm]) => nm));
 
   const L = [];
-  L.push('/* nmath-all.c —— `ext/r/cjs/gen.js` 生成，别手改。');
-  L.push(' * R 的 src/nmath 摊成一份翻译单元，好让 C -> MIR -> JS 那条腿能整块吃下去。 */');
+  L.push('/* nmath-lib.c —— `ext/r/cjs/gen.js` 生成，别手改。');
+  L.push(' * R 的 src/nmath 摊成一份翻译单元，好让 C -> MIR -> JS 那条腿能整块吃下去。');
+  L.push(' * **没有 `main`** —— 驱动各自 `#include` 它一次。 */');
   /* `-D` 进不了顶层 `omni run`，所以口径写在文件里（照 R 的 standalone Makefile 的 DEFS）。 */
   L.push('#define MATHLIB_STANDALONE 1');
   L.push('#define HAVE_CONFIG_H 1');
@@ -212,16 +230,17 @@ export function amalgamate() {
     for (const nm of ren) L.push(`#undef ${nm}`);
     for (const nm of f.defines) if (!ren.includes(nm)) L.push(`#undef ${nm}`);
   }
-  L.push(probeMain());
   return { text: `${L.join('\n')}\n`, renamed, count: files.length };
 }
 
-/** 探子那一段 C：一行一格 `名字<制表符>%.17g`。 */
+/** 驱动的头：包一次摊平出来那份，再加自己的 `main`。 */
+const driverHead = (what) => [`/* \`ext/r/cjs/gen.js\` 生成，别手改 —— ${what} */`,
+  '#include <stdio.h>', `#include "${LIB_C}"`,
+  `#include "${join(HERE, '..', 'rt', 'omni_rng.h')}"`].join('\n');
+
+/** 驱动一（探子）：一行一格 `名字<制表符>%.17g`。 */
 function probeMain() {
-  const L = [];
-  L.push('\n/* ---- 探子（gen.js 的 PROBES 生成） ---- */');
-  L.push('#include <stdio.h>');
-  L.push(`#include "${join(HERE, '..', 'rt', 'omni_rng.h')}"`);
+  const L = [driverHead('66 格数的探子')];
   L.push('int main(void) {');
   for (const [name, cExpr] of PROBES) {
     L.push(`  printf("${name}\\t%.17g\\n", (double)(${cExpr}));`);
@@ -248,8 +267,108 @@ export function probeR() {
   return `${L.join('\n')}\n`;
 }
 
+/**
+ * 驱动二（画图）：往 **stdout 印一张 SVG**。
+ *
+ * 为什么是 SVG 而不是接一台图形设备：调研的结论是这个仓库里已经有一条**零成本**的
+ * "编译产物 -> 浏览器里的图"的路 —— 程序把 `<svg …>` 印到 stdout，Studio 的预览栏
+ * （`src/studio/render.js` 认 `<svg` 开头与逐块抠 `<svg>…</svg>`）就当图挂上去，
+ * `src/lib/plot.omni` 与 `turtle.omni` 已经这么干了。C→JS 那条腿目前**没有通用的
+ * 宿主导入表**（产物只导出一个 `$run()`），所以"接一台真设备"要先有那张表 ——
+ * 那是另一刀。而这一刀要的是**这条路上第一张真的图**，用现成的地基。
+ *
+ * 画的是两条曲线：`dnorm(x)` 与 `dt(x, 3)`（都是 R 自己的 C 算的），加坐标轴与刻度。
+ * 坐标一律 `%.3f` —— 见 `PLOT` 的账。
+ */
+function plotMain() {
+  const { w, h, ml, mr, mt, mb, x0, x1, n, ymax } = PLOT;
+  const L = [driverHead('往 stdout 印一张 SVG')];
+  L.push(`#define PW ${w}
+#define PH ${h}
+#define ML ${ml}
+#define MR ${mr}
+#define MT ${mt}
+#define MB ${mb}
+#define X0 (${x0}.0)
+#define X1 (${x1}.0)
+#define NP ${n}
+#define YMAX (${ymax})
+
+/* 数据坐标 -> 画布坐标。两条轴各自线性映射，y 轴朝下所以要翻一次。 */
+static double px(double x) { return ML + (x - X0) / (X1 - X0) * (PW - ML - MR); }
+static double py(double y) { return PH - MB - y / YMAX * (PH - MT - MB); }
+
+/* 一条曲线：kind 0 是 dnorm(x)，1 是 dt(x, 3)。 */
+static void curve(int kind, const char *color) {
+  int i;
+  printf("  <polyline fill=\\"none\\" stroke=\\"%s\\" stroke-width=\\"2\\" points=\\"", color);
+  for (i = 0; i < NP; i++) {
+    double x = X0 + (X1 - X0) * i / (double)(NP - 1);
+    double y = (kind == 0) ? dnorm(x, 0.0, 1.0, 0) : dt(x, 3.0, 0);
+    printf("%s%.3f,%.3f", i == 0 ? "" : " ", px(x), py(y));
+  }
+  printf("\\"/>\\n");
+}
+
+int main(void) {
+  int k;
+  printf("<svg xmlns=\\"http://www.w3.org/2000/svg\\" width=\\"%d\\" height=\\"%d\\" "
+         "viewBox=\\"0 0 %d %d\\">\\n", PW, PH, PW, PH);
+  printf("  <rect width=\\"%d\\" height=\\"%d\\" fill=\\"#fff\\"/>\\n", PW, PH);
+  /* 坐标轴 */
+  printf("  <path fill=\\"none\\" stroke=\\"#333\\" d=\\"M %.3f %.3f L %.3f %.3f L %.3f %.3f\\"/>\\n",
+         px(X0), py(0.0) - (PH - MT - MB), px(X0), py(0.0), px(X1), py(0.0));
+  /* x 轴刻度与标签 */
+  for (k = (int)X0; k <= (int)X1; k++) {
+    double x = px((double)k);
+    printf("  <path stroke=\\"#333\\" d=\\"M %.3f %.3f L %.3f %.3f\\"/>\\n",
+           x, py(0.0), x, py(0.0) + 5.0);
+    printf("  <text x=\\"%.3f\\" y=\\"%.3f\\" font-size=\\"11\\" text-anchor=\\"middle\\""
+           " fill=\\"#333\\">%d</text>\\n", x, py(0.0) + 18.0, k);
+  }
+  /* y 轴刻度与标签（0、0.15、0.30、0.45） */
+  for (k = 0; k <= 3; k++) {
+    double y = py(YMAX * k / 3.0);
+    printf("  <path stroke=\\"#333\\" d=\\"M %.3f %.3f L %.3f %.3f\\"/>\\n",
+           px(X0) - 5.0, y, px(X0), y);
+    printf("  <text x=\\"%.3f\\" y=\\"%.3f\\" font-size=\\"11\\" text-anchor=\\"end\\""
+           " fill=\\"#333\\">%.2f</text>\\n", px(X0) - 8.0, y + 4.0, YMAX * k / 3.0);
+  }
+  curve(0, "#1f77b4");
+  curve(1, "#d62728");
+  printf("  <text x=\\"%.3f\\" y=\\"%d\\" font-size=\\"12\\" fill=\\"#1f77b4\\">dnorm(x)</text>\\n",
+         (double)(PW - MR - 150), MT);
+  printf("  <text x=\\"%.3f\\" y=\\"%d\\" font-size=\\"12\\" fill=\\"#d62728\\">dt(x, 3)</text>\\n",
+         (double)(PW - MR - 70), MT);
+  printf("</svg>\\n");
+  return 0;
+}`);
+  return L.join('\n');
+}
+
+/**
+ * 画图那一格的尺子：**只印两条曲线的点串**，不重写一遍 SVG。
+ *
+ * 为什么不让 R 也生成整张 SVG：那等于把画布那几十行逻辑写两遍，而两遍之间会飘。
+ * 图里真正是"数"的部分只有那两个 `points` 串 —— 判它逐字节相同就够了，
+ * 剩下的骨架由"解释腿 == JS 腿 == cc 腿"三方逐字节那道门管着。
+ */
+export function plotR() {
+  const { w, h, ml, mr, mt, mb, x0, x1, n, ymax } = PLOT;
+  return `# plot.R —— \`ext/r/cjs/gen.js\` 生成，别手改。画图那一格的尺子：两条曲线的点串。
+px <- function(x) ${ml} + (x - (${x0})) / (${x1} - (${x0})) * (${w} - ${ml} - ${mr})
+py <- function(y) ${h} - ${mb} - y / ${ymax} * (${h} - ${mt} - ${mb})
+i <- 0:(${n} - 1)
+x <- ${x0} + (${x1} - (${x0})) * i / (${n} - 1)
+one <- function(y) cat(paste(sprintf("%.3f,%.3f", px(x), py(y)), collapse = " "), "\\n", sep = "")
+one(dnorm(x))
+one(dt(x, 3))
+`;
+}
+
 /** 写盘。回写了几份、摊了几个文件、改了哪几个名字。 */
 export function generate() {
+
   if (!existsSync(join(RSRC, 'src/nmath'))) {
     throw new Error(`ext/r/cjs/gen.js: 参考树不在：${RSRC}（R_SRC=<路径>）`);
   }
@@ -259,15 +378,19 @@ export function generate() {
   }
   mkdirSync(OUT, { recursive: true });
   const { text, renamed, count } = amalgamate();
-  writeFileSync(AMALGAM, text);
+  writeFileSync(LIB_C, text);
+  writeFileSync(AMALGAM, `${probeMain()}\n`);
   writeFileSync(PROBE_R, probeR());
+  writeFileSync(PLOT_C, `${plotMain()}\n`);
+  writeFileSync(PLOT_R, plotR());
   return { bytes: text.length, count, renamed };
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const r = generate();
-  process.stdout.write(`${AMALGAM}\n  ${r.count} 份 .c 摊成 ${r.bytes} 字节，`
-    + `${PROBES.length + RNG_N_UNIF + RNG_N_NORM} 格探子\n`);
+  process.stdout.write(`${LIB_C}\n  ${r.count} 份 .c 摊成 ${r.bytes} 字节\n`
+    + `${AMALGAM}\n  ${PROBES.length + RNG_N_UNIF + RNG_N_NORM} 格探子\n`
+    + `${PLOT_C}\n  一张 ${PLOT.w}x${PLOT.h} 的 SVG（dnorm 与 dt 各 ${PLOT.n} 点）\n`);
   if (process.argv.includes('-v')) {
     process.stdout.write(`  改了名的 static（${r.renamed.length} 处）：\n    ${r.renamed.join('\n    ')}\n`);
   }

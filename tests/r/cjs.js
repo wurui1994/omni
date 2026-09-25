@@ -28,10 +28,12 @@
 //   node tests/r/cjs.js
 
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { generate, AMALGAM, PROBE_R, INCS, PROBES, RNG_N_UNIF, RNG_N_NORM } from '../../ext/r/cjs/gen.js';
+import {
+  generate, AMALGAM, PROBE_R, PLOT_C, PLOT_R, PLOT, INCS, PROBES, RNG_N_UNIF, RNG_N_NORM,
+} from '../../ext/r/cjs/gen.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
 const CLI = join(ROOT, 'src/cli.js');
@@ -160,6 +162,57 @@ if (rngBad.length > 0) {
   no('runif 逐位相同', `MT19937 是纯整数运算 —— 这儿不同就是线性内存里那 625 格状态搬错了\n       ${rngBad.join('\n       ')}`);
 } else {
   ok('runif 逐位相同', `set.seed(42) 之后 ${RNG_N_UNIF} 格，与 R 同一条流`);
+}
+
+/* ---- 6. 画图那一格：R 的 C 在 JS 腿上画出一张真图 ----------------------- */
+
+const PLOT_BIN = join(ROOT, '.omni-cache/r-rt/js/plot-cc');
+const ccPlot = sh(CC, ['-O2', '-std=c99', '-w', ...ccIncs, PLOT_C, '-o', PLOT_BIN, '-lm']);
+if (ccPlot.code !== 0) {
+  no('画图（cc 腿）', `编不过：\n${ccPlot.err.slice(0, 600)}`);
+} else {
+  const ccSvg = sh(PLOT_BIN, []).out;
+  const jsSvg = sh('node', [CLI, 'run', PLOT_C, '--backend', 'js', ...ourIncs]).out;
+  const ipSvg = sh('node', [CLI, 'c-run', PLOT_C, ...ourIncs]).out;
+  const pts = [...ccSvg.matchAll(/points="([^"]+)"/g)].map((m) => m[1]);
+  /* 先判"是不是一张图" —— 空输出不许冒充"三条腿一致"。 */
+  if (!ccSvg.startsWith('<svg ') || !ccSvg.trimEnd().endsWith('</svg>')
+      || pts.length !== 2 || pts.some((p) => p.split(' ').length !== PLOT.n)) {
+    no('画图', `不像一张图：${ccSvg.length} 字节，${pts.length} 条曲线`
+      + `${pts.map((p) => `/${p.split(' ').length} 点`).join('')}`);
+  } else {
+    ok('画图', `${ccSvg.length} 字节的 SVG，两条曲线各 ${PLOT.n} 点`);
+    if (jsSvg === ccSvg && ipSvg === ccSvg) ok('三条腿画的是同一张图', '逐字节相同');
+    else no('三条腿画的是同一张图', firstDiff(ccSvg, jsSvg === ccSvg ? ipSvg : jsSvg));
+
+    /* 尺子只给两条曲线的点串（不重写一遍 SVG 骨架 —— 那会飘）。 */
+    const rp = sh('Rscript', ['--vanilla', PLOT_R]).out.trim().split('\n').map((s) => s.trim());
+    if (rp.length !== 2 || rp.some((s) => s.length === 0)) {
+      no('曲线上的点与 R 逐字节相同', `尺子给了 ${rp.length} 行`);
+    } else if (rp[0] === pts[0] && rp[1] === pts[1]) {
+      ok('曲线上的点与 R 逐字节相同', `dnorm 与 dt 各 ${PLOT.n} 点（坐标印到三位小数）`);
+    } else {
+      const i = rp[0] === pts[0] ? 1 : 0;
+      const a = rp[i].split(' ');
+      const b = pts[i].split(' ');
+      const k = a.findIndex((v, j) => v !== b[j]);
+      no('曲线上的点与 R 逐字节相同', `第 ${i + 1} 条曲线第 ${k + 1} 个点：R=${a[k]} 我们=${b[k]}`);
+    }
+
+    /* **真能渲染**：拿本机的光栅器把它变成一张 PNG。没有这个工具就跳过 ——
+       它只是"这张 SVG 不是自我感觉良好"的一个旁证，不是这一轴的正本。 */
+    const png = join(ROOT, '.omni-cache/r-rt/js/plot-js.svg.png');
+    const svgPath = join(ROOT, '.omni-cache/r-rt/js/plot-js.svg');
+    writeFileSync(svgPath, jsSvg);
+    const ql = sh('qlmanage', ['-t', '-s', String(PLOT.w), '-o', dirname(svgPath), svgPath]);
+    if (ql.code !== 0) {
+      skip('真能渲染（qlmanage 光栅化）');
+    } else if (existsSync(png) && statSync(png).size > 4096) {
+      ok('真能渲染', `本机光栅器把它画成了 ${statSync(png).size} 字节的 PNG`);
+    } else {
+      no('真能渲染', '光栅化出来的 PNG 不像有内容（<= 4096 字节）');
+    }
+  }
 }
 
 /** 第一处不同，带行号。 */

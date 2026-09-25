@@ -727,8 +727,8 @@ ggplot2 的 `ggsave` / Rcpp 的 `cppFunction`）。
 `src/core/frontend-c` → MIR → `src/core/mir/emit_js.js` 跑出 66 格数：
 
 ```
-node ext/r/cjs/gen.js     # 摊平 -> .omni-cache/r-rt/js/{nmath-all.c, probe.R}
-node tests/r/cjs.js       # 八道门
+node ext/r/cjs/gen.js     # 摊平 -> .omni-cache/r-rt/js/{nmath-lib.c, nmath-probe.c, nmath-plot.c, probe.R, plot.R}
+node tests/r/cjs.js       # 十二道门
 ```
 
 选 nmath 是因为它是 R 里唯一**不沾 `setjmp`、不沾 `SEXP`、不沾 Fortran** 的一块。
@@ -745,6 +745,16 @@ node tests/r/cjs.js       # 八道门
   迭代求根），上界记死 1e-14，**只许变小**；
 * `runif` 那三格**逐位相同** —— MT19937 是纯整数运算，libm 插不上手，不同就说明
   线性内存里那 625 格状态被搬错了，不是精度问题。
+
+**显示那一格也落了一半。** 第二个驱动（`nmath-plot.c`）把 `dnorm(x)` 与 `dt(x, 3)`
+各 161 点画成一张 480×320 的 **SVG 印到 stdout**，Studio 的预览栏就当图挂上去
+（`src/studio/render.js` 认这个；`src/lib/plot.omni` 已经这么干了）。曲线上每一个数
+都是 R 自己的 C 算的、跑在 JS 腿上。判据：三条腿（`cc` / 解释 / JS）的 SVG **逐字节
+相同**（7547 字节），两条曲线的 `points` 串与 `Rscript` 算的**逐字节相同**
+（坐标印到三位小数，把两边 libm 那 1e-16 的差吃掉），而且本机光栅器真能把它画成 PNG。
+
+**这还不是"浏览器图形设备"**：现在的形状是"程序把图当文本印出去、宿主负责画"，
+而设备是"程序调宿主的画笔" —— 差的正是下面那张宿主导入表。
 
 **往 ggplot2 走还差四格**，都在 ADR-0047 里摆着：JS 发射器还不发
 `setjmp`/`longjmp`（MIR 解释腿已经有 `LongJmp`，所以是"还没做"而不是"做不到"）、
