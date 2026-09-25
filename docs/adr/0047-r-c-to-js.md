@@ -99,6 +99,32 @@ Studio 的预览栏就当图挂上去（`src/studio/render.js:248` 认 `<svg` �
 **这一格还不是"浏览器图形设备"**，差的是那张宿主导入表（见下面第 4 条）——
 现在的形状是"程序把图当文本印出去，宿主负责画"，而设备是"程序调宿主的画笔"。
 
+### 5. 显示那一格的第二半：真的交一帧（已落）
+
+**`interp/libc.js` 里那张表就是宿主导入表** —— 这是这一刀最后想明白的一件事：
+C→JS 那条腿上"对外世界"的全部出口就是它（`hasLibc` 认得的名字走宿主，别的当场报）。
+所以"接一台设备"不必先造一套新机制，往那张表里加一格就够了：
+
+```c
+int omni_c_gfx_frame(const char *path, int w, int h, const unsigned int *fb);
+```
+
+**把一帧交出去** —— 帧缓冲按 `w × h` 写成一张 PNG，回写进去的字节数。一格像素是一个
+`unsigned int`，按 `0xRRGGBB` 读。宿主那一侧是 `builtin.js` 的 `gfxFrameLin`，
+它与方言那两档（`gfxFrame` / `gfxFrameP`）**共用 `gfxEmit`** —— 那是三档必须逐字节
+一致的那段字节。单开一档而不是复用 `gfxFrameP`：那一档读的是方言的指针内存
+（`ptrDv`）、一槽 8 字节，而这条腿的内存是 `linDv`、C 的 `unsigned int` 是 4 字节。
+
+第三个驱动（`nmath-frame.c`）于是是一台**真设备上的程序**：自己在帧缓冲上逐列画那两条
+曲线与坐标轴（图元全在内存里画，一趟只过一帧 —— 图形设备就是这个形状），再调
+`omni_c_gfx_frame` 交帧，最后往 stdout 印一行 `#gfx png <路径> <宽> <高>`
+（`src/studio/render.js:267` 认这行，于是在 Studio 里它就是 canvas 上的一张图）。
+
+判据：**解释腿与 JS 腿交出来的两张 PNG 逐字节相同**（614 833 字节，480×320），
+`#gfx` 那一行指得对，PNG 头对。看过图：两条曲线、坐标轴、刻度都在，
+`dt(x,3)` 峰更低尾更厚。
+
+
 
 ## 还没解决的四道坎（往 ggplot2 走要先过这些）
 
@@ -111,21 +137,24 @@ Studio 的预览栏就当图挂上去（`src/studio/render.js:248` 认 `<svg` �
    加 `src/appl`/`src/unix`/`src/extra/tre`/tzone，而且 `static` 撞车会多得多 ——
    到那一步该做的是 MIR 层的链接器，不是更聪明的摊平脚本。
 3. **没有 Fortran。** R 的 `SOURCES_F` 与 BLAS/LAPACK 都是 Fortran。nmath 恰好不沾。
-4. **浏览器那台图形设备还没有。** 调研的结论是**地基已经在**，缺的是接头：
-   * `src/studio/gfx-gl.js` 是一台真设备（WebGL2 + 真事件），装法是
-     `globalThis.__OMNI_GFX = dev`；
-   * 离线一帧走 stdout 上的一行 `#gfx <png|rgba> <路径> <宽> <高>`，
-     `src/studio/render.js` 认这行并 `putImageData` 贴到 canvas；
-   * **还有一条零成本的路**：程序把 `<svg …>` 印到 stdout，Studio 预览栏就当图挂上去
-     （`src/lib/plot.omni` / `turtle.omni` 已经这么干）。R 的 `svglite`/`pdf` 设备
-     产生的正是这种纯文本 —— 所以"R 画图进浏览器"的第一格**可以不碰图形设备 API**。
-   * 而 C→JS 那条腿目前**没有通用的宿主导入表**：产物只导出一个 `$run()`，
-     对外世界只有一张写死的 libc 表。要让 R 的设备回调打到 canvas 上，得先有那张表。
+4. **浏览器那台图形设备：交一帧已经通了，实时那一档还没有。**
+   * 已经有的：`omni_c_gfx_frame`（上面第 5 条）—— 程序自己画帧缓冲、调宿主交帧，
+     出 PNG，两条腿逐字节相同；stdout 上那行 `#gfx` 让 Studio 把它贴到 canvas 上。
+   * 还没有的：**实时那一档**。`src/studio/gfx-gl.js` 是一台真设备（WebGL2 + 真事件，
+     装法是 `globalThis.__OMNI_GFX = dev`），而现在 C 那条腿只接到了"一趟一帧、
+     落成文件"这一格。要接到那台设备上，得再往表里加 `gfxcall` 那一族
+     （`setcol`/`moveto`/`lineto`/`present`…，签名在 `src/runtime/omni.h:358`），
+     并且让宿主在浏览器里把它们转给 `__OMNI_GFX` —— 那是一刀正经的活。
+   * 顺带记一条：程序把 `<svg …>` 印到 stdout，Studio 预览栏也当图挂上去
+     （`src/lib/plot.omni` 已经这么干），**零宿主接口成本** —— R 的 `svglite`/`pdf`
+     设备产生的正是这种纯文本。
+
 
 ## 账
 
 * 122 份 `.c` 摊成 15 641 字节的 `nmath-lib.c`（`#include` + `#define`/`#undef`，
   不含 R 的源码本身），两个驱动各包它一次。
 * 改名的 `static`：10 个名字、22 处。
-* `node tests/r/cjs.js` 全过（12/12）：66 格数 + 一张 7547 字节的 SVG。
+* `node tests/r/cjs.js` 全过（14/14）：66 格数 + 一张 7547 字节的 SVG
+  + 一张 614 833 字节的 PNG（两条腿逐字节相同）。
 * 产物落 `.omni-cache/r-rt/js/`（约定：生成物不进版本库，也不进临时目录）。

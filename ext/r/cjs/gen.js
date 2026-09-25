@@ -51,6 +51,9 @@ export const PROBE_R = join(OUT, 'probe.R');
 /** 驱动二：往 stdout 印一张 SVG（"画到浏览器里"那一格）。 */
 export const PLOT_C = join(OUT, 'nmath-plot.c');
 export const PLOT_R = join(OUT, 'plot.R');
+/** 驱动三：自己画帧缓冲，再调宿主把这一帧交出去（真设备那一格）。 */
+export const FRAME_C = join(OUT, 'nmath-frame.c');
+export const FRAME_PNG = join(OUT, 'nmath-frame.png');
 /** 三份生成出来的头在这儿（`ext/r/build.js` 造的）—— 编这份 `.c` 要 `-I` 它。 */
 export const GEN_INC = join(ROOT, '.omni-cache', 'r-rt', 'include');
 export const INCS = [GEN_INC, join(RSRC, 'src/nmath'), join(RSRC, 'src/include')];
@@ -366,6 +369,88 @@ one(dt(x, 3))
 `;
 }
 
+/**
+ * 驱动三（真设备）：自己在**帧缓冲**上画，再调宿主把这一帧交出去。
+ *
+ * 与驱动二的分别是本质的：那一格是"程序把图当文本印出去、宿主负责画"，这一格是
+ * **程序调宿主的画笔** —— `omni_c_gfx_frame(路径, 宽, 高, 帧缓冲)` 是 C→JS 这条腿上
+ * 第一个"对外世界"的出口（在这之前它只有一张写死的 libc 表）。图形设备就是这个形状：
+ * 图元全在内存里画，一趟只过一帧。
+ *
+ * 再往 stdout 印一行 `#gfx png <路径> <宽> <高>` —— `src/studio/render.js:267` 认这行，
+ * 于是同一份程序在 Studio 里就是 canvas 上的一张图。
+ */
+function frameMain() {
+  const { w, h, ml, mr, mt, mb, x0, x1, ymax } = PLOT;
+  const L = [driverHead('自己画帧缓冲，再调宿主交出这一帧')];
+  L.push(`#define FW ${w}
+#define FH ${h}
+#define ML ${ml}
+#define MR ${mr}
+#define MT ${mt}
+#define MB ${mb}
+#define X0 (${x0}.0)
+#define X1 (${x1}.0)
+#define YMAX (${ymax})
+
+/* 宿主那一格（\`src/core/interp/libc.js\` 的 \`omni_c_gfx_frame\`）。
+   一格像素是一个 unsigned int，按 0xRRGGBB 读。 */
+extern int omni_c_gfx_frame(const char *path, int w, int h, const unsigned int *fb);
+
+static unsigned int fb[FW * FH];
+
+static void put(int x, int y, unsigned int c) {
+  if (x >= 0 && x < FW && y >= 0 && y < FH) fb[y * FW + x] = c;
+}
+/* 竖线与横线 —— 坐标轴与刻度就这两样，不必要 Bresenham。 */
+static void vline(int x, int y0, int y1, unsigned int c) {
+  int y; for (y = y0; y <= y1; y++) put(x, y, c);
+}
+static void hline(int y, int x0, int x1, unsigned int c) {
+  int x; for (x = x0; x <= x1; x++) put(x, y, c);
+}
+static double px(double x) { return ML + (x - X0) / (X1 - X0) * (FW - ML - MR); }
+static double py(double y) { return FH - MB - y / YMAX * (FH - MT - MB); }
+
+/* 一条曲线：每一列算一个 y，与上一列之间竖着连起来（**逐列**，所以不会断）。
+   kind 0 是 dnorm(x)，1 是 dt(x, 3) —— 与驱动二画的是同两条。 */
+static void curve(int kind, unsigned int c) {
+  int sx, prev = -1;
+  for (sx = ML; sx <= FW - MR; sx++) {
+    double x = X0 + (X1 - X0) * (sx - ML) / (double)(FW - ML - MR);
+    double v = (kind == 0) ? dnorm(x, 0.0, 1.0, 0) : dt(x, 3.0, 0);
+    int sy = (int)(py(v) + 0.5);
+    if (prev < 0) prev = sy;
+    vline(sx, sy < prev ? sy : prev, sy < prev ? prev : sy, c);
+    prev = sy;
+  }
+}
+
+int main(void) {
+  int i, k;
+  const char *out = "${join(OUT, 'nmath-frame.png')}";
+  for (i = 0; i < FW * FH; i++) fb[i] = 0xffffff;
+  /* 坐标轴 */
+  vline((int)px(X0), MT, (int)py(0.0), 0x333333);
+  hline((int)py(0.0), (int)px(X0), (int)px(X1), 0x333333);
+  for (k = (int)X0; k <= (int)X1; k++) {
+    int sx = (int)px((double)k);
+    vline(sx, (int)py(0.0), (int)py(0.0) + 5, 0x333333);
+  }
+  for (k = 0; k <= 3; k++) {
+    int sy = (int)py(YMAX * k / 3.0);
+    hline(sy, (int)px(X0) - 5, (int)px(X0), 0x333333);
+  }
+  curve(0, 0x1f77b4);
+  curve(1, 0xd62728);
+  if (omni_c_gfx_frame(out, FW, FH, fb) <= 0) { printf("交帧失败\\n"); return 1; }
+  /* Studio 的预览栏认这一行（render.js:267） —— 于是浏览器里它就是 canvas 上的图。 */
+  printf("#gfx png %s %d %d\\n", out, FW, FH);
+  return 0;
+}`);
+  return L.join('\n');
+}
+
 /** 写盘。回写了几份、摊了几个文件、改了哪几个名字。 */
 export function generate() {
 
@@ -383,6 +468,7 @@ export function generate() {
   writeFileSync(PROBE_R, probeR());
   writeFileSync(PLOT_C, `${plotMain()}\n`);
   writeFileSync(PLOT_R, plotR());
+  writeFileSync(FRAME_C, `${frameMain()}\n`);
   return { bytes: text.length, count, renamed };
 }
 
@@ -390,7 +476,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const r = generate();
   process.stdout.write(`${LIB_C}\n  ${r.count} 份 .c 摊成 ${r.bytes} 字节\n`
     + `${AMALGAM}\n  ${PROBES.length + RNG_N_UNIF + RNG_N_NORM} 格探子\n`
-    + `${PLOT_C}\n  一张 ${PLOT.w}x${PLOT.h} 的 SVG（dnorm 与 dt 各 ${PLOT.n} 点）\n`);
+    + `${PLOT_C}\n  一张 ${PLOT.w}x${PLOT.h} 的 SVG（dnorm 与 dt 各 ${PLOT.n} 点）\n`
+    + `${FRAME_C}\n  同两条曲线画进帧缓冲，调 omni_c_gfx_frame 交帧 -> PNG\n`);
   if (process.argv.includes('-v')) {
     process.stdout.write(`  改了名的 static（${r.renamed.length} 处）：\n    ${r.renamed.join('\n    ')}\n`);
   }

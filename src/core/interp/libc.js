@@ -25,7 +25,7 @@
 // 浮点原先也在这份清单里，第十四片之后 `%f`/`%e`/`%g` 已经逐字节对上了（见 `fText`），
 // 第二十一片补上了 `%a`（见 `aText`）—— 于是这份清单只剩 `%p` 一格。
 
-import { memLoad, memStore, printBytes, flushOut, memSize, memGrow, outDirect } from './builtin.js';
+import { memLoad, memStore, printBytes, flushOut, memSize, memGrow, outDirect, gfxFrameLin } from './builtin.js';
 import { stderrBytes as hostStderr, readBinary, writeBinary, removeFile, env as hostEnv, spawn as hostSpawn, nowMs } from '../host/native.js';
 
 /**
@@ -2338,6 +2338,23 @@ const LIBC = {
     memStore('f64', BigInt(a[1]), 0, ip);
     return Number.isFinite(x) ? x - ip : (signBit(x) ? -0 : 0);
   },
+
+  /* ---- 图形设备那一格（C 那条腿的门） -----------------------------------
+   *
+   * `int omni_c_gfx_frame(const char *path, int w, int h, const unsigned int *fb)`
+   * —— **把一帧交出去**：帧缓冲按 `w × h` 写成一张 PNG（落点后缀是 `.rgba` 才走裸表面
+   * 那个备选出口），回写进去的字节数。一格像素是一个 `unsigned int`，按 `0xRRGGBB` 读。
+   *
+   * 这是"程序调宿主的画笔"的第一格 —— 在这之前 C→JS 那条腿对外世界只有这张 libc 表，
+   * 画图只能靠往 stdout 印文本（SVG 那条路）。名字带 `omni_c_` 前缀是因为它**不是** C
+   * 标准里的东西，而且要与方言那两档（`omni_gfx_frame` / `omni_gfx_framep`，
+   * `src/runtime/omni.h:353`）分清楚：那两档收 `omni_str` 结构、一槽 8 字节，
+   * 与普通 C 程序会写的签名不是一回事。出来的表面三档**逐字节相同**（共用 `gfxEmit`）。
+   *
+   * 页面那一侧不必改：程序自己往 stdout 印一行 `#gfx png <路径> <宽> <高>`，
+   * `src/studio/render.js:267` 认这行并把它贴到 canvas 上。 */
+  omni_c_gfx_frame: (a) => gfxFrameLin(readCStr(a[0]),
+    Number(BigInt.asIntN(32, BigInt(a[1]))), Number(BigInt.asIntN(32, BigInt(a[2]))), a[3]),
 
   strtol: (a) => {
     const s = readCStr(a[0]);

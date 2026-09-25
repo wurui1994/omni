@@ -28,11 +28,12 @@
 //   node tests/r/cjs.js
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  generate, AMALGAM, PROBE_R, PLOT_C, PLOT_R, PLOT, INCS, PROBES, RNG_N_UNIF, RNG_N_NORM,
+  generate, AMALGAM, PROBE_R, PLOT_C, PLOT_R, PLOT, FRAME_C, FRAME_PNG,
+  INCS, PROBES, RNG_N_UNIF, RNG_N_NORM,
 } from '../../ext/r/cjs/gen.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -212,6 +213,33 @@ if (ccPlot.code !== 0) {
     } else {
       no('真能渲染', '光栅化出来的 PNG 不像有内容（<= 4096 字节）');
     }
+  }
+}
+
+/* ---- 7. 真设备那一格：程序调宿主的画笔，交出一帧 ------------------------- */
+
+{
+  /* 两条腿各交一帧，中间把文件挪走 —— 不然第二趟看到的可能是第一趟留下的。 */
+  const one = (args) => {
+    if (existsSync(FRAME_PNG)) rmSync(FRAME_PNG);
+    const r = sh('node', [CLI, ...args, ...ourIncs]);
+    const line = r.out.split('\n').find((l) => l.startsWith('#gfx ')) ?? '';
+    return { line, png: existsSync(FRAME_PNG) ? readFileSync(FRAME_PNG) : null, err: r.err };
+  };
+  const ip = one(['c-run', FRAME_C]);
+  const jsF = one(['run', FRAME_C, '--backend', 'js']);
+  const wantLine = `#gfx png ${FRAME_PNG} ${PLOT.w} ${PLOT.h}`;
+  if (jsF.png === null) {
+    no('交帧（JS 腿）', `没出 PNG\n${jsF.err.slice(0, 400)}`);
+  } else if (jsF.line !== wantLine) {
+    no('交帧（JS 腿）', `指针那一行不对：\n       要 ${wantLine}\n       给 ${jsF.line}`);
+  } else if (jsF.png.length < 10000 || jsF.png.subarray(1, 4).toString('latin1') !== 'PNG') {
+    no('交帧（JS 腿）', `不像一张 PNG：${jsF.png.length} 字节`);
+  } else {
+    ok('交帧（JS 腿）', `omni_c_gfx_frame 出了 ${jsF.png.length} 字节的 PNG，`
+      + `stdout 上那行 #gfx 指得对`);
+    if (ip.png !== null && ip.png.equals(jsF.png)) ok('两条腿交的是同一帧', '两张 PNG 逐字节相同');
+    else no('两条腿交的是同一帧', `解释腿 ${ip.png === null ? '没出 PNG' : `${ip.png.length} 字节`}，JS 腿 ${jsF.png.length} 字节`);
   }
 }
 

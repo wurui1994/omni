@@ -756,6 +756,23 @@ node tests/r/cjs.js       # 十二道门
 **这还不是"浏览器图形设备"**：现在的形状是"程序把图当文本印出去、宿主负责画"，
 而设备是"程序调宿主的画笔" —— 差的正是下面那张宿主导入表。
 
+**设备那一半也通了（交一帧）。** `interp/libc.js` 里那张表**就是**宿主导入表 ——
+C→JS 那条腿上"对外世界"的全部出口就是它。往里加一格：
+
+```c
+int omni_c_gfx_frame(const char *path, int w, int h, const unsigned int *fb);
+```
+
+帧缓冲按 `w × h` 写成一张 PNG，一格像素是一个 `unsigned int`（`0xRRGGBB`）。
+宿主那一侧是 `builtin.js` 的 `gfxFrameLin`，与方言那两档共用 `gfxEmit`（三档逐字节一致）。
+第三个驱动（`nmath-frame.c`）就是一台**真设备上的程序**：自己在帧缓冲上逐列画那两条
+曲线与坐标轴，再调 `omni_c_gfx_frame` 交帧，最后印一行 `#gfx png <路径> <宽> <高>`
+让 Studio 把它贴到 canvas 上。判据：**解释腿与 JS 腿交出来的两张 PNG 逐字节相同**
+（614 833 字节，480×320）。
+
+**还没有的是实时那一档**：`src/studio/gfx-gl.js` 那台 WebGL2 设备（`__OMNI_GFX`）
+要接上，得再往表里加 `gfxcall` 那一族（`setcol`/`moveto`/`lineto`/`present`…）。
+
 **往 ggplot2 走还差四格**，都在 ADR-0047 里摆着：JS 发射器还不发
 `setjmp`/`longjmp`（MIR 解释腿已经有 `LongJmp`，所以是"还没做"而不是"做不到"）、
 MIR 层还没有链接器（`src/main` 那 ~99 份摊不动）、没有 Fortran、

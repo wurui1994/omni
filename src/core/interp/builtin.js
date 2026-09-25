@@ -1444,6 +1444,26 @@ function gfxEmit(p, wi, hi, cols) {
   return BigInt(body.length);
 }
 
+/**
+ * `(gfxframe PATH W H FB)` 的**线性内存那一档**（C 那条腿：`unsigned int fb[N]`，
+ * 一格 4 字节、装一个打包好的 0xRRGGBB）。出来的表面与上面那两档**逐字节相同** ——
+ * 三档共用 `gfxEmit`，那是必须一致的那段字节。
+ *
+ * 为什么单开一档而不是复用 `gfxFrameP`：那一档读的是**方言的**指针内存（`ptrDv`）、
+ * 一槽 8 字节；C→MIR→JS 那条腿的内存是另一块（`linDv`，ADR-0013 的线性内存），
+ * 而 C 里 `unsigned int` 就是 4 字节。两块内存、两种槽宽，合不到一个函数里。
+ */
+export function gfxFrameLin(p, w, h, addr) {
+  const wi = Number(w);
+  const hi = Number(h);
+  const n = wi * hi;
+  const base = BigInt(addr);
+  if (base === 0n) rtError('gfxframe: null framebuffer');
+  const cols = [];
+  for (let i = 0; i < n; i++) cols.push(memLoad('i32u', base, i * 4));
+  return gfxEmit(p, wi, hi, cols);
+}
+
 /** 一格颜色：取整、绕进 0..0xFFFFFF。**不用位运算** —— 那一族在 double 上先截到 32 位。
  *  int 那一档（指针那条路上的槽）是 BigInt，**走 BigInt 取模**：超出 24 位的值先绕回来
  *  再落成 double，于是与 C 那条腿的整数取模逐位同值。 */
