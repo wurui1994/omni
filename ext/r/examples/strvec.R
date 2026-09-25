@@ -118,3 +118,26 @@ print(endsWith(w2, "e"))
 print(trimws(c("  a ", "b  ")))
 cat(sum(startsWith(w2, "a")), "\n")
 # `startsWith(v, c("a","b"))` 那种两边都回收的没接 —— 当场报
+
+# base 那四条**字符向量常量**（`letters` / `LETTERS` / `month.name` / `month.abb`）。
+# 它们在 R 那边是普通变量（能被盖掉），所以这一档也按变量办：每用一次现造一条
+print(letters)
+print(LETTERS)
+print(month.name)
+print(month.abb)
+print(letters[1])
+print(LETTERS[3])
+print(month.abb[12])
+cat(letters[1], LETTERS[26], "\n")
+print(length(letters))
+print(toupper(letters[5]))
+# `strrep(x, times)`：接起来 times 遍（方言的 `(srep …)`）；次数只接一格标量
+print(strrep("ab", 3))
+print(strrep("-", 5))
+print(strrep("x", 0))
+print(strrep(c("a", "bc"), 2))
+print(nchar(strrep("ab", 4)))
+# `casefold(x, upper = FALSE)` 是 `tolower` / `toupper` 的别名（S 兼容）
+print(casefold("AbC"))
+print(casefold("AbC", upper = TRUE))
+print(casefold(c("Ab", "cD"), upper = TRUE))

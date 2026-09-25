@@ -730,6 +730,14 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
     连带的两格：`strsplit` 接了两种形状、`grepl` / `grep` / `sub` / `gsub` 接了
     **按字面找**那一档（都在第三节）—— 正则本身还是没有。
 
+    2026-09-26 加的三格：`strrep(x, times)`（方言的 `(srep …)`，次数只接一格标量 ——
+    R 那边两边都回收）、`casefold(x, upper =)`（`tolower` / `toupper` 的别名，收拢在
+    同一段代码里）、以及 base 那四条**字符向量常量** `letters` / `LETTERS` /
+    `month.name` / `month.abb`。那四条按**变量**办（R 那边它们能被 `letters <- …`
+    盖掉，与 `pi` / `T` / `F` 同一条规矩，见 `BASE_VARS` 那段），每用一次现造一条
+    `(arr string)` —— 造它要一串 `apush`，是语句，摆不进一格字面量里。
+    `.` 在这一层被 `mangle` 换成 `_`，所以表里的键是 `month_name`。
+
 13. `identical()` **没接，而且不是"还没写"那种没接** —— 它要的是"两条向量的
     `typeof` 一不一样"，而这一档**分不出 R 的 integer 向量与 double 向量**：
     `c(1, 2, 3)` 与 `c(1L, 2L, 3L)` 在 `typeOfExpr` 里都落成 `RVEC`（那个 `case 'c'`

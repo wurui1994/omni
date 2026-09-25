@@ -301,6 +301,12 @@ const FN_DEPS = new Map([
   ['r_trim', []],
   /* 串那一族在字符向量上逐元素 —— 每一格转给标量那一版。 */
   ['r_substr_v', ['r_substr']],
+  /* base 那四条字符向量常量（各自自足 —— 一串 `apush` 而已）+ `strrep` 逐元素那一格。 */
+  ['r_sv_letters', []],
+  ['r_sv_upper', []],
+  ['r_sv_month', []],
+  ['r_sv_mabb', []],
+  ['r_strrep_v', []],
   ['r_trim_v', ['r_trim']],
   ['r_starts_v', ['r_starts']],
   ['r_ends_v', ['r_ends']],
@@ -366,12 +372,24 @@ const CONSTS = new Map([
  * 所以 `T <- 5` 会把整段的 `T` 都变成那格变量 —— 包括赋值**之前**那几句
  * （R 在那几句里读到的还是 `TRUE`）。这一格与"变量在赋值前读到零值"是同一个来源。
  *
- * 只收数值那几格：`LETTERS` / `month.name` 那一批是**字符向量**，而这一档还没有那一层。
+ * 数值那三格在这张表里；`LETTERS` / `month.name` 那一批是**字符向量**，装在
+ * `BASE_SVAR` 里（那张表要等 `RSTRV` 先定义出来，所以摆在后头）——
+ * 两张表由 `baseVar()` 一起查。
  */
 const BASE_VARS = new Map([
   ['pi', { expr: { kind: 'real', value: Math.PI }, type: REAL }],
   ['T', { expr: { kind: 'bool', value: true }, type: BOOL }],
   ['F', { expr: { kind: 'bool', value: false }, type: BOOL }],
+]);
+
+/** 那四条常量各自装的是什么（`strvFnDecl` 按这张表发函数）。 */
+const BASE_SV = new Map([
+  ['r_sv_letters', [...'abcdefghijklmnopqrstuvwxyz']],
+  ['r_sv_upper', [...'ABCDEFGHIJKLMNOPQRSTUVWXYZ']],
+  ['r_sv_month', ['January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December']],
+  ['r_sv_mabb', ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']],
 ]);
 
 /**
@@ -455,6 +473,23 @@ const isLgl1 = (t) => t !== undefined && t !== null && t.kind === 'real' && t.lg
  */
 const RSTRV = { kind: 'arr', elem: STR };
 const isStrVec = (t) => t !== undefined && t !== null && t.kind === 'arr';
+/**
+ * base 里那四条**字符向量**常量（`BASE_VARS` 的后一半 —— 这儿才有 `RSTRV`）。
+ *
+ * `expr` 换成 `mk`（一格工厂）：造一条 `(arr string)` 要一串 `apush`，那是语句、摆不进
+ * 一格字面量里，所以落成一次函数调用。摆成工厂而不是现成的表达式，是因为 `useFn` 一执行
+ * 就把那个函数记进"这一趟要发的"——在表构造时执行就会塞进**每一份**程序里。
+ */
+const BASE_SVAR = new Map([
+  ['letters', { mk: () => lglCall('r_sv_letters'), type: RSTRV }],
+  ['LETTERS', { mk: () => lglCall('r_sv_upper'), type: RSTRV }],
+  /* `.` 在这一层被 `mangle` 换成 `_`，所以键是 `month_name` 而不是 `month.name`。 */
+  ['month_name', { mk: () => lglCall('r_sv_month'), type: RSTRV }],
+  ['month_abb', { mk: () => lglCall('r_sv_mabb'), type: RSTRV }],
+]);
+/** 两张 base 常量表一起查（数值那三格在 `BASE_VARS`、字符向量那四条在 `BASE_SVAR`）。 */
+const baseVar = (nm) => BASE_VARS.get(nm) ?? BASE_SVAR.get(nm);
+const baseVarExpr = (e) => (e.mk !== undefined ? e.mk() : e.expr);
 /**
  * **带名字的数值向量**（`c(a = 1, b = 2)`）—— 值那一条还是 `(ptr real)`，名字另走一条
  * `(arr string)`，两条**跟着同一个变量**：`v` 的名字摆在 `v__nm` 里。
@@ -719,6 +754,7 @@ const NAMED_OK = new Map([
   ['range', NA_RM], ['var', NA_RM], ['sd', NA_RM], ['any', NA_RM], ['all', NA_RM],
   ['median', NA_RM],
   ['diff', new Set(['lag'])],
+  ['casefold', new Set(['upper'])],
   /* `sort` 上**没有** `na.rm=` —— R 自己都报"参数没有用(na.rm = TRUE)"（它的默认
      `na.last = NA` 已经是"丢掉缺失"了）。量出来的：我们本来跟着收了，比 R 宽。 */
   ['head', new Set(['n'])], ['tail', new Set(['n'])],
@@ -765,6 +801,8 @@ const BUILTINS = new Set([
   /* 串那一族。`tolower` 方言里没有算子（只有 `(supper …)`），由 `r_lower` 拿两张字母表
      查出来 —— **只管 ASCII**（见 SPEC 第四节第 12 条）。 */
   'toupper', 'tolower', 'substr', 'substring', 'trimws', 'sprintf', 'startsWith', 'endsWith',
+  /* `casefold` 是那两格的别名（S 兼容）；`strrep` 是方言的 `(srep …)`。 */
+  'casefold', 'strrep',
   /* `strsplit` 只接两种形状（见 `splitOf`）：`strsplit(s, sep)[[1]]` 与
      `unlist(strsplit(s, sep))` —— R 那边它回的是一张**表**，而这一层没有"表里装向量"。 */
   'strsplit', 'unlist',
@@ -956,7 +994,7 @@ function typeOfExpr(x, types) {
       /* 局部没有 → 看顶层那些模块级变量（R 的函数看得见顶层的名字，见 `globalTys`）。 */
       const g = globalTys.get(nm);
       if (g !== undefined) return g;
-      return BASE_VARS.has(nm) ? BASE_VARS.get(nm).type : INT;
+      return baseVar(nm) !== undefined ? baseVar(nm).type : INT;
     }
     case 'block': {
       const ks = kids(x);
@@ -1152,6 +1190,9 @@ function applyTy(fn, x, types) {
     /* `nchar` / `tolower` / `toupper` 逐元素：字符向量进 → 出另一条向量。 */
     case 'nchar': return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RIVEC : INT;
     case 'tolower': return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RSTRV : STR;
+    /* `casefold` 是 `toupper` / `tolower` 的别名（S 兼容），`strrep` 逐元素接起来。 */
+    case 'casefold': case 'strrep':
+      return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RSTRV : STR;
     /* `character(n)` —— 一条 n 格空串的字符向量。 */
     case 'character': return RSTRV;
     case 'as.numeric': {
@@ -2492,8 +2533,8 @@ function exprOf(x, types, want) {
     case 'sym': {
       const nm = mangle(nameOf(x));
       /* base 里那几个有名字的常量：**这一段写过这个名字就不算**（见 `BASE_VARS`）。 */
-      if (types !== undefined && types.get(nm) === undefined && BASE_VARS.has(nm)) {
-        return BASE_VARS.get(nm).expr;
+      if (types !== undefined && types.get(nm) === undefined && baseVar(nm) !== undefined) {
+        return baseVarExpr(baseVar(nm));
       }
       return { kind: 'name', name: nm };
     }
@@ -3685,10 +3726,12 @@ function callOf(x, types, extra, want) {
         }
         return asStr(all[0], types, 15);
       }
-      case 'toupper': case 'tolower': {
-        if (n !== 1) throw new Error(`r->IR: ${fn}() 要一格实参（给了 ${n}）`);
+      case 'toupper': case 'tolower': case 'casefold': {
+        /* `casefold(x, upper = FALSE)` 在 R 里就是这两格的别名（`?casefold`：
+           "for compatibility with S"）—— 所以在这儿收拢成同一段，不另写一份。 */
+        if (n !== 1) throw new Error(`r->IR: ${fn}() 要一格位置实参（给了 ${n}）`);
         const t = all[0] === null ? STR : typeOfExpr(all[0], types);
-        const up = fn === 'toupper';
+        const up = fn === 'toupper' || (fn === 'casefold' && trueFlag(x, 'upper'));
         /* 字符向量那一档逐元素出一条新的字符向量。 */
         if (isStrVec(t)) {
           return {
@@ -3699,6 +3742,20 @@ function callOf(x, types, extra, want) {
         }
         if (up) return call1('supper', ev(0));
         return { kind: 'call', fn: { kind: 'name', name: useFn('r_lower') }, args: [ev(0)] };
+      }
+      case 'strrep': {
+        /**
+         * `strrep(x, times)`：接起来 `times` 遍。方言的 `(srep S N)` 就是它 ——
+         * 字符向量那一档逐元素（次数只接一格标量：R 那边两边都回收，那要再摆一层）。
+         */
+        if (n !== 2) throw new Error(`r->IR: strrep() 要两格实参（给了 ${n}）`);
+        const t = all[0] === null ? STR : typeOfExpr(all[0], types);
+        const kt = all[1] === null ? INT : typeOfExpr(all[1], types);
+        if (isVecTy(kt)) throw new Error('r->IR: strrep() 的次数只接一格标量（R 那边两边都回收，那一层还没接）');
+        const kk = asIntE(ev(1), kt);
+        if (isStrVec(t)) return lglCall('r_strrep_v', ev(0), kk);
+        if (t.kind !== 'string') throw new Error(`r->IR: strrep() 的第一格实参不是串（是 ${t.kind}）`);
+        return call1('srep', ev(0), kk);
       }
       case 'substr': {
         /* R 的 `substr(s, start, stop)` 是**1 起、两端都含**，而且越界是**截断**
@@ -4676,6 +4733,8 @@ const STRV_FNS = new Set([
   'r_pick_str', 'r_mask_str', 'r_split', 'r_at_name', 'r_nm_at',
   'r_gsub', 'r_gsub_v', 'r_grepl_v', 'r_grep_i', 'r_grep_s', 'r_rep_str', 'r_ifelse_s',
   'r_substr_v', 'r_trim_v', 'r_starts_v', 'r_ends_v',
+  /* base 那四条字符向量常量 + `strrep` 在字符向量上那一格。 */
+  'r_sv_letters', 'r_sv_upper', 'r_sv_month', 'r_sv_mabb', 'r_strrep_v',
 ]);
 
 /** 这一批由 `setFnDecl` 发（集合与位置那一族，见 `FN_DEPS` 上那段账）。 */
@@ -5106,6 +5165,45 @@ function strvFnDecl(name) {
     else_: S(''),
   });
 
+  if (BASE_SV.has(name)) {
+    /**
+     * base 的那四条字符向量常量（`letters` / `LETTERS` / `month.name` / `month.abb`）。
+     * 一条 `(arr string)` 造出来就 `apush` 满 —— 每用一次现造一条：R 那边它们是变量
+     * （能被 `letters <- …` 盖掉），所以"每次拿到的是一条新的"与 R 的值语义同解。
+     */
+    return {
+      kind: 'fn',
+      name,
+      params: [],
+      ret: RSTRV,
+      body: [
+        { kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), I(0)) },
+        ...BASE_SV.get(name).map((w) => ({
+          kind: 'builtin-stmt', name: 'apush', args: [nm('o'), S(w)],
+        })),
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  if (name === 'r_strrep_v') {
+    /** `strrep(v, n)` 在字符向量上逐元素（`(srep …)` 是现成的算子）。 */
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RSTRV }, { name: 'k', type: INT }],
+      ret: RSTRV,
+      body: [
+        letI('n', svLen(v)),
+        { kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), I(0)) },
+        loop([{
+          kind: 'builtin-stmt',
+          name: 'apush',
+          args: [nm('o'), call1('srep', svGet(v, i), nm('k'))],
+        }], nm('n')),
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
   if (name === 'r_at_name' || name === 'r_nm_at') {
     /* `v["a"]` —— 在名字那一条里找那个名字，回值（`r_at_name`）或者回"印出来的那个名字"
        （`r_nm_at`）。找不到时 R 印的是 `<NA>` / `NA`（量出来的，`Rscript`，2026-09-25），
