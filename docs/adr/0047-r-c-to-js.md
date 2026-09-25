@@ -124,6 +124,37 @@ int omni_c_gfx_frame(const char *path, int w, int h, const unsigned int *fb);
 `#gfx` 那一行指得对，PNG 头对。看过图：两条曲线、坐标轴、刻度都在，
 `dt(x,3)` 峰更低尾更厚。
 
+### 6. 显示那一格的第三半：设备自己的笔（已落）
+
+上面那一格还是"我画好一整帧，你存成图"。真正的图形设备是"**你替我画**"，
+所以再往那张表里加一格：
+
+```c
+double omni_c_gfx_call(const char *name, const double *args, int n);
+```
+
+一格宿主调用：名字 + 一串 double，回一个 double —— **EVAL 两门语言的宿主面就是这个形状**
+（名字表在 `src/core/host/gfx-cpu.js` 的 `gfxCall`：`cls` / `setcol` / `moveto` /
+`lineto` / `setpix` / `refresh` / `xres` / `yres` / `mousx` / `keystatus` / `gl*` …）。
+宿主那一侧是 `builtin.js` 的 `gfxCallLin`，转给 `globalThis.__OMNI_GFX` ——
+**与 `.pss` / `.kc` 那两门用的是同一格设备，不是第三份实现**：
+
+* node 上是 `host/gfx-cpu.js` 那一档 CPU 备选（`refresh` 自己写图 + 印 `#gfx`）；
+* **浏览器里是 `src/studio/gfx-gl.js` 那台 WebGL2 设备**（`installGlDevice` 把它装在
+  `globalThis.__OMNI_GFX` 上，带真的鼠标键盘事件与 rAF 帧循环）。
+
+第四个驱动（`nmath-dev.c`）于是是**一份在浏览器图形设备上画 R 的分布函数的 C 程序**：
+画布尺寸问设备要（`xres`/`yres`，页面上 canvas 多大就画多大），`moveto` 一次、
+往后一路 `lineto`，折线交给设备画，最后 `refresh` 交帧。
+
+判据：解释腿与 JS 腿交出来的两张 PNG **逐字节相同**（480×320，尺寸是问设备要的），
+`#gfx` 那一行与 `dev 480x320` 都在。看过图：两条曲线是设备的笔画出来的。
+
+**这一格就是目标里那句"建立浏览器图形设备"** —— 缺的只剩"把 R 自己的 `graphics`
+设备结构体（`GEDevDesc` 那一套回调）接到这几个名字上"，而那要先过 `setjmp` 与
+MIR 链接器两道坎（`src/main` 与 `grDevices` 都在那后面）。
+
+
 
 
 ## 还没解决的四道坎（往 ggplot2 走要先过这些）
@@ -137,14 +168,13 @@ int omni_c_gfx_frame(const char *path, int w, int h, const unsigned int *fb);
    加 `src/appl`/`src/unix`/`src/extra/tre`/tzone，而且 `static` 撞车会多得多 ——
    到那一步该做的是 MIR 层的链接器，不是更聪明的摊平脚本。
 3. **没有 Fortran。** R 的 `SOURCES_F` 与 BLAS/LAPACK 都是 Fortran。nmath 恰好不沾。
-4. **浏览器那台图形设备：交一帧已经通了，实时那一档还没有。**
-   * 已经有的：`omni_c_gfx_frame`（上面第 5 条）—— 程序自己画帧缓冲、调宿主交帧，
-     出 PNG，两条腿逐字节相同；stdout 上那行 `#gfx` 让 Studio 把它贴到 canvas 上。
-   * 还没有的：**实时那一档**。`src/studio/gfx-gl.js` 是一台真设备（WebGL2 + 真事件，
-     装法是 `globalThis.__OMNI_GFX = dev`），而现在 C 那条腿只接到了"一趟一帧、
-     落成文件"这一格。要接到那台设备上，得再往表里加 `gfxcall` 那一族
-     （`setcol`/`moveto`/`lineto`/`present`…，签名在 `src/runtime/omni.h:358`），
-     并且让宿主在浏览器里把它们转给 `__OMNI_GFX` —— 那是一刀正经的活。
+4. **浏览器那台图形设备：两档都通了，接 R 自己的设备结构体还没到。**
+   * 已经有的：`omni_c_gfx_frame`（交一帧，上面第 5 条）与 `omni_c_gfx_call`
+     （设备自己的笔，第 6 条）—— 后者打到的就是 `.pss`/`.kc` 那两门用的同一格设备，
+     浏览器里是 `studio/gfx-gl.js` 那台 WebGL2。
+   * 还没有的：R 自己的 `GEDevDesc` 那一套回调（`line` / `polygon` / `text` /
+     `metricInfo` …）往这几个名字上接 —— 那要先过第 1、2 两条（`grDevices` 在
+     `src/main` 后面）。
    * 顺带记一条：程序把 `<svg …>` 印到 stdout，Studio 预览栏也当图挂上去
      （`src/lib/plot.omni` 已经这么干），**零宿主接口成本** —— R 的 `svglite`/`pdf`
      设备产生的正是这种纯文本。
@@ -155,6 +185,6 @@ int omni_c_gfx_frame(const char *path, int w, int h, const unsigned int *fb);
 * 122 份 `.c` 摊成 15 641 字节的 `nmath-lib.c`（`#include` + `#define`/`#undef`，
   不含 R 的源码本身），两个驱动各包它一次。
 * 改名的 `static`：10 个名字、22 处。
-* `node tests/r/cjs.js` 全过（14/14）：66 格数 + 一张 7547 字节的 SVG
-  + 一张 614 833 字节的 PNG（两条腿逐字节相同）。
+* `node tests/r/cjs.js` 全过（16/16）：66 格数 + 一张 7547 字节的 SVG
+  + 两张 480×320 的 PNG（交帧那一档与设备自己的笔那一档，各自两条腿逐字节相同）。
 * 产物落 `.omni-cache/r-rt/js/`（约定：生成物不进版本库，也不进临时目录）。

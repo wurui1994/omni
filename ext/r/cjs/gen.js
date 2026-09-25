@@ -54,6 +54,9 @@ export const PLOT_R = join(OUT, 'plot.R');
 /** 驱动三：自己画帧缓冲，再调宿主把这一帧交出去（真设备那一格）。 */
 export const FRAME_C = join(OUT, 'nmath-frame.c');
 export const FRAME_PNG = join(OUT, 'nmath-frame.png');
+/** 驱动四：用**设备自己的笔**画（`cls`/`setcol`/`moveto`/`lineto`/`refresh`）。 */
+export const DEV_C = join(OUT, 'nmath-dev.c');
+export const DEV_PNG = join(OUT, 'nmath-dev.png');
 /** 三份生成出来的头在这儿（`ext/r/build.js` 造的）—— 编这份 `.c` 要 `-I` 它。 */
 export const GEN_INC = join(ROOT, '.omni-cache', 'r-rt', 'include');
 export const INCS = [GEN_INC, join(RSRC, 'src/nmath'), join(RSRC, 'src/include')];
@@ -451,6 +454,83 @@ int main(void) {
   return L.join('\n');
 }
 
+/**
+ * 驱动四（真设备，实时那一档）：用**设备自己的笔**画。
+ *
+ * 与驱动三的分别：那一格是"我自己画好一整帧，你存成图"（`omni_c_gfx_frame`），
+ * 这一格是"**你替我画**" —— `cls` / `setcol` / `moveto` / `lineto` / `refresh` 打到的是
+ * `globalThis.__OMNI_GFX`：node 上是 `host/gfx-cpu.js` 那一档，**浏览器里是
+ * `src/studio/gfx-gl.js` 那台 WebGL2 设备**。所以同一份 C 在页面里画的是真 canvas。
+ * 这就是"浏览器图形设备"该有的形状。
+ *
+ * 画布尺寸**问设备要**（`xres`/`yres`），不写死 —— 页面上 canvas 多大就画多大。
+ */
+function devMain() {
+  const { ml, mr, mt, mb, x0, x1, ymax } = PLOT;
+  const L = [driverHead('用设备自己的笔画（实时那一档）')];
+  L.push(`#define ML ${ml}
+#define MR ${mr}
+#define MT ${mt}
+#define MB ${mb}
+#define X0 (${x0}.0)
+#define X1 (${x1}.0)
+#define YMAX (${ymax})
+
+/* 宿主那一格（\`src/core/interp/libc.js\` 的 \`omni_c_gfx_call\`）：名字 + 一串 double，
+   回一个 double。名字表在 \`src/core/host/gfx-cpu.js\` 的 \`gfxCall\`。 */
+extern double omni_c_gfx_call(const char *name, const double *args, int n);
+
+static double ARG[4];
+static double g0(const char *nm) { return omni_c_gfx_call(nm, ARG, 0); }
+static double g1(const char *nm, double a) { ARG[0] = a; return omni_c_gfx_call(nm, ARG, 1); }
+static double g2(const char *nm, double a, double b) {
+  ARG[0] = a; ARG[1] = b; return omni_c_gfx_call(nm, ARG, 2);
+}
+
+static int W, H;
+static double px(double x) { return ML + (x - X0) / (X1 - X0) * (W - ML - MR); }
+static double py(double y) { return H - MB - y / YMAX * (H - MT - MB); }
+
+/* 一条曲线：\`moveto\` 一次，往后一路 \`lineto\` —— 折线交给设备去画。 */
+static void curve(int kind) {
+  int sx;
+  for (sx = ML; sx <= W - MR; sx++) {
+    double x = X0 + (X1 - X0) * (sx - ML) / (double)(W - ML - MR);
+    double v = (kind == 0) ? dnorm(x, 0.0, 1.0, 0) : dt(x, 3.0, 0);
+    if (sx == ML) g2("moveto", (double)sx, py(v));
+    else g2("lineto", (double)sx, py(v));
+  }
+}
+
+int main(void) {
+  int k;
+  W = (int)g0("xres");
+  H = (int)g0("yres");
+  if (W <= 0 || H <= 0) { printf("这一趟没有设备\\n"); return 1; }
+  g1("cls", (double)0xffffff);
+  /* 坐标轴与刻度 */
+  g1("setcol", (double)0x333333);
+  g2("moveto", px(X0), (double)MT);
+  g2("lineto", px(X0), py(0.0));
+  g2("lineto", px(X1), py(0.0));
+  for (k = (int)X0; k <= (int)X1; k++) {
+    g2("moveto", px((double)k), py(0.0));
+    g2("lineto", px((double)k), py(0.0) + 5.0);
+  }
+  for (k = 0; k <= 3; k++) {
+    g2("moveto", px(X0) - 5.0, py(YMAX * k / 3.0));
+    g2("lineto", px(X0), py(YMAX * k / 3.0));
+  }
+  g1("setcol", (double)0x1f77b4); curve(0);
+  g1("setcol", (double)0xd62728); curve(1);
+  /* 交帧。CPU 备选那一档自己写图 + 印一行 \`#gfx\`；浏览器那一档就是 canvas 上的一帧。 */
+  g0("refresh");
+  printf("dev %dx%d\\n", W, H);
+  return 0;
+}`);
+  return L.join('\n');
+}
+
 /** 写盘。回写了几份、摊了几个文件、改了哪几个名字。 */
 export function generate() {
 
@@ -469,6 +549,7 @@ export function generate() {
   writeFileSync(PLOT_C, `${plotMain()}\n`);
   writeFileSync(PLOT_R, plotR());
   writeFileSync(FRAME_C, `${frameMain()}\n`);
+  writeFileSync(DEV_C, `${devMain()}\n`);
   return { bytes: text.length, count, renamed };
 }
 
@@ -477,7 +558,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   process.stdout.write(`${LIB_C}\n  ${r.count} 份 .c 摊成 ${r.bytes} 字节\n`
     + `${AMALGAM}\n  ${PROBES.length + RNG_N_UNIF + RNG_N_NORM} 格探子\n`
     + `${PLOT_C}\n  一张 ${PLOT.w}x${PLOT.h} 的 SVG（dnorm 与 dt 各 ${PLOT.n} 点）\n`
-    + `${FRAME_C}\n  同两条曲线画进帧缓冲，调 omni_c_gfx_frame 交帧 -> PNG\n`);
+    + `${FRAME_C}\n  同两条曲线画进帧缓冲，调 omni_c_gfx_frame 交帧 -> PNG\n`
+    + `${DEV_C}\n  同两条曲线交给设备自己的笔（cls/setcol/moveto/lineto/refresh）\n`);
   if (process.argv.includes('-v')) {
     process.stdout.write(`  改了名的 static（${r.renamed.length} 处）：\n    ${r.renamed.join('\n    ')}\n`);
   }

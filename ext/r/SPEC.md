@@ -773,6 +773,24 @@ int omni_c_gfx_frame(const char *path, int w, int h, const unsigned int *fb);
 **还没有的是实时那一档**：`src/studio/gfx-gl.js` 那台 WebGL2 设备（`__OMNI_GFX`）
 要接上，得再往表里加 `gfxcall` 那一族（`setcol`/`moveto`/`lineto`/`present`…）。
 
+**实时那一档也通了。** 再加一格：
+
+```c
+double omni_c_gfx_call(const char *name, const double *args, int n);
+```
+
+名字 + 一串 double，回一个 double —— EVAL 两门语言（`.pss`/`.kc`）的宿主面就是这个形状，
+名字表在 `src/core/host/gfx-cpu.js` 的 `gfxCall`。宿主侧 `gfxCallLin` 转给
+`globalThis.__OMNI_GFX`：**与那两门用的是同一格设备**，node 上是 CPU 备选、
+**浏览器里是 `src/studio/gfx-gl.js` 那台 WebGL2**（带真事件与 rAF）。
+
+第四个驱动（`nmath-dev.c`）于是是一份**在浏览器图形设备上画 R 的分布函数的 C 程序**：
+画布尺寸问设备要（`xres`/`yres`），`moveto` 一次、往后一路 `lineto`，`refresh` 交帧。
+判据：两条腿的 PNG 逐字节相同（480×320）。
+
+**还差的一格**是把 R 自己的 `GEDevDesc` 那一套回调（`line`/`polygon`/`text`/
+`metricInfo`…）接到这几个名字上 —— 那要先过 `setjmp` 与 MIR 链接器两道坎。
+
 **往 ggplot2 走还差四格**，都在 ADR-0047 里摆着：JS 发射器还不发
 `setjmp`/`longjmp`（MIR 解释腿已经有 `LongJmp`，所以是"还没做"而不是"做不到"）、
 MIR 层还没有链接器（`src/main` 那 ~99 份摊不动）、没有 Fortran、

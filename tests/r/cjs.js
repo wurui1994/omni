@@ -32,7 +32,7 @@ import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  generate, AMALGAM, PROBE_R, PLOT_C, PLOT_R, PLOT, FRAME_C, FRAME_PNG,
+  generate, AMALGAM, PROBE_R, PLOT_C, PLOT_R, PLOT, FRAME_C, FRAME_PNG, DEV_C, DEV_PNG,
   INCS, PROBES, RNG_N_UNIF, RNG_N_NORM,
 } from '../../ext/r/cjs/gen.js';
 
@@ -70,8 +70,13 @@ try {
 ok('摊平', `${gen.count} 份 .c -> ${gen.bytes} 字节，改名 ${gen.renamed.length} 处`);
 
 /** 跑一趟，回 `{ code, out, err }`。 */
-const sh = (cmd, args) => {
-  const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 600000, cwd: ROOT });
+const sh = (cmd, args, extraEnv = undefined) => {
+  const r = spawnSync(cmd, args, {
+    encoding: 'utf8',
+    timeout: 600000,
+    cwd: ROOT,
+    env: extraEnv === undefined ? process.env : { ...process.env, ...extraEnv },
+  });
   return { code: r.status ?? 1, out: r.stdout ?? '', err: r.stderr ?? '' };
 };
 /** 把一趟输出解析成 `名字 -> 数`。顺带判行数 —— 空输出不许冒充"相同"。 */
@@ -240,6 +245,35 @@ if (ccPlot.code !== 0) {
       + `stdout 上那行 #gfx 指得对`);
     if (ip.png !== null && ip.png.equals(jsF.png)) ok('两条腿交的是同一帧', '两张 PNG 逐字节相同');
     else no('两条腿交的是同一帧', `解释腿 ${ip.png === null ? '没出 PNG' : `${ip.png.length} 字节`}，JS 腿 ${jsF.png.length} 字节`);
+  }
+}
+
+/* ---- 8. 实时那一档：设备自己的笔 ---------------------------------------- */
+
+{
+  /* 尺寸与落点走环境（`host/gfx-cpu.js` 的 `need` 与 `outPath` 读这三格）——
+     浏览器里这两样由 canvas 与页面决定，所以 C 那边是问 `xres`/`yres` 来的。 */
+  const devEnv = { OMNI_GFX_W: String(PLOT.w), OMNI_GFX_H: String(PLOT.h), OMNI_GFX_OUT: DEV_PNG };
+  const one = (args) => {
+    if (existsSync(DEV_PNG)) rmSync(DEV_PNG);
+    const r = sh('node', [CLI, ...args, ...ourIncs], devEnv);
+    return {
+      out: r.out, err: r.err,
+      png: existsSync(DEV_PNG) ? readFileSync(DEV_PNG) : null,
+    };
+  };
+  const ipD = one(['c-run', DEV_C]);
+  const jsD = one(['run', DEV_C, '--backend', 'js']);
+  const wantLine = `#gfx png ${DEV_PNG} ${PLOT.w} ${PLOT.h}`;
+  if (jsD.png === null) {
+    no('设备自己的笔（JS 腿）', `没出 PNG\n${jsD.err.slice(0, 500)}`);
+  } else if (!jsD.out.includes(wantLine) || !jsD.out.includes(`dev ${PLOT.w}x${PLOT.h}`)) {
+    no('设备自己的笔（JS 腿）', `输出不对：\n${jsD.out.slice(0, 400)}`);
+  } else {
+    ok('设备自己的笔（JS 腿）', `cls/setcol/moveto/lineto/refresh 打到 __OMNI_GFX，`
+      + `出 ${jsD.png.length} 字节的 PNG（${PLOT.w}x${PLOT.h}，尺寸是问设备要的）`);
+    if (ipD.png !== null && ipD.png.equals(jsD.png)) ok('两条腿画的是同一帧', '两张 PNG 逐字节相同');
+    else no('两条腿画的是同一帧', `解释腿 ${ipD.png === null ? '没出 PNG' : `${ipD.png.length} 字节`}`);
   }
 }
 

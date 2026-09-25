@@ -25,7 +25,10 @@
 // 浮点原先也在这份清单里，第十四片之后 `%f`/`%e`/`%g` 已经逐字节对上了（见 `fText`），
 // 第二十一片补上了 `%a`（见 `aText`）—— 于是这份清单只剩 `%p` 一格。
 
-import { memLoad, memStore, printBytes, flushOut, memSize, memGrow, outDirect, gfxFrameLin } from './builtin.js';
+import {
+  memLoad, memStore, printBytes, flushOut, memSize, memGrow, outDirect,
+  gfxFrameLin, gfxCallLin,
+} from './builtin.js';
 import { stderrBytes as hostStderr, readBinary, writeBinary, removeFile, env as hostEnv, spawn as hostSpawn, nowMs } from '../host/native.js';
 
 /**
@@ -2355,6 +2358,26 @@ const LIBC = {
    * `src/studio/render.js:267` 认这行并把它贴到 canvas 上。 */
   omni_c_gfx_frame: (a) => gfxFrameLin(readCStr(a[0]),
     Number(BigInt.asIntN(32, BigInt(a[1]))), Number(BigInt.asIntN(32, BigInt(a[2]))), a[3]),
+
+  /* `double omni_c_gfx_call(const char *name, const double *args, int n)`
+   * —— **实时那一档的门**：一格宿主调用，名字 + 一串 double，回一个 double
+   * （EVAL 的宿主面就是这个形状，名字表在 `src/core/host/gfx-cpu.js` 的 `gfxCall`）。
+   *
+   * 与上面 `omni_c_gfx_frame` 的分别：那一格是"我自己画好了一整帧，你存成图"，
+   * 这一格是"你替我画" —— `cls` / `setcol` / `moveto` / `lineto` / `refresh` …
+   * 打到的是**同一格设备**（`globalThis.__OMNI_GFX`）：node 上是 `host/gfx-cpu.js`
+   * 那一档 CPU 备选，浏览器里页面装的是 WebGL2 那一档（`src/studio/gfx-gl.js`）。
+   * 所以同一份 C 在浏览器里画的是真 canvas，不是"印一个文件名出去让别人画"。
+   *
+   * 认不出的名字**设备那边当场炸**，并把它认得哪些名字说出来 —— 这一层不兜，
+   * 静默回 0 正是"图不对但没人知道"的来源。 */
+  omni_c_gfx_call: (a) => {
+    const n = Number(BigInt.asIntN(32, BigInt(a[2])));
+    const base = BigInt(a[1]);
+    const args = [];
+    for (let i = 0; i < n; i++) args.push(memLoad('f64', base, i * 8));
+    return gfxCallLin(readCStr(a[0]), args);
+  },
 
   strtol: (a) => {
     const s = readCStr(a[0]);

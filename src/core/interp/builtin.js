@@ -1464,6 +1464,18 @@ export function gfxFrameLin(p, w, h, addr) {
   return gfxEmit(p, wi, hi, cols);
 }
 
+/**
+ * `(gfxcall "名字" 实参…)` 的 **C 那条腿那一档**：转给同一格设备
+ * （`globalThis.__OMNI_GFX`）。不是第三份实现，是同一份 —— 只是实参从线性内存里来。
+ */
+export function gfxCallLin(name, args) {
+  const dev = globalThis.__OMNI_GFX;
+  if (dev === undefined || dev === null) {
+    rtError(`这一趟里没有图形设备（宿主要装上 globalThis.__OMNI_GFX）：${name}`);
+  }
+  return dev.call(name, args);
+}
+
 /** 一格颜色：取整、绕进 0..0xFFFFFF。**不用位运算** —— 那一族在 double 上先截到 32 位。
  *  int 那一档（指针那条路上的槽）是 BigInt，**走 BigInt 取模**：超出 24 位的值先绕回来
  *  再落成 double，于是与 C 那条腿的整数取模逐位同值。 */
