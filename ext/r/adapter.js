@@ -819,7 +819,7 @@ const BUILTINS = new Set([
   /* 找与换那一族（见 `findOf`）—— **只认按字面找**那一档，pattern 是串字面量。 */
   'grepl', 'grep', 'sub', 'gsub',
   /* 函数当实参那一族 —— **只接就地写的匿名函数**（见 `applyOf`）。 */
-  'sapply', 'vapply', 'lapply', 'Reduce', 'Filter',
+  'sapply', 'vapply', 'lapply', 'Reduce', 'Filter', 'mapply',
   /* "这是什么东西"那三问 —— 类型在这一层是**推出来的**，所以答案是编译期常量。 */
   'is.character', 'is.numeric', 'is.logical',
   /* 停下来那一档（落方言的 `(fail …)`，只能摆在语句位上）。 */
@@ -1107,7 +1107,7 @@ function typeOfExpr(x, types) {
  */
 function applyTy(fn, x, types) {
   const args = posArgs(x);
-  const fnFirst = fn === 'Reduce' || fn === 'Filter';
+  const fnFirst = fn === 'Reduce' || fn === 'Filter' || fn === 'mapply';
   const fnode = fnFirst ? args[0] : args[1];
   const data = fnFirst ? args[1] : args[0];
   if (fnode === undefined || data === undefined || !isList(fnode) || tag(fnode) !== 'fn') return INT;
@@ -1118,6 +1118,14 @@ function applyTy(fn, x, types) {
   const bt = typeOfExpr(kids(fnode)[1], child);
   if (fn === 'Filter') return strIn ? RSTRV : dt;
   if (fn === 'Reduce') return bt.kind === 'string' ? STR : REAL;
+  /* `mapply` 的形参两格都是 double（字符向量那一侧没接 —— R 会加名字），
+     所以上头那趟按 `strIn` 绑的类型对它不适用；回的种类还是看函数体。 */
+  if (fn === 'mapply') {
+    const c2 = new Map(types);
+    for (const p of formalsOf(fnode)) c2.set(p, REAL);
+    const b2 = typeOfExpr(kids(fnode)[1], c2);
+    return (b2.kind === 'bool' || isLgl1(b2)) ? RLGL : RVEC;
+  }
   if (bt.kind === 'string') return RSTRV;
   if (bt.kind === 'bool' || isLgl1(bt)) return RLGL;
   return RVEC;
@@ -1175,7 +1183,7 @@ function applyTy(fn, x, types) {
       if (isApplyCall(args[0], 'lapply')) return applyTy('lapply', args[0], types);
       return INT;
     }
-    case 'sapply': case 'vapply': case 'lapply': case 'Reduce': case 'Filter':
+    case 'sapply': case 'vapply': case 'lapply': case 'Reduce': case 'Filter': case 'mapply':
       return applyTy(fn, x, types);
     case 'strsplit': return RSTRV;
     /* 找与换那一族（见 `findOf`）：`grepl` 的形状随被找的那一格、`grep` 回位置（或元素）、
@@ -1448,13 +1456,13 @@ function eachCall(x, fn) {
  * sapply(c(1,2,3), function(x) f(x))` 从前报 `'f' 的第 1 个形参是 int，给的是 real`
  * —— 因为 `f(x)` 里那个 `x` 在外层那张表里查不到，落回 int。
  */
-const APPLY_FNS = new Set(['sapply', 'vapply', 'lapply', 'Reduce', 'Filter']);
+const APPLY_FNS = new Set(['sapply', 'vapply', 'lapply', 'Reduce', 'Filter', 'mapply']);
 function applyScopes(body, types) {
   const out = [];
   eachCall(body, (name, node) => {
     if (!APPLY_FNS.has(String(name))) return;
     const as = posArgs(node);
-    const fnFirst = name === 'Reduce' || name === 'Filter';
+    const fnFirst = name === 'Reduce' || name === 'Filter' || name === 'mapply';
     const fnode = fnFirst ? as[0] : as[1];
     const data = fnFirst ? as[1] : as[0];
     if (fnode === undefined || data === undefined) return;
@@ -1510,7 +1518,7 @@ function nameToLambda(x, userFns) {
     return;
   }
   if (!APPLY_FNS.has(nm2)) return;
-  const fnFirst = nm2 === 'Reduce' || nm2 === 'Filter';
+  const fnFirst = nm2 === 'Reduce' || nm2 === 'Filter' || nm2 === 'mapply';
   /* 要换的是第几格**位置**实参 —— 在 `items` 里数（`kids(x).slice(1)` 那一串）。 */
   const slots = kids(x).slice(1).filter((a) => tag(a) === 'arg');
   const slot = slots[fnFirst ? 0 : 1];
@@ -1518,7 +1526,7 @@ function nameToLambda(x, userFns) {
   const fnode = kids(slot)[0];
   if (fnode === undefined || !isList(fnode) || tag(fnode) !== 'sym') return;
   const rname = String(nameOf(fnode));
-  const nps = nm2 === 'Reduce' ? 2 : 1;
+  const nps = (nm2 === 'Reduce' || nm2 === 'mapply') ? 2 : 1;
   const ps = [...Array(nps)].map((_, k) => `.omni.a${k}`);
   let body;
   if (APPLY_OPS.has(rname)) {
@@ -2307,10 +2315,11 @@ function applyOf(fn, x, types) {
   const vr = (nm) => ({ kind: 'name', name: nm });
   const I = (v) => ({ kind: 'int', value: v });
   /* 哪一格是函数、哪一格是数据：`Reduce` / `Filter` 是函数在前，`sapply` 是数据在前。 */
-  const fnFirst = fn === 'Reduce' || fn === 'Filter';
+  const fnFirst = fn === 'Reduce' || fn === 'Filter' || fn === 'mapply';
   const initNode = fn === 'Reduce' && args.length === 3 ? args[2] : undefined;
   /* `vapply` 多一格 `FUN.VALUE`（R 拿它定形状）—— 这一层是**推**出来的，所以那一格只检查有没有。 */
-  const want = fn === 'Reduce' ? (args.length === 3 ? 3 : 2) : (fn === 'vapply' ? 3 : 2);
+  const want = fn === 'Reduce' ? (args.length === 3 ? 3 : 2)
+    : ((fn === 'vapply' || fn === 'mapply') ? 3 : 2);
   if (args.length !== want) {
     throw new Error(`r->IR: ${fn}() 这一格接 ${want} 格实参（给了 ${args.length}）`);
   }
@@ -2321,7 +2330,7 @@ function applyOf(fn, x, types) {
       + '给一个函数名字要真的"函数值"那一层，这一档没有（见 ext/r/SPEC.md）');
   }
   const ps = formalsOf(fnode);
-  const nps = fn === 'Reduce' ? 2 : 1;
+  const nps = (fn === 'Reduce' || fn === 'mapply') ? 2 : 1;
   if (ps.length !== nps) throw new Error(`r->IR: ${fn}() 那格函数要 ${nps} 个形参（给了 ${ps.length}）`);
   const body = kids(fnode)[1];
   const dt = typeOfExpr(data, types);
@@ -2414,6 +2423,65 @@ function applyOf(fn, x, types) {
       stmts.push({ kind: 'assign', target: { kind: 'deref', expr: vr(out) }, value: call1('toreal', vr(k)) });
     }
     return { kind: 'block-expr', stmts, value: vr(out) };
+  }
+
+  if (fn === 'mapply') {
+    /**
+     * 两条向量**逐元素**（R 的 `mapply`）。长度按**两头回收**：取长的那一条、短的用 `%`
+     * 绕回去、有一边零长就出零长 —— 与 `pmax` / `pmin` 同一条（那一格的账在 `r_pmax`）。
+     *
+     * 字符向量那一侧**当场报**：R 会拿第一条当结果的**名字**（`USE.NAMES`，量出来
+     * `mapply(function(a,b) paste0(a,b), c("x","y"), c("1","2"))` 印的是带名字那种），
+     * 而这一层没有 `names`。函数体出串也一样没接。
+     */
+    const dts = [args[1], args[2]].map((d) => typeOfExpr(d, types));
+    dts.forEach((t, k) => {
+      if (isStrVec(t)) {
+        throw new Error('r->IR: mapply() 在字符向量上会给结果加名字（R 的 USE.NAMES）——'
+          + ' 这一层没有 `names`');
+      }
+      if (!isVecTy(t)) throw new Error(`r->IR: mapply() 的第 ${k + 2} 格实参要是一条向量（是 ${t.kind}）`);
+    });
+    const s2 = [fresh('mp'), fresh('mp')];
+    const ns = [fresh('mn'), fresh('mn')];
+    const m = fresh('mm');
+    const out2 = fresh('mo');
+    const i2 = fresh('mi');
+    const child2 = new Map(types);
+    for (const p of ps) child2.set(p, REAL);
+    const bt2 = typeOfExpr(body, child2);
+    if (bt2.kind === 'string') {
+      throw new Error('r->IR: mapply() 的函数体出串那一档还没接（R 那边结果还会带名字）');
+    }
+    const lgl2 = bt2.kind === 'bool' || isLgl1(bt2);
+    const stmts2 = [
+      ...[0, 1].map((k) => ({ kind: 'let', name: s2[k], type: RVEC, init: exprOf(args[k + 1], types) })),
+      ...[0, 1].map((k) => ({ kind: 'let', name: ns[k], type: INT, init: vecLen(vr(s2[k])) })),
+      { kind: 'let', name: m, type: INT, init: vr(ns[0]) },
+      { kind: 'if', cond: b('<', vr(m), vr(ns[1])), then: [{ kind: 'assign', target: vr(m), value: vr(ns[1]) }], else_: null },
+      {
+        kind: 'if',
+        cond: b('||', b('==', vr(ns[0]), I(0)), b('==', vr(ns[1]), I(0))),
+        then: [{ kind: 'assign', target: vr(m), value: I(0) }],
+        else_: null,
+      },
+      ...vecNewAs(out2, vr(m)),
+      {
+        kind: 'for',
+        init: { kind: 'let', name: i2, type: INT, init: I(0) },
+        cond: b('<', vr(i2), vr(m)),
+        post: { kind: 'assign', target: vr(i2), value: b('+', vr(i2), I(1)) },
+        body: [
+          ...[0, 1].map((k) => ({
+            kind: 'let', name: ps[k], type: REAL, init: vecGet(vr(s2[k]), b('%', vr(i2), vr(ns[k]))),
+          })),
+          vecSet(vr(out2), vr(i2), lgl2
+            ? asLgl(exprOf(body, child2), bt2)
+            : asReal(exprOf(body, child2), bt2)),
+        ],
+      },
+    ];
+    return { kind: 'block-expr', stmts: stmts2, value: vr(out2) };
   }
 
   /* `sapply` / `unlist(lapply(…))`：一格进一格出，出来的种类看函数体。 */
@@ -3956,7 +4024,7 @@ function callOf(x, types, extra, want) {
         throw new Error('r->IR: unlist() 只接 `unlist(strsplit(s, sep))` 与'
           + ' `unlist(lapply(v, function(x) …))` 这两种形状（这一层没有"表里装向量"）');
       }
-      case 'sapply': case 'vapply': case 'Reduce': case 'Filter':
+      case 'sapply': case 'vapply': case 'Reduce': case 'Filter': case 'mapply':
         return applyOf(fn, x, types);
       case 'lapply':
         throw new Error('r->IR: lapply(…) 要写成 `unlist(lapply(…))` 或直接用 `sapply(…)`'

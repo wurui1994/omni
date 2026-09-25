@@ -10,6 +10,8 @@
 # 只有一份实现。改写摆在类型推断之前：`f` 的形参装什么只能从那个合成出来的调用点看出来。
 # 名字既不是内建、也不是这段里定义过的函数（比如一格传进来的形参）时还是当场报，不猜。
 #
+# `mapply` 是两条向量逐元素那一格（长度两头回收）；`do.call(f, list(…))` 摊成一次普通调用。
+#
 # 出来的是哪一种向量看**函数体**：出数是数值向量、出真假是逻辑向量、出串是字符向量。
 #
 # 两处与 R 不同，都当场报而不是静默差一点：
@@ -70,3 +72,14 @@ print(do.call(g2, list(y = 3, x = 2)))
 print(do.call(round, list(2.567, 2)))
 print(do.call(c, list(1, 2, 3)))
 print(do.call(rep, list(5, 3)))
+
+# `mapply(f, v1, v2)` —— 两条向量逐元素，长度**两头回收**（与 `pmax` 同一条）
+print(mapply(function(a, b) a + b, c(1, 2), c(3, 4)))
+print(mapply(function(a, b) a * b, c(1, 2, 3), c(2, 2, 2)))
+print(mapply(function(a, b) a > b, c(1, 5), c(3, 2)))
+print(mapply(function(a, b) a + b, c(1, 2, 3, 4), c(10, 20)))
+print(mapply(function(a, b) a - b, 1:3, 1:3))
+add2 <- function(p, q) p + q
+print(mapply(add2, c(1, 2), c(5, 6)))
+print(mapply(`+`, c(1, 2), c(5, 6)))
+cat(sum(mapply(function(a, b) a * b, c(1, 2), c(3, 4))), "\n")
