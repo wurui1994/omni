@@ -2906,8 +2906,27 @@ let MSVC_ENV_DONE = false;
 /** 递给 `cli/msvc.js` 与 `cli/clang.js` 的宿主那几格（那两份自己不 import 宿主，好在测试里换掉）。 */
 function ccIo() {
   const cacheFile = () => join(cacheRoot(), "msvc-env.json");
+  /* **宿主函数不能当值传**（`check:self` 的硬线：`'isDir' is a native host function;
+     it can only be called, not used as a value`）—— 所以这儿每一格都包一层箭头。
+     `join` 是变参的，而包装得写出固定形参，于是按实参个数分档：`msvc.js:82` 最多用到
+     六个，多留一格。写成这样不好看，但它是子集里唯一不作假的写法。 */
+  const j = (a, b, c, d, e, f) => {
+    if (f !== undefined) return join(a, b, c, d, e, f);
+    if (e !== undefined) return join(a, b, c, d, e);
+    if (d !== undefined) return join(a, b, c, d);
+    if (c !== undefined) return join(a, b, c);
+    if (b !== undefined) return join(a, b);
+    return join(a);
+  };
   return {
-    env, exists, readDir, readText, isDir, mtimeMs, spawn, join,
+    env: (k) => env(k),
+    exists: (p) => exists(p),
+    readDir: (p) => readDir(p),
+    readText: (p) => readText(p),
+    isDir: (p) => isDir(p),
+    mtimeMs: (p) => mtimeMs(p),
+    spawn: (cmd, args, mode) => spawn(cmd, args, mode),
+    join: j,
     fail: (m) => new OmniError(m),
     cacheGet: (key) => {
       try {
