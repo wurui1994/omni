@@ -123,3 +123,20 @@ print(seq(2, 2, length.out = 3))
 print(seq(1, 10, length.out = 1))
 # `seq(n)` 就是 `1:n`
 print(seq(5))
+
+# `cummax` / `cummin`：**碰上缺失之后全是缺失**（与 `NaN` 比出来的都是假，所以不能只写
+# `if (x > acc)` —— 那样 `cummax(c(1,NA,3))` 会印 `1 1 3`，而 R 是 `1 NA NA`）。
+print(cummax(c(1, 3, 2, 5, 4)))
+print(cummin(c(5, 3, 4, 1, 2)))
+print(cummax(c(1, NA, 3)))
+print(cummin(c(2, NA, 1)))
+print(cummax(c(-1.5, -2.5)))
+print(cummin(c(-1.5, -2.5)))
+cat(cummax(c(1, 3)), "\n")
+cat(cummin(1:4), "\n")
+# `rep_len(x, n)`：循环取到长度 n（短了从头再来、长了截掉）
+print(rep_len(c(1, 2, 3), 7))
+print(rep_len(c(1, 2, 3), 2))
+print(rep_len(c(5), 3))
+print(rep_len(7, 4))
+cat(length(rep_len(c(1, 2), 5)), "\n")

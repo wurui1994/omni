@@ -186,6 +186,10 @@ const FN_DEPS = new Map([
   /* base 里"向量进向量出"那一族。`sort` 要问缺失（丢掉），`range` 要造 `NA`。 */
   ['r_sort', ['r_is_na']],
   ['r_cumsum', []],
+  /* `cummax` / `cummin`：碰上缺失之后全是缺失，所以要 `r_is_na` 与 `r_na`。 */
+  ['r_cummax', ['r_is_na', 'r_na']],
+  ['r_cummin', ['r_is_na', 'r_na']],
+  ['r_rep_len', []],
   ['r_prod', []],
   ['r_range', ['r_is_na', 'r_na']],
   ['r_diff', []],
@@ -711,10 +715,10 @@ const BUILTINS = new Set([
   'sum', 'mean', 'max', 'min', 'rev', 'seq_along', 'which', 'any', 'all',
   'print', 'invisible', 'xor', 'isTRUE', 'isFALSE', 'ifelse',
   /* base 里"向量进向量出"那一族 + 两格统计量。`seq` 与 `rep` 是造向量的。 */
-  'sort', 'cumsum', 'prod', 'range', 'diff', 'head', 'tail', 'var', 'sd', 'rep', 'seq',
+  'sort', 'cumsum', 'prod', 'range', 'diff', 'head', 'tail', 'var', 'sd', 'rep', 'seq', 'rep_len',
   /* 集合与位置那一族（见 `setFnDecl`）。`%in%` 是个算子，不在这张表里。 */
   'which.max', 'which.min', 'match', 'unique', 'duplicated',
-  'union', 'intersect', 'setdiff', 'order', 'cumprod',
+  'union', 'intersect', 'setdiff', 'order', 'cumprod', 'cummax', 'cummin',
   /* 串那一族。`tolower` 方言里没有算子（只有 `(supper …)`），由 `r_lower` 拿两张字母表
      查出来 —— **只管 ASCII**（见 SPEC 第四节第 12 条）。 */
   'toupper', 'tolower', 'substr', 'substring', 'trimws', 'sprintf', 'startsWith', 'endsWith',
@@ -1143,13 +1147,13 @@ function applyTy(fn, x, types) {
     /* `sort` / `head` / `tail` / `rep` 出来的**元素类型跟着进去的那条走**
        （逻辑向量排完还是逻辑、整数向量排完还是整数）；`range` / `seq` 一律数值，
        而 `cumsum` / `diff` 在 R 里**整数进整数出**（零长时印 `integer(0)`）。 */
-    case 'sort': case 'head': case 'tail': case 'rep': {
+    case 'sort': case 'head': case 'tail': case 'rep': case 'rep_len': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
       /* `rep` 在串上也接了（`rep("ab", 3)` 出一条字符向量）。 */
       if (isStrVec(t) || (fn === 'rep' && t.kind === 'string')) return RSTRV;
       return isVecTy(t) ? t : RVEC;
     }
-    case 'cumsum': case 'diff': case 'cumprod': {
+    case 'cumsum': case 'diff': case 'cumprod': case 'cummax': case 'cummin': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
       return isIvecTy(t) ? RIVEC : RVEC;
     }
@@ -3236,6 +3240,15 @@ function callOf(x, types, extra, want) {
         else if (n >= 2) cnt = asIntE(ev(1), typeOfExpr(all[1], types));
         return lglCall(`r_${fn}`, ev(0), cnt);
       }
+      case 'rep_len': {
+        /** `rep_len(x, n)`：循环取到长度 `n`。字符向量那一侧还没接（存法不同）。 */
+        if (n !== 2) throw new Error(`r->IR: rep_len() 要两格实参（给了 ${n}）`);
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        if (isStrVec(t) || t.kind === 'string') throw new Error(strvGap('rep_len'));
+        const kk = asIntE(ev(1), typeOfExpr(all[1], types));
+        /* 一格标量先摆成长度 1 的向量（`r_vec1` 是现成的那一格）。 */
+        return lglCall('r_rep_len', isVecTy(t) ? ev(0) : lglCall('r_vec1', asReal(ev(0), t)), kk);
+      }
       case 'rep': {
         /**
          * `rep(x, times, each)` —— 三格都接了（`length.out=` 没接）。
@@ -3404,7 +3417,7 @@ function callOf(x, types, extra, want) {
         return { kind: 'call', fn: { kind: 'name', name }, args: [dropNa(numCatOf(pre, parts))] };
       }
       case 'which.max': case 'which.min': case 'unique': case 'duplicated':
-      case 'order': case 'cumprod': {
+      case 'order': case 'cumprod': case 'cummax': case 'cummin': {
         if (n !== 1) throw new Error(`r->IR: ${fn}() 要一格向量实参（给了 ${n}）`);
         const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
         if (isStrVec(t)) throw new Error(strvGap(fn));
@@ -3412,6 +3425,7 @@ function callOf(x, types, extra, want) {
         const gen = {
           'which.max': 'r_which_max', 'which.min': 'r_which_min', unique: 'r_unique',
           duplicated: 'r_dup', order: 'r_order', cumprod: 'r_cumprod',
+          cummax: 'r_cummax', cummin: 'r_cummin',
         }[fn];
         return lglCall(gen, ev(0));
       }
@@ -6563,6 +6577,72 @@ function vecFnDecl(name) {
                 b('/', call1('toreal', b('-', g, { kind: 'int', value: 1 })), { kind: 'real', value: 3 }))),
             },
           ],
+        },
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_cummax' || name === 'r_cummin') {
+    /**
+     * `cummax` / `cummin`：**碰上缺失之后全是缺失**（R：`cummax(c(1,NA,3))` 是 `1 NA NA`）。
+     *
+     * 为什么不能只写 `if (elem > acc) acc = elem`：与 `NaN` 比出来的都是假，于是那一格
+     * 会被当成"没它大"直接跳过 —— 印出来是 `1 1 3`，而 R 是 `1 NA NA`。
+     * 所以要一格 `bad` 记住"见过缺失了没有"，见过之后一路写 `NA`。
+     */
+    const out = { kind: 'name', name: 'o' };
+    const bad = { kind: 'name', name: 'bad' };
+    const isNa = { kind: 'call', fn: { kind: 'name', name: useFn('r_is_na') }, args: [elem] };
+    const na = { kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] };
+    const better = name === 'r_cummax' ? b('>', elem, acc) : b('<', elem, acc);
+    return {
+      kind: 'fn', name, params: P, ret: RVEC,
+      body: [
+        declLen(),
+        ...vecNewAs('o', len),
+        { kind: 'let', name: 'bad', type: BOOL, init: { kind: 'bool', value: false } },
+        { kind: 'let', name: 's', type: REAL, init: { kind: 'real', value: 0 } },
+        loop([
+          { kind: 'if', cond: isNa, then: [{ kind: 'assign', target: bad, value: { kind: 'bool', value: true } }], else_: null },
+          {
+            kind: 'if',
+            cond: bad,
+            then: [vecSet(out, i, na)],
+            else_: [
+              /* 第一格直接收下（`acc` 的初值 0 不该参与比较）。 */
+              {
+                kind: 'if',
+                cond: b('||', b('==', i, { kind: 'int', value: 0 }), better),
+                then: [{ kind: 'assign', target: acc, value: elem }],
+                else_: null,
+              },
+              vecSet(out, i, acc),
+            ],
+          },
+        ], 0),
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_rep_len') {
+    /** `rep_len(x, n)`：**循环取**到长度 `n`（短了从头再来、长了截掉）。 */
+    const out = { kind: 'name', name: 'o' };
+    const kk = { kind: 'name', name: 'k' };
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RVEC }, { name: 'k', type: INT }],
+      ret: RVEC,
+      body: [
+        declLen(),
+        ...vecNewAs('o', kk),
+        {
+          kind: 'for',
+          init: { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
+          cond: b('<', i, kk),
+          post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
+          /* `%` 在两个 int 上是 C 的取余，而这儿两边都非负 —— 与 R 的循环取一致。 */
+          body: [vecSet(out, i, vecGet(v, b('%', i, len)))],
         },
         { kind: 'return', values: [out] },
       ],

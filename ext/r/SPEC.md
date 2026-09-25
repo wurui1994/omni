@@ -175,10 +175,17 @@ R 往数值那边收，所以"每一格都是逻辑"才算逻辑。
 nmath 那一族**只在第一格实参上**逐元素，别的格先存进临时量（循环里要读好多遍）——
 R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不假装。
 
-进出都是向量的几格：`rev` / `seq_along` / `which` / `sort` / `cumsum` / `cumprod` / `diff` /
-`range` / `head` / `tail` / `rep` / `seq`；出一格数的几格：`sum` / `mean` / `max` / `min` /
-`prod` / `var` / `sd`。`which` 回的是**位置**（数值向量），`NA` 直接丢 —— 与 `xs[m]` 不同
+进出都是向量的几格：`rev` / `seq_along` / `which` / `sort` / `cumsum` / `cumprod` /
+`cummax` / `cummin` / `diff` / `range` / `head` / `tail` / `rep` / `rep_len` / `seq`；
+出一格数的几格：`sum` / `mean` / `max` / `min` / `prod` / `var` / `sd`。
+`which` 回的是**位置**（数值向量），`NA` 直接丢 —— 与 `xs[m]` 不同
 （那边 `NA` 挑出一格 `NA`），这两条口径是 R 自己分开的。
+
+`cummax` / `cummin` 上有一条**只能靠显式判缺失**的规矩：碰上 `NA` 之后**一路都是 `NA`**
+（R：`cummax(c(1,NA,3))` 是 `1 NA NA`）。只写 `if (x > acc) acc = x` 的话与 `NaN` 比出来
+都是假，那一格会被当成"没它大"跳过 —— 印出来是 `1 1 3`，是个**静默的错答案**。
+所以那两格里有一个 `bad` 记着"见过缺失了没有"。`rep_len(x, n)` 是循环取到长度 `n`
+（短了从头再来、长了截掉），字符向量那一侧还没接。
 
 ### 集合与位置那一族（判据 `ext/r/examples/setfn.R`）
 
