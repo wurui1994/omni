@@ -38,6 +38,8 @@ const D = {
   mode: '', only: -1,
   /* 性能那几格（`--perf`）：一帧的墙上时间是两次 `nextframe` 之间那一段。 */
   perf: -1, tPrev: 0, tSum: 0, tMin: 0, tMax: 0, tn: 0,
+  /* 暖态那一段（跳过头 `skip` 帧之后的）—— 见 `frameEnd` 里那段注。 */
+  skip: 1, wSum: 0, wMin: 0, wMax: 0, wn: 0,
   /* 输入那几格（`mousx`/`mousy`/`bstatus`/`keystatus[256]`）。`keys` 是"还没开"的记号。
      **开局那个位置是 (320,240)**：原版一开机光标就在窗口正中（默认窗口 640×480），
      参考也是这么定死的（`c_impl/src/pd_polyhost.c:22`，注释写着 "original starts the
@@ -415,6 +417,12 @@ function frameSetup() {
   const n = one >= 0 ? one + 1 : intEnv('OMNI_FRAMES', 1);
   D.frames = n > 0 ? n : 1;
   D.perf = env('OMNI_GFX_PERF') === '1' ? 1 : 0;
+  /* 暖态从第几帧算起（缺省跳 1 帧）—— 与 `omni_fmt.c` 的 `g_gskip` 同一条口径，
+     理由见 `frameEnd`。只有一帧时不跳：不然一个数都报不出来。 */
+  let sk = intEnv('OMNI_GFX_PERF_SKIP', 1);
+  if (sk < 0) sk = 0;
+  if (sk >= D.frames) sk = D.frames > 1 ? D.frames - 1 : 0;
+  D.skip = sk;
 }
 
 /** 一帧末：记一笔时间，再看这一帧要不要交出去。 */
@@ -424,6 +432,16 @@ function frameEnd() {
   D.tn += 1;
   if (D.tn === 1 || dt < D.tMin) D.tMin = dt;
   if (dt > D.tMax) D.tMax = dt;
+  /* **暖态那一段**（跳过头 `D.skip` 帧）：头一帧要编着色器、建 FBO、暖纹理，把它算进 avg
+     会让"只有几帧的探针"量出三倍的数（量到过：同一条腿 4 帧 42ms / 27 帧 6.5ms）。
+     avg/min/max 只统暖态、`total` 照旧是全部 —— 判据那侧拿 `real − warmtotal` 当"启动"，
+     于是头一帧的编译落在启动那一栏，它本来就属于"改完到看见画面"。 */
+  if (D.tn > D.skip) {
+    D.wSum += dt;
+    D.wn += 1;
+    if (D.wn === 1 || dt < D.wMin) D.wMin = dt;
+    if (dt > D.wMax) D.wMax = dt;
+  }
   /* **点着名要的那一帧一定交**（`--frame N`）：PolyDraw 的窗口每帧都在，
      一个像素都没画的脚本给出的是**一张清过的图**，不是"没有图"。
      `ken/multiarb_asm.pss` 整份只有 `@v`/`@f` 两段、一句脚本都没有 ——
@@ -456,10 +474,15 @@ function ms1(v) {
 function perfReport() {
   if (D.perf !== 1 || D.tn === 0) return;
   D.perf = 2;
-  const avg = D.tSum / D.tn;
+  /* 暖态那一段一个数都没有（帧数 ≤ skip）时退回全部 —— 报个数比报空的有用。 */
+  const n = D.wn > 0 ? D.wn : D.tn;
+  const sum = D.wn > 0 ? D.wSum : D.tSum;
+  const lo = D.wn > 0 ? D.wMin : D.tMin;
+  const hi = D.wn > 0 ? D.wMax : D.tMax;
+  const avg = sum / n;
   stderr(`#perf gfx ${modeOf()} frames=${D.tn} total=${ms1(D.tSum)}ms`
-    + ` avg=${ms1(avg)}ms min=${ms1(D.tMin)}ms max=${ms1(D.tMax)}ms`
-    + ` fps=${ms1(avg > 0 ? 1000 / avg : 0)}\n`);
+    + ` avg=${ms1(avg)}ms min=${ms1(lo)}ms max=${ms1(hi)}ms`
+    + ` fps=${ms1(avg > 0 ? 1000 / avg : 0)} warm=${n} warmtotal=${ms1(sum)}ms\n`);
   if (REC !== null) {
     let n = 0;
     for (const v of REC.values()) n += v;

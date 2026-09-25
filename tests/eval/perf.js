@@ -23,6 +23,20 @@
 // `spawnSync` 量到 1.03s —— 那 0.88s 是起进程 + 收 stdio 的开销。第一版判据就是这么量的，
 // 于是"我们比 c_impl 慢 4.8 倍"这个结论是**工具造出来的**。现在一律 `/usr/bin/time -p`
 // 包一层、读被测进程自己报的 `real`；每帧那个数直接读运行时自己印的 `#perf gfx` 行。
+//
+// ## 时间预算：**一份例子 ≤ 10s**（2026-09-25 用户定的）
+//
+// 帧数**按时间给，不按份数给**。从前一律 120 帧、每档还先跑一趟 1 帧量启动，
+// `--only balls2k` 一份就要 59s —— 而那里头绝大部分是"把 120 帧铺在一条 84ms/帧 的慢路上"
+// 和"两趟进程量一件事"。现在：
+//   * 启动与每帧在**同一趟**里量完（`启动 = real − 暖态那几帧的时间和`）；
+//   * 运行时那行 `#perf gfx` 的 avg/min/max 只统**暖态**（跳过头一帧的着色器编译），
+//     所以几帧的探针也量得准 —— 从前 4 帧量出 42ms、60 帧量出 4.6ms，同一条腿；
+//   * 先跑 `--rt-probe`（4）帧当探针，再按它的 `min` 把帧数补到够 `--frame-win-ms`
+//     （250ms），上限 `--rt-frames`（60）；
+//   * 一份例子一份墙上预算 `--case-ms`（9000），按档发、快的档把没花完的还回去；
+//   * 每个子进程的 timeout 也跟着预算走（从前是 180s，一条挂住的路能把整趟判据拖死），
+//     而**时间片不够印 `--`、不算红** —— "它慢"与"它坏"是两件事。
 import { spawnSync } from 'node:child_process';
 
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
@@ -41,7 +55,7 @@ const val = (n, d) => {
   return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1] : d;
 };
 const CFG = {
-  reps: Number(val('--reps', '3')),
+  reps: Number(val('--reps', '1')),
   w: val('--w', '320'),
   /* **320×320**：与参考那侧的 `framebench` 同一个分辨率（它固定 320×320）——
      分辨率不同的话那一栏的比值就是假的（踩过：我们 320×240 对它 320×320）。 */
@@ -49,13 +63,24 @@ const CFG = {
   cap: Number(val('--cap', '5')) * 1000,   /* 出图那一趟的硬上限（秒） */
   frames: val('--frames', '2000'),         /* 主脚本那一栏跑多少帧（要跑到 ≥100ms 才量得准） */
   fast: Number(val('--fast', '3')),        /* 主脚本那一栏至少要快几倍 */
-  /* 实时性那一栏：跑多少帧、每帧的线、启动延迟的线（毫秒）。 */
-  rtFrames: val('--rt-frames', '120'),
+  /* 实时性那一栏：帧数**上限**、每帧的线、启动延迟的线（毫秒）。 */
+  rtFrames: val('--rt-frames', '60'),
   rtFrame: Number(val('--rt-frame-ms', '16.7')),
   rtStart: Number(val('--rt-start-ms', '1000')),
+  /* **一份例子的墙上时间预算**（2026-09-25 用户定的）：一份不许超过这个数。
+     超了就把剩下的档印成 `--` 跳过 —— 判据的价值在"几秒钟能跑一遍"，
+     而不是把 120 帧铺在一条 84ms/帧 的慢路上（那一趟光它自己就 10s）。 */
+  caseMs: Number(val('--case-ms', '9000')),
+  /* 量每帧时间要的**帧时间窗口**：探针跑 `rtProbe` 帧，不够这个窗口就按估出来的
+     ms/帧 把帧数补到刚够（上限 `rtFrames`）。够了就不再跑第二趟。
+     250ms 是 `/usr/bin/time` 10ms 刻度与运行时自己那格 `#perf gfx` 都够用的量。 */
+  frameWin: Number(val('--frame-win-ms', '250')),
+  rtProbe: Number(val('--rt-probe', '4')),
   only: val('--only', ''),
 };
 const REF_EVAL = '/Users/wurui/Documents/polydraw/c_impl/build/polydraw-eval';
+/** 一档模式**至少**留这么多毫秒（起一趟进程 + 编一趟就要这个数量级）。 */
+const MIN_SLICE = 2200;
 
 /**
  * **实时那几种模式**（用户点名的三种在最前）：
@@ -125,7 +150,7 @@ const glLib = () => {
  */
 function once(cmd, args, env) {
   const r = spawnSync('/usr/bin/time', ['-p', cmd, ...args],
-    { encoding: 'utf8', cwd: ROOT, timeout: 120000, env });
+    { encoding: 'utf8', cwd: ROOT, timeout: Math.max(2000, CFG.caseMs), env });
   const m = /real\s+([\d.]+)/.exec(r.stderr ?? '');
   if (r.status !== 0 || m === null) {
     return { ms: Infinity, why: `${(r.stderr ?? '').trim().slice(0, 200)}` };
@@ -280,16 +305,18 @@ const REF_FRAME = '/Users/wurui/Documents/polydraw/c_impl/build/framebench';
 /** 参考那一侧一份脚本的每帧毫秒（interp / llvm 取最好的）。没有那份工具回 null。 */
 function refFrameMs(src) {
   if (!existsSync(REF_FRAME)) return null;
-  const r = spawnSync(REF_FRAME, [src, '--frames', CFG.rtFrames],
-    { encoding: 'utf8', timeout: 180000 });
+  /* 帧数跟我们那一侧同一个口径（按时间给，不按份数给）：这一格只要一个稳定的
+     ms/帧，30 帧够了；超时也跟着预算走，不许一份例子在参考上耗掉几十秒。 */
+  const r = spawnSync(REF_FRAME, [src, '--frames', String(Math.min(30, Number(CFG.rtFrames)))],
+    { encoding: 'utf8', timeout: Math.max(2000, Math.round(CFG.caseMs / 3)) });
   const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
   const ms = [...out.matchAll(/(interp|llvm)\s*:\s*([\d.]+)\s*ms\/frame/g)].map((m) => Number(m[2]));
   return ms.length === 0 ? null : Math.min(...ms);
 }
 
 
-/** 跑一趟 `omni run`，回 `{ real, avg, max, why }`（都是毫秒）。 */
-function runMode(src, mode, frames) {
+/** 跑一趟 `omni run`，回 `{ real, total, avg, max, why }`（都是毫秒）。 */
+function runMode(src, mode, frames, budgetMs) {
   /* **`--gfx gl` 走旗子而不是环境变量**：那两份 GPU 的门（原生腿的 dylib、js 腿的 .node）
      是 `cli.js` 在解析这个旗子时顺手编出来并摆进环境的（§16）。只设 `OMNI_GFX=gl`
      的话它们不会被编，设备就悄悄回落 CPU 备选 —— 那时判据判的是另一件事。 */
@@ -298,32 +325,85 @@ function runMode(src, mode, frames) {
     OMNI_GFX_OUT: join(OUT, 'rt.png'), ...(LIB === '' ? {} : { OMNI_GL_LIB: LIB }) };
   const r = spawnSync('/usr/bin/time',
     ['-p', process.execPath, CLI, 'run', src, ...mode.args, '--gfx', 'gl'],
-    { encoding: 'utf8', cwd: ROOT, timeout: 180000, env });
+    { encoding: 'utf8', cwd: ROOT, timeout: Math.max(1000, budgetMs), env });
   const err = `${r.stdout ?? ''}\n${r.stderr ?? ''}`;
   const real = /real\s+([\d.]+)/.exec(r.stderr ?? '');
   if (r.status !== 0 || real === null) {
     const line = err.split('\n').find((l) => /error|Error|没有/.test(l)) ?? '';
-    return { why: line.trim().slice(0, 160) || '跑不起来' };
+    /* **时间片用光**与**跑不起来**是两件事：前者是这台判据自己的取舍（印 `--`），
+       后者才是红的。分不开的时候会把"它慢"错报成"它坏"（踩过：interp 那一档）。 */
+    if (r.error !== undefined && r.error !== null && line === '') {
+      return { why: `这一档 ${Math.round(budgetMs)}ms 的时间片不够（它慢，不是它坏）`, budget: true };
+    }
+    return { why: line.trim().slice(0, 160) || '跑不起来', budget: false };
   }
   const pf = /#perf gfx \S+ frames=(\d+) total=([\d.]+)ms avg=([\d.]+)ms min=([\d.]+)ms max=([\d.]+)ms/
     .exec(err);
+  /* `warmtotal` 是**暖态那几帧**的时间和（运行时跳掉头一帧之后的），所以
+     `real − warmtotal` 就是"改完到看见画面"：编译 + 开设备 + 头一帧那次着色器编译。 */
+  const wt = /warmtotal=([\d.]+)ms/.exec(err);
   return { real: Number(real[1]) * 1000,
+    total: wt === null ? (pf === null ? null : Number(pf[2])) : Number(wt[1]),
     avg: pf === null ? null : Number(pf[3]),
+    min: pf === null ? null : Number(pf[4]),
     max: pf === null ? null : Number(pf[5]),
     why: null };
+}
+
+/**
+ * **一档模式量一遍**：`{ start, avg, max, frames, why }`。
+ *
+ * 两件事在**同一趟**里量完（从前是两趟：1 帧量启动 + N 帧量每帧）：运行时自己那行
+ * `#perf gfx` 报的 `total` 是纯帧时间，于是 **启动 = real − total** —— 编译、开设备、
+ * 建上下文全在里头，正是"改完到看见画面"要的那一段，而且省掉一整趟进程。
+ *
+ * 帧数**按时间给**，不按份数给：先跑 `rtProbe` 帧当探针，再按它报的 **`min`**（暖态那一格）
+ * 把帧数补到刚够 `frameWin`（上限 `rtFrames`）。**估的时候必须用 `min` 而不是 `avg`**：
+ * 头一帧要编着色器、建 FBO、暖纹理，探针只有几帧时那个尖峰能把 avg 抬成三倍 ——
+ * 同一条 js 腿量到过 4 帧 18.8ms / 8 帧 11.4ms / 27 帧 6.5ms。拿 avg 估等于自证"它慢"。
+ *
+ * 预算**按档给，快的档把没花完的还回去**：每一档能用的是"这一份还剩多少 − 后面每档留的底"
+ * （底 = `MIN_SLICE`）。平分会饿死 `c` 那一档（它要先编一趟），先到先得又会让
+ * 200ms/帧 的解释器把后面全挤掉 —— 两头都踩过。
+ */
+function measureMode(src, mode, left) {
+  const probe = runMode(src, mode, CFG.rtProbe, left());
+  if (probe.why !== null || probe.avg === null) return { ...probe, frames: CFG.rtProbe };
+  const start = probe.total === null ? probe.real : Math.max(0, probe.real - probe.total);
+  const done = { start, avg: probe.avg, max: probe.max, frames: CFG.rtProbe, why: null };
+  const est = Math.max(probe.min === null || probe.min === undefined ? probe.avg : probe.min, 0.01);
+  const want = Math.min(Number(CFG.rtFrames),
+    Math.max(CFG.rtProbe, Math.round(CFG.frameWin / est)));
+  /* 再跑一趟值不值：补不到两倍不值（进程本身几百毫秒），时间片装不下也不跑。 */
+  if (want < CFG.rtProbe * 2 || left() < start + want * est + 600) return done;
+  const many = runMode(src, mode, want, left());
+  if (many.why !== null || many.avg === null) return done;
+  return { start, avg: many.avg, max: many.max, frames: want, why: null };
 }
 
 P('\n实时性那一栏（每帧 ≤ 16.7ms = 60fps；启动 = 改完到看见画面，编译算在里头）：\n');
 const rt = [];
 for (const src of RT_CASES) {
   const name = basename(src);
+  /* **一份例子一份预算**（`--case-ms`）：参考那一格先扣，剩下的按档发 ——
+     每档拿到的是"还剩多少 − 后面每档留的底"，于是快的档把没花完的还给后面的档。 */
+  const t0 = Date.now();
   const ref = refFrameMs(src);
   if (ref !== null) P(`  --   ${name} 参考（framebench 最好那档）${ref.toFixed(1)}ms/帧\n`);
-  for (const mode of MODES) {
-    const one = runMode(src, mode, 1);
-    const many = one.why === null ? runMode(src, mode, CFG.rtFrames) : one;
-    rt.push({ name, mode: mode.id, ...many, start: one.real, ref });
+  for (let i = 0; i < MODES.length; i++) {
+    const mode = MODES[i];
+    const after = MODES.length - 1 - i;
+    const cap = Math.max(MIN_SLICE, (CFG.caseMs - (Date.now() - t0)) - after * MIN_SLICE);
+    const m0 = Date.now();
+    const left = () => cap - (Date.now() - m0);
+    const many = measureMode(src, mode, left);
+    rt.push({ name, mode: mode.id, ...many, ref });
     if (many.why !== null) {
+      /* 时间片不够只是这台判据的取舍 —— 印 `--`，不算红（见 `runMode` 里那一夹）。 */
+      if (many.budget === true) {
+        P(`  --   ${name} [${mode.id}] 跳过（${many.why}）\n`);
+        continue;
+      }
       fail++;
       P(`  FAIL ${name} [${mode.id}] 跑得起来\n       ${many.why}\n`);
       continue;
@@ -336,21 +416,21 @@ for (const src of RT_CASES) {
     if (many.avg <= CFG.rtFrame) {
       pass++;
       P(`  ok   ${name} [${mode.id}] 每帧 ≤ ${CFG.rtFrame}ms `
-        + `[avg ${many.avg.toFixed(1)}ms max ${many.max.toFixed(1)}ms]\n`);
+        + `[avg ${many.avg.toFixed(1)}ms max ${many.max.toFixed(1)}ms / ${many.frames} 帧]\n`);
     } else {
       fail++;
       P(`  FAIL ${name} [${mode.id}] 每帧 ≤ ${CFG.rtFrame}ms\n       avg `
-        + `${many.avg.toFixed(1)}ms（max ${many.max.toFixed(1)}ms）= `
+        + `${many.avg.toFixed(1)}ms（max ${many.max.toFixed(1)}ms，${many.frames} 帧）= `
         + `${(1000 / many.avg).toFixed(0)}fps\n`);
     }
     if (!mode.startJudged) {
-      P(`  --   ${name} [${mode.id}] 启动 ${one.real.toFixed(0)}ms（这条路不判 —— 出成品用的）\n`);
-    } else if (one.real <= CFG.rtStart) {
+      P(`  --   ${name} [${mode.id}] 启动 ${many.start.toFixed(0)}ms（这条路不判 —— 出成品用的）\n`);
+    } else if (many.start <= CFG.rtStart) {
       pass++;
-      P(`  ok   ${name} [${mode.id}] 启动 ≤ ${CFG.rtStart}ms [${one.real.toFixed(0)}ms]\n`);
+      P(`  ok   ${name} [${mode.id}] 启动 ≤ ${CFG.rtStart}ms [${many.start.toFixed(0)}ms]\n`);
     } else {
       fail++;
-      P(`  FAIL ${name} [${mode.id}] 启动 ≤ ${CFG.rtStart}ms\n       量到 ${one.real.toFixed(0)}ms\n`);
+      P(`  FAIL ${name} [${mode.id}] 启动 ≤ ${CFG.rtStart}ms\n       量到 ${many.start.toFixed(0)}ms\n`);
     }
   }
 }

@@ -352,6 +352,13 @@ static int g_gdirty = 0;
 static int g_gmode = 0, g_gperf = -1;
 static int64_t g_gonly = -1, g_gtn = 0;
 static double g_gtprev = 0.0, g_gtsum = 0.0, g_gtmin = 0.0, g_gtmax = 0.0;
+/* **暖态那一段**（跳过头 `g_gskip` 帧之后的那些）：头一帧要编着色器、建 FBO、暖纹理，
+   把它算进 avg 会让"几帧的探针"量出三倍的数（量到过：同一条腿 4 帧 42ms / 27 帧 6.5ms）。
+   所以 avg/min/max 只统暖态，`total` 照旧是全部 —— 于是"启动"那一段（real − warm）
+   自然把头一帧的编译含进去，它本来就属于"改完到看见画面"。
+   `OMNI_GFX_PERF_SKIP` 改跳几帧（缺省 1）；只有一帧时不跳（不然一个数都没有）。 */
+static int64_t g_gskip = 1, g_gwn = 0;
+static double g_gwsum = 0.0, g_gwmin = 0.0, g_gwmax = 0.0;
 /* 输入那几格（与 host/gfx-cpu.js 的 D.mx / D.my / D.bst / D.keys 一一对应）。
    这一档没有窗口，来源是 OMNI_MOUSE=x,y,按键位 与 OMNI_KEYS=0xc8,0x1d（按住的扫描码）。 */
 /* 开局那个位置是 (320,240) —— 原版一开机光标在窗口正中（默认窗口 640×480），
@@ -953,6 +960,10 @@ static void gfx_frame_setup(void) {
   g_gframes = n > 0 ? n : 1;
   const char *p = getenv("OMNI_GFX_PERF");
   g_gperf = (p != NULL && strcmp(p, "1") == 0) ? 1 : 0;
+  /* 暖态从第几帧算起（缺省跳 1 帧）。只有一帧时不跳 —— 不然一个数都报不出来。 */
+  g_gskip = gfx_int_env("OMNI_GFX_PERF_SKIP", 1);
+  if (g_gskip < 0) g_gskip = 0;
+  if (g_gskip >= g_gframes) g_gskip = g_gframes > 1 ? g_gframes - 1 : 0;
 }
 
 /* 一帧末：记一笔时间，再看这一帧要不要交出去。 */
@@ -962,6 +973,12 @@ static void gfx_frame_end(void) {
   g_gtn += 1;
   if (g_gtn == 1 || dt < g_gtmin) g_gtmin = dt;
   if (dt > g_gtmax) g_gtmax = dt;
+  if (g_gtn > g_gskip) {
+    g_gwsum += dt;
+    g_gwn += 1;
+    if (g_gwn == 1 || dt < g_gwmin) g_gwmin = dt;
+    if (dt > g_gwmax) g_gwmax = dt;
+  }
   /* **点着名要的那一帧一定交**（`--frame N`）—— 与 `host/gfx-cpu.js` 的 `frameEnd`
      逐句相同：一个像素都没画的脚本给出的是一张清过的图，不是"没有图"。 */
   if (g_gonly >= 0 && g_gfno - 1 == g_gonly) { gfx_need(); gfx_present(); return; }
@@ -973,10 +990,17 @@ static void gfx_frame_end(void) {
 static void gfx_perf_report(void) {
   if (g_gperf != 1 || g_gtn == 0) return;
   g_gperf = 2;
-  double avg = g_gtsum / (double)g_gtn;
-  fprintf(stderr, "#perf gfx %s frames=%lld total=%.1fms avg=%.1fms min=%.1fms max=%.1fms fps=%.1f\n",
+  /* 暖态那一段一个数都没有（帧数 ≤ skip）时退回全部 —— 报个数比报空的有用。 */
+  int64_t n = g_gwn > 0 ? g_gwn : g_gtn;
+  double sum = g_gwn > 0 ? g_gwsum : g_gtsum;
+  double lo = g_gwn > 0 ? g_gwmin : g_gtmin;
+  double hi = g_gwn > 0 ? g_gwmax : g_gtmax;
+  double avg = sum / (double)n;
+  fprintf(stderr, "#perf gfx %s frames=%lld total=%.1fms avg=%.1fms min=%.1fms max=%.1fms fps=%.1f"
+          " warm=%lld warmtotal=%.1fms\n",
           gfx_mode() == 2 ? "view" : "render", (long long)g_gtn,
-          g_gtsum, avg, g_gtmin, g_gtmax, avg > 0.0 ? 1000.0 / avg : 0.0);
+          g_gtsum, avg, lo, hi, avg > 0.0 ? 1000.0 / avg : 0.0,
+          (long long)n, sum);
   if (gfx_rec()) fprintf(stderr, "#perf calls total=%lld\n", (long long)g_greccnt);
 }
 

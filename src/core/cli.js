@@ -3493,8 +3493,15 @@ function runtimeObjectsSelf(arch, os) {
      * 下一趟就把旧的 `.o` 又端上来 —— 量到过：改完 Win64 的 ABI 再编，`cc 800ms`
      * 全是缓存命中，跑出来的还是 SysV 那一版（体积都一样，看不出来）。
      * 与上面 `jsCachePut` 那一格同一个道理，也与第七十九刀"产物名只取基名"同一类错：
-     * 一个会跑错程序的缓存。 */
-    hash16(['self', arch, os, srcStamp(), CROSS === null ? '' : CROSS.sysroot, ...deps].join('|')));
+     * 一个会跑错程序的缓存。
+     *
+     * **`OMNI_MIR_OPT` 也在键里**（2026-09-25 补）：这一路的 `.o` 过的是公共 MIR 优化管线，
+     * 开着档编出来的字节与不开是两份东西，而从前键里没有它 —— 只要有人拿
+     * `OMNI_MIR_OPT=2` 在冷缓存上编过一趟，后面**所有**默认档的构建都会安静地端到
+     * 那份优化过的运行库（体积差不多，看不出来）。这里存的是原文而不是档位：
+     * `''` 与 `'0'` 语义相同但各占一格，多一格空目录比少一格判据便宜。 */
+    hash16(['self', arch, os, srcStamp(), env('OMNI_MIR_OPT') ?? '',
+      CROSS === null ? '' : CROSS.sysroot, ...deps].join('|')));
   const dir = slot.dir;
   const objs = srcs.map((p) => join(dir, `${basename(p, '.c')}.o`));
   if (slot.fresh && objs.every((o) => exists(o))) {
