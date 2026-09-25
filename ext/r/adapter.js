@@ -4125,6 +4125,14 @@ function numStrDecl() {
         ],
         else_: null,
       },
+      /* **负零归一**（与 `r_num_fmt` 里那一格同一条：R 的 `EncodeReal0` 有
+         `if(x == 0.) x = 0.;`，所以 `cat(-0.0)` 印的是 `0`）。 */
+      {
+        kind: 'if',
+        cond: b('==', x, { kind: 'real', value: 0 }),
+        then: [{ kind: 'assign', target: x, value: { kind: 'real', value: 0 } }],
+        else_: null,
+      },
       ...numFmtStmts(),
     ],
   };
@@ -5320,7 +5328,11 @@ function printFnDecl(name) {
   const ret = (e) => ({ kind: 'return', values: [e] });
 
   if (name === 'r_num_fmt') {
-    /* 一格元素按定好的 `(d, e)` 排版。三处非有限值照 `EncodeReal0`：`NA` / `NaN` / `±Inf`。 */
+    /* 一格元素按定好的 `(d, e)` 排版。三处非有限值照 `EncodeReal0`：`NA` / `NaN` / `±Inf`。
+       **负零要先归一**：IEEE 有 `-0.0`，而 C 的 `%.*f` 把它印成 `-0`。R 在 `EncodeReal0`
+       里有一句 `if(x == 0.) x = 0.;`（`-0.0 == 0.0` 为真，于是换成正零），所以 R 印 `0`。
+       量出来的：`print(c(-0.0))` R 答 `0`，不归一就答 `-0`。`sprintf("%.1f", -0.0)` 那一格
+       R **不**归一（它直接走 C 的 sprintf，两边都是 `-0.0`），所以那条路不动。 */
     cabiUsed.add('omni_r_is_infinite');
     rmathSig('omni_r_is_infinite');
     const inf = b('!=', { kind: 'ccall', sym: 'omni_r_is_infinite', args: [x] }, I(0));
@@ -5332,6 +5344,7 @@ function printFnDecl(name) {
       body: [
         iff(isNa(x), [iff(isNan(x), [ret(S('NaN'))]), ret(S('NA'))]),
         iff(inf, [iff(b('>', x, R(0)), [ret(S('Inf'))]), ret(S('-Inf'))]),
+        iff(b('==', x, R(0)), [set('x', R(0))]),
         iff(b('==', nm('e'), I(0)), [ret(call1('sfix', x, nm('d')))]),
         ret(call1('ssci', x, nm('d'))),
       ],
