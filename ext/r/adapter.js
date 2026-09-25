@@ -595,6 +595,8 @@ const BUILTINS = new Set([
   'is.character', 'is.numeric', 'is.logical',
   /* 停下来那一档（落方言的 `(fail …)`，只能摆在语句位上）。 */
   'stop', 'stopifnot',
+  /* 分支那一格（落成一条 if 链，见 `switchOf`）。 */
+  'switch',
   /* 造一条"空的/零的"向量：`numeric(n)` 那一族与不带实参的 `c()`。`character(n)` 是字符向量。 */
   'numeric', 'double', 'integer', 'logical', 'character',
   /* 随机数那一族（发生器是 R 自己那一条，见 `RRAND`）。 */
@@ -905,6 +907,11 @@ function applyTy(fn, x, types) {
     case 'sample': return RVEC;
     case 'set.seed': return { kind: 'void' };
     case 'stop': case 'stopifnot': return { kind: 'void' };
+    /* `switch` 回的是被选中那一支的类型（各支不同种在这一档是错的，量的是第一支）。 */
+    case 'switch': {
+      const arms = argsOf(x).slice(1).filter((a) => a.value !== null);
+      return arms.length === 0 ? INT : typeOfExpr(arms[0].value, types);
+    }
     case 'prod': case 'var': case 'sd': return REAL;
     /* 这一批第一格是向量就逐元素（`sqrt(xs)`），标量进标量出。 */
     case 'sqrt': case 'exp': case 'log': case 'log2': case 'log10':
@@ -1461,6 +1468,123 @@ function gapHint(fn) {
   }
   return '编译器这一档只认 `BUILTINS` 那张表里的内建（见 ext/r/SPEC.md 第三节）'
     + '与这份源码里自己定义的函数。如果它是某个包里的，那一档是 libR（SPEC 第五节）';
+}
+
+/**
+ * 尾位上那一格 `switch` 是**语句**还是**值**。
+ *
+ * R 里两种都常见：`f <- function(k) switch(k, a = "A", "其他")` 交的是值，而
+ * `switch(kind, a = cat("…"), b = cat("…"))` 是分支做事、不交值。判据是**每一支都在干什么**：
+ * 每一支都是"只能摆在语句位上的那几格"（`cat` / `print` / `stop` / 赋值…）就按语句落，
+ * 否则按值落。这样不必靠"先试一次、报错了再换一条路"—— 那种写法会把真错吞掉。
+ */
+const STMT_ONLY_FNS = new Set(['cat', 'print', 'set.seed', 'stop', 'stopifnot']);
+function switchIsStmt(x) {
+  const arms = argsOf(x).slice(1).filter((a) => a.value !== null).map((a) => a.value);
+  if (arms.length === 0) return true;
+  return arms.every((v) => {
+    if (isAssign(v)) return true;
+    if (tag(v) === 'block' || tag(v) === 'for' || tag(v) === 'while' || tag(v) === 'repeat') return true;
+    if (tag(v) === 'call' && tag(kids(v)[0]) === 'sym') return STMT_ONLY_FNS.has(nameOf(kids(v)[0]));
+    return false;
+  });
+}
+
+/**
+ * `switch(EXPR, …)` —— 落成一条 if 链。
+ *
+ * R 的这一格有两套完全不同的规矩，按**选择子的类型**分（`do_switch`）：
+ *
+ *   * 选择子是**串**：分支按名字配。`a = , b = 2` 那种**空分支往下落**（`switch("a", a=, b=2)`
+ *     是 2）；最后一格**没名字**的是兜底。
+ *   * 选择子是**数**：分支按位置配（1 起），分支不该有名字。
+ *
+ * 没配上时 R 回的是"不可见的 `NULL`" —— 这一层没有 `NULL`：
+ *   * **语句位**上那正好是"什么都不做"，一格 else 都不发；
+ *   * **表达式位**上当场报（要一格兜底）—— 假装回 0 就是静默答错。
+ *
+ * `asStmt` 分这两条路：语句位上每一支是**语句**（`cat(…)` 只能摆在语句位，见文件头第 2 条），
+ * 表达式位上每一支是**值**，落方言的 `if-expr`（那一格每支自己一个语句槽，所以是懒的 ——
+ * R 也只求被选中的那一支）。
+ */
+function switchOf(x, types, asStmt) {
+  const args = argsOf(x);
+  if (args.length < 2) throw new Error(`r->IR: switch() 至少要"选择子 + 一格分支"（给了 ${args.length}）`);
+  if (args[0].name !== null) throw new Error('r->IR: switch() 的第一格实参是选择子，不该带名字');
+  const sel = args[0].value;
+  const arms = args.slice(1);
+  const st = typeOfExpr(sel, types);
+  const body = (node) => (asStmt ? stmtOf(node, types) : exprOf(node, types));
+
+  /* 数那一档：按位置配（1 起）。 */
+  if (st.kind !== 'string') {
+    if (arms.some((a) => a.name !== null)) {
+      throw new Error('r->IR: switch() 的选择子是数时，分支是**按位置**配的，不该带名字'
+        + '（R 那儿名字会被当成"这一格叫什么"而不是分支）');
+    }
+    if (!asStmt) {
+      /* 位置那一档**没有"兜底"这个写法**（多写一格就是多一个位置），而越界时 R 回 `NULL`。
+         所以表达式位上这一格当场报 —— 回 0 或者"回最后一支"都是静默答错。 */
+      throw new Error('r->IR: 表达式位上的 `switch(数, …)` 还没接 —— 越界时 R 回 `NULL`，'
+        + ' 而这一层没有 `NULL`，位置那一档也没有"兜底"的写法。'
+        + ' 写成 if / else if，或者 `switch(as.character(i), "1" = …, …, 兜底)`');
+    }
+    const selE = asIntE(exprOf(sel, types), st);
+    const tmp = fresh('sw');
+    const pick = { kind: 'name', name: tmp };
+    let out = null;
+    for (let i = arms.length - 1; i >= 0; i--) {
+      out = {
+        kind: 'if',
+        cond: b('==', pick, { kind: 'int', value: i + 1 }),
+        then: [body(arms[i].value)],
+        else_: out === null ? null : [out],
+      };
+    }
+    return { kind: 'block', stmts: [{ kind: 'let', name: tmp, type: INT, init: selE }, out] };
+  }
+
+  /* 串那一档：名字配 + 空分支往下落 + 最后那格没名字的当兜底。 */
+  let dflt = null;
+  const groups = [];          /* { keys: [名字…], value: 那棵树 } */
+  let pending = [];
+  for (const a of arms) {
+    if (a.name === null) {
+      if (dflt !== null) throw new Error('r->IR: switch() 只接一格兜底（没名字的那一格）');
+      if (pending.length > 0) throw new Error('r->IR: switch() 的空分支后面要跟一格带名字的分支');
+      dflt = a.value;
+      continue;
+    }
+    if (a.value === null) { pending.push(a.name); continue; }   /* `a = ,` —— 往下落 */
+    groups.push({ keys: [...pending, a.name], value: a.value });
+    pending = [];
+  }
+  if (pending.length > 0) throw new Error('r->IR: switch() 最后一格分支是空的（R 那儿它落到哪儿都没有）');
+  if (groups.length === 0) throw new Error('r->IR: switch() 一格带名字的分支都没有');
+  const tmp = fresh('sw');
+  const pick = { kind: 'name', name: tmp };
+  const condOfKeys = (keys) => keys
+    .map((k) => b('==', pick, { kind: 'string', value: k }))
+    .reduce((acc, c) => b('||', acc, c));
+  let out = dflt === null ? null : (asStmt ? body(dflt) : body(dflt));
+  for (let i = groups.length - 1; i >= 0; i--) {
+    const cond = condOfKeys(groups[i].keys);
+    if (asStmt) {
+      out = { kind: 'if', cond, then: [body(groups[i].value)], else_: out === null ? null : [out] };
+    } else {
+      if (out === null) {
+        throw new Error('r->IR: 表达式位上的 `switch(串, …)` 要有一格兜底（最后一格不带名字的）'
+          + ' —— 没配上时 R 回 `NULL`，而这一层没有 `NULL`（明写在 SPEC）');
+      }
+      out = {
+        kind: 'if-expr', type: typeOfExpr(groups[i].value, types), cond, then: body(groups[i].value), else_: out,
+      };
+    }
+  }
+  const decl = { kind: 'let', name: tmp, type: STR, init: exprOf(sel, types) };
+  return asStmt
+    ? { kind: 'block', stmts: [decl, out] }
+    : { kind: 'block-expr', stmts: [decl], value: out };
 }
 
 /**
@@ -2236,9 +2360,9 @@ function callOf(x, types, extra, want) {
        那是静默答错，比当场报难查得多（量出来的）。 */
     for (const a of argsOf(x)) {
       if (a.name === null) continue;
-      /* **`list` 不过这张表**：它的命名实参是**数据**（键），不是开关 —— `list(n = 10)`
-         里那个 `n` 就是键名，白名单在这一格没有意义。 */
-      if (fn === 'list') continue;
+      /* **`list` 与 `switch` 不过这张表**：它们的命名实参是**数据**（键名 / 分支名），
+         不是开关 —— `list(n = 10)` 里那个 `n` 就是键名，白名单在这两格没有意义。 */
+      if (fn === 'list' || fn === 'switch') continue;
       const ok = NAMED_OK.get(fn);
       if (ok === undefined || !ok.has(a.name)) {
         throw new Error(`r->IR: ${fn}() 的命名实参 \`${a.name}=\` 还没接`
@@ -2776,6 +2900,7 @@ function callOf(x, types, extra, want) {
         throw new Error('r->IR: `set.seed()` 只能摆在语句位上（它回的是"不可见的 NULL"）');
       case 'stop': case 'stopifnot':
         throw new Error(`r->IR: \`${fn}()\` 只能摆在语句位上（它落的是方言的 \`(fail …)\`，那是一条语句）`);
+      case 'switch': return switchOf(x, types, false);
       case 'sample': {
         /* R 的 `sample`：**回的是下标**（`sample.int`），向量那一档就是拿下标去挑。
            不放回那一条照 `do_sample` 的算法（每次抽一格、把末尾那格填进空位）——
@@ -2899,7 +3024,7 @@ function printOf(x, types) {
  * （`f <- function(x) cat(x)` 在 R 里交的是 `cat` 的 `NULL`，也不印）。
  * 这一格从前是"一律不印"，那是因为那时还没有返回类型这张表。
  */
-const NO_AUTOPRINT = new Set(['cat', 'print', 'invisible', 'return', 'set.seed', 'stop', 'stopifnot']);
+const NO_AUTOPRINT = new Set(['cat', 'print', 'invisible', 'return', 'set.seed', 'stop', 'stopifnot', 'switch']);
 function isAutoPrint(k) {
   const t = tag(k);
   if (t === 'bin') return !isAssign(k);
@@ -3157,6 +3282,8 @@ function stmtOf(x, types) {
       /* `cat()` 与 `return()` 在 R 里都是**调用**，落到的却是语句（见文件头第 2 条）。 */
       if (fn === 'cat') return catOf(x, types);
       if (fn === 'print') return printOf(x, types);
+      /* `switch(…)` 摆在语句位上时每一支是**语句**（`cat(…)` 只能摆在那儿）。 */
+      if (fn === 'switch') return switchOf(x, types, true);
       /* `set.seed(n)` 落成一格 ccall（R 那边它也是"做事不给值"的那一类）。 */
       if (fn === 'set.seed') {
         const vs = posArgs(x);
@@ -3269,6 +3396,8 @@ function tailOf(x, types) {
       const fnNode = kids(x)[0];
       const fn = tag(fnNode) === 'sym' ? nameOf(fnNode) : null;
       if (fn === 'cat' || fn === 'return') return [stmtOf(x, types)];
+      /* 尾位上的 `switch`：每一支都在"做事"时按语句落（见 `switchIsStmt`）。 */
+      if (fn === 'switch' && switchIsStmt(x)) return [stmtOf(x, types)];
       return [{ kind: 'return', values: [retVal(x, types)] }];
     }
     default:
@@ -5581,6 +5710,12 @@ function returnType(body, types) {
       case 'call': {
         const fn = tag(kids(x)[0]) === 'sym' ? nameOf(kids(x)[0]) : null;
         if (fn === 'cat') return;
+        /* `switch` 交的是**被选中那一支**的东西 —— 所以往每一支里看，不问 `switch` 本身。
+           每一支都是 `cat(…)` 那种"做事不交值"的，这个函数就回 void。 */
+        if (fn === 'switch') {
+          for (const a of argsOf(x).slice(1)) if (a.value !== null) walkTail(a.value);
+          return;
+        }
         seen.push(typeOfCall(x, types));
         return;
       }
