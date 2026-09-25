@@ -8534,11 +8534,18 @@ function vecFnDecl(name) {
         { kind: 'let', name: 'mv', type: REAL, init: call('r_mean', v) },
         { kind: 'let', name: 'mw', type: REAL, init: call('r_mean', w) },
         { kind: 'let', name: 's', type: REAL, init: { kind: 'real', value: 0 } },
-        loop([{
-          kind: 'assign',
-          target: acc,
-          value: b('+', acc, b('*', b('-', elem, mv), b('-', vecGet(w, i), mw))),
-        }], 0),
+        /* 与 `r_var` 同一条：R 那边 `sum += (x-mx)*(y-my)` 被收缩成 `fmadd`，
+           所以这儿也走方言那一格精确的 `fma`（见 `r_var` 上那段账）。 */
+        loop([
+          { kind: 'let', name: 'dv', type: REAL, init: b('-', elem, mv) },
+          { kind: 'let', name: 'dw', type: REAL, init: b('-', vecGet(w, i), mw) },
+          {
+            kind: 'assign',
+            target: acc,
+            value: call1('rmath', { kind: 'strlit', value: 'fma' },
+              { kind: 'name', name: 'dv' }, { kind: 'name', name: 'dw' }, acc),
+          },
+        ], 0),
         {
           kind: 'return',
           values: [b('/', acc, call1('toreal', b('-', len, { kind: 'int', value: 1 })))],
@@ -8562,11 +8569,21 @@ function vecFnDecl(name) {
         declLen(),
         { kind: 'let', name: 'mu', type: REAL, init: call('r_mean', v) },
         { kind: 'let', name: 's', type: REAL, init: { kind: 'real', value: 0 } },
-        loop([{
-          kind: 'assign',
-          target: acc,
-          value: b('+', acc, b('*', b('-', elem, mu), b('-', elem, mu))),
-        }], 0),
+        /* **用 `fma` 累加**，不是 `s + d*d`。理由是量出来的：R 那边这一句
+           （`src/library/stats/src/cov.c` 的 `sum += (x-m)*(x-m)`）被 clang 在 arm64 上
+           收缩成一条 `fmadd`（单次舍入），朴素写法差 1 ulp ——
+           `var(c(1/3,2/7,3/11,4/13,5/17,6/19,7/23))` R 是 `…969429`、朴素式是 `…969418`。
+           方言的 `(rmath "fma" …)` 在五条腿上都是**精确**的那一版（ADR-0014 第十五节：
+           JS 那侧是 Dekker 拆分 + two-sum，C 那侧就是 `fmadd`），所以这条路对得上。 */
+        loop([
+          { kind: 'let', name: 'd', type: REAL, init: b('-', elem, mu) },
+          {
+            kind: 'assign',
+            target: acc,
+            value: call1('rmath', { kind: 'strlit', value: 'fma' },
+              { kind: 'name', name: 'd' }, { kind: 'name', name: 'd' }, acc),
+          },
+        ], 0),
         {
           kind: 'return',
           values: [b('/', acc, call1('toreal', b('-', len, { kind: 'int', value: 1 })))],

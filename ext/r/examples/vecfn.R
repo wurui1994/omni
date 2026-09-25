@@ -220,3 +220,11 @@ print(cov(c(1, 2), c(5, 9)))
 print(cor(x2, x2))
 cat(cor(x2, y2), cov(x2, y2), "\n")
 print(round(cor(x2, y2), 6))
+# **这一格是 fma 的守卫**：R 那边 `sum += (x-m)*(x-m)` 被收缩成一条 fmadd（单次舍入），
+# 朴素写成 `s + d*d` 差 1 ulp。印到 17 位才看得见 —— 退回朴素式这一行就会红
+bb <- c(1 / 3, 2 / 7, 3 / 11, 4 / 13, 5 / 17, 6 / 19, 7 / 23)
+cat(sprintf("%.17g", var(bb)), "\n")
+cat(sprintf("%.17g", sd(bb)), "\n")
+cat(sprintf("%.17g", cov(bb, c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7))), "\n")
+cat(sprintf("%.17g", cor(bb, c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7))), "\n")
+cat(sprintf("%.17g", mean(bb)), "\n")

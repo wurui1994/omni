@@ -87,10 +87,13 @@ export const SX_ARITY = {
   sfix: 2, ssci: 2, sgen: 2, sgenk: 2, sbase: 2,
   /* 整数与实数之间（**无符号 64 位要走 `torealu`**：那一格的位当有符号读是负数） */
   toreal: 1, torealu: 1, toint: 1,
-  /* **实数上的数学函数**（`(rmath "sqrt" A [B])`）：名单是 C99 math.h 与 ECMA-262 Math 的
+  /* **实数上的数学函数**（`(rmath "sqrt" A [B [C]])`）：名单是 C99 math.h 与 ECMA-262 Math 的
      交集（正本在 `src/core/sexpr/lower.js` 的 `RMATH`）。go 的 `math.Sqrt`、V 的 `math.sqrt`、
-     lua 的 `math.floor` 都落这一格 —— 所以摆在公共这一层。 */
-  rmath: [2, 3],
+     lua 的 `math.floor` 都落这一格 —— 所以摆在公共这一层。
+     上界是 **4**（名字 + 三格）而不是 3：`fma` 是三元的（ADR-0014 第十五节那条例外）。
+     这儿只管"几格操作数"，**每个名字到底收几格由方言那张 `RMATH` 把关**
+     （`(rmath "fma") 要 3 个参数` 那句话是它报的），所以放宽这一格不会让错元数漏过去。 */
+  rmath: [2, 4],
   /* 截到 N 位（ADR-0031 §8.2）：`(trunc N E)` = asUintN、`(sext N E)` = asIntN、
      `(zext N E)` 与 trunc 同值（分开写只为让读的人看出意图）。N 是 1..64 的字面量。 */
   trunc: 2, sext: 2, zext: 2,
