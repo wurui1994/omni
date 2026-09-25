@@ -64,6 +64,9 @@ const RMATH = new Map([
   ['pmin', { sym: 'fmin2', fill: [null, null] }],
   /* Gamma 那一族（`gamma.c` / `lgamma.c` / `polygamma.c` / `beta.c` / `choose.c`） */
   ['gamma', { sym: 'gammafn', fill: [null] }],
+  /* `factorial(x)` 在 R 里就**定义成** `gamma(x + 1)`（所以 `factorial(2.5)` 是
+     `3.323351`，不是报错）。这张表里只这一格要给第一个实参加个常数 —— 一行 `bump`。 */
+  ['factorial', { sym: 'gammafn', fill: [null], bump: 1 }],
   ['lgamma', { sym: 'lgammafn', fill: [null] }],
   ['digamma', { sym: 'digamma', fill: [null] }],
   ['trigamma', { sym: 'trigamma', fill: [null] }],
@@ -205,6 +208,8 @@ const FN_DEPS = new Map([
   ['r_prod', []],
   ['r_range', ['r_is_na', 'r_na']],
   ['r_diff', []],
+  /* `rank`：并列取平均，所以要问"算不算同一格"（`r_same`）；缺失排在最后（`r_is_na`）。 */
+  ['r_rank', ['r_is_na', 'r_same']],
   ['r_head', []],
   ['r_tail', []],
   ['r_var', ['r_mean']],
@@ -703,6 +708,7 @@ const NAMED_OK = new Map([
   ['sum', NA_RM], ['prod', NA_RM], ['mean', NA_RM], ['max', NA_RM], ['min', NA_RM],
   ['range', NA_RM], ['var', NA_RM], ['sd', NA_RM], ['any', NA_RM], ['all', NA_RM],
   ['median', NA_RM],
+  ['diff', new Set(['lag'])],
   /* `sort` 上**没有** `na.rm=` —— R 自己都报"参数没有用(na.rm = TRUE)"（它的默认
      `na.last = NA` 已经是"丢掉缺失"了）。量出来的：我们本来跟着收了，比 R 宽。 */
   ['head', new Set(['n'])], ['tail', new Set(['n'])],
@@ -743,7 +749,7 @@ const BUILTINS = new Set([
   /* 集合与位置那一族（见 `setFnDecl`）。`%in%` 是个算子，不在这张表里。 */
   'which.max', 'which.min', 'match', 'unique', 'duplicated',
   'union', 'intersect', 'setdiff', 'order', 'cumprod', 'cummax', 'cummin',
-  'is.element', 'setequal', 'findInterval', 'median',
+  'is.element', 'setequal', 'findInterval', 'median', 'rank',
   /* 串那一族。`tolower` 方言里没有算子（只有 `(supper …)`），由 `r_lower` 拿两张字母表
      查出来 —— **只管 ASCII**（见 SPEC 第四节第 12 条）。 */
   'toupper', 'tolower', 'substr', 'substring', 'trimws', 'sprintf', 'startsWith', 'endsWith',
@@ -1197,6 +1203,9 @@ function applyTy(fn, x, types) {
     case 'setequal': return BOOL;
     case 'findInterval': return RIVEC;
     case 'median': return REAL;
+    /* `rank` 并列取平均 —— 出来的可能带小数（`rank(c(2,2,1))` 是 `2.5 2.5 1.0`），
+       所以一律数值向量，不跟着进去那条是不是整数走。 */
+    case 'rank': return RVEC;
     case 'append': case 'replace': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
       return isVecTy(t) ? t : RVEC;
@@ -1658,6 +1667,9 @@ function rmathCall(rname, spec, args, argTys) {
     const ty = i < args.length ? argTys[i] : undefined;
     return sig.params[i] === 'i32' ? e : asReal(e, ty);
   });
+  /* `bump`：给第一个实参加个常数（只有 `factorial` 用 —— R 把它定义成 `gamma(x+1)`）。
+     摆在这儿而不是调用点上，是因为"第一格是向量就逐元素"那一层在上头，写在那儿就要写两遍。 */
+  if (spec.bump !== undefined) out[0] = b('+', out[0], { kind: 'real', value: spec.bump });
   return { kind: 'ccall', sym: spec.sym, args: out };
 }
 
@@ -3233,7 +3245,7 @@ function callOf(x, types, extra, want) {
         if (fn === 'character') return call1('anew', tyArg(RSTRV), cnt);
         return lglCall('r_zeros', cnt);
       }
-      case 'sort': case 'cumsum': case 'prod': case 'range': case 'diff':
+      case 'sort': case 'cumsum': case 'prod': case 'range':
       case 'var': case 'sd': {
         /* `prod` 与 `range` 在 R 里也收**任意多格**（先摊平成一条向量，见 `numCatOf`）；
            别的几格只有一格向量。 */
@@ -3283,6 +3295,29 @@ function callOf(x, types, extra, want) {
         if (named !== undefined) cnt = asIntE(exprOf(named, types), typeOfExpr(named, types));
         else if (n >= 2) cnt = asIntE(ev(1), typeOfExpr(all[1], types));
         return lglCall(`r_${fn}`, ev(0), cnt);
+      }
+      case 'diff': {
+        /**
+         * `diff(x, lag)`：相隔 `lag` 格相减，长度是 `max(0, n - lag)`
+         * （量出来 `diff(c(1,4), lag = 5)` 是 `numeric(0)`）。`differences=` 那一格
+         * （差分几次）没接 —— 不在 `NAMED_OK` 里，所以当场报。
+         */
+        if (n < 1) throw new Error('r->IR: diff() 一格实参都没给');
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        if (isStrVec(t) || t.kind === 'string') throw new Error(strvGap('diff'));
+        if (!isVecTy(t)) throw new Error(`r->IR: diff() 的第一格实参不是向量（是 ${t.kind}）`);
+        const named = namedArg(x, 'lag');
+        let lag = { kind: 'int', value: 1 };
+        if (named !== undefined) lag = asIntE(exprOf(named, types), typeOfExpr(named, types));
+        else if (n >= 2) lag = asIntE(ev(1), typeOfExpr(all[1], types));
+        return lglCall('r_diff', dropNa(ev(0)), lag);
+      }
+      case 'rank': {
+        /** `rank(x)`：并列取**平均**（R 的默认 `ties.method = "average"`）。 */
+        if (n !== 1) throw new Error(`r->IR: rank() 要一格实参（给了 ${n}）`);
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        if (isStrVec(t) || t.kind === 'string') throw new Error(strvGap('rank'));
+        return lglCall('r_rank', isVecTy(t) ? ev(0) : lglCall('r_vec1', asReal(ev(0), t)));
       }
       case 'is.element': case 'setequal': case 'findInterval': {
         /**
@@ -7040,14 +7075,21 @@ function vecFnDecl(name) {
     };
   }
   if (name === 'r_diff') {
-    /* `diff(v)` 的长度是 n-1（长度 1 的向量给零长 —— R 那边是 `numeric(0)`）。 */
+    /**
+     * `diff(v, k)`：相隔 `k` 格相减。长度是 `max(0, n - k)` —— 不够长就出零长
+     * （R 那边印 `numeric(0)`，量出来 `diff(c(1,4), lag = 5)` 就是它）。
+     */
     const out = { kind: 'name', name: 'o' };
     const m = { kind: 'name', name: 'm' };
+    const kk = { kind: 'name', name: 'k' };
     return {
-      kind: 'fn', name, params: P, ret: RVEC,
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RVEC }, { name: 'k', type: INT }],
+      ret: RVEC,
       body: [
         declLen(),
-        { kind: 'let', name: 'm', type: INT, init: b('-', len, { kind: 'int', value: 1 }) },
+        { kind: 'let', name: 'm', type: INT, init: b('-', len, kk) },
         { kind: 'if', cond: b('<', m, { kind: 'int', value: 0 }), then: [{ kind: 'assign', target: m, value: { kind: 'int', value: 0 } }], else_: null },
         ...vecNewAs('o', m),
         {
@@ -7055,8 +7097,77 @@ function vecFnDecl(name) {
           init: { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
           cond: b('<', i, m),
           post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
-          body: [vecSet(out, i, b('-', vecGet(v, b('+', i, { kind: 'int', value: 1 })), vecGet(v, i)))],
+          body: [vecSet(out, i, b('-', vecGet(v, b('+', i, kk)), vecGet(v, i)))],
         },
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_rank') {
+    /**
+     * `rank(x)`：并列那几格取**平均**（R 的默认 `ties.method = "average"`，
+     * 量出来 `rank(c(2,2,1))` 是 `2.5 2.5 1.0`）。
+     *
+     * 办法是对每一格数两遍："有几格比它小"与"有几格与它同"，名次就是
+     * `nless + (neq + 1) / 2`。这是 O(n²) —— 换成"排完再扫"能到 O(n log n)，但那要
+     * 多一条下标向量，而这一格的用处是几十格的向量，先要对。
+     *
+     * 缺失**留在结果里**、排在最后（R 的默认 `na.last = TRUE`）：第 k 个缺失拿
+     * `非缺失格数 + k`（量出来 `rank(c(NA,1,NA))` 是 `2 1 3`）。`NaN` 与 `NA` 同档
+     * （`r_is_na` 底下是 `isnan`）—— R 也是这么办的。
+     */
+    const out = { kind: 'name', name: 'o' };
+    const cnt = { kind: 'name', name: 'c' };
+    const seen = { kind: 'name', name: 'g' };
+    const i1 = { kind: 'name', name: 'i1' };
+    const i2 = { kind: 'name', name: 'i2' };
+    const j = { kind: 'name', name: 'j' };
+    const less = { kind: 'name', name: 'nl' };
+    const eq = { kind: 'name', name: 'ne' };
+    const forN = (nmS, body) => ({
+      kind: 'for',
+      init: { kind: 'let', name: nmS, type: INT, init: { kind: 'int', value: 0 } },
+      cond: b('<', { kind: 'name', name: nmS }, len),
+      post: { kind: 'assign', target: { kind: 'name', name: nmS }, value: b('+', { kind: 'name', name: nmS }, { kind: 'int', value: 1 }) },
+      body,
+    });
+    const at = (e) => vecGet(v, e);
+    const bump = (t) => ({ kind: 'assign', target: t, value: b('+', t, { kind: 'int', value: 1 }) });
+    return {
+      kind: 'fn', name, params: P, ret: RVEC,
+      body: [
+        declLen(),
+        ...vecNewAs('o', len),
+        { kind: 'let', name: 'c', type: INT, init: { kind: 'int', value: 0 } },
+        forN('i1', [{ kind: 'if', cond: { kind: 'unop', op: '!', operand: naQ(at(i1)) }, then: [bump(cnt)], else_: null }]),
+        { kind: 'let', name: 'g', type: INT, init: { kind: 'int', value: 0 } },
+        forN('i2', [{
+          kind: 'if',
+          cond: naQ(at(i2)),
+          then: [bump(seen), vecSet(out, i2, call1('toreal', b('+', cnt, seen)))],
+          else_: [
+            { kind: 'let', name: 'nl', type: INT, init: { kind: 'int', value: 0 } },
+            { kind: 'let', name: 'ne', type: INT, init: { kind: 'int', value: 0 } },
+            forN('j', [{
+              kind: 'if',
+              cond: { kind: 'unop', op: '!', operand: naQ(at(j)) },
+              then: [{
+                kind: 'if',
+                cond: b('<', at(j), at(i2)),
+                then: [bump(less)],
+                else_: [{
+                  kind: 'if',
+                  cond: { kind: 'call', fn: { kind: 'name', name: useFn('r_same') }, args: [at(j), at(i2)] },
+                  then: [bump(eq)],
+                  else_: null,
+                }],
+              }],
+              else_: null,
+            }]),
+            vecSet(out, i2, b('+', call1('toreal', less),
+              b('/', call1('toreal', b('+', eq, { kind: 'int', value: 1 })), { kind: 'real', value: 2 }))),
+          ],
+        }]),
         { kind: 'return', values: [out] },
       ],
     };

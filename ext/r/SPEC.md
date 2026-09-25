@@ -177,7 +177,7 @@ R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不�
 
 进出都是向量的几格：`rev` / `seq_along` / `which` / `sort` / `cumsum` / `cumprod` /
 `cummax` / `cummin` / `diff` / `range` / `head` / `tail` / `rep` / `rep_len` / `seq` /
-`tabulate` / `append` / `replace`；
+`tabulate` / `append` / `replace` / `rank`；
 出一格数的几格：`sum` / `mean` / `max` / `min` / `prod` / `var` / `sd` / `anyNA` / `median`。
 `which` 回的是**位置**（数值向量），`NA` 直接丢 —— 与 `xs[m]` 不同
 （那边 `NA` 挑出一格 `NA`），这两条口径是 R 自己分开的。
@@ -208,6 +208,18 @@ R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不�
 `median(x)` 是排完取中间 —— 偶数格取中间两格的平均。缺失那一问要**在排之前**问：
 `r_sort` 顺手把缺失丢了，排完就看不出原来有没有缺失，而 R 在 `na.rm = FALSE`（默认）时
 答的是 `NA`。零长也是 `NA`（量出来 `median(numeric(0))` 是 `NA`）。
+
+`rank(x)` 并列那几格取**平均**（R 的默认 `ties.method = "average"`，`rank(c(2,2,1))` 是
+`2.5 2.5 1.0`）；缺失**留在结果里**、排在最后（默认 `na.last = TRUE`，第 k 个缺失拿
+"非缺失格数 + k"）。算法是对每一格数两遍"有几格比它小 / 有几格与它同" —— O(n²)，
+换成"排完再扫"能到 O(n log n)，那要多一条下标向量，先要对。
+`ties.method=` / `na.last=` 那两个命名实参没接（不在 `NAMED_OK` 里，当场报）。
+
+`diff(x, lag)` 的 `lag=` 接了（相隔 lag 格相减，长度 `max(0, n - lag)`）；
+`differences=`（差分几次）没接。
+
+`factorial(x)` 走的是 nmath：R 把它**定义成** `gamma(x + 1)`（所以 `factorial(2.5)` 是
+`3.323351` 而不是报错），那张表里就是 `gammafn` 加一行 `bump: 1`。
 
 ### 集合与位置那一族（判据 `ext/r/examples/setfn.R`）
 
