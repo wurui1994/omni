@@ -61,3 +61,17 @@ print(z2)
 
 # 汇总那一族 R 自己也丢名字，所以照样能算
 cat(sum(w), mean(w), length(w), "\n")
+
+# 带名字的**逻辑**向量（2026-09-26 接了）：版式与数值那一格同形 —— 名字一行、值一行、
+# 两行共用一个宽 `max(TRUE/FALSE/NA 的宽, 最长的名字)`，值那一行印 `TRUE` / `FALSE` / `NA`。
+# 从前比较那一格的结果一律落"没名字的逻辑向量"，印出来少名字那一行；`c(a = TRUE, …)` 更糟，
+# 落到数值那一格印成 `1` / `0`。
+print(v > 1)
+print(w >= 2)
+print(c(a = TRUE, b = FALSE))
+print(!(w > 1))
+print(setNames(c(TRUE, NA, FALSE), c("p", "qq", "r")))
+# NA 也进这一格（`NA` 的宽是 2，比名字短就跟着名字撑开）
+print(setNames(c(TRUE, NA), c("yes", "dunno")))
+# 零长那一档印的是 `named logical(0)`
+print(setNames(c(TRUE)[c(FALSE)], character(0)))

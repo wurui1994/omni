@@ -363,6 +363,8 @@ const FN_DEPS = new Map([
   /* 带名字的向量那三格（见 `RNVEC`）：印是"名字一行、值一行"，名字那条空着就退回
      `r_print_num`（R 里名字被丢掉之后印的就是 `[1] …`）。 */
   ['r_print_named', ['r_sci', 'r_is_na', 'r_is_nan', 'r_num_fmt', 'r_print_num']],
+  /* 带名字的**逻辑**向量那一格（`v > 1` 与 `sapply(字符向量, 判真假)`）。 */
+  ['r_print_named_lgl', ['r_is_na', 'r_lgl_str', 'r_print_lgl']],
   ['r_at_name', ['r_na']],
   ['r_nm_at', []],
   ...[...CMP_FNS.values()].map((n) => [n, ['r_is_na', 'r_na']]),
@@ -938,6 +940,13 @@ function namesExprOf(x, types) {
     if (!VEC_OPS.has(op)) return null;
     return namesExprOf(kids(x)[1], types) ?? namesExprOf(kids(x)[2], types);
   }
+  /* 一元那两格（`!v` / `-v`）**名字原样带过去**（R 也是）—— `typeOfExpr` 的 `un`
+     那一格早就这么算了（`isNamedTy` 进 `isNamedTy` 出），这儿补上取名字的那一半。 */
+  if (tag(x) === 'un') {
+    const op = String(leaf(kids(x)[0]));
+    if (op !== '!' && op !== '-') return null;
+    return namesExprOf(kids(x)[1], types);
+  }
   if (tag(x) !== 'call' || tag(kids(x)[0]) !== 'sym') return null;
   const fn = nameOf(kids(x)[0]);
   if (fn === 'c') {
@@ -954,6 +963,19 @@ function namesExprOf(x, types) {
       value: { kind: 'string', value: a.name ?? '' },
     }));
     return { kind: 'block-expr', stmts, value: tv };
+  }
+  /**
+   * `sapply(字符向量, f)` / `vapply(…)` —— R 的 `USE.NAMES`：**名字就是进去那条串**
+   * （量出来 `sapply(c("ab","c"), nchar)` 印的是 `ab c` 一行、`2 1` 一行）。
+   *
+   * 这一格与 `c(a = 1)` 同一条路：名字是**另算一遍**的（那条数据会被求值两遍）。
+   * 真代码里那一格几乎总是一个变量或者字面量，所以这么办；有副作用的表达式
+   * （`sapply(f(x), g)` 里 `f` 印了东西）会印两遍 —— 明写在 SPEC。
+   */
+  if (fn === 'sapply' || fn === 'vapply') {
+    const as = posArgs(x);
+    if (as.length < 1 || !isStrVec(typeOfExpr(as[0], types))) return null;
+    return exprOf(as[0], types);
   }
   if (fn === 'setNames') {
     const as = posArgs(x);
@@ -1172,8 +1194,11 @@ function applyTy(fn, x, types) {
     return (b2.kind === 'bool' || isLgl1(b2)) ? RLGL : RVEC;
   }
   if (bt.kind === 'string') return RSTRV;
-  if (bt.kind === 'bool' || isLgl1(bt)) return RLGL;
-  return RVEC;
+  /* `sapply` / `vapply` 在**字符向量**上会给结果加名字（R 的 `USE.NAMES`）——
+     出来的是带名字的那两种（见 `namesExprOf` 里那一格）。 */
+  const named = strIn && (fn === 'sapply' || fn === 'vapply');
+  if (bt.kind === 'bool' || isLgl1(bt)) return named ? RNLGL : RLGL;
+  return named ? RNVEC : RVEC;
 }
 
 /** 一次调用的结果类型。内建各自说，用户函数按"这门语言的数"算（见文件头第 4 条）。 */function typeOfCall(x, types) {
@@ -1401,13 +1426,23 @@ function applyTy(fn, x, types) {
       if (cargs.length > 0 && cargs.every((a) => {
         const t = typeOfExpr(a, types);
         return t.kind === 'bool' || isLgl1(t) || isLglTy(t);
-      })) return RLGL;
+      })) {
+        /* `c(a = TRUE, b = FALSE)` 是**带名字的逻辑向量** —— 从前这儿一律落 `RLGL`，
+           于是 `print` 印的是 `[1] TRUE FALSE` 而 R 印的是名字一行、真假一行（静默差两行）。 */
+        return argsOf(x).some((a) => a.name !== null) ? RNLGL : RLGL;
+      }
       /* `c(a = 1, b = 2)` —— 带名字的数值向量（名字那一条见 `namesExprOf`）。 */
       return argsOf(x).some((a) => a.name !== null) ? RNVEC : RVEC;
     }
     /* 名字那几格：`names(v)` 出一条字符向量、`setNames` 出带名字的向量、`unname` 把名字摘掉。 */
     case 'names': return RSTRV;
-    case 'setNames': return RNVEC;
+    /* `setNames(c(TRUE, NA, FALSE), …)` 是带名字的**逻辑**向量 —— 从前这儿一律落 `RNVEC`，
+       于是印出来是 `1 NA 0` 而 R 印 `TRUE NA FALSE`（静默差一行）。第一格是字符向量那一档
+       还没接（见 SPEC），落回 `RNVEC` 会当场报。 */
+    case 'setNames': {
+      const t0 = args.length === 0 ? RVEC : typeOfExpr(args[0], types);
+      return (t0.kind === 'bool' || isLgl1(t0) || isLglTy(t0)) ? RNLGL : RNVEC;
+    }
     /* `unname` 只摘名字，别的记号（逻辑 / 字符）留着。 */
     case 'unname': {
       const t0 = args.length === 0 ? RVEC : typeOfExpr(args[0], types);
@@ -2403,9 +2438,25 @@ function applyOf(fn, x, types) {
      `sapply(c("ab","c"), nchar)` 在 R 里印的是一条**带名字**的向量（名字就是那些串），
      而这一层没有 `names` 那一格。所以这一档当场报 —— 换 `unlist(lapply(…))` 就没有名字，
      两边同解（量出来的）。 */
+  /**
+   * **`sapply` / `vapply` 在字符向量上会加名字**（`USE.NAMES`）—— 2026-09-26 接了：
+   * 名字就是进去那条串（`namesExprOf` 里那一格），类型落成带名字的那两种，于是
+   * `print` 与赋值都跟得住。
+   *
+   * 还差一档：函数体**出串**时 R 给的是带名字的**字符**向量，而这一层的字符向量
+   * （`(arr string)`）没有名字那一条 —— 那一格照旧当场报。
+   */
   if (strIn && (fn === 'sapply' || fn === 'vapply')) {
-    throw new Error(`r->IR: ${fn}() 在字符向量上会给结果加名字（R 的 USE.NAMES）——`
-      + ' 这一层没有 `names`，写成 `unlist(lapply(v, function(x) …))` 那一格没有名字，两边同解');
+    const btN = typeOfExpr(body, (() => {
+      const c2 = new Map(types);
+      for (const p of ps) c2.set(p, STR);
+      return c2;
+    })());
+    if (btN.kind === 'string') {
+      throw new Error(`r->IR: ${fn}() 在字符向量上、函数体又出串 —— R 给的是带名字的**字符**`
+        + '向量，而这一层的字符向量（`(arr string)`）没有名字那一条。写成'
+        + ' `unlist(lapply(v, function(x) …))` 那一格没有名字，两边同解');
+    }
   }
   const src = fresh('ap');
   const idx = fresh('ai');
@@ -4438,11 +4489,15 @@ function printValStmt(node, types) {
   const wr = (s) => ({ kind: 'builtin-stmt', name: 'write', args: [s] });
   /* **带名字的向量**：名字一行、值一行，两行共用一个宽（见 `r_print_named`）。 */
   if (isNamedTy(t)) {
-    if (isLglTy(t)) {
-      throw new Error('r->IR: 印一条**带名字的逻辑向量**（`v > 1` 那种）还没接'
-        + ' —— R 会把名字带过去，这一档只让数值那一条带。要印不带名字的写 `unname(v > 1)`');
-    }
     const ns = namesExprOf(node, types);
+    /* 带名字的**逻辑**向量（`v > 1` / `sapply(字符向量, 判真假)`）2026-09-26 接了 ——
+       版式与数值那一格同形，只是值那一行印 `TRUE` / `FALSE` / `NA`（见 `r_print_named_lgl`）。 */
+    if (isLglTy(t) && ns !== null) {
+      return {
+        kind: 'expr-stmt',
+        expr: lglCall('r_print_named_lgl', exprOf(node, types), ns),
+      };
+    }
     if (ns === null) {
       throw new Error('r->IR: print() 这一格带名字的向量印不出名字来 —— 名字那一条跟丢了'
         + '（名字是**跟着变量**走的，见 ext/r/SPEC.md 第二节）。'
@@ -7033,6 +7088,79 @@ function printFnDecl(name) {
     iff(b('&&', nm('hasni'), b('<', nm('w'), I(4))), [set('w', I(4))]),
   ];
 
+  if (name === 'r_print_named_lgl') {
+    /**
+     * **带名字的逻辑向量**：名字一行、真假一行，两行共用一个宽
+     * `cw = max(逻辑那一族的宽, 最长的名字)`，每格右对齐再跟一个空格（行末也有一个 ——
+     * 与 `r_print_named` 同一条，量出来的）。
+     *
+     * 宽那一条与 `r_print_lgl` 同一个口径：从 1 起，见过 `NA` 至少 2、见过 `TRUE` 至少 4、
+     * 见过 `FALSE` 就是 5（`formatLogical`）。零长时 R 印 `named logical(0)`。
+     * 名字那一条对不上（短了）就退回 `r_print_lgl` —— 与数值那一格的退路同形。
+     */
+    const ns = nm('ns');
+    const row = (elem, wid) => ({
+      kind: 'while',
+      cond: b('&&', b('<', j, nm('n')), b('<', j, b('+', i, nm('per')))),
+      body: [
+        letS('s', elem(j)),
+        wr(pad(nm('s'), wid)),
+        wr(nm('s')),
+        wr(S(' ')),
+        set('j', b('+', j, I(1))),
+      ],
+    });
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RVEC }, { name: 'ns', type: RSTRV }],
+      ret: { kind: 'void' },
+      body: [
+        letI('n', vecLen(v)),
+        iff(b('==', nm('n'), I(0)), [
+          wr(S('named logical(0)\n')),
+          { kind: 'return', values: [] },
+        ]),
+        iff(b('<', call1('alen', ns), nm('n')), [
+          { kind: 'expr-stmt', expr: lglCall('r_print_lgl', v) },
+          { kind: 'return', values: [] },
+        ]),
+        letI('cw', I(1)),
+        {
+          kind: 'for',
+          init: letI('k', I(0)),
+          cond: b('<', nm('k'), nm('n')),
+          post: set('k', b('+', nm('k'), I(1))),
+          body: [
+            iff(isNa(vecGet(v, nm('k'))),
+              [iff(b('<', nm('cw'), I(2)), [set('cw', I(2))])],
+              [iff(b('!=', vecGet(v, nm('k')), R(0)),
+                [iff(b('<', nm('cw'), I(4)), [set('cw', I(4))])],
+                [iff(b('<', nm('cw'), I(5)), [set('cw', I(5))])])]),
+            letI('sl3', call1('slen', svGet(ns, nm('k')))),
+            iff(b('>', nm('sl3'), nm('cw')), [set('cw', nm('sl3'))]),
+          ],
+        },
+        letI('per', call1('toint', rm('floor', b('/',
+          call1('toreal', I(80)), call1('toreal', b('+', nm('cw'), I(1))))))),
+        iff(b('<', nm('per'), I(1)), [set('per', I(1))]),
+        letI('i', I(0)),
+        {
+          kind: 'while',
+          cond: b('<', i, nm('n')),
+          body: [
+            letI('j', i),
+            row((k) => svGet(ns, k), nm('cw')),
+            wr(S('\n')),
+            set('j', i),
+            row((k) => lglCall('r_lgl_str', vecGet(v, k)), nm('cw')),
+            wr(S('\n')),
+            set('i', b('+', i, nm('per'))),
+          ],
+        },
+      ],
+    };
+  }
   if (name === 'r_print_named') {
     /* **带名字的向量**：名字一行、值一行，两行**共用一个宽** `cw = max(值的宽, 最长的名字)`，
        每格右对齐到 `cw` 再跟一个空格（所以每行**末尾有一个空格** —— 量出来的，`Rscript`，
@@ -9266,7 +9394,7 @@ function vecFnDecl(name) {
   if (SET_FNS.has(name)) return setFnDecl(name);
   if (name === 'r_sci') return sciFnDecl();
   if (name === 'r_num_fmt' || name === 'r_print_num' || name === 'r_print_lgl'
-      || name === 'r_print_named') {
+      || name === 'r_print_named' || name === 'r_print_named_lgl') {
     return printFnDecl(name);
   }
   if (name === NUM_STR) return numStrDecl();

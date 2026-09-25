@@ -14,10 +14,14 @@
 #
 # 出来的是哪一种向量看**函数体**：出数是数值向量、出真假是逻辑向量、出串是字符向量。
 #
-# 两处与 R 不同，都当场报而不是静默差一点：
-#   * `lapply` 裸着用 —— R 回一张表，这一层没有"表里装向量"（写 `unlist(lapply(…))`）；
-#   * `sapply` / `vapply` 在**字符向量**上 —— R 会拿那些串当结果的**名字**（`USE.NAMES`），
-#     而这一层没有 `names`。`unlist(lapply(…))` 那一格没有名字，两边同解。
+# `sapply` / `vapply` 在**字符向量**上 R 会拿那些串当结果的**名字**（`USE.NAMES`）—— 这一格
+# 2026-09-26 接了：出来的是**带名字的**向量（数值那一格 `RNVEC`、真假那一格 `RNLGL`），名字就是
+# 那条输入本身（见 `namesExprOf`；代价是那条输入的表达式**算两遍**，所以别在里头写带副作用的）。
+# 函数体出**串**那一格还没接（没有带名字的字符向量，见 SPEC §2），当场报。
+# `unlist(lapply(…))` 那一格照 R 一样没有名字，可以拿它绕开。
+#
+# 一处与 R 不同，当场报而不是静默差一点：
+#   * `lapply` 裸着用 —— R 回一张表，这一层没有"表里装向量"（写 `unlist(lapply(…))`）。
 
 v <- c(1, 2, 3, 4)
 
@@ -83,3 +87,19 @@ add2 <- function(p, q) p + q
 print(mapply(add2, c(1, 2), c(5, 6)))
 print(mapply(`+`, c(1, 2), c(5, 6)))
 cat(sum(mapply(function(a, b) a * b, c(1, 2), c(3, 4))), "\n")
+
+# `USE.NAMES`：字符向量上 `sapply` / `vapply` 拿那些串当名字（印法是名字一行、值一行）
+ws <- c("ab", "c", "def")
+print(sapply(ws, nchar))
+print(sapply(ws, function(s) nchar(s) * 2))
+print(vapply(ws, nchar, integer(1)))
+print(sapply(ws, function(s) nchar(s) > 1))   # 真假那一格：带名字的逻辑向量
+print(sapply(c("one"), function(s) nchar(s))) # 一格也照样有名字
+# 名字跟着**变量**走，所以接出来还能问名字
+sn <- sapply(ws, nchar)
+print(sn)
+print(names(sn))
+# 汇总那一族 R 自己丢名字，所以照旧
+cat(sum(sapply(ws, nchar)), "\n")
+# `unlist(lapply(…))` 两边都没有名字
+print(unlist(lapply(ws, nchar)))
