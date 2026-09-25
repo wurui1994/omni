@@ -178,7 +178,7 @@ R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不�
 进出都是向量的几格：`rev` / `seq_along` / `which` / `sort` / `cumsum` / `cumprod` /
 `cummax` / `cummin` / `diff` / `range` / `head` / `tail` / `rep` / `rep_len` / `seq` /
 `tabulate` / `append` / `replace`；
-出一格数的几格：`sum` / `mean` / `max` / `min` / `prod` / `var` / `sd` / `anyNA`。
+出一格数的几格：`sum` / `mean` / `max` / `min` / `prod` / `var` / `sd` / `anyNA` / `median`。
 `which` 回的是**位置**（数值向量），`NA` 直接丢 —— 与 `xs[m]` 不同
 （那边 `NA` 挑出一格 `NA`），这两条口径是 R 自己分开的。
 
@@ -205,10 +205,15 @@ R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不�
 带名字的向量在 `append` / `replace` 上**没接**（名字那一条要跟着插/跟着走），当场报；
 字符向量那一侧四格都没接。
 
+`median(x)` 是排完取中间 —— 偶数格取中间两格的平均。缺失那一问要**在排之前**问：
+`r_sort` 顺手把缺失丢了，排完就看不出原来有没有缺失，而 R 在 `na.rm = FALSE`（默认）时
+答的是 `NA`。零长也是 `NA`（量出来 `median(numeric(0))` 是 `NA`）。
+
 ### 集合与位置那一族（判据 `ext/r/examples/setfn.R`）
 
 `match` / `%in%` / `unique` / `duplicated` / `union` / `intersect` / `setdiff` / `order` /
-`which.max` / `which.min` / `pmax` / `pmin`。难的只有两问，都是 R 自己的规矩：
+`which.max` / `which.min` / `pmax` / `pmin` / `is.element` / `setequal` / `findInterval`。
+难的只有两问，都是 R 自己的规矩：
 
 * **"两格值算不算同一格"**（`r_same`）：`NA` 与 `NA` 算同一格（`NA %in% c(1, NA)` 是 TRUE、
   `unique(c(NA, NA))` 只剩一格）、`NaN` 与 `NaN` 也算、而 `NA` 与 `NaN` **不算**。
@@ -221,6 +226,13 @@ R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不�
 逐元素出逻辑向量。`pmax` / `pmin` 是**两头回收**的（有一边零长就出零长）。
 `which.max` / `which.min` 在"一格非缺失都没有"时 R 回 `integer(0)`，这一档没有那种值 ——
 当场停下来（`(fail …)`）。字符向量上这一族都还没接（见第四节第 12 条）。
+
+2026-09-26 加的三格：`is.element(el, set)` 与 `el %in% set` 是**同一格**（R 的文档就这么
+写的），所以走的是同一对函数；`setequal(a, b)` 当集合看 —— 重复的那几格不算、`NA` 与 `NA`
+算同一格（量出来 `setequal(c(NA,1), c(1,NA))` 是 TRUE）；`findInterval(x, vec)` 回的是
+**有几格断点 `<= x[i]`**（缺失回 `NA`）。R 那边 `findInterval` 是二分查找，这儿是数一遍
+—— **断点升着排**时同解，而 R 的文档在"没排序"时本来就不给结果。
+`rightmost.closed=` / `all.inside=` 那几个命名实参没接，当场报。
 
 
 **缺失那一格每个函数的口径都不一样**，照 R 的文档办（判据是 `ext/r/examples/vecfn.R`）：

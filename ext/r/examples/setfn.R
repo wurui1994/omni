@@ -45,3 +45,22 @@ print(unique(c(1, NA, NA)))
 print(match(NA, c(1, NA)))
 cat(NA %in% c(1, NA), "\n")
 print(order(c(3, NA, 1)))
+
+# `is.element(el, set)` 与 `el %in% set` 是同一格（R 的文档就这么写的）
+print(is.element(2, c(1, 2, 3)))
+print(is.element(c(1, 5), c(1, 2, 3)))
+print(is.element(c(NA, 2), c(1, 2)))
+print(is.element(2, c(1, NA)))
+# `setequal`：当集合看 —— 重复的那几格不算，`NA` 与 `NA` 算同一格
+print(setequal(c(1, 2), c(2, 1)))
+print(setequal(c(1, 2), c(1, 2, 3)))
+print(setequal(c(1, 1, 2), c(2, 1)))
+print(setequal(c(1, 2), c(3, 4)))
+print(setequal(c(NA, 1), c(1, NA)))
+# `findInterval(x, vec)`：有几格断点 `<= x`（比所有断点都小是 0，缺失回 NA）
+print(findInterval(c(1.5, 2.5), c(1, 2, 3)))
+print(findInterval(c(0.5, 3.5), c(1, 2, 3)))
+print(findInterval(c(1, 2, 3), c(1, 2, 3)))
+print(findInterval(c(2), c(1, 2, 2, 3)))
+print(findInterval(c(NA, 2), c(1, 2)))
+cat(findInterval(c(1.2, 9), c(1, 5)), "\n")

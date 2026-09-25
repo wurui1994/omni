@@ -209,6 +209,9 @@ const FN_DEPS = new Map([
   ['r_tail', []],
   ['r_var', ['r_mean']],
   ['r_sd', ['r_var', 'r_mean']],
+  /* `median`：先排（`r_sort` 顺手把缺失丢了）再取中间那一格/两格的平均。缺失那一条要
+     **在排之前**问（`na.rm = FALSE` 时 R 答 `NA`，而排完就看不出原来有没有缺失了）。 */
+  ['r_median', ['r_sort', 'r_any_na', 'r_na']],
   ['r_rep_s', []],
   ['r_rep_v', []],
   ['r_rep_str', []],
@@ -253,6 +256,10 @@ const FN_DEPS = new Map([
   ['r_union', ['r_same', 'r_in1']],
   ['r_intersect', ['r_same', 'r_in1']],
   ['r_setdiff', ['r_same', 'r_in1']],
+  /* `setequal(a, b)` = 两边各问一遍"另一条里有没有这一格"；`findInterval` 数的是
+     "有几格断点 <= 这一格"。两格都在集合那一族里（`setFnDecl2`）。 */
+  ['r_setequal', ['r_same', 'r_in1']],
+  ['r_find_int', ['r_is_na', 'r_na']],
   /* 三态逻辑那一族（`RLGL1` 那段账）。比较那六格各发一个函数 —— 不摊在调用点上是
      因为"两边各读两遍"要临时量，而临时量在**条件位**上没地方摆（`while` 的条件被降级到
      循环外头，摊开的 `let` 会变成"只算一次"）。一次函数调用是纯表达式，哪儿都放得下。 */
@@ -695,6 +702,7 @@ const NAMED_OK = new Map([
   ['paste0', new Set(['sep', 'collapse'])],
   ['sum', NA_RM], ['prod', NA_RM], ['mean', NA_RM], ['max', NA_RM], ['min', NA_RM],
   ['range', NA_RM], ['var', NA_RM], ['sd', NA_RM], ['any', NA_RM], ['all', NA_RM],
+  ['median', NA_RM],
   /* `sort` 上**没有** `na.rm=` —— R 自己都报"参数没有用(na.rm = TRUE)"（它的默认
      `na.last = NA` 已经是"丢掉缺失"了）。量出来的：我们本来跟着收了，比 R 宽。 */
   ['head', new Set(['n'])], ['tail', new Set(['n'])],
@@ -735,6 +743,7 @@ const BUILTINS = new Set([
   /* 集合与位置那一族（见 `setFnDecl`）。`%in%` 是个算子，不在这张表里。 */
   'which.max', 'which.min', 'match', 'unique', 'duplicated',
   'union', 'intersect', 'setdiff', 'order', 'cumprod', 'cummax', 'cummin',
+  'is.element', 'setequal', 'findInterval', 'median',
   /* 串那一族。`tolower` 方言里没有算子（只有 `(supper …)`），由 `r_lower` 拿两张字母表
      查出来 —— **只管 ASCII**（见 SPEC 第四节第 12 条）。 */
   'toupper', 'tolower', 'substr', 'substring', 'trimws', 'sprintf', 'startsWith', 'endsWith',
@@ -1178,6 +1187,16 @@ function applyTy(fn, x, types) {
        `append` / `replace` 出来的元素类型跟着第一格进去的那条走。 */
     case 'tabulate': return RIVEC;
     case 'anyNA': return BOOL;
+    /* `is.element(el, set)` 就是 `el %in% set`，所以类型跟那一格同一条：左边是向量
+       出逻辑向量、左边一格数出三态标量。`setequal` 回一格真假、`findInterval` 回位置
+       （整数向量）、`median` 回一格数。 */
+    case 'is.element': {
+      const t = args.length > 0 ? typeOfExpr(args[0], types) : REAL;
+      return isVecTy(t) ? RLGL : RLGL1;
+    }
+    case 'setequal': return BOOL;
+    case 'findInterval': return RIVEC;
+    case 'median': return REAL;
     case 'append': case 'replace': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
       return isVecTy(t) ? t : RVEC;
@@ -3265,6 +3284,30 @@ function callOf(x, types, extra, want) {
         else if (n >= 2) cnt = asIntE(ev(1), typeOfExpr(all[1], types));
         return lglCall(`r_${fn}`, ev(0), cnt);
       }
+      case 'is.element': case 'setequal': case 'findInterval': {
+        /**
+         * 这三格都是"两条向量"：`is.element(el, set)` 与 `el %in% set` 是**同一格**
+         * （R 的文档就是这么写的），所以走的也是同一对函数（`r_in_v` / `r_in1`）。
+         */
+        if (n !== 2) throw new Error(`r->IR: ${fn}() 要两格实参（给了 ${n}）`);
+        const ts = [0, 1].map((k) => (all[k] === null ? REAL : typeOfExpr(all[k], types)));
+        if (ts.some((t) => isStrVec(t) || t.kind === 'string')) throw new Error(strvGap(fn));
+        const asVec = (k) => (isVecTy(ts[k]) ? ev(k) : lglCall('r_vec1', asReal(ev(k), ts[k])));
+        if (fn === 'is.element') {
+          return isVecTy(ts[0])
+            ? lglCall('r_in_v', ev(0), asVec(1))
+            : lglCall('r_in1', asReal(ev(0), ts[0]), asVec(1));
+        }
+        return lglCall(fn === 'setequal' ? 'r_setequal' : 'r_find_int', asVec(0), asVec(1));
+      }
+      case 'median': {
+        /** `median(x)`：一格标量就是它自己（R 也这么答）；`na.rm=` 走公共的 `dropNa`。 */
+        if (n !== 1) throw new Error(`r->IR: median() 要一格实参（给了 ${n}）`);
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        if (isStrVec(t) || t.kind === 'string') throw new Error(strvGap('median'));
+        if (!isVecTy(t)) return asReal(ev(0), t);
+        return lglCall('r_median', dropNa(ev(0)));
+      }
       case 'tabulate': {
         /**
          * `tabulate(bin, nbins)` —— 不给 `nbins` 时走 `r_tab_a`（默认长度 `max(1, bin)`，
@@ -4566,7 +4609,7 @@ const STRV_FNS = new Set([
 const SET_FNS = new Set([
   'r_same', 'r_which_max', 'r_which_min', 'r_cumprod', 'r_pmax', 'r_pmin',
   'r_ord_lt', 'r_order', 'r_match', 'r_in_v', 'r_in1', 'r_unique', 'r_dup',
-  'r_union', 'r_intersect', 'r_setdiff',
+  'r_union', 'r_intersect', 'r_setdiff', 'r_setequal', 'r_find_int',
 ]);
 
 /**
@@ -4830,6 +4873,63 @@ function setFnDecl2(name) {
               vecSet(o, i, mat ? call1('toreal', b('+', j, I(1))) : R(1)),
               { kind: 'break' },
             ]),
+          ]),
+        ]),
+        ret(o),
+      ],
+    };
+  }
+  if (name === 'r_setequal') {
+    /**
+     * `setequal(a, b)`：**当集合看**一不一样 —— 重复的那几格不算（R：
+     * `setequal(c(1,1,2), c(2,1))` 是 TRUE），`NA` 与 `NA` 算同一格（`r_same` 的口径，
+     * 量出来 `setequal(c(NA,1), c(1,NA))` 是 TRUE）。
+     *
+     * 办法就是两边各问一遍"另一条里有没有这一格" —— `r_in1` 回的是 `1.0` / `0.0`
+     * （三态标量那种存法），所以这儿与 `1` 比一下收成 bool。
+     */
+    const inW = (e, tbl) => b('==', cal('r_in1', e, tbl), R(1));
+    return {
+      kind: 'fn',
+      name,
+      params: P2,
+      ret: BOOL,
+      body: [
+        letI('n', vecLen(v)),
+        letI('m', vecLen(w)),
+        forTo('i', nm('n'), [iff({ kind: 'unop', op: '!', operand: inW(vecGet(v, i), w) },
+          [ret({ kind: 'bool', value: false })])]),
+        forTo('j', nm('m'), [iff({ kind: 'unop', op: '!', operand: inW(vecGet(w, j), v) },
+          [ret({ kind: 'bool', value: false })])]),
+        ret({ kind: 'bool', value: true }),
+      ],
+    };
+  }
+  if (name === 'r_find_int') {
+    /**
+     * `findInterval(x, vec)`：每一格 `x[i]` 落在哪一段 —— 回的是**有几格断点 `<= x[i]`**
+     * （所以 `x` 比所有断点都小就是 0，比所有都大就是 `length(vec)`）。缺失回 `NA`
+     * （量出来 `findInterval(c(NA,2), c(1,2))` 是 `NA 2`）。
+     *
+     * R 那边是二分查找，这儿是数一遍 —— **断点升着排**时两者同解（R 的文档也只在
+     * "vec 已排序"时给结果，没排序它自己说结果 undefined）。
+     */
+    return {
+      kind: 'fn',
+      name,
+      params: P2,
+      ret: RIVEC,
+      body: [
+        letI('n', vecLen(v)),
+        letI('m', vecLen(w)),
+        ...vecNewAs('o', nm('n')),
+        forTo('i', nm('n'), [
+          iff(isNa(vecGet(v, i)), [vecSet(o, i, cal('r_na'))], [
+            letI('c', I(0)),
+            forTo('j', nm('m'), [
+              iff(b('<=', vecGet(w, j), vecGet(v, i)), [set('c', b('+', nm('c'), I(1)))]),
+            ]),
+            vecSet(o, i, call1('toreal', nm('c'))),
           ]),
         ]),
         ret(o),
@@ -6826,6 +6926,50 @@ function vecFnDecl(name) {
           else_: null,
         }], 0),
         { kind: 'return', values: [f] },
+      ],
+    };
+  }
+  if (name === 'r_median') {
+    /**
+     * `median(x)`：排完取中间 —— 奇数格取正中那一格，偶数格取中间**两格的平均**
+     * （R：`median(c(1,2,3,4))` 是 `2.5`）。
+     *
+     * 缺失那一问要**在排之前**问：`r_sort` 顺手把缺失丢了，排完就看不出原来有没有缺失，
+     * 而 R 在 `na.rm = FALSE`（默认）时答的是 `NA`。`na.rm = TRUE` 那一档在调用点上
+     * 先过一道 `r_drop_na`（`dropNa`），所以这儿见不到缺失。
+     * 零长也回 `NA`（R：`median(numeric(0))` 是 `NA`）。
+     */
+    const s = { kind: 'name', name: 'q' };
+    const ln = { kind: 'name', name: 'm' };
+    const half = b('/', ln, { kind: 'int', value: 2 });
+    return {
+      kind: 'fn', name, params: P, ret: REAL,
+      body: [
+        {
+          kind: 'if',
+          cond: { kind: 'call', fn: { kind: 'name', name: useFn('r_any_na') }, args: [v] },
+          then: [{ kind: 'return', values: [{ kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] }] }],
+          else_: null,
+        },
+        { kind: 'let', name: 'q', type: RVEC, init: { kind: 'call', fn: { kind: 'name', name: useFn('r_sort') }, args: [v] } },
+        { kind: 'let', name: 'm', type: INT, init: vecLen(s) },
+        {
+          kind: 'if',
+          cond: b('==', ln, { kind: 'int', value: 0 }),
+          then: [{ kind: 'return', values: [{ kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] }] }],
+          else_: null,
+        },
+        {
+          kind: 'if',
+          cond: b('==', b('%', ln, { kind: 'int', value: 2 }), { kind: 'int', value: 1 }),
+          then: [{ kind: 'return', values: [vecGet(s, half)] }],
+          else_: null,
+        },
+        {
+          kind: 'return',
+          values: [b('/', b('+', vecGet(s, b('-', half, { kind: 'int', value: 1 })), vecGet(s, half)),
+            { kind: 'real', value: 2 })],
+        },
       ],
     };
   }

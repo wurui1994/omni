@@ -174,3 +174,16 @@ print(replace(c(1, 2, 3), 1, NA))
 print(replace(c(1, 2), 5, 9))
 print(replace(c(1, 2), 0, 9))
 cat(replace(c(5, 6), 2, 1), "\n")
+
+# `median(x)`：排完取中间 —— 偶数格是中间两格的平均。缺失那一问在排之前问
+# （`na.rm = FALSE` 是 `NA`，而排序那一格顺手把缺失丢了，排完就看不出来了）
+print(median(c(3, 1, 2)))
+print(median(c(1, 2, 3, 4)))
+print(median(1:4))
+print(median(c(5)))
+print(median(c(2, 1)))
+print(median(c(1, NA, 3)))
+print(median(c(1, NA, 3), na.rm = TRUE))
+print(median(c(-1.5, 2.5, 0)))
+print(median(numeric(0)))
+cat(median(c(1, 2, 3, 4)), "\n")
