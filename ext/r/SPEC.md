@@ -573,6 +573,14 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
     R 那一条，见第二节）。没接的是 `replace=` / `prob=`、`RNGkind()`、以及 `rgamma` /
     `rweibull` 那几个要先换算参数的。
 11. `NA_integer_` / `NA_character_` 没接（实数的 `NA` 已经立住了）—— 见第二节那一小节。
+    由此来的两格**当场报**（不猜）：`as.integer(x > 2)`（R 答 `NA_integer_`）与
+    `as.character(一条向量)`（R 出的字符向量里 `NA` 印出来**不带引号**）。
+    **`as.numeric` / `as.integer` 本身接了**（判据 `ext/r/examples/str.R`）：real / int /
+    两态逻辑 / 三态逻辑标量 / 数值与逻辑**向量**都答得准 —— 向量本来就是 double，
+    `as.integer` 逐元素**朝零截**而缺失原样留着（"整数向量"底下还是 double，`NA` 跟得住）。
+    **把串转成数没接**，而且这一格卡在方言上：核心方言没有"串 → 数"那一格算子
+    （`toint` / `toreal` 只在 int 与 real 之间转）。自己写一圈按位累加在 15 位有效数字
+    或者 10^±22 之外与 `strtod` 的舍入对不上 —— 那是静默差最后几位，所以当场报。
 12. **字符向量接了**（`(arr string)`，判据是 `ext/r/examples/strvec.R`，见第二节那一小节）：
     `c(…)` / `character(n)` / `v[i]` 读写 / `v[c(1,3)]` / `v[掩码]` / `length` / `cat` /
     `print` / `for (s in v)` / `seq_along` / `rev` / `nchar(v)` / `toupper(v)` /

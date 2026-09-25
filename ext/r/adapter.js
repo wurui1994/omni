@@ -193,6 +193,8 @@ const FN_DEPS = new Map([
   ['r_seq_by', []],
   ['r_sample_i', []],
   ['r_zeros', []],
+  /* `as.integer(向量)` —— 逐元素朝零截，缺失原样留着（所以要问 `r_is_na`）。 */
+  ['r_as_int_v', ['r_is_na']],
   /* 字符向量那一族（`(arr string)`，见 `RSTRV`）。各自都是自足的 —— 串这一侧没有 `NA`。 */
   ['r_cat_str', []],
   ['r_print_str', []],
@@ -1005,13 +1007,21 @@ function applyTy(fn, x, types) {
     case 'is.character': case 'is.numeric': case 'is.logical': return BOOL;
     case 'toupper': return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RSTRV : STR;
     case 'startsWith': case 'endsWith': return BOOL;
-    case 'length': case 'as.integer': return INT;
+    case 'length': return INT;
+    /* `as.numeric` / `as.integer` 的形状跟着进去的那一格走（向量进向量出，见 `callOf`）。 */
+    case 'as.integer': {
+      const t = args.length > 0 ? typeOfExpr(args[0], types) : INT;
+      return isVecTy(t) ? RIVEC : INT;
+    }
     /* `nchar` / `tolower` / `toupper` 逐元素：字符向量进 → 出另一条向量。 */
     case 'nchar': return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RIVEC : INT;
     case 'tolower': return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RSTRV : STR;
     /* `character(n)` —— 一条 n 格空串的字符向量。 */
     case 'character': return RSTRV;
-    case 'as.numeric': return REAL;
+    case 'as.numeric': {
+      const t = args.length > 0 ? typeOfExpr(args[0], types) : REAL;
+      return isVecTy(t) ? RVEC : REAL;
+    }
     case 'is.null': return BOOL;
     case 'sum': case 'mean': case 'max': case 'min': return REAL;
     /* `any` / `all` 回的是**带 NA 的标量逻辑**（`any(c(FALSE, NA))` 是 `NA`）。 */
@@ -3107,13 +3117,60 @@ function callOf(x, types, extra, want) {
         }[fn];
         return lglCall(gen, asVec(0), asVec(1));
       }
-      case 'as.integer': return call1('toint', ev(0));
-      case 'as.numeric': return call1('toreal', ev(0));
+      /**
+       * `as.numeric` / `as.integer` —— **只在答得准的那几格上答**。
+       *
+       * 数值这一侧是现成的：向量本来就是 double（`as.numeric` 只是把"逻辑"那个记号摘掉）、
+       * 标量在 int / real 之间走方言的 `toint` / `toreal`、两态逻辑落一格三元。
+       *
+       * **串那一侧当场报**：核心方言里没有"串 → 数"那一格算子（`toreal` 只在 int 与 real
+       * 之间转），而自己写一圈按位累加，在 15 位有效数字或者 10^±22 之外与 `strtod` 的舍入
+       * 对不上 —— 那是静默差最后几位，比当场报难查得多。
+       */
+      case 'as.integer': case 'as.numeric': {
+        if (n !== 1) throw new Error(`r->IR: ${fn}() 要一格实参（给了 ${n}）`);
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        const wantInt = fn === 'as.integer';
+        if (t.kind === 'string' || isStrVec(t)) {
+          throw new Error(`r->IR: ${fn}() 把**串**转成数还没接 —— 核心方言里没有"串 → 数"`
+            + '那一格算子，而自己写一圈按位累加在 15 位有效数字之外与 `strtod` 的舍入对不上'
+            + '（那是静默差最后几位）。见 ext/r/SPEC.md 第四节');
+        }
+        if (t.kind === 'map') throw new Error(`r->IR: ${fn}() 的实参是一张 list`);
+        if (isVecTy(t)) {
+          /* 向量：R 出的还是一条向量。`as.integer` 要逐元素**朝零截**（缺失原样留着 ——
+             这一档的"整数向量"底下还是 double，所以 `NA` 跟得住，与 R 印出来一样）。 */
+          return wantInt ? lglCall('r_as_int_v', ev(0)) : ev(0);
+        }
+        if (t.kind === 'bool') {
+          const one = wantInt ? { kind: 'int', value: 1 } : { kind: 'real', value: 1 };
+          const zero = wantInt ? { kind: 'int', value: 0 } : { kind: 'real', value: 0 };
+          return { kind: 'ternary', cond: ev(0), then: one, else_: zero };
+        }
+        if (isLgl1(t)) {
+          /* 三态逻辑标量：`as.numeric` 就是它自己（1 / 0 / NA 都是 double）。
+             `as.integer` 当场报 —— R 那儿答 `NA_integer_`，而这一档没有它（第四节第 11 条）。 */
+          if (!wantInt) return ev(0);
+          throw new Error('r->IR: as.integer() 收了一格**三态逻辑**（`x > 2` 那种）——'
+            + ' R 那儿 `NA` 转出来是 `NA_integer_`，而这一档没有带缺失的整数'
+            + '（见 ext/r/SPEC.md 第四节第 11 条）。要数就写 `as.numeric(…)`');
+        }
+        if (wantInt) return t.kind === 'int' ? ev(0) : call1('toint', ev(0));
+        return t.kind === 'real' ? ev(0) : call1('toreal', ev(0));
+      }
       /* `as.character(x)` 与 `cat(x)` 是**两套位数**：前者 15 位有效数字
          （`0.333333333333333`），后者 7 位（`0.3333333`）。所以这一格走 `asStr(…, 15)`，
          不是 `tostr`（那一格是方言自己的浮点文本，与 R 的挑法无关）。 */
       case 'as.character': {
         if (n !== 1 || all[0] === null) return call1('tostr', ev(0));
+        /* **向量那一档当场报**：R 出的是一条字符向量，而里头的 `NA` 印出来是**不带引号**的
+           `NA`（`as.character(c(1, NA))` 是 `[1] "1" NA`）—— 那要 `NA_character_`，
+           这一档没有（第四节第 11 条）。把它印成 `"NA"` 就是静默差两个引号。 */
+        if (isVecTy(typeOfExpr(all[0], types))) {
+          throw new Error('r->IR: as.character() 收了一条**向量** —— R 出的是字符向量，'
+            + '而里头的 `NA` 印出来不带引号（`NA_character_`），这一档没有带缺失的串'
+            + '（见 ext/r/SPEC.md 第四节第 11 条）。要逐元素转就写 `sapply(v, as.character)`');
+        }
         return asStr(all[0], types, 15);
       }
       case 'toupper': case 'tolower': {
@@ -5444,8 +5501,37 @@ function vecFnDecl(name) {
   });
   const P = [{ name: 'v', type: RVEC }];
 
-  if (name === 'r_sum') {
+  if (name === 'r_as_int_v') {
+    /* `as.integer(向量)` —— 逐元素**朝零截**（R 的口径：`as.integer(-2.7)` 是 `-2`）。
+       缺失原样留着：这一档的"整数向量"底下还是 double（见 `RIVEC`），所以 `NA` 跟得住，
+       印出来与 R 一样。 */
+    const out = { kind: 'name', name: 'o' };
+    const isNa = { kind: 'call', fn: { kind: 'name', name: useFn('r_is_na') }, args: [elem] };
+    const rm = (f) => call1('rmath', { kind: 'strlit', value: f }, elem);
     return {
+      kind: 'fn',
+      name,
+      params: P,
+      ret: RIVEC,
+      body: [
+        declLen(),
+        ...vecNewAs('o', len),
+        loop([{
+          kind: 'if',
+          cond: isNa,
+          then: [vecSet(out, i, elem)],
+          else_: [vecSet(out, i, {
+            kind: 'ternary',
+            cond: b('<', elem, { kind: 'real', value: 0 }),
+            then: rm('ceil'),
+            else_: rm('floor'),
+          })],
+        }], 0),
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_sum') {    return {
       kind: 'fn', name, params: P, ret: REAL,
       body: [
         declLen(),

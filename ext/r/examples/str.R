@@ -68,3 +68,15 @@ cat(substring("hello", 2, 3), "\n")
 cat(is.character("a"), is.character(1), "\n")
 cat(is.numeric(1), is.numeric(1.5), is.numeric(TRUE), is.numeric("a"), "\n")
 cat(is.logical(TRUE), is.logical(1 > 0), is.logical(2), "\n")
+
+# `as.numeric` / `as.integer` —— 只在答得准的那几格上答。**串转数没接**：核心方言里没有
+# "串 → 数"那一格算子，自己写一圈按位累加在 15 位有效数字之外与 strtod 的舍入对不上，
+# 所以当场报。`as.integer` 是**朝零截**（不是四舍五入）；向量上逐元素、缺失原样留着
+# （这一档的"整数向量"底下还是 double，所以 NA 跟得住）。
+cat(as.numeric(1.5), as.numeric(2L), as.numeric(TRUE), "\n")
+cat(as.integer(2.7), as.integer(-2.7), as.integer(TRUE), "\n")
+cat(as.numeric(NA), "\n")
+print(as.numeric(c(1L, 2L)))
+print(as.numeric(c(TRUE, FALSE, NA)))
+print(as.integer(c(1.7, -2.7, NA)))
+print(as.integer(c(10, 20)))
