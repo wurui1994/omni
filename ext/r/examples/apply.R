@@ -4,8 +4,11 @@
 # 搬，那是另一刀）。可真代码里这几格的实参几乎总是**就地写的匿名函数** —— 那时根本不需要
 # 函数值：把形参绑到元素上、把函数体当一段表达式摊进循环里就行。账在 `applyOf`。
 #
-# 所以只接"就地写的 `function(…) …`"。给一个函数**名字**（`sapply(v, sqrt)`）当场报 ——
-# 那要真的函数值，不假装。
+# 所以底子只接"就地写的 `function(…) …`"。而给一个函数**名字**（`sapply(v, sqrt)` /
+# `Reduce(`+`, v)`）也接了 —— 办法不是"函数值"，是**先就地改写**成
+# `sapply(v, function(.omni.a0) sqrt(.omni.a0))`（见 `nameToLambda`），于是后头那一大段
+# 只有一份实现。改写摆在类型推断之前：`f` 的形参装什么只能从那个合成出来的调用点看出来。
+# 名字既不是内建、也不是这段里定义过的函数（比如一格传进来的形参）时还是当场报，不猜。
 #
 # 出来的是哪一种向量看**函数体**：出数是数值向量、出真假是逻辑向量、出串是字符向量。
 #
@@ -39,3 +42,18 @@ cat(Reduce(function(a, b) paste0(a, "-", b), w), "\n")
 x <- 100
 print(sapply(v, function(x) x + 1))
 cat(x, "\n")
+
+# 给**函数名字**那一档（改写成匿名函数，见文件头）
+dbl <- function(k) k * 2
+print(sapply(c(1, 2, 3), dbl))
+print(unlist(lapply(c(1, 2), dbl)))
+print(sapply(c(1, 4, 9), sqrt))
+print(sapply(c(-1, 2), abs))
+print(sapply(c(1.4, 2.6), round))
+big <- function(k) k > 2
+print(Filter(big, c(1, 2, 3, 4)))
+# 算子名合成的是 `bin` 节点（方言里 `+` 不是函数）
+print(Reduce(`+`, c(1, 2, 3, 4)))
+print(Reduce(`*`, c(1, 2, 3, 4)))
+# 就地写一层壳子包着别的函数 —— 那格形参的类型从数据那边来
+print(sapply(c(1, 2, 3), function(k) dbl(k)))

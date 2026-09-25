@@ -1436,6 +1436,83 @@ function eachCall(x, fn) {
 }
 
 /**
+ * **apply 那一族里那段匿名函数，它的形参装什么** —— 数据那一格决定（与 `applyOf` 里
+ * 算 `elemTy` 是同一条：字符向量给串，别的给 double）。回的是几格"多出来的作用域"。
+ *
+ * 为什么不把它并进外层那张类型表：外层可能有个**同名**的变量（`x` 在顶层是串、在
+ * `sapply(v, function(x) …)` 里是数），并进去会把外层那个带歪，而那张表还要喂
+ * `globalTys`。多摆一个作用域就够了 —— `inferFns` 第 2 步只把形参类型**并宽**，
+ * 外层那趟按 int 算出来的那一笔压不下这儿的 real。
+ *
+ * 量出来的那一格（2026-09-26）：`f <- function(x) x * 2;
+ * sapply(c(1,2,3), function(x) f(x))` 从前报 `'f' 的第 1 个形参是 int，给的是 real`
+ * —— 因为 `f(x)` 里那个 `x` 在外层那张表里查不到，落回 int。
+ */
+const APPLY_FNS = new Set(['sapply', 'vapply', 'lapply', 'Reduce', 'Filter']);
+function applyScopes(body, types) {
+  const out = [];
+  eachCall(body, (name, node) => {
+    if (!APPLY_FNS.has(String(name))) return;
+    const as = posArgs(node);
+    const fnFirst = name === 'Reduce' || name === 'Filter';
+    const fnode = fnFirst ? as[0] : as[1];
+    const data = fnFirst ? as[1] : as[0];
+    if (fnode === undefined || data === undefined) return;
+    if (!isList(fnode) || tag(fnode) !== 'fn') return;
+    const dt = typeOfExpr(data, types);
+    const elem = isStrVec(dt) ? STR : REAL;
+    const ps = formalsOf(fnode);
+    const fb = kids(fnode)[1];
+    out.push({ body: fb, types: inferTypes(fb, ps, new Map(ps.map((p) => [p, elem]))) });
+  });
+  return out;
+}
+
+/**
+ * **apply 那一族里"给的是一个函数名字"那种写法**（`sapply(v, f)` / `Reduce(\`+\`, v)`）
+ * —— 就地改写成匿名函数：`sapply(v, function(.omni.a0) f(.omni.a0))`。
+ *
+ * 为什么是改写而不是在 `applyOf` 里另开一条路：那一段（回收 / 字符向量 / `USE.NAMES`
+ * 那几问）只该有**一份**实现 —— 与 `sprintf` 那一处"合成 CST 再递归下来"同一条办法。
+ * 为什么摆在 `inferFns` **之前**：那一遍要靠 `f(.omni.a0)` 这个**调用点**才推得出
+ * `f` 的形参装什么（这一档没有别的信息源）。
+ *
+ * 算子名（`` `+` `` 那种）合成的是 `bin` 节点，不是 `call` —— 方言里它们不是函数。
+ */
+const APPLY_OPS = new Set(['+', '-', '*', '/', '^', '%%', '%/%']);
+const cstFnOf = (ps, body) => cstList(
+  'fn', cstList('formals', ...ps.map((p) => cstList('formal', cstSym(p)))), body,
+);
+function nameToLambda(x, userFns) {
+  if (!isList(x)) return;
+  for (const k of kids(x)) nameToLambda(k, userFns);
+  if (tag(x) !== 'call' || tag(kids(x)[0]) !== 'sym') return;
+  const nm2 = String(nameOf(kids(x)[0]));
+  if (!APPLY_FNS.has(nm2)) return;
+  const fnFirst = nm2 === 'Reduce' || nm2 === 'Filter';
+  /* 要换的是第几格**位置**实参 —— 在 `items` 里数（`kids(x).slice(1)` 那一串）。 */
+  const slots = kids(x).slice(1).filter((a) => tag(a) === 'arg');
+  const slot = slots[fnFirst ? 0 : 1];
+  if (slot === undefined) return;
+  const fnode = kids(slot)[0];
+  if (fnode === undefined || !isList(fnode) || tag(fnode) !== 'sym') return;
+  const rname = String(nameOf(fnode));
+  const nps = nm2 === 'Reduce' ? 2 : 1;
+  const ps = [...Array(nps)].map((_, k) => `.omni.a${k}`);
+  let body;
+  if (APPLY_OPS.has(rname)) {
+    if (nps !== 2) return;
+    body = cstList('bin', { kind: 'atom', value: rname }, cstSym(ps[0]), cstSym(ps[1]));
+  } else if (BUILTINS.has(rname) || RMATH.has(rname) || userFns.has(mangle(rname))) {
+    body = cstCall(rname, ps.map((p) => cstSym(p)));
+  } else {
+    /* 表外的名字不猜：`applyOf` 那一侧会报"要就地写成 `function(…) …`"。 */
+    return;
+  }
+  slot.items[1] = cstFnOf(ps, body);
+}
+
+/**
  * **把用户函数的形参与返回类型推出来**（填 `fnParams` / `fnRets`）。
  *
  * 只有一处信息源：调用点。所以一轮是"按现在这份形参类型把每段的局部类型推一遍 →
@@ -1489,6 +1566,8 @@ function inferFns(fns, rest) {
       const seed = new Map(ps.map((p, k) => [p, fnParams.get(f.name)[k]]));
       scopes.push({ body: kids(f.node)[1], types: inferTypes(kids(f.node)[1], ps, seed) });
     }
+    /* apply 那一族里那几段匿名函数体也算作用域（见 `applyScopes` 上那段账）。 */
+    for (const sc of [...scopes]) for (const s of applyScopes(sc.body, sc.types)) scopes.push(s);
     /* 2) 扫所有调用点，把实参类型并进形参（命名实参与默认值都按 `bindArgs` 配） */
     for (const sc of scopes) {
       eachCall(sc.body, (name, node) => {
@@ -8337,6 +8416,11 @@ export function rToIR(tree) {
     }
     rest.push(item);
   }
+  /* apply 那一族里"给的是一个函数名字"那种写法**先就地改写**成匿名函数
+     （见 `nameToLambda`）—— 要摆在 `inferFns` 之前：那一遍靠合成出来的那个调用点
+     才推得出被点名那个函数的形参装什么。 */
+  const userFns = new Set(fns.map((f) => f.name));
+  for (const item of items) nameToLambda(item, userFns);
   /* **先把用户函数的形参与返回类型推出来**（扫调用点，转三轮）—— 发之前必须定住，
      不然 `half(3)` 里 `x` 还是 int，而函数体里 `x / 2` 已经按 real 发了。 */
   inferFns(fns, rest);
