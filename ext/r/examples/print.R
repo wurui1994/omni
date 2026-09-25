@@ -63,3 +63,26 @@ paste("a", "b")
 # 这两格不可见（印不出东西来）
 invisible(5)
 y <- 7
+
+# 零长向量印的是**元素类型名**，不是一律 `numeric(0)`：位置那一族（`which` / `seq_len` /
+# `seq_along` / `order` / `match` / `nchar` / `integer(n)` / `1:n`）在 R 里是**整数**向量，
+# `cumsum` / `diff` / `sort` / `rev` / `head` / 三格集合运算跟着进去的那条走。
+# 存法这一侧两者一样（都是 `(ptr real)`），差的就是这一行字 —— 见 adapter 的 `RIVEC`。
+print(which(x > 100))
+print(seq_len(0))
+print(seq_along(character(0)))
+print(order(numeric(0)))
+print(nchar(character(0)))
+print(integer(0))
+print(numeric(0))
+print(character(0))
+print(logical(0))
+print(diff(1:1))
+print(cumsum(integer(0)))
+print(unique(integer(0)))
+print(sort(integer(0)))
+print(rev(integer(0)))
+print(head(1:3, 0))
+print(intersect(1:2, 3:4))
+print(setdiff(1:2, 1:2))
+print(match(integer(0), 1:2))

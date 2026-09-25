@@ -222,9 +222,12 @@ const FN_DEPS = new Map([
   ['r_in1', ['r_same']],
   ['r_unique', ['r_same']],
   ['r_dup', ['r_same']],
-  ['r_union', ['r_same']],
-  ['r_intersect', ['r_same']],
-  ['r_setdiff', ['r_same']],
+  /* 这三格的体里用 `r_in1` 问"另一条里有没有这一格"（`setFnDecl2` 的 `inW`）——
+     登记漏了的话它只在"源码里还另有一处 `%in%`"时凑巧能链上（量出来的：`print.R` 里
+     单写 `intersect(1:2, 3:4)` 报 `未声明的函数 'r_in1'`）。 */
+  ['r_union', ['r_same', 'r_in1']],
+  ['r_intersect', ['r_same', 'r_in1']],
+  ['r_setdiff', ['r_same', 'r_in1']],
   /* 三态逻辑那一族（`RLGL1` 那段账）。比较那六格各发一个函数 —— 不摊在调用点上是
      因为"两边各读两遍"要临时量，而临时量在**条件位**上没地方摆（`while` 的条件被降级到
      循环外头，摊开的 `let` 会变成"只算一次"）。一次函数调用是纯表达式，哪儿都放得下。 */
@@ -407,6 +410,21 @@ const isStrVec = (t) => t !== undefined && t !== null && t.kind === 'arr';
 const RNVEC = { kind: 'ptr', inner: REAL, named: true };
 /** `v > 1` 那一格：**带名字的逻辑向量**（R 也把名字带过去）。这一档印不出来 —— 当场报。 */
 const RNLGL = { kind: 'ptr', inner: REAL, lgl: true, named: true };
+/**
+ * **整数向量**那个记号（`typeToSx` 看不见它，与 `lgl` / `named` 同一条路子）。
+ *
+ * 存法与数值向量完全一样（还是 `(ptr real)`）—— 这个记号只管**一件事**：零长向量印出来的
+ * 那个类型名。R 印的是**元素类型**（量出来的，`Rscript`，2026-09-25）：
+ * `which(x > 5)` / `seq_len(0)` / `order(numeric(0))` / `nchar(character(0))` 印
+ * `integer(0)`，而 `numeric(0)` / `c(1:2, 3)[0]` 印 `numeric(0)`。
+ * 非零长那一档两者印得一样，所以这个记号只影响那一行字。
+ *
+ * 从前没有它，于是 `print(which(x > 5))` 印的是 `numeric(0)` —— 静默与 R 差一行字。
+ */
+const RIVEC = { kind: 'ptr', inner: REAL, ivec: true };
+const isIvecTy = (t) => t !== undefined && t !== null && t.kind === 'ptr' && t.ivec === true;
+/** 零长时印的那个类型名（`formatReal` 之外的一行字，见 `RIVEC`）。 */
+const zeroName = (t) => (isIvecTy(t) ? 'integer(0)' : 'numeric(0)');
 const isNamedTy = (t) => t !== undefined && t !== null && t.kind === 'ptr' && t.named === true;
 /** 那个影子变量的名字（`v` 的名字在 `v__nm` 里）。 */
 const nmVar = (v) => `${v}__nm`;
@@ -890,7 +908,7 @@ function typeOfExpr(x, types) {
         return a.kind === 'real' || c2.kind === 'real' ? RLGL1 : BOOL;
       }
       if (ASSIGN_OPS.has(op)) return typeOfExpr(kids(x)[2], types);
-      if (op === ':') return RVEC;
+      if (op === ':') return RIVEC;
       /* `/` 一律实数除；`^` 走 `R_pow`、`%%` / `%/%` 走那条 floor 的算法 —— 三者都回 double */
       if (op === '/' || op === '^' || op === '**' || op === '%%' || op === '%/%') return REAL;
       return joinNum(typeOfExpr(kids(x)[1], types), typeOfExpr(kids(x)[2], types));
@@ -968,7 +986,7 @@ function applyTy(fn, x, types) {
     case 'startsWith': case 'endsWith': return BOOL;
     case 'length': case 'as.integer': return INT;
     /* `nchar` / `tolower` / `toupper` 逐元素：字符向量进 → 出另一条向量。 */
-    case 'nchar': return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RVEC : INT;
+    case 'nchar': return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RIVEC : INT;
     case 'tolower': return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RSTRV : STR;
     /* `character(n)` —— 一条 n 格空串的字符向量。 */
     case 'character': return RSTRV;
@@ -993,27 +1011,40 @@ function applyTy(fn, x, types) {
        `rev` 的元素类型跟着进去的那条走（字符向量倒过来还是字符向量）。 */
     case 'rev': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
-      return isStrVec(t) ? RSTRV : RVEC;
+      if (isStrVec(t)) return RSTRV;
+      return isVecTy(t) ? t : RVEC;
     }
-    case 'seq_along': case 'which': case 'seq_len': return RVEC;
+    case 'seq_along': case 'which': case 'seq_len': return RIVEC;
     /* `sort` / `head` / `tail` / `rep` 出来的**元素类型跟着进去的那条走**
-       （逻辑向量排完还是逻辑）；`cumsum` / `diff` / `range` / `seq` 一律数值。 */
+       （逻辑向量排完还是逻辑、整数向量排完还是整数）；`range` / `seq` 一律数值，
+       而 `cumsum` / `diff` 在 R 里**整数进整数出**（零长时印 `integer(0)`）。 */
     case 'sort': case 'head': case 'tail': case 'rep': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
       if (isStrVec(t)) return RSTRV;
       return isVecTy(t) ? t : RVEC;
     }
-    case 'cumsum': case 'diff': case 'range': case 'seq': return RVEC;
-    /* 集合与位置那一族：位置回一格 int，别的回向量（`duplicated` 回逻辑向量）。 */
+    case 'cumsum': case 'diff': case 'cumprod': {
+      const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
+      return isIvecTy(t) ? RIVEC : RVEC;
+    }
+    case 'range': case 'seq': return RVEC;
+    /* 集合与位置那一族：位置回一格 int，别的回向量（`duplicated` 回逻辑向量）。
+       `match` / `order` 回的是**位置**，所以是整数向量；三格集合运算跟着进去的那条走。 */
     case 'which.max': case 'which.min': return INT;
-    case 'match': case 'unique': case 'union': case 'intersect': case 'setdiff':
-    case 'order': case 'cumprod': return RVEC;
+    case 'match': case 'order': return RIVEC;
+    case 'unique': case 'union': case 'intersect': case 'setdiff': {
+      const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
+      return isIvecTy(t) ? RIVEC : RVEC;
+    }
     case 'duplicated': return RLGL;
-    /* `numeric(n)` 那一族：出一条零向量（`logical(n)` 是一条 FALSE 的逻辑向量）。 */
-    case 'numeric': case 'double': case 'integer': return RVEC;
+    /* `numeric(n)` 那一族：出一条零向量（`logical(n)` 是一条 FALSE 的逻辑向量）。
+       `integer(n)` 的零长印 `integer(0)` —— 元素类型不一样。 */
+    case 'numeric': case 'double': return RVEC;
+    case 'integer': return RIVEC;
     case 'logical': return RLGL;
-    /* 随机数那一族：R 的 `runif(n, …)` 出的是**长度 n 的向量**（`runif(1)` 也是向量）。 */
-    case 'sample': return RVEC;
+    /* 随机数那一族：R 的 `runif(n, …)` 出的是**长度 n 的向量**（`runif(1)` 也是向量）。
+       `sample` 抽的是位置，回整数向量。 */
+    case 'sample': return RIVEC;
     case 'set.seed': return { kind: 'void' };
     case 'stop': case 'stopifnot': return { kind: 'void' };
     /* `switch` 回的是被选中那一支的类型（各支不同种在这一档是错的，量的是第一支）。 */
@@ -3187,7 +3218,10 @@ function printValStmt(node, types) {
         + 'R 里 `sort` / `rev` / `head` / `cumsum` / `abs` / `v[v > 1]` 这些都把名字带过去，'
         + '这一档带不了 —— 要印不带名字的那一条就写 `unname(…)`');
     }
-    return { kind: 'expr-stmt', expr: lglCall('r_print_named', exprOf(node, types), ns) };
+    return {
+      kind: 'expr-stmt',
+      expr: lglCall('r_print_named', exprOf(node, types), ns, { kind: 'string', value: zeroName(t) }),
+    };
   }
   /* `v["a"]` / `v[1]` —— R 的**单**方括号取一格出来名字也跟着（两行版式），`v[["a"]]` 不带。
      值那一条已经是一格标量了，所以这儿现摆一条长度 1 的向量与一条长度 1 的名字。 */
@@ -3216,7 +3250,9 @@ function printValStmt(node, types) {
         },
         {
           kind: 'expr-stmt',
-          expr: lglCall('r_print_named', lglCall('r_vec1', exprOf(node, types)), { kind: 'name', name: nn }),
+          expr: lglCall('r_print_named', lglCall('r_vec1', exprOf(node, types)),
+            { kind: 'name', name: nn },
+            { kind: 'string', value: zeroName(typeOfExpr(kids(node)[0], types)) }),
         },
       ],
     };
@@ -3224,7 +3260,9 @@ function printValStmt(node, types) {
   if (isVecTy(t)) {
     return {
       kind: 'expr-stmt',
-      expr: lglCall(isLglTy(t) ? 'r_print_lgl' : 'r_print_num', exprOf(node, types)),
+      expr: isLglTy(t)
+        ? lglCall('r_print_lgl', exprOf(node, types))
+        : lglCall('r_print_num', exprOf(node, types), { kind: 'string', value: zeroName(t) }),
     };
   }
   /* 字符向量：带引号、**左对齐**、共用一套宽（见 `strvFnDecl`）。 */
@@ -4930,13 +4968,16 @@ function printFnDecl(name) {
     return {
       kind: 'fn',
       name,
-      params: [{ name: 'v', type: RVEC }, { name: 'ns', type: RSTRV }],
+      params: [{ name: 'v', type: RVEC }, { name: 'ns', type: RSTRV }, { name: 'z', type: STR }],
       ret: { kind: 'void' },
       body: [
         letI('n', vecLen(v)),
-        iff(b('==', nm('n'), I(0)), [wr(S('named numeric(0)\n')), { kind: 'return', values: [] }]),
+        iff(b('==', nm('n'), I(0)), [
+          wr(b('+', b('+', S('named '), nm('z')), S('\n'))),
+          { kind: 'return', values: [] },
+        ]),
         iff(b('<', call1('alen', ns), nm('n')), [
-          { kind: 'expr-stmt', expr: lglCall('r_print_num', v) },
+          { kind: 'expr-stmt', expr: lglCall('r_print_num', v, nm('z')) },
           { kind: 'return', values: [] },
         ]),
         ...agg,
@@ -4975,12 +5016,16 @@ function printFnDecl(name) {
   return {
     kind: 'fn',
     name,
-    params: [{ name: 'v', type: RVEC }],
+    params: [{ name: 'v', type: RVEC }, { name: 'z', type: STR }],
     ret: { kind: 'void' },
     body: [
       letI('n', vecLen(v)),
-      /* 零长向量印类型名（`diff(c(1))` 在 R 里就是 `numeric(0)`） */
-      iff(b('==', nm('n'), I(0)), [wr(S('numeric(0)\n')), { kind: 'return', values: [] }]),
+      /* 零长向量印**元素类型名**（`diff(c(1))` 是 `numeric(0)`、`which(…)` 是
+         `integer(0)`）—— 那一行字由调用点给（见 `RIVEC` 与 `zeroName`）。 */
+      iff(b('==', nm('n'), I(0)), [
+        wr(b('+', nm('z'), S('\n'))),
+        { kind: 'return', values: [] },
+      ]),
       ...agg,
       ...wrapStmts((k) => lglCall('r_num_fmt', vecGet(v, k), nm('dd'), nm('ee'))),
     ],
