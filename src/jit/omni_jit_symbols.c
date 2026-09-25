@@ -106,6 +106,11 @@ const omni_jit_sym OMNI_JIT_SYMS[] = {
   { "omni_r_log10", (void *)omni_r_log10 },
   { "omni_r_cbrt", (void *)omni_r_cbrt },
   { "omni_r_hypot", (void *)omni_r_hypot },
+  /* 越界与空引用那两句话（`OMNI_NORETURN`）：**数组三条就地展开之后**（§32.3 那一刀）
+     发出来的 IR 自己 call 它们 —— 从前那三条是 `call @omni_arr_f64_get`，错误路径在
+     omni_arr.c 里，这张表里不需要它们。 */
+  { "omni_err_null", (void *)omni_err_null },
+  { "omni_err_range", (void *)omni_err_range },
   /* `(gfxarr "名字" a0..a3 数组)`：带一整块数组的宿主调用（§19.1）。它与上面那几格
      `omni_gfx_*` 是一族，漏在表外同一个后果。 */
   { "omni_gfx_arr", (void *)omni_gfx_arr },
@@ -129,6 +134,8 @@ const omni_jit_sym OMNI_JIT_SYMS[] = {
   { "omni_str_upper", (void *)omni_str_upper },
   { "omni_tchk", (void *)omni_tchk },
   { "omni_trunc", (void *)omni_trunc },
+  /* `int()` 就地展开之后，慢路径那一格（|v| 出了 2^53）由发出来的 IR 自己 call。 */
+  { "omni_trunc_oob", (void *)omni_trunc_oob },
   { "omni_write_string", (void *)omni_write_string },
   { "omni_write_text", (void *)omni_write_text },
   { "omni_gfx_frame", (void *)omni_gfx_frame },

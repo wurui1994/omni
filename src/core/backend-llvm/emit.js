@@ -310,6 +310,10 @@ class LlvmEmitter {
     // 用到的数组元素类型。这一组不生成任何函数体，只 declare 运行时里已有的符号 ——
     // 数组的实现在 omni_arr.c，run-c 那条腿调的是同一个符号。
     this.arrElems = new Map();
+    /* 走就地展开那一档的元素类型（`arrFast`）—— 决定 len/get/set 发哪一套。 */
+    this.arrFastElems = new Map();
+    /* `int()` 那一格要不要发本模块的 `alwaysinline` 函数体（`TRUNC_HELPER`）。 */
+    this.needTruncFast = false;
     // 聚合元素的数组用到了没有：那一组符号与元素类型无关（按字节），一份 declare 就够
     this.needArrBlob = false;
     // 结构体用到了没有：用到就要发 arena 的那个私有分配器（缓冲那一节本来就要它）
@@ -777,16 +781,33 @@ class LlvmEmitter {
         this.line(t === T_F64 ? bufHelpers('double', 8, '0.0') : bufHelpers('i64', 8, '0'));
       }
     }
-    // 数组：只 declare，不生成。六条指令全是 call 运行时符号，所以这一节没有一行 IR 逻辑。
+    // 数组：`new`/`push`/`pop` 照旧 call 运行时符号（倍增与错误消息在 omni_arr.c 里，
+    // 两条腿共用同一段机器码）。**热的那三条**（len/get/set）在 int/real 上换成本模块里的
+    // `alwaysinline` 函数体（`arrFastHelpers`，§32.3）—— 理由与 C 腿把它们做成宏一样。
     for (const t of this.arrElems.keys()) {
       const e = ARR_ELEMS.get(t);
       const s = e.suffix;
       this.line(`declare ptr @omni_arr_${s}_new(i64, ${e.p})`);
+      this.line(`declare ${e.r} @omni_arr_${s}_push(ptr, ${e.p})`);
+      this.line(`declare ${e.r} @omni_arr_${s}_pop(ptr)`);
+      /* 那三条照旧 declare（没人调的 declare 在 LLVM 里是空的）：判据是"发的调用能不能
+         找到声明"，而不是"这一趟用没用上" —— 少一条就是一次 `use of undefined value`。 */
       this.line(`declare i64 @omni_arr_${s}_len(ptr)`);
       this.line(`declare ${e.r} @omni_arr_${s}_get(ptr, i64)`);
       this.line(`declare ${e.r} @omni_arr_${s}_set(ptr, i64, ${e.p})`);
-      this.line(`declare ${e.r} @omni_arr_${s}_push(ptr, ${e.p})`);
-      this.line(`declare ${e.r} @omni_arr_${s}_pop(ptr)`);
+    }
+    if (this.arrFastElems.size > 0) {
+      this.line('declare void @omni_err_null() noreturn');
+      this.line('declare void @omni_err_range(i64, i64) noreturn');
+      this.line('');
+      for (const t of this.arrFastElems.keys()) {
+        this.line(arrFastHelpers(t === T_F64 ? 'double' : 'i64', ARR_ELEMS.get(t).suffix));
+      }
+    }
+    if (this.needTruncFast) {
+      this.line('declare i64 @omni_trunc_oob(double)');
+      this.line('');
+      this.line(TRUNC_HELPER);
     }
     if (this.needArrBlob) {
       this.line('declare ptr @omni_arr_blob_new(i64, i64, ptr)');
@@ -1387,6 +1408,15 @@ class LlvmEmitter {
         throw new OmniError(`${NOPE} op '${entry.name}'（函数 ${f.name}）`);
       }
       const refs = f.argsOf(f.b[i]);
+      /* **`int()` 就地展开**（§32.3 的第二格）：`omni_trunc` 在 C 那条腿上是宏
+         （omni.h:318，快路径一次范围判断 + 一条 `fptosi`，出了 2^53 才调
+         `omni_trunc_oob`）。这条腿从前发的是 `call @omni_trunc` —— 函数体不在模块里，
+         `default<O2>` 内联不了。同一份 `tigrou/balls2k.pss` 的 IR 里它有 552 处。 */
+      if (entry.name === 'trunc' || entry.name === 'trunc.real') {
+        this.needTruncFast = true;
+        this.line(`  ${dst} = call i64 @omni_ll_trunc(double ${this.val(refs[0])})`);
+        return;
+      }
       /* **`gfxcall` 是"个数 + 补零"那一档**（不是变参）：方言那一格实参个数随脚本变，
          而运行时的真符号是平的 —— 名字 + 个数 + 十二格 double。补零这件事在 backend-c
          里是 `case 'gfx_call'` 做的（HIR 那一层），这条腿从 MIR 出发，所以得自己补。
@@ -2045,10 +2075,18 @@ class LlvmEmitter {
       return;
     }
     if (op === OP.ALEN) {
+      if (this.arrFast(el)) {
+        this.line(`  ${dst} = call i64 @omni_ll_alen_${s}(ptr ${a})`);
+        return;
+      }
       this.line(`  ${dst} = call i64 @omni_arr_${s}_len(ptr ${a})`);
       return;
     }
     if (op === OP.AGET) {
+      if (this.arrFast(el)) {
+        this.line(`  ${dst} = call ${e.r} @omni_ll_aget_${s}(ptr ${a}, i64 ${this.val(f.b[i])})`);
+        return;
+      }
       this.line(`  ${dst} = call ${e.r} @omni_arr_${s}_get(ptr ${a}, i64 ${this.val(f.b[i])})`);
       return;
     }
@@ -2061,8 +2099,27 @@ class LlvmEmitter {
       return;
     }
     const args = f.argsOf(f.b[i]);
+    if (this.arrFast(el)) {
+      this.line(`  ${dst} = call ${e.r} @omni_ll_aset_${s}(ptr ${a}, i64 ${this.val(args[0])}, `
+        + `${e.p} ${this.val(args[1])})`);
+      return;
+    }
     this.line(`  ${dst} = call ${e.r} @omni_arr_${s}_set(ptr ${a}, i64 ${this.val(args[0])}, `
       + `${e.p} ${this.val(args[1])})`);
+  }
+
+  /**
+   * 这个元素类型走**就地展开**那一档吗（`arrFastHelpers`）。
+   *
+   * 只认 `int` 与 `real`：这两族的格子就是 8 字节的标量，一条 load/store 完事，而且
+   * EVAL 两门语言、go、asy 的热路径全在这儿。`bool` 那一格在 C 里是 `bool`（1 字节）、
+   * 在 IR 里是 `i1`，位宽与存储宽不是一件事；`string` 是 `[2 x i64]` 的聚合。这两族**留在
+   * 运行时符号上**（它们不在任何热路径上），省掉"两种表示对不对"这个本来不必回答的问题。
+   */
+  arrFast(t) {
+    if (t !== T_I64 && t !== T_F64) return false;
+    this.arrFastElems.set(t, true);
+    return true;
   }
 
   /**
@@ -2446,6 +2503,114 @@ slow:
   ret ptr %r
 }
 `;
+
+/**
+ * `int()`（`omni_trunc`）那一格的**就地展开**，逐句照 omni.h:318 那个宏：
+ * `|v| < 2^53` 就一条 `fptosi`，出了那一段（含 NaN/Inf 与真越界）交给 `omni_trunc_oob`
+ * —— 它与宏走的是**同一个符号**，所以两条腿的答案与报错不可能分叉。
+ *
+ * 两个界写成十六进制：`0x4340000000000000` 就是 2^53（指数 1023+53、尾数全 0），
+ * 十进制那种写法要靠读者相信"它正好可表示"。
+ */
+const TRUNC_HELPER = `define private i64 @omni_ll_trunc(double %v) alwaysinline {
+entry:
+  %lo = fcmp ogt double %v, 0xC340000000000000
+  %hi = fcmp olt double %v, 0x4340000000000000
+  %in = and i1 %lo, %hi
+  br i1 %in, label %fast, label %slow
+fast:
+  %t = fptosi double %v to i64
+  ret i64 %t
+slow:
+  %r = call i64 @omni_trunc_oob(double %v)
+  ret i64 %r
+}
+`;
+
+/**
+ * 一种元素类型的**数组三条**（len / get / set）发成 `alwaysinline` 的私有函数体。
+ *
+ * 为什么要这一份（2026-09-25，§32.3）：从前这三条是 `call @omni_arr_f64_get` ——
+ * 函数体在 omni_arr.c 里、**不在这个模块里**，于是 `default<O2>` 内联不了它，
+ * LICM/GVN 也看不穿。同一份 `tigrou/balls2k.pss` 的 IR 里这一族有 814 处调用
+ * （get 484 + set 330），而 **C 那条腿上它们是宏**（`omni.h` 的 `OMNI__AGET`/`OMNI__ASET`，
+ * clang 内联成"一次无符号比较 + 一条 load"）—— 这就是 jit 4.0ms 与 clang -O2 0.35ms
+ * 之间那一个数量级的大头。
+ *
+ * **逐句照那两个宏来**（别自己发明）：
+ *   * 空判 -> `omni_err_null()`；
+ *   * 越界判据是**一次无符号比较**（`icmp uge`）—— 负数转成 u64 是个大数，一次比较把
+ *     `i < 0` 与 `i >= len` 两边都判了。omni.h 那段注写着为什么这样等价（长度按构造非负）；
+ *   * `set` 回的是**写进去的那个值**（宏的最后一句是 `omni__v`）。
+ * 头是四族共用的 `{ len, cap, items }`（omni.h 的 `OMNI_ARR_DECL`），所以 `items` 在第 3 格。
+ *
+ * 为什么是 `alwaysinline` 的函数而不是在调用点直接展开：越界检查带分支，而调用点在
+ * 结构化控制流里 —— 展开会把 `this.live`/`regions` 那套记账搅乱（与 `bufHelpers`
+ * 同一个理由）。交给内联器等于白拿：O0 时它们仍是三条 call（语义不变），O2 时全展开。
+ */
+function arrFastHelpers(elem, suffix) {
+  const s = suffix;
+  const H = '{ i64, i64, ptr }';
+  return `define private i64 @omni_ll_alen_${s}(ptr %a) alwaysinline {
+entry:
+  %nul = icmp eq ptr %a, null
+  br i1 %nul, label %bad, label %ok
+bad:
+  call void @omni_err_null()
+  unreachable
+ok:
+  %lp = getelementptr inbounds ${H}, ptr %a, i64 0, i32 0
+  %n = load i64, ptr %lp
+  ret i64 %n
+}
+
+define private ${elem} @omni_ll_aget_${s}(ptr %a, i64 %i) alwaysinline {
+entry:
+  %nul = icmp eq ptr %a, null
+  br i1 %nul, label %bad0, label %chk
+bad0:
+  call void @omni_err_null()
+  unreachable
+chk:
+  %lp = getelementptr inbounds ${H}, ptr %a, i64 0, i32 0
+  %n = load i64, ptr %lp
+  %oob = icmp uge i64 %i, %n
+  br i1 %oob, label %bad1, label %ok
+bad1:
+  call void @omni_err_range(i64 %i, i64 %n)
+  unreachable
+ok:
+  %ip = getelementptr inbounds ${H}, ptr %a, i64 0, i32 2
+  %items = load ptr, ptr %ip
+  %sl = getelementptr inbounds ${elem}, ptr %items, i64 %i
+  %v = load ${elem}, ptr %sl
+  ret ${elem} %v
+}
+
+define private ${elem} @omni_ll_aset_${s}(ptr %a, i64 %i, ${elem} %v) alwaysinline {
+entry:
+  %nul = icmp eq ptr %a, null
+  br i1 %nul, label %bad0, label %chk
+bad0:
+  call void @omni_err_null()
+  unreachable
+chk:
+  %lp = getelementptr inbounds ${H}, ptr %a, i64 0, i32 0
+  %n = load i64, ptr %lp
+  %oob = icmp uge i64 %i, %n
+  br i1 %oob, label %bad1, label %ok
+bad1:
+  call void @omni_err_range(i64 %i, i64 %n)
+  unreachable
+ok:
+  %ip = getelementptr inbounds ${H}, ptr %a, i64 0, i32 2
+  %items = load ptr, ptr %ip
+  %sl = getelementptr inbounds ${elem}, ptr %items, i64 %i
+  store ${elem} %v, ptr %sl
+  ret ${elem} %v
+}
+`;
+}
 
 /**
  * 一种元素类型的缓冲三条：new / get / set。发成私有函数而不是在调用点展开 ——

@@ -2530,23 +2530,74 @@ IR 的内容、不含档位 —— 不带上它的话 `OMNI_JIT_OPT=0` 会安静
   （`--objcache`）救得了复跑，救不了"改完一个字"那一趟 —— 这一格是下一轮要单独算的账
   （候选：只给热函数上 O2、或者 O1 起步再按需升档）。
 
-### 32.3 剩下那 10 倍在哪：**IR 里 1366 处不可内联的运行时调用**
+### 32.3 第二刀：**那三族在 IR 里就地展开** —— 4.0 -> 0.7ms/帧（追平上限、越过参考）
 
-同一份 `balls2k` 的 jit IR（8614 行）里：
+同一份 `balls2k` 的 jit IR（8614 行）里原来有：
 
 * `omni_arr_f64_get` **484** 处、`omni_arr_f64_set` **330** 处
 * `omni_trunc` **552** 处（下标取整）
-* `omni_r_pow` 9 处、`omni_gfx_call` 19 处
 
 这三族在 **C 那条腿上是宏**（`omni.h` 的 `OMNI__AGET` / `OMNI__ASET` / `omni_trunc`），
 clang 直接内联成"一次无符号比较 + 一条 load"；而这条腿发的是 `call @omni_arr_f64_get`，
-函数体不在模块里 ⇒ **`default<O2>` 也内联不了**，LICM/GVN 更看不穿它。
-1366 次不可内联的调用就是 3.9ms 与 0.35ms 之间那一个数量级。
+**函数体不在模块里 ⇒ `default<O2>` 也内联不了**，LICM/GVN 更看不穿它。
+1366 次不可内联的调用就是那一个数量级。
 
-下一刀（未做）：在发射的模块里给这三族各补一份 `internal alwaysinline` 的 IR 函数体，
-形状照 `omni.h` 那三个宏逐句来（null 判 + 一次 `icmp uge` + `getelementptr`/`load`），
-让 O2 自己把它们吃掉。**这比在后端手写基本块更稳**：控制流交给内联器，
-而"与 C 腿逐句相同"这件事看得见（两边都能指到 omni.h 的那三行）。
+改法：在发射的模块里补 `define private … alwaysinline` 的函数体，
+**逐句照 omni.h 那三个宏**（`arrFastHelpers` / `TRUNC_HELPER`）——
+空判走 `omni_err_null`、越界是一次 `icmp uge`（负数转 u64 是个大数，一次比较判两边）、
+`set` 回写进去的那个值；`int()` 的慢路径调的是**同一个** `omni_trunc_oob`。
+为什么发成 `alwaysinline` 的函数而不是在调用点直接展开：越界检查带分支，而调用点在
+结构化控制流里 —— 展开会把 `this.live`/`regions` 那套记账搅乱（与 `bufHelpers` 同一个理由）。
+交给内联器是白拿的：O0 时它们仍是三条 call（语义不变），O2 时全展开。
+
+只给 **int / real** 两族做（`arrFast`）：它们的格子就是 8 字节标量，一条 load/store 完事，
+而热路径全在这儿。`bool` 在 C 里是 1 字节而 IR 里是 `i1`（位宽与存储宽不是一件事）、
+`string` 是 `[2 x i64]` 的聚合 —— 这两族留在运行时符号上，省掉一个本来不必回答的问题。
+
+两格连带的坑（各自表现为"整条腿不跑"）：`omni_err_null` / `omni_err_range` /
+`omni_trunc_oob` 三个符号从前**不在 JIT 宿主表里**（错误路径以前在 omni_arr.c 里，
+IR 不引用它们），要补；`declare` 那三条照旧留着（没人调的 declare 是空的）。
+
+账（`balls2k`，`OMNI_FRAMES=8`，暖态）：
+
+| 这一刀 | 每帧 avg | 对 x87 参考 0.636ms |
+| --- | --- | --- |
+| 修好之前 | **跑不起来** | — |
+| 接上 O2 管线（§32.2） | 5.5 -> 4.0ms | 6.3x |
+| 数组三条就地展开 | 4.0 -> **3.3ms** | 5.2x |
+| `int()` 也展开 | 3.3 -> **0.7ms**（min 0.4） | **0.9x ~ 1.1x** |
+
+也就是说：**jit 这条腿现在与 clang -O2 那个上限（0.3~0.4ms/帧）同一档，并且已经追平原版的
+x87 JIT**。出的 PNG 与 c 腿**逐字节相同**（每一刀之后都验）。
+
+`omni_trunc` 那 552 处是这一轮里最大的一格（3.3 -> 0.7，×4.7）—— 与 §29.4 在 C 腿上
+量到的"`omni_trunc` 占 52% 栈顶样本"是同一件事的另一侧。
+
+### 32.4 四份 HEAVY 的现状（`OMNI_CC=clang OMNI_OPT=2 node tests/eval/perf.js`）
+
+```
+  启动(ms)  每帧avg(ms)  每帧max(ms)   fps  参考(ms)   比参考   模式    例子
+       828          0.7          0.8  1429      14.5    0.05x   jit     drawsph.pss
+       631          9.7         16.0   103      14.5    0.67x   js      drawsph.pss
+       919          0.3          0.4  3333      14.5    0.02x   c       drawsph.pss
+       878          0.6          0.7  1667       6.0    0.10x   jit     balls2k.pss
+       615         21.7         44.0    46       6.0    3.63x   js      balls2k.pss
+      1528          0.6          0.7  1667       6.0    0.10x   c       balls2k.pss
+       835          1.8          2.2   556      16.7    0.11x   jit     snake tube.pss
+       621         13.0         15.0    77      16.7    0.78x   js      snake tube.pss
+       968          0.8          1.0  1250      16.7    0.05x   c       snake tube.pss
+       691         16.3         19.2    61         —        —   jit     disco ball.pss
+       525         61.7         65.0    16         —        —   js      disco ball.pss
+      1108         20.7         21.0    48         —        —   c       disco ball.pss
+```
+
+* **jit 四份全过两条线**（每帧 ≤ 16.7ms、启动 ≤ 1000ms）。`disco ball` 上它 16.3ms
+  比 AOT 的 c 腿 20.7ms 还快 —— 一个模块一起过 O2，没有跨编译单元那道墙；
+* 启动那一格从 §32.2 那趟的 1818ms 落回 **691~878ms**：那 1818 是冷对象码缓存那一趟；
+* 剩下的红全不在 jit 上：`js` 在 `balls2k`/`disco ball` 上 21.7/61.7ms（`ArrSet`
+  调用点展开那一刀还没做，§29.8），`interp` 一族本来就不是实时那一档。
+
+### 32.5 下一格：启动延迟
 
 
 
