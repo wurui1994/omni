@@ -22,7 +22,8 @@ import { join, basename, dirname, isAbsolute, resolve } from './host/path.js';
    async 的，动态 import 在它里头是语法错（`SyntaxError: Unexpected reserved word`，踩过）。 */
 import {
   scanTopLevel as cSplitScan, formatScan as cSplitFormat, readPlan as cSplitReadPlan,
-  applyPlan as cSplitApply, checkRejoin as cSplitCheck,
+  applyPlan as cSplitApply, checkRejoin as cSplitCheck, contiguity as cSplitContig,
+  stitchFile as cSplitStitch,
 } from './frontend-c/split.js';
 import { installSrcEvalHook } from './host/src_eval.js';
 import { cacheRoot, scratchDir, dropScratch, cacheList, cacheGc, cacheKept } from './host/cache.js';
@@ -6789,6 +6790,14 @@ function main(argv) {
         stderr(`omni c split: 复原不等于原文（${chk.got} vs ${chk.want} 字节）—— 不落盘\n`);
         return 70;
       }
+      /* **同一份文件的格子必须连着**（理由见 split.js 的 `contiguity`）：不连续的话
+         缝合文件那句"一份 include 一次"就等于悄悄重排声明次序。`--loose` 放行。 */
+      const bad = cSplitContig(r.manifest);
+      if (bad.size > 0 && !rest.includes('--loose')) {
+        stderr('omni c split: 这几份不是一段连续区间（缝合会重排声明次序；放行加 --loose）——\n');
+        for (const [f, n] of bad) stderr(`  ${f}\t${n} 段\n`);
+        return 66;
+      }
       const dir = val('-o');
       if (rest.includes('--check') || dir === undefined) {
         stderr(`omni c split: ${chunks.length} 格 -> ${r.files.size} 份；复原逐字节相同（${chk.want} 字节）\n`);
@@ -6801,6 +6810,9 @@ function main(argv) {
       }
       writeText(join(dir, `${basename(src0, '.c')}.manifest.json`),
         `${JSON.stringify({ source: basename(src0), len: src.length, pieces: r.manifest })}\n`);
+      /* 缝合文件：`build.cmd` 照旧编这一份（unity build，原文一个字节没改）。 */
+      writeText(join(dir, `${basename(src0, '.c')}.stitch.c`),
+        cSplitStitch(basename(src0), r.manifest));
       stderr(`omni c split: ${chunks.length} 格 -> ${r.files.size} 份，写进 ${dir}`
         + `（复原逐字节相同，${chk.want} 字节）\n`);
       return 0;

@@ -12,7 +12,8 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { scanTopLevel, joinChunks, KIND } from '../../../src/core/frontend-c/split.js';
+import { scanTopLevel, joinChunks, KIND, readPlan, applyPlan, checkRejoin, contiguity, stitchFile }
+  from '../../../src/core/frontend-c/split.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 const P = (s) => process.stdout.write(s);
@@ -61,6 +62,40 @@ for (const p of files) {
   pass++;
   const n = chunks.filter((c) => c.kind === KIND.func).length;
   P(`  ok   ${rel} ${chunks.length} 格 / ${n} 个函数，接回去逐字节相同\n`);
+}
+
+/* ── 第二段：**整条路**（描述文件 -> 切 -> 缝合 -> 接回来）在一份真实文件上走一趟 ──
+ *
+ * 前面那一段只验扫描器。这一段把 `--map` 那条路也压上：拿 `omni_r3.c`（76 个函数）
+ * 按行段切成四份，验三件事 —— 复原逐字节、**每份是一段连续区间**（不然缝合会重排
+ * 声明次序）、缝合文件里那几份 `#include` 接起来等于原文。 */
+{
+  const p = join(ROOT, 'src/runtime/omni_r3.c');
+  const src = readFileSync(p, 'latin1');
+  const chunks = scanTopLevel(src);
+  const cuts = [[0, 'r3/a.c'], [0.25, 'r3/b.c'], [0.5, 'r3/c.c'], [0.75, 'r3/d.c']];
+  const rows = chunks.map((c, i) => {
+    let f = cuts[0][1];
+    for (const [frac, m] of cuts) if (i >= Math.floor(frac * chunks.length)) f = m;
+    const at = src.slice(0, c.start).split('\n').length;
+    return `${f}\t${c.kind}\t${c.name}\t${at}`;
+  });
+  const r = applyPlan(src, chunks, readPlan(rows.join('\n')));
+  const chk = checkRejoin(src, r.manifest, r.files);
+  const bad = contiguity(r.manifest);
+  const st = stitchFile('omni_r3.c', r.manifest);
+  const incs = [...st.matchAll(/#include "([^"]+)"/g)].map((m) => m[1]);
+  const cat = incs.map((f) => r.files.get(f) ?? '').join('');
+  const ok = r.missing.length === 0 && chk.ok && bad.size === 0 && cat === src
+    && incs.length === 4;
+  if (ok) {
+    pass++;
+    P(`  ok   整条路（omni_r3.c -> 4 份 -> 缝合）：复原逐字节、每份一段连续、缝合等于原文\n`);
+  } else {
+    fail++;
+    P(`  FAIL 整条路：未指派 ${r.missing.length}、复原 ${chk.ok}、不连续 ${bad.size}`
+      + `、缝合 ${incs.length} 份 ${cat === src}\n`);
+  }
 }
 
 P(`\n${pass} passed, ${fail} failed（omni c split：划分完整 + 逐字节复原）\n`);

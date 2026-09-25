@@ -383,17 +383,75 @@ export function applyPlan(src, chunks, plan) {
  *
  * 这一条是 ADR-0046 的硬线：拆开再接回去**等于**原文。它同时验两件事 ——
  * 内容没被改（slice/concat 而已）与划分没漏（长度加起来正好是原文）。
+ *
+ * `synth` 那些格子是**新材料**（生成的 `#include` 行之类）：拉链时要**跳过内容、
+ * 但照旧推进那份文件的游标** —— 不然后面全错位。
  */
 export function checkRejoin(src, manifest, files) {
   const cur = new Map();
   let out = '';
   for (const m of manifest) {
     const at = cur.get(m.file) ?? 0;
-    out += (files.get(m.file) ?? '').slice(at, at + m.len);
+    const piece = (files.get(m.file) ?? '').slice(at, at + m.len);
+    if (m.synth !== true) out += piece;
     cur.set(m.file, at + m.len);
   }
   return { ok: out === src, got: out.length, want: src.length };
 }
+
+/**
+ * **同一个文件的格子必须连着**（`--map` 的硬要求）。
+ *
+ * 为什么是硬要求：缝合文件（`stitchFile`）是"一份文件 `#include` 一次"，
+ * 于是"缝起来的记号次序 = 原文次序"**只在每份文件占一段连续区间时成立**。
+ * 不连续就等于悄悄重排了声明次序 —— C 里次序是有意义的（用之前要先声明）。
+ * 头一版按名字指派，`eval.c` 的 10 份文件摊成 **69 段**，那份缝合文件是错的。
+ *
+ * 回不连续的那几份（文件名 -> 段数），全连续时回空表。
+ */
+export function contiguity(manifest) {
+  const runsOf = new Map();
+  let prev = null;
+  for (const m of manifest) {
+    if (m.synth === true) continue;
+    if (m.file !== prev) runsOf.set(m.file, (runsOf.get(m.file) ?? 0) + 1);
+    prev = m.file;
+  }
+  const bad = new Map();
+  for (const [f, n] of runsOf) if (n > 1) bad.set(f, n);
+  return bad;
+}
+
+/**
+ * **缝合文件**：按原次序 `#include` 那几份产物的一份 `.c`。
+ *
+ * 为什么要它（这一格决定了"拆分不动原文"能不能编过）：拆出来的模块里那些 `static`
+ * 全局与函数**只在原来那一个翻译单元里可见**。要让它们分成真正独立的 `.o`，就得给
+ * 跨模块用到的那些去掉 `static` 并在头里补 `extern` —— **那是改原文**，用户明令不许。
+ *
+ * 所以第一步走 unity build：`eval.c` 换成一份只有 `#include` 的壳，编译器看见的
+ * 记号流与原来**一模一样**（次序就是 manifest 的次序），`static` 语义一个字没变，
+ * 而人读代码时看的是拆开的那几份。`build.cmd` 一个字都不用改。
+ *
+ * 不补 `#line`：`#include` 本身就把 `__FILE__`/`__LINE__` 换成被包含那份文件的 ——
+ * 报错与调试信息自然指到拆开后的那一份上。在 `#include` 前面写 `#line 1 "x"` 反而是错的
+ * （那句说的是"下一行是 x 的第 1 行"，而下一行是 `#include` 自己）。
+ */
+export function stitchFile(source, manifest) {
+  const seen = [];
+  for (const m of manifest) {
+    if (m.synth === true) continue;
+    if (seen.length === 0 || seen[seen.length - 1] !== m.file) seen.push(m.file);
+  }
+  const out = [`/* ${source} —— 由 \`omni c split\` 生成的缝合文件（ADR-0046）。`,
+    ' * 原文一个字节都没改：这几份 `#include` 的字节接起来**等于**原文，次序就是这里的次序。',
+    ' * 为什么走 unity build 而不是各编成 .o：拆出来的模块里那些 `static` 只在原来那一个',
+    ' * 翻译单元里可见，要分开编就得去掉 `static` 并补 `extern` —— 那是改原文，不许。',
+    ' */'];
+  for (const f of seen) out.push(`#include "${f}"`);
+  return `${out.join('\n')}\n`;
+}
+
 
 
 
