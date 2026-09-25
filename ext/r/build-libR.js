@@ -21,8 +21,9 @@
 //
 //   * BLAS / LAPACK 走 **Accelerate.framework**；tre / tzone 用树里自带的那份
 //   * quartz（AppKit）留着，X11 / cairo / ICU / NLS / OpenMP 不开
-//   * base 装成**源码**（`library/base/R/base` 就是 all.R）—— R 自己那个用 R 写的
-//     字节码编译器我们不要，所以跑的时候 `R_ENABLE_JIT=0`
+//   * base 装成**源码**（`library/base/R/base` 是 all.R **加上 `baseloader.R` 的尾巴**
+//     —— 那条尾巴里的 `.C_*` 原生符号对象是 `addTaskCallback()` 的命根子，见 `mkbase`）
+//     —— R 自己那个用 R 写的字节码编译器我们不要，所以跑的时候 `R_ENABLE_JIT=0`
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -211,13 +212,29 @@ const PROFDIR = join(RSRC, 'src/library/profile');
 
 /* `all.R`：按 `LC_COLLATE=C ls R/*.R R/unix/*.R` 的次序接起来，再替 `@WHICH@`
    （R 自己的 `share/make/basepkg.mk` 第 63..78 行 `mkRbase` 干的就是这两件事）。
-   **次序要紧** —— base 里有些定义依赖前面已经存在的东西。 */
+   **次序要紧** —— base 里有些定义依赖前面已经存在的东西。
+
+   后面还要**接上 R 自己 `baseloader.R` 的尾巴**（从 `## populate C/Fortran symbols`
+   到文件末）。R 正经的构建里 `library/base/R/base` 装的是 `baseloader.R`（懒加载那一条），
+   而我们装的是 all.R —— 于是 `baseloader.R` 里**只在那儿**做的三件事全丢了：
+
+     1. `getDLLRegisteredRoutines("base")` 把 `.C_*` / `.F_*` 那批**原生符号对象**
+        摆进 base 的命名空间。少了它 `addTaskCallback()` 一调就报
+        `object '.C_R_addTaskCallback' not found` —— 而 `cli` 的 `.onLoad` 正好调它，
+        于是 `cli` 半死、接着 `'ansi_show_cursor' is not an exported object` 一路报下去
+        （量出来的：`omni run ext/r/libr-demo/ggplot.R` 那四行 Error）。
+     2. 把 `.S3_methods_table` 里那批 S3 方法包进 `.__S3MethodsTable__.`；
+     3. 锁住 `.ArgsEnv` / `.GenericArgsEnv`。
+
+   尾巴是**从 R 的源码里截出来的**，不手抄 —— 与 `rt/ffi.js` 那条纪律同一个理由。 */
 b.rule('mkbase', {
   /* `xargs cat` 而不是 shell 的 for 循环：这条命令要过一遍 ninja 的模板展开，
-     而那一层看见 `$f` 会当成变量名（展成空）。这儿一格 `$` 都不留。 */
+     而那一层看见 `$f` 会当成变量名（展成空）。这儿一格 `$` 都不留 ——
+     awk 那一段也是为了这个才不用 `sed -n '/…/,$p'`。 */
   command: `cd ${BASEDIR} && LC_COLLATE=C ls R/*.R R/unix/*.R | xargs cat `
-    + '| sed -e "s:@WHICH@:/usr/bin/which:" > $out',
-  description: 'base 的 all.R -> $out',
+    + '| sed -e "s:@WHICH@:/usr/bin/which:" > $out'
+    + ` && awk '/^## populate C/{f=1} f' ${join(BASEDIR, 'baseloader.R')} >> $out`,
+  description: 'base 的 all.R + baseloader 的尾巴 -> $out',
 });
 /* 系统 profile：`Common.R` + `Rprofile.unix` 接起来（`src/library/profile/Makefile.in` 第 19 行）。
    `.Library` 就是在这儿定的 —— 少了它 R 起不来。 */
@@ -247,7 +264,9 @@ b.rule('mkrenviron', {
   description: 'Renviron -> $out',
 });
 
-b.build(BASE_R, 'mkbase', [], { implicit: [join(BASEDIR, 'R/zzz.R')] });
+b.build(BASE_R, 'mkbase', [], {
+  implicit: [join(BASEDIR, 'R/zzz.R'), join(BASEDIR, 'baseloader.R')],
+});
 b.build(BASE_PROFILE, 'mkprofile', [], { implicit: [join(PROFDIR, 'Common.R'), join(PROFDIR, 'Rprofile.unix')] });
 b.build(BASE_DESC, 'mkdesc', join(BASEDIR, 'DESCRIPTION.in'));
 b.build(RENVIRON, 'mkrenviron', join(RSRC, 'etc/Renviron.in'));

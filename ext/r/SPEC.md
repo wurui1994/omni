@@ -657,8 +657,19 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
 node ext/r/build-libR.js      # 405 条边：libR.dylib + R.bin + 12 个基础包 + Meta + 验一趟
 node ext/r/install-cran.js    # 从 CRAN 下 tarball、按拓扑序装（默认那一串是 ggplot2 的闭包）
 node ext/r/install-cran.js Rcpp
-node tests/r/libr.js          # 这一档的尺子：七格都真跑
+node tests/r/libr.js          # 这一档的尺子：八格都真跑
 ```
+
+**base 装成源码那一格少掉的那一半要补回来。** R 正经的构建里 `library/base/R/base` 装的是
+`baseloader.R`（懒加载那条路），我们装的是 `all.R`（`mkRbase` 那条），于是 `baseloader.R`
+里**只在那儿**做的三件事全丢了 —— 最要紧的是用 `getDLLRegisteredRoutines("base")` 把
+`.C_*` / `.F_*` 那批**原生符号对象**摆进 base 的命名空间。少了它 `addTaskCallback()` 一调
+就报 `object '.C_R_addTaskCallback' not found`，而调它的正是 `cli` 的 `.onLoad`：
+`library(ggplot2)` 会吐四行 `'ansi_show_cursor' is not an exported object from
+'namespace:cli'`，**而图照样出得来**（量出来的，2026-09-25）。所以 `mkbase` 那条边在
+`all.R` 后面**接上 `baseloader.R` 的尾巴**（从源码里截，不手抄），
+判据是 `tests/r/libr.js` 第 2 格；而且那一轴每一格现在都判"输出里一行 Error 都没有" ——
+只看退出码与"要的那一行在不在"是发现不了这种病的。
 
 **跑一份脚本不用手敲那一串**：`omni run x.R` 一句管到底 —— 编译器那一档接得住就走它
 （快 17~76 倍），接不住就**自己换到这一档**，并把"为什么换"印在 stderr 上（不闷着换）。

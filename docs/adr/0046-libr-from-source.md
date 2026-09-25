@@ -63,8 +63,19 @@ S7 / cpp11 / farver / isoband / …）一共 **135 523 行 R + 102 848 行 C/C++
 2. ~~一个 `Rscript` 形状的驱动~~ —— **已落**：`R.bin` 就是 R 自己的 `src/main/Rmain.c`
    链我们的 libR（`Rmain.c` 不在 `SOURCES_C` 里，R 自己也是只把它链进 `R.bin`）。
 3. base 那几个包：**base 已落**（按 `share/make/basepkg.mk` 的 `mkRbase` + `mkRsimple`
-   装成源码：`library/base/R/base` 就是 `all.R`，22 700 行）。`.Library` 在系统 profile 里定
+   装成源码：`library/base/R/base` 是 `all.R`，22 700 行，**后面再接 R 自己
+   `baseloader.R` 的尾巴**）。`.Library` 在系统 profile 里定
    （`src/library/profile/Common.R` + `Rprofile.unix` 接起来），少了它 R 起不来。
+
+   那条尾巴不是可有可无的：R 正经的构建里 `library/base/R/base` 装的就是 `baseloader.R`，
+   而 `baseloader.R` 里**只在那儿**做三件事 —— 用 `getDLLRegisteredRoutines("base")` 把
+   `.C_*` / `.F_*` 那批原生符号对象摆进 base 的命名空间、把 `.S3_methods_table` 包进
+   `.__S3MethodsTable__.`、锁住 `.ArgsEnv` / `.GenericArgsEnv`。少了第一件，
+   `addTaskCallback()` 一调就报 `object '.C_R_addTaskCallback' not found`，而调它的正是
+   `cli` 的 `.onLoad` —— 于是 `library(ggplot2)` 吐四行 Error（`'ansi_show_cursor' is not
+   an exported object from 'namespace:cli'`）而**图照样出得来**。量出来的（2026-09-25，
+   `omni run ext/r/libr-demo/ggplot.R`）。尺子补在 `tests/r/libr.js` 第 2 格上，
+   而且那一轴每一格现在都判"输出里一行 Error 都没有"。
    **别的十一个包也已经编好装好**（tools / compiler / utils / methods / stats / graphics /
    grDevices / grid / datasets / splines / stats4：R 代码按 `LC_COLLATE=C` 接起来、
    `NAMESPACE` 与 `DESCRIPTION` 就位、`src/` 的 146 份 C/Fortran/Objective-C 编出了八份
@@ -126,7 +137,12 @@ base 的算术、stats 的 `sd`、LAPACK（`lm` 的系数 1.05）、methods 的 
   而那个包我们不装 —— 报的是 `package 'compiler' does not have a namespace`。
 * base 的 `all.R` **次序要紧**（`LC_COLLATE=C ls R/*.R R/unix/*.R`），
   而拼它的那条命令里一格 `$` 都不能留：它要过一遍 ninja 的模板展开，`$f` 会被当成变量展成空。
-  所以用 `xargs cat`，不用 shell 的 for。
+  所以用 `xargs cat`，不用 shell 的 for。**接 `baseloader.R` 的尾巴也是这个理由**用
+  `awk '/^## populate C/{f=1} f'`，不用 `sed -n '/…/,$p'`。
+* **"装成源码"少掉的那一半要补回来**：`all.R` 只有定义，而 `baseloader.R` 里还有
+  `.C_*` 原生符号对象那一段（见上面第 3 条）。这一格的症状离病根特别远 ——
+  报出来的是 `cli` 的 `'ansi_show_cursor' is not an exported object`，
+  而且**图还是出得来**，所以尺子不能只看"文件有没有生成"，得看 stderr 里有没有 Error。
 * `tools/GETVERSION` 认的是 **`../../SVN-REVISION`**（相对 CWD），所以它得在
   `<gen>/src/include` 里跑；参考树是 git 检出、没有那份文件，我们自己写一份。
 
