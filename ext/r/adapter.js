@@ -296,6 +296,8 @@ const FN_DEPS = new Map([
   ['r_starts', []],
   ['r_ends', []],
   ['r_padl', []],
+  /* `format(一格数)`：底子是 `r_num_str`（7 位），`nsmall=` 那一格要问缺失与无穷。 */
+  ['r_format1', ['r_num_str', 'r_is_na']],
   ['r_padr', []],
   ['r_pad0', []],
   ['r_trim', []],
@@ -762,6 +764,7 @@ const NAMED_OK = new Map([
   ['median', NA_RM],
   ['diff', new Set(['lag'])],
   ['casefold', new Set(['upper'])],
+  ['format', new Set(['nsmall', 'width'])],
   ['trimws', new Set(['which'])],
   ['nchar', new Set(['type'])],
   /* `sort` 上**没有** `na.rm=` —— R 自己都报"参数没有用(na.rm = TRUE)"（它的默认
@@ -812,7 +815,7 @@ const BUILTINS = new Set([
      查出来 —— **只管 ASCII**（见 SPEC 第四节第 12 条）。 */
   'toupper', 'tolower', 'substr', 'substring', 'trimws', 'sprintf', 'startsWith', 'endsWith',
   /* `casefold` 是那两格的别名（S 兼容）；`strrep` 是方言的 `(srep …)`。 */
-  'casefold', 'strrep', 'chartr',
+  'casefold', 'strrep', 'chartr', 'format',
   /* `strsplit` 只接两种形状（见 `splitOf`）：`strsplit(s, sep)[[1]]` 与
      `unlist(strsplit(s, sep))` —— R 那边它回的是一张**表**，而这一层没有"表里装向量"。 */
   'strsplit', 'unlist',
@@ -1215,6 +1218,8 @@ function applyTy(fn, x, types) {
     /* `casefold` 是 `toupper` / `tolower` 的别名（S 兼容），`strrep` 逐元素接起来。 */
     case 'casefold': case 'strrep':
       return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RSTRV : STR;
+    /* `format()` 这一档只接标量 —— 回一格串（向量那一侧见 `callOf` 里那段账）。 */
+    case 'format': return STR;
     /* `chartr(old, new, x)` 的形状跟着**第三格**走（前两格是字符表）。 */
     case 'chartr':
       return args.length > 2 && isStrVec(typeOfExpr(args[2], types)) ? RSTRV : STR;
@@ -3946,6 +3951,43 @@ function callOf(x, types, extra, want) {
         if (up) return call1('supper', ev(0));
         return { kind: 'call', fn: { kind: 'name', name: useFn('r_lower') }, args: [ev(0)] };
       }
+      case 'format': {
+        /**
+         * `format(x, nsmall =, width =)` —— **只接标量**。
+         *
+         * 向量那一档没接：R 会给一条向量算一套**共用的宽与共用的小数位**
+         * （量出来 `format(c(1,10,100))` 是 `"  1" " 10" "100"`、
+         * `format(c(1.5,10))` 是 `" 1.5" "10.0"`），而那一套正是 `printFnDecl` 里
+         * 印向量那一大段在算的东西 —— 接它是把那一段改成"也能交出一条字符向量"，
+         * 那是另一刀（那段代码是逐字节判据的要害，不顺手改）。
+         */
+        if (n !== 1) throw new Error(`r->IR: format() 要一格位置实参（给了 ${n}）`);
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        if (isVecTy(t) || isStrVec(t) || t.kind === 'map') {
+          throw new Error('r->IR: format() 只接标量 —— 向量那一档 R 会算一套**共用的**宽与小数位'
+            + '（`format(c(1,10,100))` 是 `"  1" " 10" "100"`），那一套在 `printFnDecl` 里，'
+            + '交出字符向量是另一刀');
+        }
+        const named = (k) => {
+          const nd = namedArg(x, k);
+          return nd === undefined ? { kind: 'int', value: 0 } : asIntE(exprOf(nd, types), typeOfExpr(nd, types));
+        };
+        const w = named('width');
+        /* 串**左对齐**、真假与数**右对齐**（R 的口径，量出来 `format("a", width=4)` 是 `"a   "`）。 */
+        if (t.kind === 'string') {
+          if (namedArg(x, 'nsmall') !== undefined) {
+            throw new Error('r->IR: format() 的 `nsmall=` 只对数有意义（给的是一格串）');
+          }
+          return lglCall('r_padr', ev(0), w);
+        }
+        if (t.kind === 'bool' || isLgl1(t)) {
+          if (namedArg(x, 'nsmall') !== undefined) {
+            throw new Error('r->IR: format() 的 `nsmall=` 只对数有意义（给的是真假）');
+          }
+          return lglCall('r_padl', asStr(all[0], types, 7), w);
+        }
+        return lglCall('r_format1', asReal(ev(0), t), named('nsmall'), w);
+      }
       case 'strrep': {
         /**
          * `strrep(x, times)`：接起来 `times` 遍。方言的 `(srep S N)` 就是它 ——
@@ -4995,6 +5037,47 @@ function strFnDecl(name) {
           [ret(b('+', b('+', S('-'), call1('srep', S('0'), b('-', nm('w'), call1('slen', s)))),
             call1('ssub', s, I(1), b('-', call1('slen', s), I(1)))))]),
         ret(b('+', fill0, s)),
+      ],
+    };
+  }
+  if (name === 'r_format1') {
+    /**
+     * 一格**数**按 `format()` 排版。底子就是 `cat` / `print` 那一条（7 位有效数字、
+     * 定点与科学记数照 `format.c` 挑）—— 所以 `format(1/3)` 是 `0.3333333`、
+     * `format(1e5)` 是 `1e+05`。
+     *
+     * `nsmall = k` 是"**至少** k 位小数"，而且**只在定点那一侧管**：量出来
+     * `format(1e5, nsmall = 2)` 还是 `1e+05`（不是 `100000.00`）、
+     * `format(1/3, nsmall = 2)` 还是 `0.3333333`（已经够了）、
+     * `format(1.5, nsmall = 3)` 才变成 `1.500`。所以这儿先看挑出来那串里有没有 `e`，
+     * 有就一个字都不动；没有才数小数位、不够时按 `nsmall` 重排一遍（`sfix`）。
+     * `NA` / `NaN` / `±Inf` 也一个字都不动（那三格没有小数位这一说）。
+     *
+     * `width = k` 是"至少 k 宽"，数**右对齐**（串是左对齐，那一格在调用点上用 `r_padr`）。
+     */
+    cabiUsed.add('omni_r_is_infinite');
+    rmathSig('omni_r_is_infinite');
+    const xx = nm('x');
+    const out = nm('o');
+    const fin = b('&&', { kind: 'unop', op: '!', operand: naQ(xx) },
+      b('==', { kind: 'ccall', sym: 'omni_r_is_infinite', args: [xx] }, I(0)));
+    const dec = nm('dec');
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'x', type: REAL }, { name: 'ns', type: INT }, { name: 'w', type: INT }],
+      ret: STR,
+      body: [
+        { kind: 'let', name: 'o', type: STR, init: { kind: 'call', fn: { kind: 'name', name: useFn(NUM_STR) }, args: [xx, I(7)] } },
+        iff(b('&&', b('>', nm('ns'), I(0)),
+          b('&&', fin, b('<', call1('sfind', out, S('e')), I(0)))), [
+          letI('k', call1('sfind', out, S('.'))),
+          letI('dec', I(0)),
+          iff(b('>=', nm('k'), I(0)),
+            [set('dec', b('-', b('-', call1('slen', out), nm('k')), I(1)))]),
+          iff(b('<', dec, nm('ns')), [set('o', call1('sfix', xx, nm('ns')))]),
+        ]),
+        ret(b('+', call1('srep', S(' '), b('-', nm('w'), call1('slen', out))), out)),
       ],
     };
   }
@@ -8334,7 +8417,7 @@ function vecFnDecl(name) {
   }
   if (name === 'r_substr' || name === 'r_starts' || name === 'r_ends'
       || name === 'r_padl' || name === 'r_padr' || name === 'r_pad0' || name === 'r_lower'
-      || name === 'r_trim' || name === 'r_chartr') {
+      || name === 'r_trim' || name === 'r_chartr' || name === 'r_format1') {
     return strFnDecl(name);
   }
   if (STRV_FNS.has(name)) return strvFnDecl(name);

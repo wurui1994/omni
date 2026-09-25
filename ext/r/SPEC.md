@@ -472,6 +472,16 @@ R 的 `cat` 不带，差一个字节就对不上 `Rscript`）。
 所以 `as.character(1e5)` 是 `1e+05` 而不是 `100000` —— 定点与科学记数那条挑法照旧管，
 只是位数不同。落地就是 `asStr(…, dig)` 那一个参数（`r_num_str` 与 `r_sci` 都收位数）。
 
+`format(x, nsmall =, width =)` **接了一半**（2026-09-26，判据 `ext/r/examples/numfmt.R`）：
+**标量**那一档全接 —— 底子就是 `cat` / `print` 那条（7 位有效数字），`nsmall = k` 是
+"**至少** k 位小数"而且**只在定点那一侧管**（量出来 `format(1e5, nsmall = 2)` 还是
+`1e+05`、`format(1/3, nsmall = 2)` 还是 `0.3333333`、`format(1.5, nsmall = 3)` 才变
+`1.500`），`width = k` 是"至少 k 宽"：数与真假**右对齐**、串**左对齐**。
+**向量那一档没接**：R 会给一条向量算一套**共用的**宽与小数位（`format(c(1,10,100))` 是
+`"  1" " 10" "100"`、`format(c(1.5,10))` 是 `" 1.5" "10.0"`），而那一套正是
+`printFnDecl` 里印向量那一大段在算的 —— 接它是把那段改成"也能交出一条字符向量"，
+那段是逐字节判据的要害，另起一刀。`formatC` / `prettyNum` 一格没有。
+
 `toupper` / `tolower` / `substr` / `substring` / `trimws` / `startsWith` / `endsWith` /
 `sprintf` 接了，还有"这是什么东西"那三问（`is.character` / `is.numeric` / `is.logical` ——
 类型在这一层是推出来的，所以它们是**编译期常量**）。`substr` 走生成出来的
