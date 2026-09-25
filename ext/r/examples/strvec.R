@@ -101,3 +101,9 @@ print(ifelse(v > 0, "pos", "non-pos"))
 print(ifelse(c(TRUE, FALSE), "y", "n"))
 cat(ifelse(TRUE, "a", "b"), ifelse(1 > 2, "a", "b"), "\n")
 # test 里有 NA 时 R 挑出一格 NA_character_，这一档没有那种值 —— 当场停下来，不静默印 "NA"
+
+# 负下标在字符向量上也是"丢掉那几格"（与数值那一侧同三条规矩，见 `r_pick_str`）
+ss <- c("a", "b", "c", "d")
+print(ss[-2])
+print(ss[-c(1, 4)])
+print(ss[c(2, 0, 3)])

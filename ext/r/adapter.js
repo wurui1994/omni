@@ -174,7 +174,8 @@ const FN_DEPS = new Map([
   /* `max` / `min` 要把 `NA` 与 `NaN` 分开记（R 的口径见那两段账），所以要问那三格。 */
   ['r_max', ['r_is_na', 'r_is_nan', 'r_na']],
   ['r_min', ['r_is_na', 'r_is_nan', 'r_na']],
-  ['r_vec_pick', []],
+  /* 下标里有 `NA` 就停下来、正负混着就停下来（见那个函数上的账）。 */
+  ['r_vec_pick', ['r_is_na']],
   ['r_vec_mask', ['r_is_na', 'r_na']],
   ['r_rev', []],
   ['r_seq_along', []],
@@ -869,6 +870,15 @@ function dictNames(x, out = new Set(), vecs = new Set()) {
 /** 两格数值类型合起来：有一格是 real 就是 real（`1 + 0.5`）。 */
 const joinNum = (a, b) => (a.kind === 'real' || b.kind === 'real' ? REAL : INT);
 
+/**
+ * 这一格下标是不是**写着一个负号**（`x[-1]` / `x[-i]` / `x[-c(1,3)]`）。
+ *
+ * R 的负下标是"把那几格丢掉"，所以 `x[-1]` 出来的是一条**向量**，不是一格数 ——
+ * 类型上要分得开，而那只能看树（`x[k]` 里 k 运行期才知道正负，那一格照旧按位置取，
+ * 越界时方言当场报）。`x[-c(1,3)]` 的下标本来就是向量，走 `r_vec_pick` 里那三条规矩。
+ */
+const isNegSub = (k) => isList(k) && tag(k) === 'un' && String(leaf(kids(k)[0])) === '-';
+
 /** 一格表达式装的是什么。`types` 是这一段边推边查的那张表。 */
 function typeOfExpr(x, types) {
   switch (tag(x)) {
@@ -914,16 +924,18 @@ function typeOfExpr(x, types) {
       /* **被下标的那一格不一定是名字**：`sort(z)[250]` / `c(1,2)[1]` 都是常见写法，
          所以这儿问的是"那个表达式的类型"，不是"那个名字装什么"（`indexRead` 也是这么问的）。 */
       const a = typeOfExpr(kids(x)[0], types);
-      /* 字符向量：取一格出来是一格串，按向量挑出来的还是一条字符向量。 */
+      /* 字符向量：取一格出来是一格串，按向量挑出来的还是一条字符向量。
+         负下标（`s[-2]`）是"丢掉那一格"，出来的还是一条字符向量。 */
       if (isStrVec(a)) {
         const ks0 = kids(x).slice(1).map((k) => kids(k)[0]).filter((k) => k !== undefined);
-        if (ks0.length === 1 && isVecTy(typeOfExpr(ks0[0], types))) return a;
+        if (ks0.length === 1 && (isVecTy(typeOfExpr(ks0[0], types)) || isNegSub(ks0[0]))) return a;
         return STR;
       }
       if (!isVecTy(a)) return INT;
-      /* 下标是向量 → 挑出来的还是一格向量（逻辑/数值随被挑的那个走）。 */
+      /* 下标是向量 → 挑出来的还是一格向量（逻辑/数值随被挑的那个走）。
+         **写着负号的那一格也是**（`x[-1]` 在 R 里是"丢掉第一格"，出来是一条向量）。 */
       const ks = kids(x).slice(1).map((k) => kids(k)[0]).filter((k) => k !== undefined);
-      if (ks.length === 1 && isVecTy(typeOfExpr(ks[0], types))) return a;
+      if (ks.length === 1 && (isVecTy(typeOfExpr(ks[0], types)) || isNegSub(ks[0]))) return a;
       /* 一格标量下标：**元素类型跟着向量走** —— 逻辑向量里取一格出来还是逻辑
          （`zs[1]` 印 `TRUE` 而不是 `1`）。 */
       return isLglTy(a) ? RLGL1 : REAL;
@@ -2267,6 +2279,12 @@ function indexRead(x, types) {
       const helper = isLglTy(kt) ? 'r_vec_mask' : 'r_vec_pick';
       return { kind: 'call', fn: { kind: 'name', name: useFn(helper) }, args: [o, exprOf(keys[0], types)] };
     }
+    /* **写着负号的一格标量下标**（`x[-1]` / `x[-i]`）：R 的意思是"丢掉那一格"，
+       出来是一条向量。摆成长度 1 的下标向量交给 `r_vec_pick` —— 正负那三条规矩
+       只在那一个函数里（见它上面那段账）。 */
+    if (isNegSub(keys[0])) {
+      return lglCall('r_vec_pick', o, lglCall('r_vec1', asReal(exprOf(keys[0], types), kt)));
+    }
     return vecGet(o, zeroBased(exprOf(keys[0], types), typeOfExpr(keys[0], types)));
   }
   /* 字符向量：一格标量下标（`labels[2]`）、按位置挑（`labels[c(1,3)]`）、
@@ -2276,6 +2294,10 @@ function indexRead(x, types) {
     if (isVecTy(kt)) {
       const helper = isLglTy(kt) ? 'r_mask_str' : 'r_pick_str';
       return { kind: 'call', fn: { kind: 'name', name: useFn(helper) }, args: [o, exprOf(keys[0], types)] };
+    }
+    /* `s[-2]` —— 与数值那一侧同一条：摆成长度 1 的下标向量交给 `r_pick_str`。 */
+    if (isNegSub(keys[0])) {
+      return lglCall('r_pick_str', o, lglCall('r_vec1', asReal(exprOf(keys[0], types), kt)));
     }
     return svGet(o, zeroBased(exprOf(keys[0], types), kt));
   }
@@ -4959,19 +4981,51 @@ function strvFnDecl(name) {
     const p = { kind: 'name', name: 'p' };
     const cnt = nm('k');
     if (name === 'r_pick_str') {
+      /* 与数值那一侧的 `r_vec_pick` 是**同三条规矩**（正数挑、0 跳过、负数丢、混着报）——
+         只是抄的是 `(arr string)`。判正负是运行期的事，所以那三条在这儿也写一遍。 */
+      const jj = nm('j');
+      const at2 = vecGet(p, jj);
+      const forJ2 = (upto, body) => ({
+        kind: 'for', init: letI('j', I(0)), cond: b('<', jj, upto), post: set('j', b('+', jj, I(1))), body,
+      });
       return {
         kind: 'fn',
         name,
         params: [{ name: 'v', type: RSTRV }, { name: 'p', type: RVEC }],
         ret: RSTRV,
         body: [
-          letI('n', vecLen(p)),
-          { kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), nm('n')) },
-          loop([{
-            kind: 'assign',
-            target: svGet(nm('o'), i),
-            value: svGet(v, b('-', call1('toint', vecGet(p, i)), I(1))),
-          }], nm('n')),
+          letI('m', vecLen(p)),
+          letI('n', svLen(v)),
+          letI('nneg', I(0)),
+          letI('npos', I(0)),
+          forJ2(nm('m'), [
+            iff(b('<', at2, { kind: 'real', value: 0 }),
+              [set('nneg', b('+', nm('nneg'), I(1)))],
+              [iff(b('>', at2, { kind: 'real', value: 0 }), [set('npos', b('+', nm('npos'), I(1)))])]),
+          ]),
+          iff(b('&&', b('>', nm('nneg'), I(0)), b('>', nm('npos'), I(0))), [{
+            kind: 'builtin-stmt',
+            name: 'fail',
+            args: [{ kind: 'string', value: "can't mix positive and negative subscripts" }],
+          }]),
+          { kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), I(0)) },
+          iff(b('>', nm('nneg'), I(0)), [
+            ...vecNewAs('kp', nm('n')),
+            loop([vecSet(nm('kp'), i, { kind: 'real', value: 1 })], nm('n')),
+            forJ2(nm('m'), [
+              letI('q', b('-', I(0), call1('toint', at2))),
+              iff(b('&&', b('>=', nm('q'), I(1)), b('<=', nm('q'), nm('n'))),
+                [vecSet(nm('kp'), b('-', nm('q'), I(1)), { kind: 'real', value: 0 })]),
+            ]),
+            loop([iff(b('!=', vecGet(nm('kp'), i), { kind: 'real', value: 0 }),
+              [{ kind: 'builtin-stmt', name: 'apush', args: [nm('o'), svGet(v, i)] }])], nm('n')),
+            { kind: 'return', values: [nm('o')] },
+          ]),
+          forJ2(nm('m'), [iff(b('!=', at2, { kind: 'real', value: 0 }), [{
+            kind: 'builtin-stmt',
+            name: 'apush',
+            args: [nm('o'), svGet(v, b('-', call1('toint', at2), I(1)))],
+          }])]),
           { kind: 'return', values: [nm('o')] },
         ],
       };
@@ -5965,24 +6019,100 @@ function vecFnDecl(name) {
     };
   }
   if (name === 'r_vec_pick') {
-    /* `xs[c(1,3)]` —— 按位置挑（下标从 1 起，所以减 1）。结果长度就是下标那个向量的长度。 */
+    /**
+     * `xs[下标向量]` —— R 在这一格上有**三条**规矩（量出来的，`Rscript`，2026-09-25）：
+     *
+     *   * 全是正数：按位置挑（1 起），而**下标 0 直接跳过**（`x[c(1,0,2)]` 是两格）；
+     *   * 全是负数：把那几格**丢掉**（`x[-1]` / `x[-c(1,3)]`），越界的负下标**不算**
+     *     （`x[-5]` 在长度 4 上就是原样）；
+     *   * 正负**混着**：R 报错 —— 这儿也当场停下来（`(fail …)`）。
+     *
+     * 判"正还是负"是**运行期**的事（`x[c(-1,-2)]` 与 `x[-c(1,3)]` 在树上不同形），
+     * 所以这三条都在这一个函数里，不在调用点上。`NA` 下标 R 挑出一格 `NA`，
+     * 数值这一侧我们本来有 `NA`，但"挑出来的长度"会跟着变 —— 那一格停下来，不猜。
+     */
     const ix = { kind: 'name', name: 'ix' };
+    const m = { kind: 'name', name: 'm' };
+    const n = { kind: 'name', name: 'n' };
+    const j = { kind: 'name', name: 'j' };
+    const k = { kind: 'name', name: 'k' };
+    const I0 = (val) => ({ kind: 'int', value: val });
+    const letI2 = (nm2, init) => ({ kind: 'let', name: nm2, type: INT, init });
+    const setI = (nm2, val) => ({ kind: 'assign', target: { kind: 'name', name: nm2 }, value: val });
+    const forJ = (upto, body) => ({
+      kind: 'for',
+      init: letI2('j', I0(0)),
+      cond: b('<', j, upto),
+      post: setI('j', b('+', j, I0(1))),
+      body,
+    });
+    const forI = (upto, body) => ({
+      kind: 'for',
+      init: letI2('i', I0(0)),
+      cond: b('<', i, upto),
+      post: setI('i', b('+', i, I0(1))),
+      body,
+    });
+    const at = vecGet(ix, j);
+    const iff2 = (cond, then, else_ = null) => ({ kind: 'if', cond, then, else_ });
+    const keep = { kind: 'name', name: 'kp' };
     const out = { kind: 'name', name: 'o' };
+    const out2 = { kind: 'name', name: 'o2' };
+    const pos = { kind: 'name', name: 'p' };
     return {
       kind: 'fn',
       name,
       params: [{ name: 'v', type: RVEC }, { name: 'ix', type: RVEC }],
       ret: RVEC,
       body: [
-        declLen(ix),
-        ...vecNewAs('o', len),
-        {
-          kind: 'for',
-          init: { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
-          cond: b('<', i, len),
-          post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
-          body: [vecSet(out, i, vecGet(v, b('-', call1('toint', vecGet(ix, i)), { kind: 'int', value: 1 })))],
-        },
+        letI2('m', vecLen(ix)),
+        letI2('n', vecLen(v)),
+        letI2('nneg', I0(0)),
+        letI2('npos', I0(0)),
+        forJ(m, [
+          iff2({ kind: 'call', fn: { kind: 'name', name: useFn('r_is_na') }, args: [at] }, [{
+            kind: 'builtin-stmt',
+            name: 'fail',
+            args: [{ kind: 'string', value: 'NA in a numeric subscript: 挑出来的长度说不清' }],
+          }]),
+          iff2(b('<', at, { kind: 'real', value: 0 }),
+            [setI('nneg', b('+', { kind: 'name', name: 'nneg' }, I0(1)))],
+            [iff2(b('>', at, { kind: 'real', value: 0 }),
+              [setI('npos', b('+', { kind: 'name', name: 'npos' }, I0(1)))])]),
+        ]),
+        iff2(b('&&', b('>', { kind: 'name', name: 'nneg' }, I0(0)), b('>', { kind: 'name', name: 'npos' }, I0(0))), [{
+          kind: 'builtin-stmt',
+          name: 'fail',
+          args: [{ kind: 'string', value: "can't mix positive and negative subscripts" }],
+        }]),
+        /* 全是负数 → 丢掉那几格（先标一遍留不留，再抄）。 */
+        iff2(b('>', { kind: 'name', name: 'nneg' }, I0(0)), [
+          ...vecNewAs('kp', n),
+          forI(n, [vecSet(keep, i, { kind: 'real', value: 1 })]),
+          forJ(m, [
+            letI2('p', b('-', I0(0), call1('toint', at))),
+            iff2(b('&&', b('>=', pos, I0(1)), b('<=', pos, n)),
+              [vecSet(keep, b('-', pos, I0(1)), { kind: 'real', value: 0 })]),
+          ]),
+          letI2('k', I0(0)),
+          forI(n, [iff2(b('!=', vecGet(keep, i), { kind: 'real', value: 0 }), [setI('k', b('+', k, I0(1)))])]),
+          ...vecNewAs('o2', k),
+          setI('k', I0(0)),
+          forI(n, [iff2(b('!=', vecGet(keep, i), { kind: 'real', value: 0 }), [
+            vecSet(out2, k, vecGet(v, i)),
+            setI('k', b('+', k, I0(1))),
+          ])]),
+          { kind: 'return', values: [out2] },
+        ]),
+        /* 全是正数（或者一格都没有）→ 按位置挑，下标 0 跳过。 */
+        letI2('kk', I0(0)),
+        forJ(m, [iff2(b('!=', at, { kind: 'real', value: 0 }), [setI('kk', b('+', { kind: 'name', name: 'kk' }, I0(1)))])]),
+        ...vecNewAs('o', { kind: 'name', name: 'kk' }),
+        letI2('w', I0(0)),
+        forJ(m, [iff2(b('!=', at, { kind: 'real', value: 0 }), [
+          vecSet(out, { kind: 'name', name: 'w' }, vecGet(v, b('-', call1('toint', at), I0(1)))),
+          setI('w', b('+', { kind: 'name', name: 'w' }, I0(1))),
+        ])]),
         { kind: 'return', values: [out] },
       ],
     };

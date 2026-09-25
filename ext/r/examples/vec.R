@@ -86,3 +86,21 @@ cat(seq_along(xs), "\n")
 cat(which(xs > 2), "\n")
 cat(which(ys > 1), "\n")
 cat(xs[rev(seq_along(xs))], "\n")
+
+# **负下标**：R 的 `x[-1]` 是"把第一格丢掉"，出来是一条向量。判正负是**运行期**的事
+# （`x[c(-1,-2)]` 与 `x[-c(1,3)]` 在树上不同形），所以那三条规矩都在 `r_vec_pick` 里：
+# 全是正数按位置挑、**下标 0 跳过**、全是负数丢掉那几格（越界的负下标不算）、正负混着当场停。
+w <- c(10, 20, 30, 40)
+print(w[-1])
+print(w[-c(1, 3)])
+print(w[-(1:2)])
+print(w[c(-1, -2)])
+print(w[-4])
+print(w[-5])
+print(w[-(1:4)])
+print(w[c(1, 0, 2)])
+k <- 2
+print(w[-k])
+cat(length(w[-1]), "\n")
+zz <- c(TRUE, FALSE, TRUE)
+print(zz[-1])
