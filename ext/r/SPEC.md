@@ -228,7 +228,9 @@ R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不�
 接了的：`c(…)`（摊平，含"有一格是串就整条收成字符向量"，数按 `as.character` 的 15 位转）、
 `character(n)`、`v[i]` 读与写、`v[c(1,3)]` / `v[掩码]`、`length`、`cat`、`print`、
 `for (s in v)`、`seq_along`、`rev`、`rep`（`times` / `each`）、
-`nchar` / `toupper` / `tolower` / `paste` **逐元素**
+`nchar` / `toupper` / `tolower` / `substr` / `substring` / `trimws` /
+`startsWith` / `endsWith` / `paste` **逐元素**（每一格转给标量那一版；后两个出的是
+**逻辑**向量。`startsWith(v, c("a","b"))` 那种两边都回收的没接 —— 当场报）
 （回收规则与数值那一侧同一条；零长那一格在 `paste` 里收成空串，这是 R 的规矩）、
 找与换那一族（`grepl` / `grep` / `sub` / `gsub`，见那一小节）、
 `ifelse(test, "y", "n")`（两支是串时出一条字符向量；`test` 里有 `NA` 时**当场停下来** ——

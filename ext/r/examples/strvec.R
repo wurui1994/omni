@@ -107,3 +107,14 @@ ss <- c("a", "b", "c", "d")
 print(ss[-2])
 print(ss[-c(1, 4)])
 print(ss[c(2, 0, 3)])
+
+# 串那一族在**字符向量**上逐元素（每一格转给标量那一版，见 `r_substr_v` 那几个）
+w2 <- c("apple", "be", "cherry")
+print(substr(w2, 1, 3))
+print(substring(w2, 2))
+print(substr(w2, 2, 2))
+print(startsWith(w2, "a"))
+print(endsWith(w2, "e"))
+print(trimws(c("  a ", "b  ")))
+cat(sum(startsWith(w2, "a")), "\n")
+# `startsWith(v, c("a","b"))` 那种两边都回收的没接 —— 当场报

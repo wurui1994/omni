@@ -258,6 +258,11 @@ const FN_DEPS = new Map([
   ['r_padr', []],
   ['r_pad0', []],
   ['r_trim', []],
+  /* 串那一族在字符向量上逐元素 —— 每一格转给标量那一版。 */
+  ['r_substr_v', ['r_substr']],
+  ['r_trim_v', ['r_trim']],
+  ['r_starts_v', ['r_starts']],
+  ['r_ends_v', ['r_ends']],
   ['r_split', []],
   /* 找与换那一族（见 `findOf`）。`r_gsub` 是 `sub` 与 `gsub` 共用的那一个（带"换几次"的旗子）。 */
   ['r_gsub', []],
@@ -1048,8 +1053,12 @@ function applyTy(fn, x, types) {
       }) ? RSTRV : STR;
     }
     case 'as.character': return STR;
-    case 'substr': case 'sprintf': return STR;
-    case 'substring': case 'trimws': return STR;
+    case 'sprintf': return STR;
+    /* 串那一族在字符向量上逐元素（出来还是一条字符向量 / 逻辑向量）。 */
+    case 'substr': case 'substring': case 'trimws': {
+      const t = args.length > 0 ? typeOfExpr(args[0], types) : STR;
+      return isStrVec(t) ? RSTRV : STR;
+    }
     /* `strsplit(…)[[1]]` 在 `sub2` 那一格答；`unlist(strsplit(…))` 与它同解。 */
     case 'unlist': {
       if (args.length !== 1) return INT;
@@ -1073,7 +1082,10 @@ function applyTy(fn, x, types) {
     }
     case 'is.character': case 'is.numeric': case 'is.logical': return BOOL;
     case 'toupper': return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RSTRV : STR;
-    case 'startsWith': case 'endsWith': return BOOL;
+    case 'startsWith': case 'endsWith': {
+      const t = args.length > 0 ? typeOfExpr(args[0], types) : STR;
+      return isStrVec(t) ? RLGL : BOOL;
+    }
     case 'length': return INT;
     /* `as.numeric` / `as.integer` 的形状跟着进去的那一格走（向量进向量出，见 `callOf`）。 */
     case 'as.integer': {
@@ -3393,23 +3405,28 @@ function callOf(x, types, extra, want) {
       }
       case 'substr': {
         /* R 的 `substr(s, start, stop)` 是**1 起、两端都含**，而且越界是**截断**
-           （方言的 `(ssub S I N)` 是 0 起 + 长度，越界当场报）—— 所以走生成出来的那格函数。 */
+           （方言的 `(ssub S I N)` 是 0 起 + 长度，越界当场报）—— 所以走生成出来的那格函数。
+           字符向量那一档逐元素（另一格辅助函数，`(arr string)` 与串是两种存法）。 */
         if (n !== 3) throw new Error(`r->IR: substr() 要三格实参（给了 ${n}）`);
-        return lglCall('r_substr', ev(0),
+        const vec = all[0] !== null && isStrVec(typeOfExpr(all[0], types));
+        return lglCall(vec ? 'r_substr_v' : 'r_substr', ev(0),
           asIntE(ev(1), typeOfExpr(all[1], types)), asIntE(ev(2), typeOfExpr(all[2], types)));
       }
       case 'substring': {
         /* `substring(s, first, last = 1000000L)` —— 与 `substr` 同一格函数，只是 `last`
-           可以不给（R 的默认就是那个大数）。逐元素那一档（实参是向量）没接。 */
+           可以不给（R 的默认就是那个大数）。字符向量那一档也逐元素。 */
         if (n < 2 || n > 3) throw new Error(`r->IR: substring() 接两格或三格实参（给了 ${n}）`);
         const last = n === 3
           ? asIntE(ev(2), typeOfExpr(all[2], types))
           : { kind: 'int', value: 1000000 };
-        return lglCall('r_substr', ev(0), asIntE(ev(1), typeOfExpr(all[1], types)), last);
+        const vec = all[0] !== null && isStrVec(typeOfExpr(all[0], types));
+        return lglCall(vec ? 'r_substr_v' : 'r_substr', ev(0),
+          asIntE(ev(1), typeOfExpr(all[1], types)), last);
       }
       case 'trimws': {
         if (n !== 1) throw new Error(`r->IR: trimws() 要一格实参（给了 ${n}）—— \`which=\` 没接`);
-        return lglCall('r_trim', ev(0));
+        const vec = all[0] !== null && isStrVec(typeOfExpr(all[0], types));
+        return lglCall(vec ? 'r_trim_v' : 'r_trim', ev(0));
       }
       case 'unlist': {
         /* `unlist(strsplit(s, sep))` 与 `unlist(lapply(v, f))` —— 前者与 `[[1]]` 同解，
@@ -3445,6 +3462,13 @@ function callOf(x, types, extra, want) {
       }
       case 'startsWith': case 'endsWith': {
         if (n !== 2) throw new Error(`r->IR: ${fn}() 要两格实参（给了 ${n}）`);
+        const t0 = all[0] === null ? STR : typeOfExpr(all[0], types);
+        const t1 = all[1] === null ? STR : typeOfExpr(all[1], types);
+        if (isStrVec(t1)) {
+          throw new Error(`r->IR: ${fn}() 的第二格实参是一条字符向量 ——`
+            + ' R 那儿两边都回收，这一层只接"一格定串"（那一半写个循环）');
+        }
+        if (isStrVec(t0)) return lglCall(fn === 'startsWith' ? 'r_starts_v' : 'r_ends_v', ev(0), ev(1));
         return lglCall(fn === 'startsWith' ? 'r_starts' : 'r_ends', ev(0), ev(1));
       }
       case 'sprintf': return sprintfOf(x, types);
@@ -4311,6 +4335,7 @@ const STRV_FNS = new Set([
   'r_cat_str', 'r_print_str', 'r_join_str', 'r_rev_str', 'r_nchar_v', 'r_upper_v', 'r_lower_v',
   'r_pick_str', 'r_mask_str', 'r_split', 'r_at_name', 'r_nm_at',
   'r_gsub', 'r_gsub_v', 'r_grepl_v', 'r_grep_i', 'r_grep_s', 'r_rep_str', 'r_ifelse_s',
+  'r_substr_v', 'r_trim_v', 'r_starts_v', 'r_ends_v',
 ]);
 
 /** 这一批由 `setFnDecl` 发（集合与位置那一族，见 `FN_DEPS` 上那段账）。 */
@@ -4886,6 +4911,38 @@ function strvFnDecl(name) {
             },
           },
         ], nm('n')),
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  if (name === 'r_substr_v' || name === 'r_trim_v' || name === 'r_starts_v' || name === 'r_ends_v') {
+    /* 串那一族在**字符向量**上逐元素（`substr(v, 1, 3)` / `trimws(v)` /
+       `startsWith(v, "a")`）—— 每一格转给标量那一版，出来的是另一条向量。
+       `startsWith` / `endsWith` 出的是**逻辑**向量（`(ptr real)` 上的 1 / 0，见 `RLGL`）。 */
+    const lgl = name === 'r_starts_v' || name === 'r_ends_v';
+    const one = {
+      r_substr_v: 'r_substr', r_trim_v: 'r_trim', r_starts_v: 'r_starts', r_ends_v: 'r_ends',
+    }[name];
+    const args = name === 'r_substr_v'
+      ? [svGet(v, i), nm('a'), nm('z')]
+      : (name === 'r_trim_v' ? [svGet(v, i)] : [svGet(v, i), nm('t')]);
+    const params = [{ name: 'v', type: RSTRV }];
+    if (name === 'r_substr_v') params.push({ name: 'a', type: INT }, { name: 'z', type: INT });
+    if (lgl) params.push({ name: 't', type: STR });
+    const el = { kind: 'call', fn: { kind: 'name', name: useFn(one) }, args };
+    return {
+      kind: 'fn',
+      name,
+      params,
+      ret: lgl ? RLGL : RSTRV,
+      body: [
+        letI('n', svLen(v)),
+        ...(lgl
+          ? vecNewAs('o', nm('n'))
+          : [{ kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), nm('n')) }]),
+        loop([lgl
+          ? vecSet(nm('o'), i, { kind: 'ternary', cond: el, then: { kind: 'real', value: 1 }, else_: { kind: 'real', value: 0 } })
+          : { kind: 'assign', target: svGet(nm('o'), i), value: el }], nm('n')),
         { kind: 'return', values: [nm('o')] },
       ],
     };
