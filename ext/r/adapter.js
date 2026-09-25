@@ -210,6 +210,16 @@ const FN_DEPS = new Map([
   ['r_diff', []],
   /* `rank`：并列取平均，所以要问"算不算同一格"（`r_same`）；缺失排在最后（`r_is_na`）。 */
   ['r_rank', ['r_is_na', 'r_same']],
+  /* 位运算那一族（`bitwAnd` …）。R 的整数是**32 位**的，而这一档的 `int` 是 64 位 ——
+     所以每一格进出都过一道 `r_bit_v`：出了 32 位就当场报（R 那边它是 `NA_integer_`，
+     而整数的缺失这一档还没有，见 SPEC 第四节第 11 条）。 */
+  ['r_bit_v', []],
+  ['r_bit_and', ['r_bit_v']],
+  ['r_bit_or', ['r_bit_v']],
+  ['r_bit_xor', ['r_bit_v']],
+  ['r_bit_not', ['r_bit_v']],
+  ['r_bit_shl', ['r_bit_v']],
+  ['r_bit_shr', ['r_bit_v']],
   ['r_head', []],
   ['r_tail', []],
   ['r_var', ['r_mean']],
@@ -750,6 +760,8 @@ const BUILTINS = new Set([
   'which.max', 'which.min', 'match', 'unique', 'duplicated',
   'union', 'intersect', 'setdiff', 'order', 'cumprod', 'cummax', 'cummin',
   'is.element', 'setequal', 'findInterval', 'median', 'rank',
+  /* 位运算那一族（只接标量，见 `r_bit_v` 那段 32 位的账）。 */
+  'bitwAnd', 'bitwOr', 'bitwXor', 'bitwNot', 'bitwShiftL', 'bitwShiftR',
   /* 串那一族。`tolower` 方言里没有算子（只有 `(supper …)`），由 `r_lower` 拿两张字母表
      查出来 —— **只管 ASCII**（见 SPEC 第四节第 12 条）。 */
   'toupper', 'tolower', 'substr', 'substring', 'trimws', 'sprintf', 'startsWith', 'endsWith',
@@ -1206,6 +1218,9 @@ function applyTy(fn, x, types) {
     /* `rank` 并列取平均 —— 出来的可能带小数（`rank(c(2,2,1))` 是 `2.5 2.5 1.0`），
        所以一律数值向量，不跟着进去那条是不是整数走。 */
     case 'rank': return RVEC;
+    /* 位运算那一族回一格 32 位整数（出了 32 位就当场报，见 `r_bit_v`）。 */
+    case 'bitwAnd': case 'bitwOr': case 'bitwXor': case 'bitwNot':
+    case 'bitwShiftL': case 'bitwShiftR': return INT;
     case 'append': case 'replace': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
       return isVecTy(t) ? t : RVEC;
@@ -3318,6 +3333,29 @@ function callOf(x, types, extra, want) {
         const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
         if (isStrVec(t) || t.kind === 'string') throw new Error(strvGap('rank'));
         return lglCall('r_rank', isVecTy(t) ? ev(0) : lglCall('r_vec1', asReal(ev(0), t)));
+      }
+      case 'bitwAnd': case 'bitwOr': case 'bitwXor': case 'bitwNot':
+      case 'bitwShiftL': case 'bitwShiftR': {
+        /**
+         * 位运算那一族。**只接标量** —— R 那边它们是逐元素的（`bitwAnd(c(1L,2L), 3L)`），
+         * 而那要再摆一层回收，所以向量进来当场报，不假装。
+         *
+         * 实参按 `as.integer` 收（`bitwAnd(12, 10)` 在 R 里也是 8）。
+         */
+        const one = fn === 'bitwNot';
+        const want = one ? 1 : 2;
+        if (n !== want) throw new Error(`r->IR: ${fn}() 要 ${want} 格实参（给了 ${n}）`);
+        const gen = {
+          bitwAnd: 'r_bit_and', bitwOr: 'r_bit_or', bitwXor: 'r_bit_xor',
+          bitwNot: 'r_bit_not', bitwShiftL: 'r_bit_shl', bitwShiftR: 'r_bit_shr',
+        }[fn];
+        const arg = (k) => {
+          const t = all[k] === null ? REAL : typeOfExpr(all[k], types);
+          if (isVecTy(t)) throw new Error(`r->IR: ${fn}() 只接标量（第 ${k + 1} 格是向量 —— 逐元素那一层还没接）`);
+          if (isStrVec(t) || t.kind === 'string') throw new Error(strvGap(fn));
+          return asIntE(ev(k), t);
+        };
+        return one ? lglCall(gen, arg(0)) : lglCall(gen, arg(0), arg(1));
       }
       case 'is.element': case 'setequal': case 'findInterval': {
         /**
@@ -7100,6 +7138,124 @@ function vecFnDecl(name) {
           body: [vecSet(out, i, b('-', vecGet(v, b('+', i, kk)), vecGet(v, i)))],
         },
         { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_bit_v') {
+    /**
+     * 位运算那一族的**32 位闸门**。R 的整数是 32 位的，这一档的 `int` 是 64 位 ——
+     * 于是"出了 32 位"这件事在 R 那边有值（`NA_integer_`）而在这儿没有。
+     *
+     * 量出来的两格：`bitwShiftL(1L, 31L)` R 印 `NA`（算出来正好是 `INT_MIN`，而
+     * `NA_INTEGER` **就是** `INT_MIN` —— 不是"溢出了报错"，是那个位型被占用了）、
+     * `bitwNot(2147483647L)` 同理。所以合法区间是 `[-2147483647, 2147483647]`，
+     * 出去了**当场报**，不给一个 R 不会给的数（那是静默答错）。
+     */
+    const xx = { kind: 'name', name: 'x' };
+    const lim = { kind: 'int', value: 2147483647 };
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'x', type: INT }],
+      ret: INT,
+      body: [
+        {
+          kind: 'if',
+          cond: b('||', b('>', xx, lim), b('<', xx, b('-', { kind: 'int', value: 0 }, lim))),
+          then: [{
+            kind: 'builtin-stmt',
+            name: 'fail',
+            args: [{
+              kind: 'string',
+              value: 'bitw*(): 出了 32 位 —— R 那边这一格是 NA_integer_（NA_INTEGER 就是 INT_MIN），'
+                + '而这一档还没有"带缺失的整数"（见 ext/r/SPEC.md 第四节第 11 条）',
+            }],
+          }],
+          else_: null,
+        },
+        { kind: 'return', values: [xx] },
+      ],
+    };
+  }
+  if (name === 'r_bit_and' || name === 'r_bit_or' || name === 'r_bit_xor') {
+    /** `bitwAnd` / `bitwOr` / `bitwXor`：两边都在 32 位里，结果也就在 32 位里。 */
+    const op = { r_bit_and: '&', r_bit_or: '|', r_bit_xor: '^' }[name];
+    const gate = (e) => ({ kind: 'call', fn: { kind: 'name', name: useFn('r_bit_v') }, args: [e] });
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'a', type: INT }, { name: 'c', type: INT }],
+      ret: INT,
+      body: [{
+        kind: 'return',
+        values: [gate(b(op, gate({ kind: 'name', name: 'a' }), gate({ kind: 'name', name: 'c' })))],
+      }],
+    };
+  }
+  if (name === 'r_bit_not') {
+    /** `bitwNot(x)` 就是 `x ^ -1`（方言的一元算符只有 `-` 与 `!` —— 没有 `~`）。 */
+    const gate = (e) => ({ kind: 'call', fn: { kind: 'name', name: useFn('r_bit_v') }, args: [e] });
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'a', type: INT }],
+      ret: INT,
+      body: [{
+        kind: 'return',
+        values: [gate(b('^', gate({ kind: 'name', name: 'a' }), { kind: 'int', value: -1 }))],
+      }],
+    };
+  }
+  if (name === 'r_bit_shl' || name === 'r_bit_shr') {
+    /**
+     * `bitwShiftL` / `bitwShiftR`：**移的是那 32 个位**，而这一档的 `int` 有 64 个 ——
+     * 所以两边都要自己摆：先 `& 0xFFFFFFFF` 取出那 32 位，移完再把第 31 位铺回符号
+     * （左移那一格），右移是**补零的**（量出来 `bitwShiftR(-1L, 1L)` 是 `2147483647`，
+     * 不是 `-1` —— 所以不能用方言的 `>>`，那是算术移位）。
+     *
+     * 位数不在 `0..31` 里时 R 回 `NA`，这儿当场报（同 `r_bit_v` 那段账）。
+     */
+    const a = { kind: 'name', name: 'a' };
+    const nn = { kind: 'name', name: 'n' };
+    const u = { kind: 'name', name: 'u' };
+    const M32 = { kind: 'int', value: 4294967295 };
+    const gate = (e) => ({ kind: 'call', fn: { kind: 'name', name: useFn('r_bit_v') }, args: [e] });
+    const shl = name === 'r_bit_shl';
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'a', type: INT }, { name: 'n', type: INT }],
+      ret: INT,
+      body: [
+        { kind: 'expr-stmt', expr: gate(a) },
+        {
+          kind: 'if',
+          cond: b('||', b('<', nn, { kind: 'int', value: 0 }), b('>', nn, { kind: 'int', value: 31 })),
+          then: [{
+            kind: 'builtin-stmt',
+            name: 'fail',
+            args: [{ kind: 'string', value: 'bitwShift*(): 位数不在 0..31 里 —— R 那边这一格是 NA_integer_，这一档没有那种值' }],
+          }],
+          else_: null,
+        },
+        /* 那 32 个位（`a` 是负数时这一步把符号位铺开的那些 1 收进 32 位里）。 */
+        {
+          kind: 'let',
+          name: 'u',
+          type: INT,
+          init: shl
+            ? b('&', b('<<', b('&', a, M32), nn), M32)
+            : b('>>', b('&', a, M32), nn),
+        },
+        /* 左移完第 31 位是 1 的话，那是个负数 —— 把上头 32 位补成 1（符号扩展）。
+           右移是补零的，结果一定非负，不必补。 */
+        ...(shl ? [{
+          kind: 'if',
+          cond: b('>=', u, { kind: 'int', value: 2147483648 }),
+          then: [{ kind: 'assign', target: u, value: b('-', u, { kind: 'int', value: 4294967296 }) }],
+          else_: null,
+        }] : []),
+        { kind: 'return', values: [gate(u)] },
       ],
     };
   }

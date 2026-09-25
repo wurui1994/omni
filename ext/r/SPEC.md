@@ -222,7 +222,6 @@ R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不�
 `3.323351` 而不是报错），那张表里就是 `gammafn` 加一行 `bump: 1`。
 
 ### 集合与位置那一族（判据 `ext/r/examples/setfn.R`）
-
 `match` / `%in%` / `unique` / `duplicated` / `union` / `intersect` / `setdiff` / `order` /
 `which.max` / `which.min` / `pmax` / `pmin` / `is.element` / `setequal` / `findInterval`。
 难的只有两问，都是 R 自己的规矩：
@@ -264,6 +263,25 @@ R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不�
 **`mean` 不在这一档**：R 的 `mean(1, 2)` 答的是 `1`（第二格是 `trim=`），所以它多给一格
 就当场报，不假装。`sort(x, decreasing = TRUE)` 是"升着排完倒过来"（相等的那几格在 double
 上分不出来，所以与 R 逐字节一致）。
+
+### 位运算那一族（判据 `ext/r/examples/bitw.R`）
+
+`bitwAnd` / `bitwOr` / `bitwXor` / `bitwNot` / `bitwShiftL` / `bitwShiftR`。
+方言那侧现成的：`& | ^ << >>`（都只对 int 成立），一元的 `~` **没有**（`un` 只有 `-`
+与 `!`），所以 `bitwNot` 借 `x ^ -1`。难的只有一件事 —— **R 的整数是 32 位的，而这一档
+的 `int` 是 64 位**，于是有三处不能照抄：
+
+* **右移是补零的**（logical），不是算术移位：`bitwShiftR(-1L, 1L)` 是 `2147483647`
+  而不是 `-1`。所以先 `& 0xFFFFFFFF` 取出那 32 位再移。
+* **左移**完第 31 位是 1 的话那是个负数，要把符号铺回去（`bitwShiftL(-1L, 1L)` 是 `-2`）。
+* `NA_INTEGER` **就是** `INT_MIN` —— 所以 `bitwShiftL(1L, 31L)` 在 R 里印 `NA`（算出来
+  正好是那个位型），`bitwNot(2147483647L)` 同理，位数不在 `0..31` 里也是 `NA`。
+  整数的缺失这一档还没有（见第四节第 11 条），所以那几格**当场报**（`(fail …)`）——
+  不给一个 R 不会给的数。合法区间因此是 `[-2147483647, 2147483647]`，进出各过一道闸门
+  （`r_bit_v`）。
+
+**只接标量**：R 那边这一族是逐元素的（`bitwAnd(c(1L,2L), 3L)`），那要再摆一层回收，
+向量进来当场报。实参按 `as.integer` 收（`bitwAnd(12, 10)` 在 R 里也是 8）。
 
 ### 字符向量：**另一种存法**（`(arr string)`）
 
