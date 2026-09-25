@@ -161,3 +161,23 @@ cat(sum(nk[c("a", "bb")]), "\n")
 # `names(v[按名字挑])` 那一格**当场报**（退到 libR）：找不着的那一格 R 给的是
 # `NA_character_`，这一层没有串的缺失 —— 名字那一行印的 `<NA>` 只是"印出来的样子"，
 # 当数据用会静默差一格。所以这儿不写那种形状。
+
+# `table(v)`（2026-09-26 接了）：值是计数、名字是那几个取值印出来的样子（`as.character`
+# 的 15 位口径）。取值那几格照 R 的 `factor(v)` = `sort(unique(v))`，所以 `NA` 跟着
+# `sort` 一起丢（R 缺省 `useNA = "no"`）。印法与带名字的向量同形，只差两处：前头**多空
+# 一行**（dimnames 的名字那一行，空的），零长那一档印 `< table of extent 0 >`。
+print(table(c(1, 1, 2)))
+print(table(c(3, 1, 2, 1, 3, 3)))
+print(table(c(TRUE, FALSE, TRUE)))
+print(table(c(10, 200, 10)))
+print(table(c(1.5, 1.5, 2)))
+print(table(c(1, NA, 1)))     # 缺失那一格不算
+print(table(numeric(0)))
+tb <- table(c(2, 2, 1))
+print(tb)
+print(names(tb))
+cat(sum(tb), length(tb), "\n")
+print(tb[1])
+for (k in names(tb)) cat(k, "")
+cat("\n")
+# 字符向量那一侧还没接（R 的 levels 要按 locale collation 排）—— 所以这儿不写。

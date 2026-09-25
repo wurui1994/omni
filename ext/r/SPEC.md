@@ -585,6 +585,19 @@ adapter 自己消化五件事（`ext/r/adapter.js` 文件头有账）：
    （见第二节那一小节）。这一格只能按形状分 —— 被 `c(…)` / `setNames(…)` / `numeric(…)`
    赋过的名字是向量，被 `list(…)` 赋过的是表。
 
+**`table(v)` 接了**（2026-09-26，判据在 `named.R` 末尾）：它出来的就是一条**带名字的向量**
+—— 值是计数、名字是那几个取值印出来的样子（`as.character` 的 15 位口径）。取值那几格照 R 的
+`factor(v)` = `sort(unique(v))`，所以 `NA` 跟着 `sort` 一起丢（R 缺省 `useNA = "no"`，
+量出来 `table(c(1,NA,1))` 只有 `1` 那一格）。
+
+印法只与带名字的向量差两处（量出来的）：**前头多空一行**（那是 dimnames 的名字那一行，
+没名字就是空的），零长那一档印 `< table of extent 0 >` 而不是 `named numeric(0)` ——
+所以类型上多带一个记号 `RTBL`（`adapter.js`），它**只在 `print` 那一处分岔**：
+`sum` / `length` / `names` / `[` 都当普通带名字的向量走。
+
+没接的两格：**字符向量**上的 `table`（R 的 levels 要按 locale collation 排，见第四节
+第 12 条 —— 只有按字节那一种的话是静默答错）、**两条以上实参**的交叉表（要二维那一层）。
+
 一格 `hooks` 都没有：`dset` / `dget` 与向量上的 `pload` / `pstore` 由 adapter 直接发
 （它知道类型），`cat` 落成一串 `write`（**不是 `print`**：方言的 `print` 自带换行，
 R 的 `cat` 不带，差一个字节就对不上 `Rscript`）。

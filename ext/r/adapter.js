@@ -263,6 +263,11 @@ const FN_DEPS = new Map([
   ['r_nm_keys', []],
   ['r_copy_str', []],
   ['r_copyv', []],
+  /* `table(v)`：值那侧数格子、名字那侧是取值印出来的样子；印法只差前头那一空行。 */
+  ['r_tab_cnt', ['r_sort', 'r_unique', 'r_same']],
+  ['r_tab_nm', ['r_sort', 'r_unique', 'r_num_str']],
+  ['r_tab_nml', ['r_sort', 'r_unique']],
+  ['r_print_tbl', ['r_print_named']],
   ['r_at_keys', ['r_na']],
   ['r_mask_str', ['r_is_na']],
   ['r_drop_na', ['r_is_na']],
@@ -580,6 +585,17 @@ const baseVarExpr = (e) => (e.mk !== undefined ? e.mk() : e.expr);
 const RNVEC = { kind: 'ptr', inner: REAL, named: true };
 /** `v > 1` 那一格：**带名字的逻辑向量**（R 也把名字带过去）。这一档印不出来 —— 当场报。 */
 const RNLGL = { kind: 'ptr', inner: REAL, lgl: true, named: true };
+/**
+ * **`table(v)` 出来的那一格**：值是计数、名字是那几个取值印出来的样子 —— 除了**印法**，
+ * 它与带名字的数值向量一模一样（存法照旧 `(ptr real)` + 影子变量里那条名字）。
+ *
+ * 为什么要一个自己的记号：R 印 `table` 会**先空一行**（那是 dimnames 的名字那一行，
+ * 没名字就是空的），零长那一档印的是 `< table of extent 0 >` 而不是 `named numeric(0)`
+ * —— 量出来的（`Rscript`，2026-09-26）。别的地方（`sum` / `length` / `names` / `[`）
+ * 它就是一条带名字的向量，所以这个记号只在 `print` 那一处分岔。
+ */
+const RTBL = { kind: 'ptr', inner: REAL, named: true, tbl: true };
+const isTblTy = (t) => t !== undefined && t !== null && t.kind === 'ptr' && t.tbl === true;
 /**
  * **整数向量**那个记号（`typeToSx` 看不见它，与 `lgl` / `named` 同一条路子）。
  *
@@ -923,7 +939,7 @@ const BUILTINS = new Set([
   /* 两条向量的那两格统计量（`var(x, y)` 与 `cov(x, y)` 是同一件事）。 */
   'cor', 'cov', 'quantile', 'zapsmall',
   /* 数格子、问缺失、插一段、换几格 —— 后两格与 `x[k] <- v` 同一套口径（见 `r_replace`）。 */
-  'tabulate', 'anyNA', 'append', 'replace',
+  'tabulate', 'anyNA', 'append', 'replace', 'table',
   /* 集合与位置那一族（见 `setFnDecl`）。`%in%` 是个算子，不在这张表里。 */
   'which.max', 'which.min', 'match', 'unique', 'duplicated',
   'union', 'intersect', 'setdiff', 'order', 'cumprod', 'cummax', 'cummin', 'anyDuplicated',
@@ -1166,6 +1182,19 @@ function namesExprOf(x, types) {
     else if (as.length >= 2) cnt = asIntE(exprOf(as[1], types), typeOfExpr(as[1], types));
     const h = useFn(fn === 'head' ? 'r_head_str' : 'r_tail_str');
     return { kind: 'call', fn: { kind: 'name', name: h }, args: [ns, cnt] };
+  }
+  /**
+   * `table(v)` 的名字那一条：那几个取值**印出来的样子**（R 的 levels 是
+   * `as.character(sort(unique(v)))`，15 位有效数字那一档）。逻辑那一侧是
+   * `"FALSE"` / `"TRUE"`，所以分两格函数。那条数据会**求值两遍**（与 `c(…)` 同一条账）。
+   */
+  if (fn === 'table') {
+    const as = posArgs(x);
+    if (as.length !== 1) return null;
+    const t = typeOfExpr(as[0], types);
+    const vec = isVecTy(t) ? exprOf(as[0], types) : lglCall('r_vec1', asReal(exprOf(as[0], types), t));
+    const h = useFn(isLglTy(t) || isLgl1(t) || t.kind === 'bool' ? 'r_tab_nml' : 'r_tab_nm');
+    return { kind: 'call', fn: { kind: 'name', name: h }, args: [vec] };
   }
   if (fn === 'setNames') {
     const as = posArgs(x);
@@ -1601,6 +1630,12 @@ function applyTy(fn, x, types) {
     }
     /* `duplicated` 回"这一格前面见过没有" —— **名字不跟着**（R 自己就丢，量出来的）。 */
     case 'duplicated': return RLGL;
+    /**
+     * `table(v)` —— 值是计数、名字是那几个取值印出来的样子（见 `RTBL`）。
+     * 字符向量那一侧还没接：R 的 levels 是 `sort(unique(x))`，而排串要 locale collation
+     * （见第四节第 12 条）—— 那一格由 `callOf` 报。
+     */
+    case 'table': return RTBL;
     /* `numeric(n)` 那一族：出一条零向量（`logical(n)` 是一条 FALSE 的逻辑向量）。
        `integer(n)` 的零长印 `integer(0)` —— 元素类型不一样。 */
     case 'numeric': case 'double': return RVEC;
@@ -2477,7 +2512,9 @@ const TBL_FNS = new Set([
   /* `names` / `setNames` / `unname` **已经接了一半**（见 `RNVEC`），所以它们不在这张表里
      —— 接不住的那几格由 `callOf` 自己报，报得比这条通用指路准。 */
   'data.frame', 'matrix', 'colnames', 'rownames', 'attr', 'attributes',
-  'nrow', 'ncol', 'dim', 'cbind', 'rbind', 'apply', 'aggregate', 'merge', 'table', 'factor',
+  /* `table` 2026-09-26 接了一格（数值/逻辑那一档，出一条带名字的向量）—— 所以它不在
+     这张表里了：接不住的那两格（字符向量、交叉表）由 `callOf` 自己报，报得准得多。 */
+  'nrow', 'ncol', 'dim', 'cbind', 'rbind', 'apply', 'aggregate', 'merge', 'factor',
 ]);
 function gapHint(fn) {
   if (PKG_FNS.has(fn)) {
@@ -4176,6 +4213,27 @@ function callOf(x, types, extra, want) {
         else if (n >= 2) kk = asIntE(ev(1), typeOfExpr(all[1], types));
         return kk === null ? lglCall('r_tab_a', vec) : lglCall('r_tabulate', vec, kk);
       }
+      case 'table': {
+        /**
+         * `table(v)` —— 数每个取值出现几次。值那一侧是计数（`r_tab_cnt`），名字那一侧是
+         * 那几个取值**印出来的样子**（`r_tab_nm` / `r_tab_nml`，见 `namesExprOf`）。
+         *
+         * 取值那几格照 R 的 `factor(v)`：`sort(unique(v))` —— 所以 `NA` 跟着 `sort` 一起
+         * 丢掉（R 的 `table` 缺省 `useNA = "no"`，量出来 `table(c(1,NA))` 只有 `1` 那一格）。
+         *
+         * **字符向量那一侧当场报**：R 的 levels 要按 locale collation 排（见第四节第 12 条），
+         * 这一档只有按字节那一种 —— 给一个"看着像排好了"的答案是静默答错。
+         * 两条以上实参（交叉表）也没接：那要二维那一层。
+         */
+        if (n !== 1) throw new Error(`r->IR: table() 这一档只接一格实参（给了 ${n}）—— 交叉表要二维那一层`);
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        if (isStrVec(t) || t.kind === 'string') {
+          throw new Error('r->IR: table() 在**字符向量**上还没接 —— R 的取值那几格要按 locale'
+            + ' collation 排（见 ext/r/SPEC.md 第四节第 12 条），这一档只有按字节那一种');
+        }
+        const vec = isVecTy(t) ? ev(0) : lglCall('r_vec1', asReal(ev(0), t));
+        return lglCall('r_tab_cnt', vec);
+      }
       case 'anyNA': {
         /** `anyNA(x)`：一格标量也认（摊成长度 1 的向量）。串那一侧没有 `NA`，所以报。 */
         if (n !== 1) throw new Error(`r->IR: anyNA() 要一格实参（给了 ${n}）`);
@@ -4824,6 +4882,11 @@ function printValStmt(node, types) {
         kind: 'expr-stmt',
         expr: lglCall('r_print_named_lgl', exprOf(node, types), ns),
       };
+    }
+    /* `table(v)` 那一格：版式与带名字的数值向量同形，只是前头多空一行、零长那一档印
+       `< table of extent 0 >`（见 `r_print_tbl`）。 */
+    if (isTblTy(t) && ns !== null) {
+      return { kind: 'expr-stmt', expr: lglCall('r_print_tbl', exprOf(node, types), ns) };
     }
     if (ns === null) {
       throw new Error('r->IR: print() 这一格带名字的向量印不出名字来 —— 名字那一条跟丢了'
@@ -5698,7 +5761,7 @@ function strFnDecl(name) {
 /** 这一批由 `strvFnDecl` 发（形状都是"一条 `(arr string)` 进"）。 */
 const STRV_FNS = new Set([
   'r_cat_str', 'r_print_str', 'r_join_str', 'r_rev_str', 'r_nchar_v', 'r_upper_v', 'r_lower_v',
-  'r_pick_str', 'r_mask_str', 'r_split', 'r_at_name', 'r_nm_at', 'r_sat1', 'r_nm_pos', 'r_nm_pick', 'r_nm_keys', 'r_copy_str',
+  'r_pick_str', 'r_mask_str', 'r_split', 'r_at_name', 'r_nm_at', 'r_sat1', 'r_nm_pos', 'r_nm_pick', 'r_nm_keys', 'r_copy_str', 'r_tab_nm', 'r_tab_nml',
   'r_gsub', 'r_gsub_v', 'r_grepl_v', 'r_grep_i', 'r_grep_s', 'r_rep_str', 'r_ifelse_s',
   'r_substr_v', 'r_trim_v', 'r_starts_v', 'r_ends_v',
   /* base 那四条字符向量常量 + `strrep` 在字符向量上那一格。 */
@@ -5713,7 +5776,7 @@ const SET_FNS = new Set([
   'r_same', 'r_which_max', 'r_which_min', 'r_cumprod', 'r_pmax', 'r_pmin',
   'r_ord_lt', 'r_order', 'r_match', 'r_in_v', 'r_in1', 'r_unique', 'r_dup', 'r_any_dup',
   'r_union', 'r_intersect', 'r_setdiff', 'r_setequal', 'r_find_int',
-  'r_na_v', 'r_nan_v', 'r_fin_v', 'r_inf_v', 'r_nm_sort', 'r_at1', 'r_at_keys',
+  'r_na_v', 'r_nan_v', 'r_fin_v', 'r_inf_v', 'r_nm_sort', 'r_at1', 'r_at_keys', 'r_tab_cnt',
 ]);
 
 /**
@@ -6008,6 +6071,36 @@ function setFnDecl2(name) {
         }]),
         iff(b('>', nm('i'), nm('n')), [ret(cal('r_na'))]),
         ret(vecGet(v, b('-', nm('i'), I(1)))),
+      ],
+    };
+  }
+  if (name === 'r_tab_cnt') {
+    /**
+     * `table(v)` 的**值**那一侧：每个取值出现几次。
+     *
+     * 取值那几格照 R 的 `factor(v)`：`sort(unique(v))` —— `sort` 自己把 `NA` 丢掉
+     * （R 的 `table` 缺省 `useNA = "no"`，量出来 `table(c(1,NA))` 只有 `1` 那一格）。
+     * "算不算同一格"走 `r_same`（与 `unique` 同一条），所以 `NaN` 那一格也对得上。
+     */
+    const u = nm('u');
+    return {
+      kind: 'fn',
+      name,
+      params: P1,
+      ret: RVEC,
+      body: [
+        { kind: 'let', name: 'u', type: RVEC, init: cal('r_sort', cal('r_unique', v)) },
+        letI('k', vecLen(u)),
+        letI('n', vecLen(v)),
+        ...vecNewAs('o', nm('k')),
+        forTo('j', nm('k'), [
+          letI('c', I(0)),
+          forTo('i', nm('n'), [
+            iff(same(vecGet(v, i), vecGet(u, j)), [set('c', b('+', nm('c'), I(1)))]),
+          ]),
+          vecSet(o, j, call1('toreal', nm('c'))),
+        ]),
+        ret(o),
       ],
     };
   }
@@ -6656,6 +6749,50 @@ function strvFnDecl(name) {
           }]),
         ], nm('n')),
         { kind: 'return', values: [val ? lglCall('r_na') : S('<NA>')] },
+      ],
+    };
+  }
+  if (name === 'r_tab_nm' || name === 'r_tab_nml') {
+    /**
+     * `table(v)` 的**名字**那一侧：那几个取值印出来的样子（R 的 levels 是
+     * `as.character(sort(unique(v)))`）。数那一档走 `r_num_str` 的 **15 位**口径
+     * （`as.character` 的口径，不是 `print` 的 7 位）；逻辑那一档是 `"FALSE"` / `"TRUE"`。
+     *
+     * 收的是一条**数值**向量（逻辑向量在这一层也是 double），所以两格都在这儿。
+     */
+    const u = nm('u');
+    const one = name === 'r_tab_nm'
+      ? {
+        kind: 'call',
+        fn: { kind: 'name', name: useFn(NUM_STR) },
+        args: [vecGet(u, i), I(15)],
+      }
+      : {
+        kind: 'ternary',
+        cond: b('!=', vecGet(u, i), { kind: 'real', value: 0 }),
+        then: S('TRUE'),
+        else_: S('FALSE'),
+      };
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RVEC }],
+      ret: RSTRV,
+      body: [
+        {
+          kind: 'let',
+          name: 'u',
+          type: RVEC,
+          init: {
+            kind: 'call',
+            fn: { kind: 'name', name: useFn('r_sort') },
+            args: [{ kind: 'call', fn: { kind: 'name', name: useFn('r_unique') }, args: [nm('v')] }],
+          },
+        },
+        letI('n', vecLen(u)),
+        { kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), I(0)) },
+        loop([{ kind: 'builtin-stmt', name: 'apush', args: [nm('o'), one] }], nm('n')),
+        { kind: 'return', values: [nm('o')] },
       ],
     };
   }
@@ -7634,6 +7771,35 @@ function printFnDecl(name) {
     iff(b('&&', nm('hasni'), b('<', nm('w'), I(4))), [set('w', I(4))]),
   ];
 
+  if (name === 'r_print_tbl') {
+    /**
+     * `print(table(v))` —— 与带名字的数值向量**同一个版式**，只差两处（量出来的，
+     * `Rscript`，2026-09-26）：
+     *
+     *   * 前头**多空一行** —— 那是 dimnames 的名字那一行，没名字就是空的；
+     *   * 零长那一档印 `< table of extent 0 >`，不是 `named numeric(0)`。
+     *
+     * 所以这一格只管这两件事，两行本身交给 `r_print_named`（一份实现，别抄第二遍）。
+     */
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RVEC }, { name: 'ns', type: RSTRV }],
+      ret: { kind: 'void' },
+      body: [
+        letI('n', vecLen(v)),
+        iff(b('==', nm('n'), I(0)), [
+          wr(S('< table of extent 0 >\n')),
+          { kind: 'return', values: [] },
+        ]),
+        wr(S('\n')),
+        {
+          kind: 'expr-stmt',
+          expr: lglCall('r_print_named', v, nm('ns'), S('named numeric(0)')),
+        },
+      ],
+    };
+  }
   if (name === 'r_print_named_lgl') {
     /**
      * **带名字的逻辑向量**：名字一行、真假一行，两行共用一个宽
@@ -9994,7 +10160,7 @@ function vecFnDecl(name) {
   if (SET_FNS.has(name)) return setFnDecl(name);
   if (name === 'r_sci') return sciFnDecl();
   if (name === 'r_num_fmt' || name === 'r_print_num' || name === 'r_print_lgl'
-      || name === 'r_print_named' || name === 'r_print_named_lgl') {
+      || name === 'r_print_named' || name === 'r_print_named_lgl' || name === 'r_print_tbl') {
     return printFnDecl(name);
   }
   if (name === NUM_STR) return numStrDecl();
