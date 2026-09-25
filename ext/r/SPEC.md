@@ -945,6 +945,22 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
     `(slen …) 的第一个参数要是 string，这里是 real` —— 那时已经过了换档那道门，
     libR 接不上，一个答案都拿不到。
 
+    同一条账还有两格（都是 2026-09-26 补的）：
+    * `substr` / `substring` 的**起止只接一格标量** —— R 那边 `substring("hello", 1:3, 3:5)`
+      是把起止两条一起回收（出三格串），这一档还没接。从前落成 `(toint <一条向量>)`，
+      撞的是方言那句 `(toint E) 的参数要是 real，这里是 real*`。
+    * `c("a", NA)` 在 R 里是 `NA_character_`，这一层没有串的缺失 —— 写着 `NA` / `NaN`
+      的那一档当场报（从前它变成串 `"NA"`：R 印 `[1] "a" NA `、这儿印 `[1] "a"  "NA"`，
+      **静默差一对引号**）。运行期才知道是 `NA` 的（`c("a", x)`）拦不住，留着这一格。
+
+    **`.Machine` 接了**（2026-09-26）：R 里它是一张 list，这一档把它当**常量**落
+    （`MACHINE` 那张表：`integer.max` / `double.eps` / `double.xmax` / `double.xmin`，
+    值是量出来的、`%.17g` 逐位相同；`integer.max` 是**整数**那一格）。不落成表的理由是
+    "只读不写的名字"会被推成一格**空 dict**，于是 `.Machine$integer.max` 运行期报
+    `key not found`（方言的话，而且过了换档那道门）。表外的键当场报 —— 退到 libR。
+    顺带记一格还没补的：**任何"只读不写"的表名**都有那个毛病（`cfg$a` 而 `cfg` 从没赋过值
+    时落空 dict）—— `.Machine` 是它最常见的一张脸，别的还没拦。
+
 13. `identical()` **没接，而且不是"还没写"那种没接** —— 它要的是"两条向量的
     `typeof` 一不一样"，而这一档**分不出 R 的 integer 向量与 double 向量**：
     `c(1, 2, 3)` 与 `c(1L, 2L, 3L)` 在 `typeOfExpr` 里都落成 `RVEC`（那个 `case 'c'`

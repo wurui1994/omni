@@ -394,6 +394,26 @@ const BOOL = { kind: 'bool' };
 const arrOf = (value) => ({ kind: 'arr', elem: value });   /* 只给字典的值类型用了 */
 /** R 的 `list` 带名字用就是关联表 —— 键一律是串。 */
 const dictOf = (value) => ({ kind: 'map', key: STR, value });
+/**
+ * **`.Machine`** —— base 里那一格"这台机器的浮点参数"。R 里它是一张 list，可这一档把它当
+ * **常量**落：键是编译期看得见的，值照 R 自己的答案抄（量出来的，`Rscript`，2026-09-26；
+ * `%.17g` 印出来逐位相同）。
+ *
+ * 不落成表有两个理由：一是表那条路会让"只读不写的名字"落成一格**空 dict**，于是
+ * `.Machine$integer.max` 运行期报 `key not found`（方言的话，而且已经过了换档那道门）；
+ * 二是 `integer.max` 在 R 里是**整数**，与别的三格不同 —— 类型上要分得开。
+ *
+ * 表外的键当场报：R 那张 list 有二十多格（`double.digits` / `longdouble.*` …），
+ * 这儿只接量过的这四格，别的退到 libR。
+ */
+const MACHINE = new Map([
+  ['integer.max', { type: INT, node: { kind: 'int', value: 2147483647 } }],
+  ['double.eps', { type: REAL, node: { kind: 'real', value: 2.220446049250313e-16 } }],
+  ['double.xmax', { type: REAL, node: { kind: 'real', value: 1.7976931348623157e+308 } }],
+  ['double.xmin', { type: REAL, node: { kind: 'real', value: 2.2250738585072014e-308 } }],
+]);
+/** 这一格 `$` 是不是 `.Machine$…`（左边写着那个名字）。 */
+const isMachine = (l) => isList(l) && tag(l) === 'sym' && nameOf(l) === '.Machine';
 
 /**
  * R 的名字规整成方言收得下的形状：`.` 是 R 里合法的名字字符（`is.null` / `max.2`），
@@ -629,6 +649,25 @@ const svLen = (v) => call1('alen', v);
  */
 const strvGap = (fn) => `r->IR: ${fn}() 在字符向量上还没接`
   + '（排序要 R 的 locale collation、其余几格要"按下标挑"那一层，见 ext/r/SPEC.md 第四节第 12 条）';
+/**
+ * `substr` / `substring` 的**起止只接一格标量**。
+ *
+ * R 那边 `substring("hello", 1:3, 3:5)` 是把起止两条一起回收（出三格串），
+ * 而这一档的 `r_substr` / `r_substr_v` 收的是两格 int。从前没拦：那两格会落成
+ * `(toint <一条向量>)`，于是一路走到 `.sx` 才撞上方言那句
+ * `(toint E) 的参数要是 real，这里是 real*` —— 那是**方言**的话，而且已经过了换档那道门，
+ * libR 接不上，一个答案都拿不到。在这儿报就退到 libR，答案是对的。
+ */
+function substrScalarPos(fn, all, types) {
+  for (const k of [1, 2]) {
+    if (all[k] === undefined || all[k] === null) continue;
+    const t = typeOfExpr(all[k], types);
+    if (isVecTy(t) || isStrVec(t)) {
+      throw new Error(`r->IR: ${fn}() 的起止只接一格标量（给了一条向量）——`
+        + ' R 那边把起止两条一起回收（`substring("hello", 1:3, 3:5)` 出三格串），这一档还没接');
+    }
+  }
+}
 /** 第 i 格元素的地址（`i` 从 0 数，所以要 +1 跳过长度那一格）。 */
 const vecAt = (v, i) => call1('padd', v, i.kind === 'int'
   ? { kind: 'int', value: i.value + 1 }
@@ -1176,6 +1215,9 @@ function dictNames(x, out = new Set(), vecs = new Set()) {
   }
   for (const k of kids(x)) dictNames(k, out, vecs);
   for (const nv of vecs) out.delete(nv);
+  /* `.Machine` 不是一张表 —— 它是 base 里那一格常量（见 `MACHINE`），单独落。
+     留在这儿的话会白开一格空 dict，而且 `$` 会落成 `dget`（运行期"key not found"）。 */
+  out.delete('.Machine');
   return out;
 }
 
@@ -1270,6 +1312,12 @@ function typeOfExpr(x, types) {
       const op = String(leaf(kids(x)[0]));
       /* `m$k` —— 表上按名字取（那张表的值类型就是它的类型）。 */
       if (op === '$') {
+        if (isMachine(kids(x)[1])) {
+          const k = dollarKey(x);
+          const m = MACHINE.get(k);
+          if (m === undefined) throw new Error(`r->IR: .Machine$${k} 还没接（只接量过的那四格）`);
+          return m.type;
+        }
         const d = typeOfExpr(kids(x)[1], types);
         return d !== undefined && d.kind === 'map' ? d.value : INT;
       }
@@ -3132,6 +3180,16 @@ function exprOf(x, types, want) {
            那几档都没有（见 SPEC §4 第 4 条），所以只接"左边是一张表"这一种。
            R 的 `$` 还会**部分匹配**（`cfg$to` 能取到 `tol`）—— 这儿不做，写全名。 */
         if (op === '$') {
+          /* `.Machine$…` 是 base 的常量，不走表那条路（见 `MACHINE`）。 */
+          if (isMachine(l)) {
+            const k = dollarKey(x);
+            const m = MACHINE.get(k);
+            if (m === undefined) {
+              throw new Error(`r->IR: .Machine$${k} 还没接 —— 只接量过的那四格`
+                + '（integer.max / double.eps / double.xmax / double.xmin）');
+            }
+            return m.node;
+          }
           const dt = typeOfExpr(l, types);
           if (dt === undefined || dt.kind !== 'map') {
             throw new Error(`r->IR: \`$\` 只接"左边是一张表（\`list(名字 = 值)\`）"那一种`
@@ -3741,6 +3799,20 @@ function callOf(x, types, extra, want) {
           all.forEach((a, i) => {
             const t = a === null ? REAL : typeOfExpr(a, types);
             if (!isStrVec(t)) {
+              /**
+               * **`c("a", NA)` 在 R 里是 `NA_character_`，不是串 `"NA"`。**
+               * 印出来差一对引号（R 印 `[1] "a" NA `，这儿会印 `[1] "a"  "NA"`）——
+               * 静默差。这一层没有串的缺失（第四节第 3 条），所以写着 `NA` / `NaN`
+               * 的那一档在这儿**当场报**，退到 libR 答案是对的。
+               * 运行期才知道是 `NA` 的（`c("a", x)` 里 x 是 NA）拦不住 —— 明写在 SPEC。
+               */
+              if (a !== null && tag(a) === 'num') {
+                const txt = String(leaf(kids(a)[0]));
+                if (txt === 'NA' || txt === 'NA_real_' || txt === 'NaN') {
+                  throw new Error('r->IR: `c("串", NA)` 收出来的是 `NA_character_`，'
+                    + '这一层没有串的缺失（写着的 `NA` 会变成串 `"NA"`，印出来差一对引号）');
+                }
+              }
               stmts.push({
                 kind: 'builtin-stmt',
                 name: 'apush',
@@ -4527,6 +4599,7 @@ function callOf(x, types, extra, want) {
            （方言的 `(ssub S I N)` 是 0 起 + 长度，越界当场报）—— 所以走生成出来的那格函数。
            字符向量那一档逐元素（另一格辅助函数，`(arr string)` 与串是两种存法）。 */
         if (n !== 3) throw new Error(`r->IR: substr() 要三格实参（给了 ${n}）`);
+        substrScalarPos('substr', all, types);
         const vec = all[0] !== null && isStrVec(typeOfExpr(all[0], types));
         return lglCall(vec ? 'r_substr_v' : 'r_substr', ev(0),
           asIntE(ev(1), typeOfExpr(all[1], types)), asIntE(ev(2), typeOfExpr(all[2], types)));
@@ -4535,6 +4608,7 @@ function callOf(x, types, extra, want) {
         /* `substring(s, first, last = 1000000L)` —— 与 `substr` 同一格函数，只是 `last`
            可以不给（R 的默认就是那个大数）。字符向量那一档也逐元素。 */
         if (n < 2 || n > 3) throw new Error(`r->IR: substring() 接两格或三格实参（给了 ${n}）`);
+        substrScalarPos('substring', all, types);
         const last = n === 3
           ? asIntE(ev(2), typeOfExpr(all[2], types))
           : { kind: 'int', value: 1000000 };

@@ -127,3 +127,15 @@ print(zapsmall(c(-1e-18, 5)))
 print(zapsmall(c(123.456789, 0.000001)))
 print(zapsmall(c(1, 2, 3)))
 print(zapsmall(c(1.5e-8, 2)))
+
+# `.Machine` —— base 里那格"这台机器的浮点参数"（2026-09-26 接了）。R 里它是一张 list，
+# 这一档把它当**常量**落：键编译期就看得见，值照 R 自己的答案抄（`%.17g` 逐位相同）。
+# 从前它会落成一格**空 dict**，于是 `.Machine$integer.max` 运行期报 `key not found`
+# —— 方言的话，而且那时已经过了换档那道门。表外的键（`double.digits` …）退到 libR。
+print(.Machine$integer.max)
+print(.Machine$double.eps)
+cat(sprintf("%.17g", .Machine$double.eps), "\n")
+cat(sprintf("%.17g", .Machine$double.xmax), "\n")
+cat(sprintf("%.17g", .Machine$double.xmin), "\n")
+print(1 + .Machine$double.eps > 1)
+print(1 + .Machine$double.eps / 2 > 1)
