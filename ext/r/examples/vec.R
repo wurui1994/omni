@@ -104,3 +104,26 @@ print(w[-k])
 cat(length(w[-1]), "\n")
 zz <- c(TRUE, FALSE, TRUE)
 print(zz[-1])
+
+# **越界写就接长**（R：空档是 `NA`）。接长要换一格指针，所以只在左边是一个名字时接 ——
+# 而 R 的赋值本来就是值语义，换指针没人看得见。名字那一条跟着长，新格是空串。
+ex <- c(1, 2)
+ex[5] <- 9
+print(ex)
+cat(length(ex), "\n")
+ex[3] <- 7
+print(ex)
+ex[6] <- 0
+print(ex)
+ex2 <- c(1)
+ex2[2] <- 2
+ex2[4] <- 4
+print(ex2)
+cat(sum(ex2, na.rm = TRUE), "\n")
+j <- 7
+ex2[j] <- 70
+print(ex2)
+enm <- c(a = 1, b = 2)
+enm[4] <- 40
+print(enm)
+print(names(enm))

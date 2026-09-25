@@ -163,6 +163,9 @@ const LGL_FNS = new Set([
  */
 const FN_DEPS = new Map([
   ['r_na', []],
+  /* `x[k] <- v` 里 k 超长时接长那两格（值那条填 NA、名字那条填空串）。 */
+  ['r_ext', ['r_na']],
+  ['r_ext_nm', []],
   ['r_is_na', []],
   ['r_is_nan', []],
   ['r_num_str', ['r_is_na', 'r_is_nan', 'r_sci']],
@@ -3932,8 +3935,51 @@ function assignOf(x, types) {
       return { kind: 'builtin-stmt', name: 'dset', args: [o, exprOf(keys[0], types), v2] };
     }
     if (isVecTy(ot)) {
-      return vecSet(o, zeroBased(exprOf(keys[0], types), typeOfExpr(keys[0], types)),
-        asReal(exprOf(value, types), typeOfExpr(value, types)));
+      const kv = exprOf(keys[0], types);
+      const kt = typeOfExpr(keys[0], types);
+      const val = asReal(exprOf(value, types), typeOfExpr(value, types));
+      /* **越界就接长**（R 的口径：`x <- c(1,2); x[5] <- 9` 之后 `x` 是 `1 2 NA NA 9`）。
+       *
+       * 只在左边是**一个名字**的时候接：接长要换一格指针，而换指针就得重新绑到那个变量上，
+       * 而"能重新绑"这件事只有名字有（`m$v[i] <- 3` 那种左边不是一格可赋的东西）。
+       * 别的形状照旧直接写 —— 越界由运行期的指针边界检查报，不静默。
+       *
+       * 下标要**先存进一格 int**：它要用两遍（接长那一句与写那一句），而它可能是个
+       * 带副作用的表达式（`x[f()] <- 1`）。 */
+      if (tag(obj) === 'sym') {
+        const vn = mangle(nameOf(obj));
+        const tmp = fresh('ix');
+        const kk = { kind: 'name', name: tmp };
+        const vr = { kind: 'name', name: vn };
+        /* 下标在 R 里是 1 起的，`r_ext` 与 `vecAt` 都按这个口径收 —— 所以这儿存的是
+           **1 起的 int**（下标是 double 时截一次）。 */
+        const out = [
+          {
+            kind: 'let',
+            name: tmp,
+            type: INT,
+            init: kt !== undefined && kt.kind === 'real' ? call1('toint', kv) : kv,
+          },
+          {
+            kind: 'assign',
+            target: vr,
+            value: { kind: 'call', fn: { kind: 'name', name: useFn('r_ext') }, args: [vr, kk] },
+          },
+        ];
+        /* 名字那一条跟着长（R：新格的名字是空串）。没名字的向量上这一句发不出来。 */
+        if (isNamedTy(ot)) {
+          const nr = { kind: 'name', name: nmVar(vn) };
+          out.push({
+            kind: 'assign',
+            target: nr,
+            value: { kind: 'call', fn: { kind: 'name', name: useFn('r_ext_nm') }, args: [nr, kk] },
+          });
+        }
+        /* 写。`vecSet` 收的是 0 起的下标，所以这儿把 1 起的减回去。 */
+        out.push(vecSet(vr, b('-', kk, { kind: 'int', value: 1 }), val));
+        return { kind: 'block', stmts: out };
+      }
+      return vecSet(o, zeroBased(kv, kt), val);
     }
     /* 字符向量的元素写（`labels[2] <- "x"`）。**越界不会现长** —— R 那边
        `labels[n+1] <- s` 会把向量接长，这儿是 `(aset …)`，越界当场报（明写在 SPEC）。 */
@@ -6607,6 +6653,76 @@ function vecFnDecl(name) {
           body: [vecSet(out, i, b('-', vecGet(v, b('+', i, { kind: 'int', value: 1 })), vecGet(v, i)))],
         },
         { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_ext') {
+    /**
+     * `x[k] <- v` 里 `k` 超出长度时把向量**接长到 k 格**，空档填 `NA`（R 的口径）。
+     *
+     * 回的是"该用哪一格向量"：够长就原样回 `v`（**一个字节都不拷**，这条路最常走），
+     * 不够才开一格新的、把老的抄过去、空档写 `NA`。调用方拿回值重新绑到那个变量上 ——
+     * R 的赋值本来就是值语义（写一格会整份复制），所以换一格指针不会让别人看见。
+     *
+     * 为什么空档要显式写 `NA`：`vecNewAs` 开出来的内存**不保证是零**（`r_zeros`
+     * 那一格的注释也记着这件事），而且 R 那边空档是 `NA` 而不是 0 —— 少这一趟就是
+     * `x <- c(1,2); x[5] <- 9; print(x)` 印出一串垃圾。
+     */
+    const out = { kind: 'name', name: 'o' };
+    const kk = { kind: 'name', name: 'k' };
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RVEC }, { name: 'k', type: INT }],
+      ret: RVEC,
+      body: [
+        declLen(),
+        { kind: 'if', cond: b('<=', kk, len), then: [{ kind: 'return', values: [v] }], else_: null },
+        ...vecNewAs('o', kk),
+        {
+          kind: 'for',
+          init: { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
+          cond: b('<', i, kk),
+          post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
+          body: [{
+            kind: 'if',
+            cond: b('<', i, len),
+            then: [vecSet(out, i, vecGet(v, i))],
+            else_: [vecSet(out, i, { kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] })],
+          }],
+        },
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_ext_nm') {
+    /**
+     * 名字那一条跟着长：接到 `k` 格，新格是**空串**（R 的口径 ——
+     * `x <- c(a=1); x[3] <- 5; names(x)` 是 `"a" "" ""`）。
+     *
+     * 名字住在 `(arr string)` 里（可增长），所以这儿是 `apush` 而不是重新开一格。
+     * 名字是**空的**（长度 0 —— 那个向量本来没名字）就什么都不做：R 那边也不会
+     * 因为一次下标写就给整份向量凭空造出一串空名字。
+     */
+    const ns = { kind: 'name', name: 'ns' };
+    const kk = { kind: 'name', name: 'k' };
+    const nn = { kind: 'name', name: 'n' };
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'ns', type: RSTRV }, { name: 'k', type: INT }],
+      ret: RSTRV,
+      body: [
+        { kind: 'let', name: 'n', type: INT, init: call1('alen', ns) },
+        { kind: 'if', cond: b('==', nn, { kind: 'int', value: 0 }), then: [{ kind: 'return', values: [ns] }], else_: null },
+        {
+          kind: 'for',
+          init: { kind: 'let', name: 'i', type: INT, init: nn },
+          cond: b('<', i, kk),
+          post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
+          body: [{ kind: 'builtin-stmt', name: 'apush', args: [ns, { kind: 'string', value: '' }] }],
+        },
+        { kind: 'return', values: [ns] },
       ],
     };
   }
