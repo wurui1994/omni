@@ -650,10 +650,13 @@ const NAME_KEEP_NUM = new Set([
   'abs', 'sqrt', 'exp', 'log', 'log2', 'log10', 'floor', 'ceiling', 'trunc',
   'round', 'signif', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
   'sinh', 'cosh', 'tanh', 'cumsum', 'cumprod', 'cummax', 'cummin', 'zapsmall',
+  /* `rank` 也是"位置不动"那一批（量出来 R 把名字带过去）。 */
+  'rank',
 ]);
 /* `NAME_KEEP` 只管那道门（`callOf` 里"名字跟不住就报"那一句）：这几格的名字跟得住。
    `c` 也在里头 —— 它的名字是**接起来**而不是原样跟着（见 `namesExprOf` 的 `c` 那一格）。 */
-const NAME_KEEP = new Set([...NAME_KEEP_LGL, ...NAME_KEEP_NUM, 'rev', 'head', 'tail', 'sort', 'c']);
+const NAME_KEEP = new Set([...NAME_KEEP_LGL, ...NAME_KEEP_NUM,
+  'rev', 'head', 'tail', 'sort', 'c', 'diff', 'which.max', 'which.min']);
 /** 第 i 格（0 起）。方言的 `{kind:'index'}` 落成 `(aget …)`，赋值那侧落 `(aset …)`。 */
 const svGet = (v, i) => ({ kind: 'index', obj: v, index: i });
 const svLen = (v) => call1('alen', v);
@@ -1196,6 +1199,37 @@ function namesExprOf(x, types) {
     const h = useFn(isLglTy(t) || isLgl1(t) || t.kind === 'bool' ? 'r_tab_nml' : 'r_tab_nm');
     return { kind: 'call', fn: { kind: 'name', name: h }, args: [vec] };
   }
+  /**
+   * `diff(v, lag)` —— 名字那一条**丢掉前 `lag` 格**（量出来 `diff(c(a=3,bb=1,ccc=2))`
+   * 的名字是 `bb ccc`）：出来的第 i 格是 `v[i+lag] - v[i]`，R 拿**后面那一格**的名字。
+   * 所以就是 `tail(names, n - lag)`。
+   *
+   * `which.max` / `which.min` —— 回的是位置，R 连那一格的名字一起回（长度 1）。
+   * 名字那一条按那个位置挑一格（`r_nm_pick` 收的是"1 起的下标向量"）。
+   * 那一格位置因此**算两遍**（值那侧一遍、名字那侧一遍）—— 与 `c(…)` 同一条账。
+   */
+  if (fn === 'diff' || fn === 'which.max' || fn === 'which.min') {
+    const as = posArgs(x);
+    if (as.length < 1) return null;
+    const ns = namesExprOf(as[0], types);
+    if (ns === null) return null;
+    if (fn === 'diff') {
+      const lagArg = namedArg(x, 'lag');
+      let lag = { kind: 'int', value: 1 };
+      if (lagArg !== undefined) lag = asIntE(exprOf(lagArg, types), typeOfExpr(lagArg, types));
+      else if (as.length >= 2) lag = asIntE(exprOf(as[1], types), typeOfExpr(as[1], types));
+      const nv = fresh('dn');
+      const keep = b('-', svLen({ kind: 'name', name: nv }), lag);
+      return {
+        kind: 'block-expr',
+        stmts: [{ kind: 'let', name: nv, type: RSTRV, init: ns }],
+        value: { kind: 'call', fn: { kind: 'name', name: useFn('r_tail_str') }, args: [{ kind: 'name', name: nv }, keep] },
+      };
+    }
+    const pos = lglCall('r_vec1', call1('toreal',
+      lglCall(fn === 'which.max' ? 'r_which_max' : 'r_which_min', exprOf(as[0], types))));
+    return { kind: 'call', fn: { kind: 'name', name: useFn('r_nm_pick') }, args: [ns, pos] };
+  }
   if (fn === 'setNames') {
     const as = posArgs(x);
     if (as.length !== 2) throw new Error(`r->IR: setNames() 要两格实参（给了 ${as.length}）`);
@@ -1582,6 +1616,9 @@ function applyTy(fn, x, types) {
     }
     case 'cumsum': case 'diff': case 'cumprod': case 'cummax': case 'cummin': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
+      /* `diff` 也把名字带过去（丢掉前 `lag` 格 —— 见 `namesExprOf`）。累加那几格在
+         `NAME_KEEP_NUM` 里，上头已经答过了，所以这儿只剩 `diff` 要看一眼。 */
+      if (isNamedTy(t)) return RNVEC;
       return isIvecTy(t) ? RIVEC : RVEC;
     }
     /* `tabulate` 数的是"几次"，所以回**整数向量**（零长印 `integer(0)`）；
@@ -1618,7 +1655,13 @@ function applyTy(fn, x, types) {
     case 'range': case 'seq': return RVEC;
     /* 集合与位置那一族：位置回一格 int，别的回向量（`duplicated` 回逻辑向量）。
        `match` / `order` 回的是**位置**，所以是整数向量；三格集合运算跟着进去的那条走。 */
-    case 'which.max': case 'which.min': return INT;
+    /* `which.max` / `which.min` 回的是**位置**。带名字的向量上 R 连那一格的名字一起回
+       （量出来 `which.max(c(a=3,b=1))` 印 `a` 一行、`1` 一行）—— 所以那一档出的是
+       一条长度 1 的带名字的向量，不是一格 int（见 `namesExprOf`）。 */
+    case 'which.max': case 'which.min': {
+      const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
+      return isNamedTy(t) ? RNVEC : INT;
+    }
     /* `anyDuplicated` 回的是**位置**（没有就 0）—— 一格 int。 */
     case 'anyDuplicated': return INT;
     case 'match': case 'order': return RIVEC;
@@ -4469,6 +4512,11 @@ function callOf(x, types, extra, want) {
           duplicated: 'r_dup', order: 'r_order', cumprod: 'r_cumprod',
           cummax: 'r_cummax', cummin: 'r_cummin',
         }[fn];
+        /* 带名字的向量上的 `which.max` / `which.min`：R 连那一格的名字一起回，所以出的是
+           一条**长度 1** 的向量（名字那一条在 `namesExprOf` 里挑，见那儿）。 */
+        if (isNamedTy(t) && (fn === 'which.max' || fn === 'which.min')) {
+          return lglCall('r_vec1', call1('toreal', lglCall(gen, ev(0))));
+        }
         return lglCall(gen, ev(0));
       }
       case 'match': case 'union': case 'intersect': case 'setdiff': {

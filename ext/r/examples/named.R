@@ -181,3 +181,16 @@ print(tb[1])
 for (k in names(tb)) cat(k, "")
 cat("\n")
 # 字符向量那一侧还没接（R 的 levels 要按 locale collation 排）—— 所以这儿不写。
+
+# 又三格名字（2026-09-26）：`rank` 位置不动所以原样跟着；`diff` **丢掉前 lag 格**
+# （出来第 i 格是 `v[i+lag] - v[i]`，R 拿后面那一格的名字）；`which.max` / `which.min`
+# 回的是位置，而 R 连那一格的名字一起回 —— 所以出来是一条**长度 1** 的带名字的向量。
+dv <- c(a = 3, bb = 1, ccc = 2)
+print(rank(dv))
+print(diff(dv))
+print(diff(dv, lag = 2))
+print(names(diff(dv)))
+print(which.max(dv))
+print(which.min(dv))
+print(diff(c(a = 1, b = 2, c = 4, d = 8)))
+cat(sum(diff(dv)), "\n")
