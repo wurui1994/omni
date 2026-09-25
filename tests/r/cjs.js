@@ -27,18 +27,22 @@
 //
 //   node tests/r/cjs.js
 
-import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync, execFile as execFileCb } from 'node:child_process';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import {
-  generate, AMALGAM, PROBE_R, PLOT_C, PLOT_R, PLOT, FRAME_C, FRAME_PNG, DEV_C, DEV_PNG,
+  generate, AMALGAM, PROBE_R, PLOT_C, PLOT_R, PLOT, PLOT_FLAT,
+  FRAME_C, FRAME_PNG, DEV_C, DEV_PNG,
   INCS, PROBES, RNG_N_UNIF, RNG_N_NORM,
 } from '../../ext/r/cjs/gen.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
 const CLI = join(ROOT, 'src/cli.js');
 const CC = process.env.OMNI_CLANG ?? process.env.CC ?? 'clang';
+const execFile = promisify(execFileCb);
 const N_LINES = PROBES.length + RNG_N_UNIF + RNG_N_NORM;
 
 /** 量出来的上界（相对/绝对取小者）。**只许变小。**
@@ -274,6 +278,133 @@ if (ccPlot.code !== 0) {
       + `出 ${jsD.png.length} 字节的 PNG（${PLOT.w}x${PLOT.h}，尺寸是问设备要的）`);
     if (ipD.png !== null && ipD.png.equals(jsD.png)) ok('两条腿画的是同一帧', '两张 PNG 逐字节相同');
     else no('两条腿画的是同一帧', `解释腿 ${ipD.png === null ? '没出 PNG' : `${ipD.png.length} 字节`}`);
+  }
+}
+
+/* ---- 9. 浏览器那条腿：同一份 C，同一张图 -------------------------------- */
+
+/**
+ * 这一节把"R 的 C 在浏览器里画图"从**说得通**变成**跑过了**。
+ *
+ * 三件事凑齐才可能：
+ *   1. `omni c cpp` 把驱动二连 R 那 120 份源码与 SDK 的头全展开成**一份 550 KB 的 `.c`**
+ *      —— 浏览器那条腿的文件系统是内存里一张表，它装不下 r-source，但装得下这一份；
+ *   2. 单体 HTML（`tools/bundle-studio.mjs`）里那份编译器**自带 C 前端**；
+ *   3. `/api/file` PUT 能把一份源码写进那张内存表（Studio 自己"存了再跑"就是这条路）。
+ *
+ * 壳子照 `tests/studio/run.js` 第 3 节那一招：把内联的那段 JS 抠出来、前面塞一格
+ * `window`，于是 **node 跑的就是页面上要跑的那份代码**。真浏览器那一层由
+ * `tests/studio/run.js` 第 4 节管（那儿有 playwright），这儿不重复造。
+ *
+ * 判的是**逐字节**：同一份 C，在本地 JS 腿与浏览器腿上画出来的 SVG 要一模一样。
+ */
+{
+  const bundle = join(ROOT, '.omni-cache/work/studio-judge/omni-studio.html');
+  const flatSrc = sh('node', [CLI, 'c', 'cpp', PLOT_C, ...ourIncs]);
+  if (flatSrc.code !== 0 || flatSrc.out.length < 100000) {
+    no('摊平预处理（c cpp）', `${flatSrc.code}：${flatSrc.err.slice(0, 300)}`);
+  } else {
+    writeFileSync(PLOT_FLAT, flatSrc.out);
+    /* 先证这一份自足：**一个 `-I` 都不给**，画出来的图要与原件逐字节相同。 */
+    const flatOut = sh('node', [CLI, 'run', PLOT_FLAT, '--backend', 'js']);
+    const jsSvg = sh('node', [CLI, 'run', PLOT_C, '--backend', 'js', ...ourIncs]).out;
+    if (flatOut.out !== jsSvg) {
+      no('摊平预处理（c cpp）', firstDiff(jsSvg, flatOut.out));
+    } else {
+      ok('摊平预处理（c cpp）', `${flatSrc.out.length} 字节的自足 .c（不要任何 -I），画的是同一张图`);
+      if (!existsSync(bundle)) {
+        skip('浏览器那条腿（单体 HTML 还没拼：node tools/bundle-studio.mjs -o '
+          + '.omni-cache/work/studio-judge/omni-studio.html）');
+      } else {
+        const html = readFileSync(bundle, 'utf8');
+        const a = html.indexOf('<script type="module">') + '<script type="module">'.length;
+        const b = html.indexOf('</script>', a);
+        const shellPath = join(ROOT, '.omni-cache/r-rt/js/browser-shell.mjs');
+        writeFileSync(shellPath,
+          'globalThis.window = globalThis;\n'
+          + `${html.slice(a, b)}\n`
+          + 'const src = await import("node:fs").then((m) => m.readFileSync(process.argv[2], "utf8"));\n'
+          /* 先写进内存里那张表（Studio 的"存"就是这一条），再按路径跑它。 */
+          + 'await window.__OMNI_LOCAL("/api/file", { method: "PUT",\n'
+          + '  body: JSON.stringify({ path: "r-nmath-plot.c", text: src }) });\n'
+          + 'const r = await window.__OMNI_LOCAL("/api/run",\n'
+          /* **`--backend js` 要明说**：`run x.c` 的缺省是原生那条路（编 + 链 + 跑），
+             而页面上没有链接器也没有 libc —— 不给这个开关，报的是 `elf: 找不到库 -lc`。 */
+          + '  { body: JSON.stringify({ argv: ["run", "r-nmath-plot.c", "--backend", "js"] }) });\n'
+          + 'process.stdout.write(r.stdout);\n'
+          + 'process.stderr.write(r.stderr);\n');
+        const got = sh('node', [shellPath, PLOT_FLAT]);
+        if (got.out === jsSvg) {
+          ok('浏览器那条腿上是同一张图', `${got.out.length} 字节，逐字节相同`
+            + '（R 的 nmath 编成 JS，在页面那份编译器里跑）');
+        } else {
+          no('浏览器那条腿上是同一张图', got.out.length === 0
+            ? `没有输出：${got.err.slice(0, 500)}` : firstDiff(jsSvg, got.out));
+        }
+        await realBrowser(bundle, jsSvg);
+      }
+    }
+  }
+}
+
+/**
+ * **真浏览器那一趟**（`tests/studio/run.js` 第 4 节同一条路：静态服务 + `playwright-cli`）。
+ *
+ * 为什么 node 壳子不够：上一节那一趟在 node 上跑，`process` 是有的；页面上没有。
+ * 那一类红（`process is not defined`）只有真浏览器里才现形，而那一节看不见它。
+ * 这一趟额外判"控制台一条错都没有" —— 白屏是静默的。
+ *
+ * 没装 `playwright-cli` 就明着跳过（它是台机器上的工具，不在仓库依赖里）。
+ */
+async function realBrowser(bundle, want) {
+  const r = sh('playwright-cli', ['--version']);
+  if (r.code !== 0) { skip('真浏览器那一趟（这台机器上没有 playwright-cli）'); return; }
+  const work = join(ROOT, '.omni-cache/work/r-cjs-browser');
+  mkdirSync(work, { recursive: true });
+  copyFileSync(bundle, join(work, 'omni-studio.html'));
+  copyFileSync(PLOT_FLAT, join(work, 'r-nmath-plot.c'));
+  const srv = createServer((req, res) => {
+    const rel = req.url.split('?')[0].replace(/^\//, '');
+    try {
+      const body = readFileSync(join(work, rel));
+      /* **`.html` 必须报 `text/html`**：报成 `text/plain` 浏览器就把它当源码显示，
+         `playwright-cli goto` 于是失败（第一版就是这么红的）。 */
+      res.writeHead(200, { 'content-type': rel.endsWith('.html') ? 'text/html' : 'text/plain' });
+      res.end(body);
+    } catch { res.writeHead(404); res.end('no'); }
+  });
+  await new Promise((done) => srv.listen(0, '127.0.0.1', done));
+  const url = `http://127.0.0.1:${srv.address().port}/omni-studio.html`;
+  const S = '-s=r-cjs-judge';
+  /* **必须异步**：静态服务就在这个进程里，同步等子进程会把事件循环挡死，
+     页面一个字节都收不到（`tests/studio/run.js` 上撞过一次）。 */
+  const pw = async (args) => (await execFile('playwright-cli', args,
+    { encoding: 'utf8', timeout: 180000, maxBuffer: 64 * 1024 * 1024 })).stdout;
+  try {
+    try { await pw([S, 'open', url]); } catch { /* 同名会话已经开着也行 */ }
+    await pw([S, 'goto', url]);
+    const con = await pw([S, 'console', 'error']);
+    if (/Errors: 0/.test(con)) ok('真浏览器里控制台一条错都没有');
+    else no('真浏览器里控制台一条错都没有', con.trim().slice(0, 300));
+    /* 那份 550 KB 的 C 从同源取回来，PUT 进内存表，再按路径跑。 */
+    const probe = 'async () => {'
+      + ' const src = await (await fetch("r-nmath-plot.c")).text();'
+      + ' await window.__OMNI_LOCAL("/api/file", { method: "PUT",'
+      + '   body: JSON.stringify({ path: "r-nmath-plot.c", text: src }) });'
+      + ' const r = await window.__OMNI_LOCAL("/api/run", { body: JSON.stringify({'
+      + '   argv: ["run", "r-nmath-plot.c", "--backend", "js"] }) });'
+      + ' return { n: src.length, o: r.stdout, e: (r.stderr || "").slice(0, 300), code: r.code }; }';
+    const g = JSON.parse(await pw([S, '--raw', 'eval', probe]));
+    if (g.o === want && g.code === 0) {
+      ok('真浏览器里画的是同一张图', `${g.n} 字节的 C -> ${g.o.length} 字节的 SVG，逐字节相同`);
+    } else {
+      no('真浏览器里画的是同一张图', `code=${g.code} err=${JSON.stringify(g.e)}\n       `
+        + (g.o === undefined || g.o === '' ? '没有输出' : firstDiff(want, g.o)));
+    }
+  } catch (e) {
+    no('真浏览器那一趟', String(e instanceof Error ? e.message : e).slice(0, 400));
+  } finally {
+    srv.close();
   }
 }
 

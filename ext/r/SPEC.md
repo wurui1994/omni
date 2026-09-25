@@ -791,6 +791,15 @@ double omni_c_gfx_call(const char *name, const double *args, int n);
 **还差的一格**是把 R 自己的 `GEDevDesc` 那一套回调（`line`/`polygon`/`text`/
 `metricInfo`…）接到这几个名字上 —— 那要先过 `setjmp` 与 MIR 链接器两道坎。
 
+**真浏览器里也跑过了。** `omni c cpp` 把驱动二摊平成一份**自足的 `.c`**（550 365 字节、
+16 195 行、一个 `-I` 都不要）—— 浏览器那条腿的文件系统是内存里一张表，装不下 r-source，
+但装得下这一份。单体 HTML 里那份编译器自带 C 前端，`/api/file` PUT 把源码写进表，
+`run … --backend js` 跑它。判据两层：node 当壳子那一趟（跑的就是页面上那份代码），
+与 `playwright-cli` 开真页面那一趟（控制台一条错都没有 + stdout 与本地 JS 腿逐字节相同）。
+
+两个坑记在这儿：页面上 `run x.c` **必须明说 `--backend js`**（缺省是原生那条路，
+而页面上没有链接器与 libc）；静态服务给 `.html` **必须报 `text/html`**。
+
 **往 ggplot2 走还差四格**，都在 ADR-0047 里摆着：JS 发射器还不发
 `setjmp`/`longjmp`（MIR 解释腿已经有 `LongJmp`，所以是"还没做"而不是"做不到"）、
 MIR 层还没有链接器（`src/main` 那 ~99 份摊不动）、没有 Fortran、

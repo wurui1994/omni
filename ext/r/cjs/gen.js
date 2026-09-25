@@ -57,6 +57,15 @@ export const FRAME_PNG = join(OUT, 'nmath-frame.png');
 /** 驱动四：用**设备自己的笔**画（`cls`/`setcol`/`moveto`/`lineto`/`refresh`）。 */
 export const DEV_C = join(OUT, 'nmath-dev.c');
 export const DEV_PNG = join(OUT, 'nmath-dev.png');
+/**
+ * 驱动二**预处理摊平**之后那一份：一份 550 KB 的自足 `.c`，**一个 `-I` 都不要**。
+ *
+ * 为什么要这一格：浏览器那条腿的文件系统是内存里一张表（`host/browser.js` 的 VFS），
+ * 那儿没有 r-source 那 120 份源码，也没有 SDK 的头。`omni c cpp` 把它们全展开成一份
+ * （16 195 行），于是**同一份 C 可以搬进页面里跑**（`tests/r/cjs.js` 最后那一节）。
+ * 这一份由测试现做（要 CLI 跑一趟 `c cpp`），不在 `generate()` 里。
+ */
+export const PLOT_FLAT = join(OUT, 'nmath-plot-flat.c');
 /** 三份生成出来的头在这儿（`ext/r/build.js` 造的）—— 编这份 `.c` 要 `-I` 它。 */
 export const GEN_INC = join(ROOT, '.omni-cache', 'r-rt', 'include');
 export const INCS = [GEN_INC, join(RSRC, 'src/nmath'), join(RSRC, 'src/include')];
