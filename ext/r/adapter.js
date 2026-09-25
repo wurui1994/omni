@@ -16,8 +16,10 @@
 //      R 的数其实只有 double，这儿按**字面量的写法**分：没有小数点没有指数的是 `int`
 //      （`5`、`1:n`、`42L`），带小数点或指数的是 `real`。判据是那几份例子的输出
 //      （`cat(15)` 要印 `15` 而不是 `15.0`），与 awk 那一格同一个取舍。
-//   5. **下标从 1 起**。`x[i]` → `aget(x, i-1)`，字面量当场折掉。`x[["k"]]` 是字典
+//   5. **下标从 1 起**。`x[i]` → `aget(x, i-1)`，字面量当场折掉。`x[["k"]]` 多半是字典
 //      （R 的 `list` 带名字用就是关联表），`x[i]` 是数组 —— 靠上面第 4 条推出来的类型分。
+//      `x` 被 `c(…)` / `setNames(…)` 赋过时 `x[["k"]]` 是**带名字的向量上按名字取**
+//      （见 `RNVEC` 与 `dictNames`）。
 //
 // ## 明说的不足（**不猜**；正本在 `ext/r/SPEC.md` 第四节）
 //
@@ -27,8 +29,9 @@
 //   2. **逻辑是三态的**（`NA` 真的走到底，见 `RLGL` / `RLGL1`）。两处口径差别：两边都是
 //      int 的比较仍然回方言的 `bool`（这一档没有 `NA_integer_`，那个状态到不了），
 //      而 `&&` / `||` 有三态参与时**不短路**（原因在 `FN_DEPS` 那段账上）。
-//   3. **不做懒求值**（promise / `missing()` / `substitute()`）、**不做属性**
-//      （`names` / `dim` / `class`）、**不做 S3 / S4 / R5 分派**、**不做环境**
+//   3. **不做懒求值**（promise / `missing()` / `substitute()`）、**属性只做了 `names` 的
+//      一半**（名字**跟着变量**走，见 `RNVEC`；`dim` / `class` 一格没有）、
+//      **不做 S3 / S4 / R5 分派**、**不做环境**
 //      （`<<-` 当普通赋值）、**不做 `...`**。形参默认值与命名实参**接了**（在调用点填，
 //      见 `fnDefs`）；用户函数的形参与返回类型是**从调用点推**的（`inferFns`）：
 //      同一个形参在不同调用点装不同**种**东西那一格没做（要运行期类型标签）。
@@ -252,6 +255,11 @@ const FN_DEPS = new Map([
   ['r_num_fmt', ['r_is_na', 'r_is_nan']],
   ['r_print_num', ['r_sci', 'r_is_na', 'r_is_nan', 'r_num_fmt']],
   ['r_print_lgl', ['r_is_na', 'r_lgl_str']],
+  /* 带名字的向量那三格（见 `RNVEC`）：印是"名字一行、值一行"，名字那条空着就退回
+     `r_print_num`（R 里名字被丢掉之后印的就是 `[1] …`）。 */
+  ['r_print_named', ['r_sci', 'r_is_na', 'r_is_nan', 'r_num_fmt', 'r_print_num']],
+  ['r_at_name', ['r_na']],
+  ['r_nm_at', []],
   ...[...CMP_FNS.values()].map((n) => [n, ['r_is_na', 'r_na']]),
 ]);
 
@@ -384,6 +392,38 @@ const isLgl1 = (t) => t !== undefined && t !== null && t.kind === 'real' && t.lg
  */
 const RSTRV = { kind: 'arr', elem: STR };
 const isStrVec = (t) => t !== undefined && t !== null && t.kind === 'arr';
+/**
+ * **带名字的数值向量**（`c(a = 1, b = 2)`）—— 值那一条还是 `(ptr real)`，名字另走一条
+ * `(arr string)`，两条**跟着同一个变量**：`v` 的名字摆在 `v__nm` 里。
+ *
+ * 为什么是"跟着变量"而不是"跟着值"：R 的名字是**属性**（挂在 SEXP 上），要跟着值走就得给
+ * 每一格向量带一个头（结构体 + `fld` / `fldset`，每一处向量算子都要改）。而真代码里名字
+ * 几乎总是挂在一个有名字的量上（`counts <- c(a = 1, b = 2)`），所以这一档只做那一半：
+ * 名字跟着**名字**走。跟不住的地方（`sort(v)` 那种要把名字也排一遍的）**当场报**，
+ * 不静默把名字丢掉 —— 丢了之后 `print` 出来与 R 差两行。
+ *
+ * `named` 这个记号 `typeToSx` 看不见（它只看 `kind` 与 `inner`），与 `lgl` 同一条路子。
+ */
+const RNVEC = { kind: 'ptr', inner: REAL, named: true };
+/** `v > 1` 那一格：**带名字的逻辑向量**（R 也把名字带过去）。这一档印不出来 —— 当场报。 */
+const RNLGL = { kind: 'ptr', inner: REAL, lgl: true, named: true };
+const isNamedTy = (t) => t !== undefined && t !== null && t.kind === 'ptr' && t.named === true;
+/** 那个影子变量的名字（`v` 的名字在 `v__nm` 里）。 */
+const nmVar = (v) => `${v}__nm`;
+/**
+ * **名字丢得掉的那几格** —— R 自己也丢，所以这一档丢了不差字节。量出来的（`Rscript`，
+ * 2026-09-25）：`range` / `unique` / `seq_along` / `as.character` / `paste` 都回没名字的，
+ * 而 `sort` / `rev` / `head` / `cumsum` / `abs` / `sqrt` / `round` / `is.na` / `c(v, 4)`
+ * **都把名字带过去**。表外的名字收到带名字的向量就**当场报** —— 静默丢掉的话
+ * `print` 少印一行（两行版式变成 `[1] …`），而那是最难查的一种错。
+ */
+const NAME_DROP_OK = new Set([
+  'names', 'setNames', 'unname', 'print', 'invisible', 'cat',
+  'paste', 'paste0', 'sprintf', 'length', 'sum', 'mean', 'max', 'min', 'prod',
+  'var', 'sd', 'range', 'any', 'all', 'unique', 'seq_along', 'seq_len',
+  'as.character', 'as.numeric', 'as.integer',
+  'is.numeric', 'is.character', 'is.logical', 'stop', 'stopifnot',
+]);
 /** 第 i 格（0 起）。方言的 `{kind:'index'}` 落成 `(aget …)`，赋值那侧落 `(aset …)`。 */
 const svGet = (v, i) => ({ kind: 'index', obj: v, index: i });
 const svLen = (v) => call1('alen', v);
@@ -599,6 +639,8 @@ const BUILTINS = new Set([
   'switch',
   /* 造一条"空的/零的"向量：`numeric(n)` 那一族与不带实参的 `c()`。`character(n)` 是字符向量。 */
   'numeric', 'double', 'integer', 'logical', 'character',
+  /* 名字那一族（见 `RNVEC`）：`names(v)` 读、`names(v) <- ns` 写、`setNames` / `unname`。 */
+  'names', 'setNames', 'unname',
   /* 随机数那一族（发生器是 R 自己那一条，见 `RRAND`）。 */
   'set.seed', 'sample', ...RRAND.keys(),
   /* libm 那一族：R 自己这几个也是直接调 libm（不在 nmath 里），所以落方言的 `rmath`。
@@ -644,6 +686,57 @@ function eachAssign(x, fn) {
 const isListCall = (node) => isList(node) && tag(node) === 'call'
   && tag(kids(node)[0]) === 'sym' && nameOf(kids(node)[0]) === 'list';
 
+/**
+ * 这一格表达式的**名字**那一条（回一格 `(arr string)` 的表达式，没有名字就回 `null`）。
+ *
+ * 只认这几种形状 —— 它们正好是名字**能跟住**的那几处：
+ *   `c(a = 1, b = 2)`      名字是字面量（没给名字的那几格是空串，与 R 一样）
+ *   `setNames(v, ns)`      名字就是第二格实参
+ *   一个带名字的变量        名字在它的影子变量里（`v__nm`）
+ *   `(…)`                  往里看
+ *   `v * 2` 那种逐元素      名字跟着带名字的那一边走（R 也是这么传的）
+ */
+function namesExprOf(x, types) {
+  if (!isList(x)) return null;
+  if (tag(x) === 'paren') return namesExprOf(kids(x)[0], types);
+  if (tag(x) === 'sym') {
+    const nm = mangle(nameOf(x));
+    const t = types.get(nm) ?? globalTys.get(nm);
+    return isNamedTy(t) ? { kind: 'name', name: nmVar(nm) } : null;
+  }
+  if (tag(x) === 'bin') {
+    const op = String(leaf(kids(x)[0]));
+    if (!VEC_OPS.has(op)) return null;
+    return namesExprOf(kids(x)[1], types) ?? namesExprOf(kids(x)[2], types);
+  }
+  if (tag(x) !== 'call' || tag(kids(x)[0]) !== 'sym') return null;
+  const fn = nameOf(kids(x)[0]);
+  if (fn === 'c') {
+    const as = argsOf(x);
+    if (!as.some((a) => a.name !== null)) return null;
+    const tmp = fresh('nm');
+    const tv = { kind: 'name', name: tmp };
+    const stmts = [{
+      kind: 'let', name: tmp, type: RSTRV, init: call1('anew', tyArg(RSTRV), { kind: 'int', value: as.length }),
+    }];
+    as.forEach((a, i) => stmts.push({
+      kind: 'assign',
+      target: { kind: 'index', obj: tv, index: { kind: 'int', value: i } },
+      value: { kind: 'string', value: a.name ?? '' },
+    }));
+    return { kind: 'block-expr', stmts, value: tv };
+  }
+  if (fn === 'setNames') {
+    const as = posArgs(x);
+    if (as.length !== 2) throw new Error(`r->IR: setNames() 要两格实参（给了 ${as.length}）`);
+    if (!isStrVec(typeOfExpr(as[1], types))) {
+      throw new Error('r->IR: setNames() 的第二格实参要是一条字符向量');
+    }
+    return exprOf(as[1], types);
+  }
+  return null;
+}
+
 /** `m$k` 里那个键（右边是名字或串字面量 —— R 两种都收）。 */
 const isDollar = (node) => isList(node) && tag(node) === 'bin'
   && String(leaf(kids(node)[0])) === '$';
@@ -662,8 +755,16 @@ function dollarKey(node) {
  * （`cfg[["n"]]`）的那种写法里，`[[` 只出现在读的一侧 —— 光看 `[[` 也找得到它；但
  * `m <- list(a = 1); length(m)` 那种一次 `[[` 都没有的，从前推不出它是一张表（落成 int，
  * 然后在 `dnew` 那一步报"'m' 是 int"）。
+ *
+ * 反过来要**摘出去**一批：`v <- c(a = 1, b = 2)` 之后的 `v[["a"]]` 是**带名字的向量上
+ * 按名字取**（见 `RNVEC`），不是表。这一格只能按形状分 —— 被 `c(…)` / `setNames(…)`
+ * 赋过的名字就是向量，不是表。
  */
-function dictNames(x, out = new Set()) {
+const VEC_MAKERS = new Set(['c', 'setNames', 'unname', 'numeric', 'double', 'integer', 'logical']);
+const isVecMakerCall = (node) => isList(node) && tag(node) === 'call'
+  && tag(kids(node)[0]) === 'sym' && VEC_MAKERS.has(nameOf(kids(node)[0]));
+
+function dictNames(x, out = new Set(), vecs = new Set()) {
   if (!isList(x)) return out;
   if (tag(x) === 'sub2' && tag(kids(x)[0]) === 'sym') out.add(nameOf(kids(x)[0]));
   /* `m$k` 与 `m[["k"]]` 是同一件事（R 里 `$` 就是按名字取），所以这一格也算。 */
@@ -671,8 +772,10 @@ function dictNames(x, out = new Set()) {
   if (isAssign(x)) {
     const { target, value } = assignParts(x);
     if (tag(target) === 'sym' && isListCall(value)) out.add(nameOf(target));
+    if (tag(target) === 'sym' && isVecMakerCall(value)) vecs.add(nameOf(target));
   }
-  for (const k of kids(x)) dictNames(k, out);
+  for (const k of kids(x)) dictNames(k, out, vecs);
+  for (const nv of vecs) out.delete(nv);
   return out;
 }
 
@@ -719,7 +822,7 @@ function typeOfExpr(x, types) {
       /* `!` 跟着被取反的那一格走：逻辑向量进逻辑向量出，三态标量进三态标量出，
          `bool` 那一格（`!TRUE`）仍然是 `bool`。 */
       const t = typeOfExpr(kids(x)[1], types);
-      if (isVecTy(t)) return RLGL;
+      if (isVecTy(t)) return isNamedTy(t) ? RNLGL : RLGL;
       return t.kind === 'real' ? RLGL1 : BOOL;
     }
     case 'sub1': {
@@ -764,7 +867,13 @@ function typeOfExpr(x, types) {
       if (VEC_OPS.has(op)) {
         const a = typeOfExpr(kids(x)[1], types);
         const c2 = typeOfExpr(kids(x)[2], types);
-        if (isVecTy(a) || isVecTy(c2)) return VEC_CMP.has(op) || LGL_OPS.has(op) ? RLGL : RVEC;
+        if (isVecTy(a) || isVecTy(c2)) {
+          const named = isNamedTy(a) || isNamedTy(c2);
+          /* **名字跟着带名字的那一边走**（R 也是这么传的）：`v * 2` 还是带名字的、
+             `v > 1` 是一条带名字的逻辑向量。 */
+          if (VEC_CMP.has(op) || LGL_OPS.has(op)) return named ? RNLGL : RLGL;
+          return named ? RNVEC : RVEC;
+        }
       }
       /* 比较：有一边是 double（含三态逻辑本身）就回**三态逻辑**（`NaN > 2` 是 `NA`）。
          两边都是 int / bool 才回 `bool` —— 那一格没有 NA，见 `RLGL1` 那段账。 */
@@ -927,14 +1036,28 @@ function applyTy(fn, x, types) {
        混着写（`c(TRUE, 1)`）R 会往数值那边收，所以"每一格都是逻辑"才算逻辑。
        **有一格是串就整条是字符向量** —— R 的收拢次序是 logical < integer < double < character。 */
     case 'c': {
-      if (args.some((a) => {
+      /* **`c` 的命名实参是元素名，不是开关** —— 所以这儿按 `argsOf` 的**原序**看全部实参
+         （`posArgs` 会把 `c(a = 1, b = 2)` 过滤成空的）。 */
+      const cargs = argsOf(x).map((a) => a.value);
+      if (cargs.some((a) => {
         const t = typeOfExpr(a, types);
         return t.kind === 'string' || isStrVec(t);
       })) return RSTRV;
-      return args.length > 0 && args.every((a) => {
+      if (cargs.length > 0 && cargs.every((a) => {
         const t = typeOfExpr(a, types);
         return t.kind === 'bool' || isLgl1(t) || isLglTy(t);
-      }) ? RLGL : RVEC;
+      })) return RLGL;
+      /* `c(a = 1, b = 2)` —— 带名字的数值向量（名字那一条见 `namesExprOf`）。 */
+      return argsOf(x).some((a) => a.name !== null) ? RNVEC : RVEC;
+    }
+    /* 名字那几格：`names(v)` 出一条字符向量、`setNames` 出带名字的向量、`unname` 把名字摘掉。 */
+    case 'names': return RSTRV;
+    case 'setNames': return RNVEC;
+    /* `unname` 只摘名字，别的记号（逻辑 / 字符）留着。 */
+    case 'unname': {
+      const t0 = args.length === 0 ? RVEC : typeOfExpr(args[0], types);
+      if (isStrVec(t0)) return t0;
+      return isLglTy(t0) ? RLGL : RVEC;
     }
     /* `list(a = 1, b = 2)` —— R 的 list 当**关联表**用那一档（文件头第 5 条）。
        值类型按那几格实参算（有一格是串就整张表装串）。 */
@@ -1121,6 +1244,18 @@ function inferFns(fns, rest) {
   const rank = (t) => (t.kind === 'string' ? 3 : (isVecTy(t) || t.kind === 'map' ? 3
     : (t.kind === 'real' ? 2 : 1)));
   eachAssign(body, ({ target, value, op }) => {
+    /* `names(v) <- ns` —— 那一句把 `v` 变成**带名字的**向量（记号见 `RNVEC`）。
+       `rank` 那条管不了这一格：两边都是"向量"，宽度一样，所以单独记一笔。 */
+    if (tag(target) === 'call' && tag(kids(target)[0]) === 'sym'
+        && nameOf(kids(target)[0]) === 'names') {
+      const a0 = posArgs(target)[0];
+      if (a0 !== undefined && tag(a0) === 'sym') {
+        const nv = mangle(nameOf(a0));
+        const t2 = types.get(nv);
+        if (t2 !== undefined && isVecTy(t2) && !isLglTy(t2)) types.set(nv, RNVEC);
+      }
+      return;
+    }
     if (tag(target) !== 'sym') return;
     const name = mangle(nameOf(target));
     /* `<<-` 写的是**全局**（R 的规矩）—— 那一格不该变成这一段的局部量。 */
@@ -1453,7 +1588,9 @@ const isApplyCall = (node, name) => isList(node) && tag(node) === 'call'
  */
 const PKG_FNS = new Set(['library', 'require', 'requireNamespace', 'attachNamespace', 'loadNamespace']);
 const TBL_FNS = new Set([
-  'data.frame', 'matrix', 'names', 'setNames', 'colnames', 'rownames', 'attr', 'attributes',
+  /* `names` / `setNames` / `unname` **已经接了一半**（见 `RNVEC`），所以它们不在这张表里
+     —— 接不住的那几格由 `callOf` 自己报，报得比这条通用指路准。 */
+  'data.frame', 'matrix', 'colnames', 'rownames', 'attr', 'attributes',
   'nrow', 'ncol', 'dim', 'cbind', 'rbind', 'apply', 'aggregate', 'merge', 'table', 'factor',
 ]);
 function gapHint(fn) {
@@ -1894,7 +2031,26 @@ function indexRead(x, types) {
     /* 下标本身是**向量**那两档（R 里 `xs[xs > 2]` 与 `xs[c(1,3)]` 都是天天写的形状）：
        逻辑向量按掩码挑、数值向量按位置挑，各走一格生成出来的辅助函数。 */
     const kt = typeOfExpr(keys[0], types);
+    /* `v["a"]` / `v[["a"]]` —— 带名字的向量上**按名字取**（名字那一条在影子变量里，
+       见 `RNVEC`）。找不到那个名字时回 `NA` —— R 也是（`v["zz"]` 印 `<NA>` / `NA`）。 */
+    if (kt.kind === 'string' || (isStrVec(kt) && isNamedTy(ot))) {
+      if (isStrVec(kt)) {
+        throw new Error('r->IR: `v[c("a","b")]` 那种按名字一次取多格还没接'
+          + '（挑出来的那几格名字也要跟着走）');
+      }
+      const ns = namesExprOf(obj, types);
+      if (ns === null) {
+        throw new Error('r->IR: 按名字取下标只在**带名字的向量**上接'
+          + '（`c(a = 1, …)` / `setNames(v, ns)`）—— 这一格推不出名字来');
+      }
+      return lglCall('r_at_name', o, ns, exprOf(keys[0], types));
+    }
     if (isVecTy(kt)) {
+      /* 挑出来的那几格 R 会把**名字也挑过去** —— 这一档跟不住，当场报。 */
+      if (isNamedTy(ot) || isNamedTy(kt)) {
+        throw new Error('r->IR: 在**带名字的向量**上按掩码 / 按位置挑还没接'
+          + '（R 会把挑出来的那几格名字也带过去）—— 要不带名字就写 `unname(…)`');
+      }
       const helper = isLglTy(kt) ? 'r_vec_mask' : 'r_vec_pick';
       return { kind: 'call', fn: { kind: 'name', name: useFn(helper) }, args: [o, exprOf(keys[0], types)] };
     }
@@ -2283,10 +2439,24 @@ function condOf(x, types) {
 function callOf(x, types, extra, want) {
   const fnNode = kids(x)[0];
   const fn = tag(fnNode) === 'sym' ? nameOf(fnNode) : null;
-  const args = posArgs(x);
+  /* `c(a = 1, b = 2)` 里那几个名字是**元素名**（数据），所以 `c` 这一格要按原序拿**全部**
+     实参 —— 别的内建的命名实参是开关，由 `NAMED_OK` 那张表管。 */
+  const args = fn === 'c' ? argsOf(x).map((a) => a.value) : posArgs(x);
   const all = extra === undefined ? args : [null, ...args];
   const ev = (i) => (all[i] === null ? extra : exprOf(all[i], types));
   const n = all.length;
+  /**
+   * **名字跟不住就当场报**（见 `RNVEC` 与 `NAME_DROP_OK`）。R 会把名字带过去的那些
+   * （`sort` / `rev` / `head` / `cumsum` / `abs` / `sqrt` / `round` / `is.na` / `c(v, 4)`…）
+   * 这一档只带值：静默带过去的话 `print` 会少印名字那一行。用户函数也算 —— 名字那一条
+   * 是**跟着变量**走的，传不进被调方。
+   */
+  if (fn !== null && !NAME_DROP_OK.has(fn)
+      && all.some((a) => a !== null && isNamedTy(typeOfExpr(a, types)))) {
+    throw new Error(`r->IR: ${fn}() 收了一格**带名字的向量** —— 这一档名字只跟着`
+      + '逐元素算术与 `names` / `setNames` / `unname` / `v["a"]` 走（见 ext/r/SPEC.md 第二节）。'
+      + `R 里 ${fn}() 会把名字带过去，所以这儿不静默丢 —— 真要丢就写 \`unname(…)\``);
+  }
   /**
    * `na.rm = TRUE / FALSE` —— **只认字面量**（运行期的旗子要两条路都发，那是另一件事）。
    * 回 true 时把那格向量先过一遍 `r_drop_na`（见那个函数上的账）。
@@ -2360,9 +2530,10 @@ function callOf(x, types, extra, want) {
        那是静默答错，比当场报难查得多（量出来的）。 */
     for (const a of argsOf(x)) {
       if (a.name === null) continue;
-      /* **`list` 与 `switch` 不过这张表**：它们的命名实参是**数据**（键名 / 分支名），
-         不是开关 —— `list(n = 10)` 里那个 `n` 就是键名，白名单在这两格没有意义。 */
-      if (fn === 'list' || fn === 'switch') continue;
+      /* **`list` / `switch` / `c` 不过这张表**：它们的命名实参是**数据**（键名 / 分支名 /
+         元素名），不是开关 —— `list(n = 10)` 里那个 `n` 就是键名、`c(a = 1)` 里那个 `a`
+         就是元素名，白名单在这三格没有意义。 */
+      if (fn === 'list' || fn === 'switch' || fn === 'c') continue;
       const ok = NAMED_OK.get(fn);
       if (ok === undefined || !ok.has(a.name)) {
         throw new Error(`r->IR: ${fn}() 的命名实参 \`${a.name}=\` 还没接`
@@ -2372,6 +2543,26 @@ function callOf(x, types, extra, want) {
     switch (fn) {
       case 'return':
         throw new Error('r->IR: `return()` 只能摆在语句位上（这儿在表达式里）');
+      /* 名字那三格（见 `RNVEC`）。`names(v)` 读的是那个影子变量；`setNames` / `unname`
+         这儿只管**值**那一条 —— 名字那一条由 `namesExprOf` 在赋值那一句上另发一条。 */
+      case 'names': {
+        if (n !== 1 || all[0] === null) throw new Error('r->IR: names() 要一格实参（管道位上还没接）');
+        const ns = namesExprOf(all[0], types);
+        if (ns === null) {
+          throw new Error('r->IR: names() 只在**带名字的向量**上接（`c(a = 1, …)` / `setNames`）'
+            + ' —— 这一格推不出名字来。list 上的 names() 要方言能枚举表里的键，'
+            + '那一格还没有（见 ext/r/SPEC.md 第四节）');
+        }
+        return ns;
+      }
+      case 'unname': {
+        if (n !== 1 || all[0] === null) throw new Error('r->IR: unname() 要一格实参（管道位上还没接）');
+        return ev(0);
+      }
+      case 'setNames': {
+        if (n !== 2) throw new Error(`r->IR: setNames() 要两格实参（给了 ${n}）`);
+        return ev(0);
+      }
       case 'length': {
         if (n !== 1) throw new Error('r->IR: length() 要一格实参');
         const t = all[0] === null ? INT : typeOfExpr(all[0], types);
@@ -2983,6 +3174,53 @@ function callOf(x, types, extra, want) {
 function printValStmt(node, types) {
   const t = typeOfExpr(node, types);
   const wr = (s) => ({ kind: 'builtin-stmt', name: 'write', args: [s] });
+  /* **带名字的向量**：名字一行、值一行，两行共用一个宽（见 `r_print_named`）。 */
+  if (isNamedTy(t)) {
+    if (isLglTy(t)) {
+      throw new Error('r->IR: 印一条**带名字的逻辑向量**（`v > 1` 那种）还没接'
+        + ' —— R 会把名字带过去，这一档只让数值那一条带。要印不带名字的写 `unname(v > 1)`');
+    }
+    const ns = namesExprOf(node, types);
+    if (ns === null) {
+      throw new Error('r->IR: print() 这一格带名字的向量印不出名字来 —— 名字那一条跟丢了'
+        + '（名字是**跟着变量**走的，见 ext/r/SPEC.md 第二节）。'
+        + 'R 里 `sort` / `rev` / `head` / `cumsum` / `abs` / `v[v > 1]` 这些都把名字带过去，'
+        + '这一档带不了 —— 要印不带名字的那一条就写 `unname(…)`');
+    }
+    return { kind: 'expr-stmt', expr: lglCall('r_print_named', exprOf(node, types), ns) };
+  }
+  /* `v["a"]` / `v[1]` —— R 的**单**方括号取一格出来名字也跟着（两行版式），`v[["a"]]` 不带。
+     值那一条已经是一格标量了，所以这儿现摆一条长度 1 的向量与一条长度 1 的名字。 */
+  if (tag(node) === 'sub1' && isNamedTy(typeOfExpr(kids(node)[0], types))) {
+    const keys = kids(node).slice(1).map((a) => kids(a)[0]).filter((k) => k !== undefined);
+    if (keys.length !== 1) throw new Error('r->IR: 多维下标（x[i, j]）还没接');
+    const ns = namesExprOf(kids(node)[0], types);
+    const kt = typeOfExpr(keys[0], types);
+    const nn = fresh('p1n');
+    /* 下标是串就在名字那条里找（找不到 R 印 `<NA>`，`r_nm_at` 就答这个）；
+       下标是数就直接取那一格（`v[1]` 的名字是 `names(v)[1]`）。 */
+    const one = kt.kind === 'string'
+      ? lglCall('r_nm_at', ns, exprOf(keys[0], types))
+      : svGet(ns, zeroBased(exprOf(keys[0], types), kt));
+    return {
+      kind: 'block',
+      stmts: [
+        {
+          kind: 'let', name: nn, type: RSTRV,
+          init: call1('anew', tyArg(RSTRV), { kind: 'int', value: 1 }),
+        },
+        {
+          kind: 'assign',
+          target: { kind: 'index', obj: { kind: 'name', name: nn }, index: { kind: 'int', value: 0 } },
+          value: one,
+        },
+        {
+          kind: 'expr-stmt',
+          expr: lglCall('r_print_named', lglCall('r_vec1', exprOf(node, types)), { kind: 'name', name: nn }),
+        },
+      ],
+    };
+  }
   if (isVecTy(t)) {
     return {
       kind: 'expr-stmt',
@@ -3109,7 +3347,36 @@ function assignOf(x, types) {
     /* 名字定成了 double、这一句给的是整数 → 提升。R 里 `t <- 0` 之后 `t <- t + 2.5` 是一回事
        （那格量一直是 double），而方言那侧一个名字只有一种类型，所以写的时候对齐。 */
     if (want !== undefined && want.kind === 'real' && vt.kind === 'int') v = asReal(v, vt);
-    return { kind: 'assign', target: { kind: 'name', name }, value: v };
+    const asg = { kind: 'assign', target: { kind: 'name', name }, value: v };
+    /* **带名字的向量：名字那一条另发一句**（落在影子变量 `v__nm` 上，见 `RNVEC`）。
+       右边推不出名字来（`v <- c(1, 2)` / `v <- unname(w)`）就把名字**清掉** —— R 那边
+       也是这样（赋一格没名字的进去，名字就没了），而"跟不住"的那些右边在 `callOf`
+       那一格已经当场报过了，到不了这儿。 */
+    if (isNamedTy(want ?? globalTys.get(name))) {
+      const ns = namesExprOf(value, types)
+        ?? call1('anew', tyArg(RSTRV), { kind: 'int', value: 0 });
+      return {
+        kind: 'block',
+        stmts: [asg, { kind: 'assign', target: { kind: 'name', name: nmVar(name) }, value: ns }],
+      };
+    }
+    return asg;
+  }
+  /* `names(v) <- ns` —— R 的"替换函数"里我们只接这一格：写的是那个影子变量。 */
+  if (t === 'call' && tag(kids(target)[0]) === 'sym' && nameOf(kids(target)[0]) === 'names') {
+    const a0 = posArgs(target)[0];
+    if (a0 === undefined || tag(a0) !== 'sym') {
+      throw new Error('r->IR: `names(…) <- …` 的括号里只接一个名字');
+    }
+    const nm2 = mangle(nameOf(a0));
+    if (!isNamedTy(types.get(nm2) ?? globalTys.get(nm2))) {
+      throw new Error(`r->IR: \`names(${nameOf(a0)}) <- …\` 的左边要是一条数值向量`
+        + '（这一档名字只挂在数值向量上）');
+    }
+    if (!isStrVec(typeOfExpr(value, types))) {
+      throw new Error('r->IR: `names(v) <- …` 右边要是一条字符向量');
+    }
+    return { kind: 'assign', target: { kind: 'name', name: nmVar(nm2) }, value: exprOf(value, types) };
   }
   /* `m$k <- v` —— 与 `m[["k"]] <- v` 同一件事（值类型也一起推，见 `inferTypes` 的 dicts）。 */
   if (isDollar(target)) {
@@ -3630,7 +3897,7 @@ function strFnDecl(name) {
 /** 这一批由 `strvFnDecl` 发（形状都是"一条 `(arr string)` 进"）。 */
 const STRV_FNS = new Set([
   'r_cat_str', 'r_print_str', 'r_join_str', 'r_rev_str', 'r_nchar_v', 'r_upper_v', 'r_lower_v',
-  'r_pick_str', 'r_mask_str', 'r_split',
+  'r_pick_str', 'r_mask_str', 'r_split', 'r_at_name', 'r_nm_at',
 ]);
 
 /** 这一批由 `setFnDecl` 发（集合与位置那一族，见 `FN_DEPS` 上那段账）。 */
@@ -4004,6 +4271,30 @@ function strvFnDecl(name) {
     else_: S(''),
   });
 
+  if (name === 'r_at_name' || name === 'r_nm_at') {
+    /* `v["a"]` —— 在名字那一条里找那个名字，回值（`r_at_name`）或者回"印出来的那个名字"
+       （`r_nm_at`）。找不到时 R 印的是 `<NA>` / `NA`（量出来的，`Rscript`，2026-09-25），
+       所以这儿一格回 `NA`、一格回 `"<NA>"` —— 不是当场报：那是 R 自己的答案。 */
+    const val = name === 'r_at_name';
+    return {
+      kind: 'fn',
+      name,
+      params: val
+        ? [{ name: 'v', type: RVEC }, { name: 'ns', type: RSTRV }, { name: 'k', type: STR }]
+        : [{ name: 'ns', type: RSTRV }, { name: 'k', type: STR }],
+      ret: val ? REAL : STR,
+      body: [
+        letI('n', svLen(nm('ns'))),
+        loop([
+          iff(b('==', svGet(nm('ns'), i), nm('k')), [{
+            kind: 'return',
+            values: [val ? vecGet(v, i) : nm('k')],
+          }]),
+        ], nm('n')),
+        { kind: 'return', values: [val ? lglCall('r_na') : S('<NA>')] },
+      ],
+    };
+  }
   if (name === 'r_cat_str') {
     /* `cat(labels, sep=…)` —— 元素**不带引号**（那是 `print` 的事），按 `sep` 连起来。 */
     return {
@@ -4553,12 +4844,134 @@ function printFnDecl(name) {
     };
   }
 
-  /* 数值向量：先把每格的 `(neg, left, nsig)` 取极值（`r_sci`），再挑一次、算出共用的宽。 */
+  /* 数值向量：先把每格的 `(neg, left, nsig)` 取极值（`r_sci`），再挑一次、算出共用的宽。
+     这一段（到那四条 `NA` / `Inf` 撑宽为止）**两个印法共用** —— `r_print_named` 的值那一行
+     与 `r_print_num` 是同一套宽度，差别只在外头的版式。 */
   const BIG = 1000000000;
   const inf1 = (e) => b('!=', { kind: 'ccall', sym: 'omni_r_is_infinite', args: [e] }, I(0));
   cabiUsed.add('omni_r_is_infinite');
   rmathSig('omni_r_is_infinite');
   const el = vecGet(v, i);
+  const agg = [
+    { kind: 'let', name: 'p', type: PTR_REAL, init: call1('pnew', tyArg(PTR_REAL), I(3)) },
+    letI('neg', I(0)),
+    letI('mxl', I(-BIG)),
+    letI('mnl', I(BIG)),
+    letI('mxsl', I(-BIG)),
+    letI('rgt', I(-BIG)),
+    letI('mxns', I(-BIG)),
+    letI('fin', I(0)),
+    letBo('hasna', { kind: 'bool', value: false }),
+    letBo('hasnan', { kind: 'bool', value: false }),
+    letBo('haspi', { kind: 'bool', value: false }),
+    letBo('hasni', { kind: 'bool', value: false }),
+    {
+      kind: 'for',
+      init: letI('i', I(0)),
+      cond: b('<', i, nm('n')),
+      post: set('i', b('+', i, I(1))),
+      body: [
+        iff(isNa(el),
+          [iff(isNan(el),
+            [set('hasnan', { kind: 'bool', value: true })],
+            [set('hasna', { kind: 'bool', value: true })])],
+          [iff(inf1(el),
+            [iff(b('>', el, R(0)),
+              [set('haspi', { kind: 'bool', value: true })],
+              [set('hasni', { kind: 'bool', value: true })])],
+            [
+              set('fin', b('+', nm('fin'), I(1))),
+              { kind: 'expr-stmt', expr: lglCall('r_sci', el, I(7), nm('p')) },
+              letI('ng', call1('toint', { kind: 'deref', expr: call1('padd', nm('p'), I(0)) })),
+              letI('lf', call1('toint', { kind: 'deref', expr: call1('padd', nm('p'), I(1)) })),
+              letI('ns', call1('toint', { kind: 'deref', expr: call1('padd', nm('p'), I(2)) })),
+              letI('sl', b('+', nm('ng'), I(1))),
+              iff(b('>', nm('lf'), I(0)), [set('sl', b('+', nm('ng'), nm('lf')))]),
+              letI('rt', b('-', nm('ns'), nm('lf'))),
+              iff(b('>', nm('rt'), nm('rgt')), [set('rgt', nm('rt'))]),
+              iff(b('>', nm('lf'), nm('mxl')), [set('mxl', nm('lf'))]),
+              iff(b('<', nm('lf'), nm('mnl')), [set('mnl', nm('lf'))]),
+              iff(b('>', nm('sl'), nm('mxsl')), [set('mxsl', nm('sl'))]),
+              iff(b('>', nm('ns'), nm('mxns')), [set('mxns', nm('ns'))]),
+              iff(b('!=', nm('ng'), I(0)), [set('neg', I(1))]),
+            ])]),
+      ],
+    },
+    ...fmtPickStmts({
+      neg: 'neg', mxl: 'mxl', mnl: 'mnl', mxsl: 'mxsl', rgt: 'rgt', mxns: 'mxns',
+      wf: 'wf', ee: 'ee', dd: 'dd', w: 'w',
+    }),
+    /* 一格有限值都没有时那几个极值还是哨兵，按 `formatReal` 的口径清零（`w` 由下面那四条撑） */
+    iff(b('==', nm('fin'), I(0)), [set('w', I(0)), set('dd', I(0)), set('ee', I(0))]),
+    /* `NA` 占 2 格、`NaN` 与 `Inf` 占 3、`-Inf` 占 4（`R_print.na_width` 是 2） */
+    iff(b('&&', nm('hasna'), b('<', nm('w'), I(2))), [set('w', I(2))]),
+    iff(b('&&', nm('hasnan'), b('<', nm('w'), I(3))), [set('w', I(3))]),
+    iff(b('&&', nm('haspi'), b('<', nm('w'), I(3))), [set('w', I(3))]),
+    iff(b('&&', nm('hasni'), b('<', nm('w'), I(4))), [set('w', I(4))]),
+  ];
+
+  if (name === 'r_print_named') {
+    /* **带名字的向量**：名字一行、值一行，两行**共用一个宽** `cw = max(值的宽, 最长的名字)`，
+       每格右对齐到 `cw` 再跟一个空格（所以每行**末尾有一个空格** —— 量出来的，`Rscript`，
+       2026-09-25）。一行几格是 `floor(80 / (cw + 1))`：这一档没有 `[1]` 那个标号。
+       名字那一条空着（长度对不上）就退回 `r_print_num` —— R 里名字被丢掉之后印的就是它。 */
+    const ns = nm('ns');
+    const row = (elem, wid) => ({
+      kind: 'while',
+      cond: b('&&', b('<', j, nm('n')), b('<', j, b('+', i, nm('per')))),
+      body: [
+        letS('s', elem(j)),
+        wr(pad(nm('s'), wid)),
+        wr(nm('s')),
+        wr(S(' ')),
+        set('j', b('+', j, I(1))),
+      ],
+    });
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RVEC }, { name: 'ns', type: RSTRV }],
+      ret: { kind: 'void' },
+      body: [
+        letI('n', vecLen(v)),
+        iff(b('==', nm('n'), I(0)), [wr(S('named numeric(0)\n')), { kind: 'return', values: [] }]),
+        iff(b('<', call1('alen', ns), nm('n')), [
+          { kind: 'expr-stmt', expr: lglCall('r_print_num', v) },
+          { kind: 'return', values: [] },
+        ]),
+        ...agg,
+        letI('cw', nm('w')),
+        {
+          kind: 'for',
+          init: letI('k', I(0)),
+          cond: b('<', nm('k'), nm('n')),
+          post: set('k', b('+', nm('k'), I(1))),
+          body: [
+            letI('sl2', call1('slen', svGet(ns, nm('k')))),
+            iff(b('>', nm('sl2'), nm('cw')), [set('cw', nm('sl2'))]),
+          ],
+        },
+        letI('per', call1('toint', rm('floor', b('/',
+          call1('toreal', I(80)), call1('toreal', b('+', nm('cw'), I(1))))))),
+        iff(b('<', nm('per'), I(1)), [set('per', I(1))]),
+        letI('i', I(0)),
+        {
+          kind: 'while',
+          cond: b('<', i, nm('n')),
+          body: [
+            letI('j', i),
+            row((k) => svGet(ns, k), nm('cw')),
+            wr(S('\n')),
+            set('j', i),
+            row((k) => lglCall('r_num_fmt', vecGet(v, k), nm('dd'), nm('ee')), nm('cw')),
+            wr(S('\n')),
+            set('i', b('+', i, nm('per'))),
+          ],
+        },
+      ],
+    };
+  }
+
   return {
     kind: 'fn',
     name,
@@ -4568,61 +4981,7 @@ function printFnDecl(name) {
       letI('n', vecLen(v)),
       /* 零长向量印类型名（`diff(c(1))` 在 R 里就是 `numeric(0)`） */
       iff(b('==', nm('n'), I(0)), [wr(S('numeric(0)\n')), { kind: 'return', values: [] }]),
-      { kind: 'let', name: 'p', type: PTR_REAL, init: call1('pnew', tyArg(PTR_REAL), I(3)) },
-      letI('neg', I(0)),
-      letI('mxl', I(-BIG)),
-      letI('mnl', I(BIG)),
-      letI('mxsl', I(-BIG)),
-      letI('rgt', I(-BIG)),
-      letI('mxns', I(-BIG)),
-      letI('fin', I(0)),
-      letBo('hasna', { kind: 'bool', value: false }),
-      letBo('hasnan', { kind: 'bool', value: false }),
-      letBo('haspi', { kind: 'bool', value: false }),
-      letBo('hasni', { kind: 'bool', value: false }),
-      {
-        kind: 'for',
-        init: letI('i', I(0)),
-        cond: b('<', i, nm('n')),
-        post: set('i', b('+', i, I(1))),
-        body: [
-          iff(isNa(el),
-            [iff(isNan(el),
-              [set('hasnan', { kind: 'bool', value: true })],
-              [set('hasna', { kind: 'bool', value: true })])],
-            [iff(inf1(el),
-              [iff(b('>', el, R(0)),
-                [set('haspi', { kind: 'bool', value: true })],
-                [set('hasni', { kind: 'bool', value: true })])],
-              [
-                set('fin', b('+', nm('fin'), I(1))),
-                { kind: 'expr-stmt', expr: lglCall('r_sci', el, I(7), nm('p')) },
-                letI('ng', call1('toint', { kind: 'deref', expr: call1('padd', nm('p'), I(0)) })),
-                letI('lf', call1('toint', { kind: 'deref', expr: call1('padd', nm('p'), I(1)) })),
-                letI('ns', call1('toint', { kind: 'deref', expr: call1('padd', nm('p'), I(2)) })),
-                letI('sl', b('+', nm('ng'), I(1))),
-                iff(b('>', nm('lf'), I(0)), [set('sl', b('+', nm('ng'), nm('lf')))]),
-                letI('rt', b('-', nm('ns'), nm('lf'))),
-                iff(b('>', nm('rt'), nm('rgt')), [set('rgt', nm('rt'))]),
-                iff(b('>', nm('lf'), nm('mxl')), [set('mxl', nm('lf'))]),
-                iff(b('<', nm('lf'), nm('mnl')), [set('mnl', nm('lf'))]),
-                iff(b('>', nm('sl'), nm('mxsl')), [set('mxsl', nm('sl'))]),
-                iff(b('>', nm('ns'), nm('mxns')), [set('mxns', nm('ns'))]),
-                iff(b('!=', nm('ng'), I(0)), [set('neg', I(1))]),
-              ])]),
-        ],
-      },
-      ...fmtPickStmts({
-        neg: 'neg', mxl: 'mxl', mnl: 'mnl', mxsl: 'mxsl', rgt: 'rgt', mxns: 'mxns',
-        wf: 'wf', ee: 'ee', dd: 'dd', w: 'w',
-      }),
-      /* 一格有限值都没有时那几个极值还是哨兵，按 `formatReal` 的口径清零（`w` 由下面那四条撑） */
-      iff(b('==', nm('fin'), I(0)), [set('w', I(0)), set('dd', I(0)), set('ee', I(0))]),
-      /* `NA` 占 2 格、`NaN` 与 `Inf` 占 3、`-Inf` 占 4（`R_print.na_width` 是 2） */
-      iff(b('&&', nm('hasna'), b('<', nm('w'), I(2))), [set('w', I(2))]),
-      iff(b('&&', nm('hasnan'), b('<', nm('w'), I(3))), [set('w', I(3))]),
-      iff(b('&&', nm('haspi'), b('<', nm('w'), I(3))), [set('w', I(3))]),
-      iff(b('&&', nm('hasni'), b('<', nm('w'), I(4))), [set('w', I(4))]),
+      ...agg,
       ...wrapStmts((k) => lglCall('r_num_fmt', vecGet(v, k), nm('dd'), nm('ee'))),
     ],
   };
@@ -5633,7 +5992,10 @@ function vecFnDecl(name) {
   if (STRV_FNS.has(name)) return strvFnDecl(name);
   if (SET_FNS.has(name)) return setFnDecl(name);
   if (name === 'r_sci') return sciFnDecl();
-  if (name === 'r_num_fmt' || name === 'r_print_num' || name === 'r_print_lgl') return printFnDecl(name);
+  if (name === 'r_num_fmt' || name === 'r_print_num' || name === 'r_print_lgl'
+      || name === 'r_print_named') {
+    return printFnDecl(name);
+  }
   if (name === NUM_STR) return numStrDecl();
   throw new Error(`r->IR: 不认识的辅助函数 ${name}`);
 }
@@ -5684,6 +6046,10 @@ function fnDecl(name, node, types) {
     if (params.includes(n)) continue;
     decls.push({ kind: 'let', name: n, type: t, init: zeroInit(t) });
     decls.push(...zeroStmts(n, t));
+    /* 带名字的向量：名字那一条摆在影子变量里（见 `RNVEC`），跟着这格 `let` 一起声明。 */
+    if (isNamedTy(t)) {
+      decls.push({ kind: 'let', name: nmVar(n), type: RSTRV, init: zeroInit(RSTRV) });
+    }
   }
   const all = [...decls, ...stmts];
   /* 回什么：拿最后那一格带值的 `return` 里的表达式类型算（`local` 已经推完了）。 */
@@ -5741,7 +6107,17 @@ function returnType(body, types) {
      在这一档合不起来，留向量那一个（调用点上它才是能接着用的那格）。 */
   if (seen.some((t) => isStrVec(t))) return RSTRV;
   if (seen.some((t) => t.kind === 'string')) return STR;
-  if (seen.some((t) => isVecTy(t) || t.kind === 'map')) return seen.find((t) => isVecTy(t) || t.kind === 'map');
+  if (seen.some((t) => isVecTy(t) || t.kind === 'map')) {
+    const got = seen.find((t) => isVecTy(t) || t.kind === 'map');
+    /* **交一格带名字的向量出不去** —— 名字那一条是跟着变量走的（见 `RNVEC`），
+       跟不出函数。静默丢掉的话调用点上 `print` 会少印名字那一行，所以当场报。 */
+    if (isNamedTy(got)) {
+      throw new Error('r->IR: 函数交一格**带名字的向量**还没接 —— 名字那一条跟着变量走，'
+        + '出不了函数（见 ext/r/SPEC.md 第二节）。要带名字就在调用点上装回去：'
+        + '`setNames(f(…), ns)`');
+    }
+    return got;
+  }
   /* **三态逻辑要留住那个记号**：`f <- function(x) x > 2` 回的是逻辑，不是普通 double
      （丢了它 `cat(f(1))` 会印 `1` / `0` 而不是 `TRUE` / `FALSE`）。
      每一处尾位都是三态才算 —— 混着数出来的那种（一支 `x > 2`、一支 `0`）按数算。 */
@@ -5800,15 +6176,26 @@ export function rToIR(tree) {
         lets.push({ kind: 'assign', target: { kind: 'name', name: n }, value: z });
         lets.push(...zeroStmts(n, t));
       }
+      if (isNamedTy(t)) {
+        lets.push({
+          kind: 'assign', target: { kind: 'name', name: nmVar(n) }, value: zeroInit(RSTRV),
+        });
+      }
       continue;
     }
     lets.push({ kind: 'let', name: n, type: t, init: zeroInit(t) });
     lets.push(...zeroStmts(n, t));
+    /* 名字那一条的影子变量（见 `RNVEC`）。 */
+    if (isNamedTy(t)) {
+      lets.push({ kind: 'let', name: nmVar(n), type: RSTRV, init: zeroInit(RSTRV) });
+    }
   }
   decls.push({ kind: 'main', body: [...lets, ...stmts] });
   /* 模块级变量的声明摆在最前（函数体与 `main` 都可能提到它们）。 */
   for (const [n, t] of [...globalTys].sort((p, q) => (p[0] < q[0] ? -1 : 1)).reverse()) {
-    decls.unshift({ kind: 'global', name: n, type: types.get(n) ?? t });
+    const gt = types.get(n) ?? t;
+    if (isNamedTy(gt)) decls.unshift({ kind: 'global', name: nmVar(n), type: RSTRV });
+    decls.unshift({ kind: 'global', name: n, type: gt });
   }
   /* 生成出来的辅助函数：**先按 `FN_DEPS` 闭包**，再一次发完（次序与"谁先被点到"无关）。
      摆在 `main` 之前、按名字排 —— 出来的 `.sx` 要能进快照。 */
