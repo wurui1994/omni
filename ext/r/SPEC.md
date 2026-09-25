@@ -234,7 +234,8 @@ R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不�
 
 ### 集合与位置那一族（判据 `ext/r/examples/setfn.R`）
 `match` / `%in%` / `unique` / `duplicated` / `union` / `intersect` / `setdiff` / `order` /
-`which.max` / `which.min` / `pmax` / `pmin` / `is.element` / `setequal` / `findInterval`。
+`which.max` / `which.min` / `pmax` / `pmin` / `is.element` / `setequal` / `findInterval` /
+`anyDuplicated`（回第一格重复元素的位置，没有就 0；串那一侧也接）。
 难的只有两问，都是 R 自己的规矩：
 
 * **"两格值算不算同一格"**（`r_same`）：`NA` 与 `NA` 算同一格（`NA %in% c(1, NA)` 是 TRUE、
@@ -309,6 +310,16 @@ var(c(1/3, 2/7, 3/11, 4/13, 5/17, 6/19, 7/23))
 **`mean` 不在这一档**：R 的 `mean(1, 2)` 答的是 `1`（第二格是 `trim=`），所以它多给一格
 就当场报，不假装。`sort(x, decreasing = TRUE)` 是"升着排完倒过来"（相等的那几格在 double
 上分不出来，所以与 R 逐字节一致）。
+
+### 环境与"这是个函数吗"
+
+`Sys.getenv(name)` 落方言的 `(getenv E)` —— 没设时回**空串**，与 R 同解（量过）。
+不带实参那一档没接（R 回的是一整条带名字的字符向量），`unset=` 也没接。
+公共那一层顺手把 `getenv` 写进 `SX_ARITY`（方言早有，标准 IR 这一层从前没登记过）。
+
+`is.function(f)` 在这一档是**编译期常量**：名字在这一段定义过的函数表（`fnDefs`）里、
+或者在内建/nmath 那两张表里就是 TRUE，就地写的匿名函数也是 TRUE，别的是 FALSE ——
+与 `is.numeric` / `is.character` / `is.logical` 同一条路（类型是推出来的，见第三节第 4 条）。
 
 ### 位运算那一族（判据 `ext/r/examples/bitw.R`）
 

@@ -88,3 +88,18 @@ cat(atol(1e-9), "\n")
 scaleby <- function(v, k = 2) v * k
 cat(scaleby(c(1, 2, 3)), "\n")
 cat(scaleby(c(1, 2, 3), 10), "\n")
+
+# `is.function(f)` 在这一档是**编译期常量**：名字在"这一段定义过的函数"表里、或者在
+# 内建/nmath 那两张表里就是 TRUE，就地写的匿名函数也是 —— 与 `is.numeric` 那三问同一条路
+isf <- function(x) x
+print(is.function(isf))
+print(is.function(sum))
+print(is.function(sqrt))
+print(is.function(function(x) x))
+notf <- 5
+print(is.function(notf))
+# `Sys.getenv(name)` 落方言的 `(getenv …)` —— 没设回空串（与 R 同解）
+print(nchar(Sys.getenv("HOME")) > 0)
+print(Sys.getenv("OMNI_NO_SUCH_VAR_XYZ"))
+print(nchar(Sys.getenv("OMNI_NO_SUCH_VAR_XYZ")))
+print(Sys.getenv("HOME") == Sys.getenv("HOME"))

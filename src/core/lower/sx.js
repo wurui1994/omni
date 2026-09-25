@@ -84,6 +84,9 @@ export const SX_ARITY = {
   brk: [0, 1], cont: [0, 1], print: 1, write: 1,
   /* 字符串那一族 */
   tostr: 1, slen: 1, sfind: 2, ssub: 3, srep: 2, supper: 1,
+  /* 环境变量（`(getenv E)`，方言那侧是 `get_env`）：R 的 `Sys.getenv("HOME")` 落这一格。
+     没设时回空串 —— 与 R 同解，所以不必再包一层。 */
+  getenv: 1,
   sfix: 2, ssci: 2, sgen: 2, sgenk: 2, sbase: 2,
   /* 整数与实数之间（**无符号 64 位要走 `torealu`**：那一格的位当有符号读是负数） */
   toreal: 1, torealu: 1, toint: 1,

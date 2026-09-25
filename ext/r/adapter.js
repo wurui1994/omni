@@ -274,6 +274,7 @@ const FN_DEPS = new Map([
   ['r_in1', ['r_same']],
   ['r_unique', ['r_same']],
   ['r_dup', ['r_same']],
+  ['r_any_dup', ['r_same']],
   /* 这三格的体里用 `r_in1` 问"另一条里有没有这一格"（`setFnDecl2` 的 `inW`）——
      登记漏了的话它只在"源码里还另有一处 `%in%`"时凑巧能链上（量出来的：`print.R` 里
      单写 `intersect(1:2, 3:4)` 报 `未声明的函数 'r_in1'`）。 */
@@ -329,6 +330,7 @@ const FN_DEPS = new Map([
   /* 字符向量的 `sort(method="radix")` / `order(method="radix")`：按字节比（C locale）。 */
   ['r_sort_str', []],
   ['r_order_str', []],
+  ['r_any_dup_str', []],
   ['r_uniq_str', []],
   ['r_dup_str', []],
   ['r_match_str', ['r_na']],
@@ -838,7 +840,7 @@ const BUILTINS = new Set([
   'tabulate', 'anyNA', 'append', 'replace',
   /* 集合与位置那一族（见 `setFnDecl`）。`%in%` 是个算子，不在这张表里。 */
   'which.max', 'which.min', 'match', 'unique', 'duplicated',
-  'union', 'intersect', 'setdiff', 'order', 'cumprod', 'cummax', 'cummin',
+  'union', 'intersect', 'setdiff', 'order', 'cumprod', 'cummax', 'cummin', 'anyDuplicated',
   'is.element', 'setequal', 'findInterval', 'median', 'rank',
   /* 位运算那一族（只接标量，见 `r_bit_v` 那段 32 位的账）。 */
   'bitwAnd', 'bitwOr', 'bitwXor', 'bitwNot', 'bitwShiftL', 'bitwShiftR',
@@ -847,6 +849,8 @@ const BUILTINS = new Set([
   'toupper', 'tolower', 'substr', 'substring', 'trimws', 'sprintf', 'startsWith', 'endsWith',
   /* `casefold` 是那两格的别名（S 兼容）；`strrep` 是方言的 `(srep …)`。 */
   'casefold', 'strrep', 'chartr', 'format',
+  /* 环境变量与"这是个函数吗"—— 后者在这一档是编译期常量（名字表里查得到就是）。 */
+  'Sys.getenv', 'is.function',
   /* `strsplit` 只接两种形状（见 `splitOf`）：`strsplit(s, sep)[[1]]` 与
      `unlist(strsplit(s, sep))` —— R 那边它回的是一张**表**，而这一层没有"表里装向量"。 */
   'strsplit', 'unlist',
@@ -1256,6 +1260,9 @@ function applyTy(fn, x, types) {
       return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RSTRV : STR;
     /* `format()` 这一档只接标量 —— 回一格串（向量那一侧见 `callOf` 里那段账）。 */
     case 'format': return STR;
+    /* `Sys.getenv(名字)` 回一格串；`is.function` 回编译期算出来的真假。 */
+    case 'Sys.getenv': return STR;
+    case 'is.function': return BOOL;
     /* `chartr(old, new, x)` 的形状跟着**第三格**走（前两格是字符表）。 */
     case 'chartr':
       return args.length > 2 && isStrVec(typeOfExpr(args[2], types)) ? RSTRV : STR;
@@ -1340,6 +1347,8 @@ function applyTy(fn, x, types) {
     /* 集合与位置那一族：位置回一格 int，别的回向量（`duplicated` 回逻辑向量）。
        `match` / `order` 回的是**位置**，所以是整数向量；三格集合运算跟着进去的那条走。 */
     case 'which.max': case 'which.min': return INT;
+    /* `anyDuplicated` 回的是**位置**（没有就 0）—— 一格 int。 */
+    case 'anyDuplicated': return INT;
     case 'match': case 'order': return RIVEC;
     case 'unique': case 'union': case 'intersect': case 'setdiff': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
@@ -3690,6 +3699,15 @@ function callOf(x, types, extra, want) {
         }
         return lglCall(fn === 'setequal' ? 'r_setequal' : 'r_find_int', asVec(0), asVec(1));
       }
+      case 'anyDuplicated': {
+        /** `anyDuplicated(v)` —— 第一格重复元素的位置（1 起），没有回 0。串那一侧也接。 */
+        if (n !== 1) throw new Error(`r->IR: anyDuplicated() 要一格实参（给了 ${n}）`);
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        if (isStrVec(t)) return lglCall('r_any_dup_str', ev(0));
+        if (t.kind === 'string') return lglCall('r_any_dup_str', lglCall('r_sv1', ev(0)));
+        if (!isVecTy(t)) throw new Error(`r->IR: anyDuplicated() 的实参不是向量（是 ${t.kind}）`);
+        return lglCall('r_any_dup', ev(0));
+      }
       case 'quantile': {
         /**
          * `quantile(x, probs, names = FALSE)` —— **只接 `names = FALSE`**：R 默认回的是
@@ -4143,6 +4161,35 @@ function callOf(x, types, extra, want) {
           return lglCall('r_padl', asStr(all[0], types, 7), w);
         }
         return lglCall('r_format1', asReal(ev(0), t), named('nsmall'), w);
+      }
+      case 'Sys.getenv': {
+        /**
+         * `Sys.getenv(name)` —— 方言的 `(getenv E)` 就是它，没设的回**空串**
+         * （两边同解：R 的 `Sys.getenv` 没设也回 `""`，量过）。
+         *
+         * 不带实参那一档没接（R 回的是一整条带名字的字符向量），`unset=` 也没接。
+         */
+        if (n !== 1) throw new Error(`r->IR: Sys.getenv() 这一档要一格实参（给了 ${n}）——`
+          + ' 不带实参时 R 回的是一整条带名字的字符向量，这一层没有');
+        const t = all[0] === null ? STR : typeOfExpr(all[0], types);
+        if (t.kind !== 'string') throw new Error(`r->IR: Sys.getenv() 的实参要是一格串（是 ${t.kind}）`);
+        return call1('getenv', ev(0));
+      }
+      case 'is.function': {
+        /**
+         * `is.function(f)` —— 这一档里"是不是函数"**编译期就知道**：名字在这一段定义过的
+         * 函数表（`fnDefs`）里、或者是内建/nmath 那两张表里，就是 TRUE，别的是 FALSE。
+         *
+         * 与 `is.numeric` / `is.character` 那三问同一条路（文件头第 4 条：类型是推出来的，
+         * 所以那几问是编译期常量）。
+         */
+        if (n !== 1) throw new Error(`r->IR: is.function() 要一格实参（给了 ${n}）`);
+        const a0 = all[0];
+        const known = a0 !== null && isList(a0) && tag(a0) === 'sym'
+          && (fnDefs.has(mangle(nameOf(a0))) || BUILTINS.has(String(nameOf(a0))) || RMATH.has(String(nameOf(a0))));
+        /* 就地写的匿名函数也是函数（`is.function(function(x) x)`）。 */
+        const lam = a0 !== null && isList(a0) && tag(a0) === 'fn';
+        return { kind: 'bool', value: known || lam };
       }
       case 'strrep': {
         /**
@@ -5258,14 +5305,14 @@ const STRV_FNS = new Set([
   /* base 那四条字符向量常量 + `strrep` 在字符向量上那一格。 */
   'r_sv_letters', 'r_sv_upper', 'r_sv_month', 'r_sv_mabb', 'r_strrep_v', 'r_chartr_v',
   'r_as_str_v', 'r_as_str_lv',
-  'r_sv1', 'r_sort_str', 'r_order_str', 'r_uniq_str', 'r_dup_str', 'r_match_str', 'r_in_str', 'r_in1_str',
+  'r_sv1', 'r_sort_str', 'r_order_str', 'r_any_dup_str', 'r_uniq_str', 'r_dup_str', 'r_match_str', 'r_in_str', 'r_in1_str',
   'r_union_str', 'r_isect_str', 'r_sdiff_str', 'r_head_str', 'r_tail_str',
 ]);
 
 /** 这一批由 `setFnDecl` 发（集合与位置那一族，见 `FN_DEPS` 上那段账）。 */
 const SET_FNS = new Set([
   'r_same', 'r_which_max', 'r_which_min', 'r_cumprod', 'r_pmax', 'r_pmin',
-  'r_ord_lt', 'r_order', 'r_match', 'r_in_v', 'r_in1', 'r_unique', 'r_dup',
+  'r_ord_lt', 'r_order', 'r_match', 'r_in_v', 'r_in1', 'r_unique', 'r_dup', 'r_any_dup',
   'r_union', 'r_intersect', 'r_setdiff', 'r_setequal', 'r_find_int',
 ]);
 
@@ -5593,6 +5640,31 @@ function setFnDecl2(name) {
       ],
     };
   }
+  if (name === 'r_any_dup') {
+    /**
+     * `anyDuplicated(v)` —— 回**第一格重复元素的位置**（1 起），没有回 `0`
+     * （量出来 `anyDuplicated(c(1,2,1))` 是 3、`anyDuplicated(c(1,2))` 是 0）。
+     * "算不算同一格"照旧走 `r_same`（`NA` 与 `NA` 算同一格）。
+     */
+    return {
+      kind: 'fn',
+      name,
+      params: P1,
+      ret: INT,
+      body: [
+        letI('n', vecLen(v)),
+        forTo('i', nm('n'), [{
+          kind: 'for',
+          init: letI('j', I(0)),
+          cond: b('<', nm('j'), i),
+          post: set('j', b('+', nm('j'), I(1))),
+          body: [iff(same(vecGet(v, i), vecGet(v, nm('j'))),
+            [{ kind: 'return', values: [b('+', i, I(1))] }])],
+        }]),
+        { kind: 'return', values: [I(0)] },
+      ],
+    };
+  }
   if (name === 'r_in1') {
     /* `一格数 %in% t` —— 回的是**三态标量**（那一格能直接进 `if`）。 */
     return {
@@ -5864,6 +5936,31 @@ function strvFnDecl(name) {
         { kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), I(0)) },
         { kind: 'builtin-stmt', name: 'apush', args: [nm('o'), nm('a')] },
         { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  if (name === 'r_any_dup_str') {
+    /**
+     * `anyDuplicated(v)` 在字符向量上 —— R 回的是**第一格重复元素的位置**（1 起），
+     * 一格重复都没有回 `0`（量出来 `anyDuplicated(c(1,2,1))` 是 3）。
+     * 与 `duplicated` 同一条：只要"相等"，不要 collation。
+     */
+    return {
+      kind: 'fn',
+      name,
+      params: P,
+      ret: INT,
+      body: [
+        letI('n', svLen(v)),
+        loop([{
+          kind: 'for',
+          init: letI('j', I(0)),
+          cond: b('<', nm('j'), i),
+          post: set('j', b('+', nm('j'), I(1))),
+          body: [iff(b('==', svGet(v, i), svGet(v, nm('j'))),
+            [{ kind: 'return', values: [b('+', i, I(1))] }])],
+        }], nm('n')),
+        { kind: 'return', values: [I(0)] },
       ],
     };
   }

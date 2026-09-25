@@ -64,3 +64,15 @@ print(findInterval(c(1, 2, 3), c(1, 2, 3)))
 print(findInterval(c(2), c(1, 2, 2, 3)))
 print(findInterval(c(NA, 2), c(1, 2)))
 cat(findInterval(c(1.2, 9), c(1, 5)), "\n")
+
+# `anyDuplicated(v)` —— 回**第一格重复元素的位置**（1 起），一格都没有回 0。
+# 串那一侧也接（与 `duplicated` 同一条：只要"相等"）
+print(anyDuplicated(c(1, 2, 1)))
+print(anyDuplicated(c(1, 2, 3)))
+print(anyDuplicated(c(5)))
+print(anyDuplicated(c(1, 1)))
+print(anyDuplicated(c(3, 1, 4, 1, 5)))
+print(anyDuplicated(c(NA, 1, NA)))
+print(anyDuplicated(c("b", "a", "b")))
+print(anyDuplicated(c("a", "b")))
+cat(anyDuplicated(c(2, 2)), anyDuplicated(c(2, 3)), "\n")
