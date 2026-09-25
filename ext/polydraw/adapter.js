@@ -1867,8 +1867,9 @@ function renameStatics(x, ren) {
  * * `&a` 形参（`pref`）—— 它拿到的就是调用方那一格数组；
  * * 实参位置的 `&x`（`addr`），且 `x` 不是本来就成块的东西（数组 / 结构体）。
  *
- * 名单是**整份程序一张**（与 `C.arrs` 同一手的平名字空间）：同一个名字在别的函数里
- * 也会跟着装箱 —— 多开一格长度 1 的数组，语义不变。
+ * 这台机器**既算整份程序那一张**（`C.boxedAll` —— 模块级的量要不要改成 `(arr real)`
+ * 得看整份程序），**也按函数各算一张**（`C.boxed`，见 `boxedFor`）：一个函数里的局部量
+ * 只因为**别的**函数里有个同名的量被 `&` 过就装箱，纯是白开一格数组。
  */
 function collectBoxed(x, C, out = new Set(), blocks = new Set()) {
   if (!isList(x)) return out;
@@ -1913,6 +1914,30 @@ function collectBoxed(x, C, out = new Set(), blocks = new Set()) {
 }
 
 /** 这一份函数体里用到的（装箱的）名字 —— 用上头那格 `usedNames`（读也算）。 */
+
+/**
+ * **这一个函数**那张装箱名单。
+ *
+ * 装箱是"名字的属性"还是"那一格变量的属性"？—— 是后者：函数体里的 `x` 与别的函数里的 `x`
+ * 是两格变量（这门语言没有词法闭包，局部量不出函数）。所以只收三处：
+ *   * 这份函数自己的 `&x` 形参与体里的 `&x` / 按名字传引用（`collectBoxed` 走这一棵子树）；
+ *   * **模块级**的量（`static`）—— 它们在 `preDecls` 里已经按整份程序那张单改成了
+ *     `(arr real)`，读写必须跟着走箱子那条路，不然类型对不上；
+ *   * 这份函数**收整块**的形参（`C.offs`）不在这儿 —— 那一族本来就是块。
+ *
+ * 收益：`tigrou/balls2k.pss` 的 `rotate(&x,&y,r)` 把 `x`/`y` 两个名字钉成了箱子，而
+ * `drawsph` 里的 `x`/`y` 只是椭圆中心那两格局部量 —— 每次调用白开两格长度 1 的数组，
+ * 一帧 175 个球 ⇒ 350 次 `omni_arr_f64_new`（占语言那一半 24.1% 的栈顶样本）。
+ */
+function boxedFor(node, C) {
+  const own = collectBoxed(node, C, new Set(), C.blockNames);
+  const out = new Set();
+  for (const nm of C.boxedAll) {
+    if (C.valParams.has(nm)) continue;
+    if (own.has(nm) || C.globals.get(nm) === ARR) out.add(nm);
+  }
+  return out;
+}
 
 function staticDecls(x, out = [], tags = { plain: 'static', typed: 'sty' }) {
   if (!isList(x)) return out;
@@ -2214,6 +2239,7 @@ export function evalToIR(cst, host, src = '') {
     arrInits: [],                       /* 那几格数组的 `a = (anew …)`：入口里做一次 */
     boxed: new Set(),                   /* 被取过地址的量（`&x`）：落成一格长度 1 的数组 */
     boxedAll: new Set(),                /* 整份程序那一张（`C.boxed` 是**当前这个函数**那一张） */
+    blockNames: new Set(),              /* 函数体里那些"本来就成块"的名字（`auto a[3]` / 带类型的） */
     valParams: new Set(),               /* 当前函数**按值**收的形参（`&x` 碰上它要报） */
     gotoActive: [],                     /* 正在降哪几格标号前头那一段（`goto` 的旗子名） */
     /* **块里头那些标号**（名字 -> 那一段原文语句）：外层的 `goto` 跳进来时照抄一份，
@@ -2342,9 +2368,10 @@ export function evalToIR(cst, host, src = '') {
   /* **谁要装箱**（`&x`）—— 摆在这儿是因为它要先知道哪些名字**本来就成块**
      （文件级与函数里的数组/结构体都登记过了），那些不装箱，直接把那一块传过去。
      装箱的**全局**要从 `real` 改成一格长度 1 的 `(arr real)`：初值也跟着改成写 `x[0]`。 */
-  C.boxedAll = collectBoxed(cst, C, new Set(), new Set(
+  C.blockNames = new Set(
     autoDecls(cst).filter((s) => s.ty !== undefined || s.arr !== undefined).map((s) => s.name),
-  ));
+  );
+  C.boxedAll = collectBoxed(cst, C, new Set(), C.blockNames);
   C.boxed = C.boxedAll;
   for (const d of preDecls) {
     /* **已经成块的不许再装箱**：`C.arrs` 里那些是真有长度的数组（`static v[3]`），
@@ -2368,7 +2395,7 @@ export function evalToIR(cst, host, src = '') {
     /* **装箱是按函数算的**：整份程序那张名单里，凡是本函数**按值**收的形参都不算箱子
        （`demos/planpos.kc` 里 `year` 在一处是 `&year`、在 `getday(year,…)` 里是按值的形参）。 */
     C.valParams = new Set(ps.filter((p) => p.type === REAL).map((p) => p.name));
-    C.boxed = new Set([...C.boxedAll].filter((nm) => !C.valParams.has(nm)));
+    C.boxed = boxedFor(x, C);
     /* 标号那张表**按函数算**（同名的标号在另一个函数里是另一回事）。 */
     C.innerLabels = new Map();
     /* 这一份函数体里"收整块的形参"各自那格偏移（`名字$o`）—— 下标都要加上它。 */
@@ -2386,7 +2413,7 @@ export function evalToIR(cst, host, src = '') {
      有形参就在入口里当零值的局部量。 */
   const mainPs = paramInfos(kids(mainNode)[0], C).map((p) => p.name);
   C.valParams = new Set(mainPs);
-  C.boxed = new Set([...C.boxedAll].filter((nm) => !C.valParams.has(nm)));
+  C.boxed = boxedFor(mainNode, C);
   /* 主函数的形参都是按值的 real —— 上一份函数留下的偏移表不许串到这儿。 */
   C.offs = new Map();
   C.innerLabels = new Map();
