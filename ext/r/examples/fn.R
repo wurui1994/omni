@@ -103,3 +103,40 @@ print(nchar(Sys.getenv("HOME")) > 0)
 print(Sys.getenv("OMNI_NO_SUCH_VAR_XYZ"))
 print(nchar(Sys.getenv("OMNI_NO_SUCH_VAR_XYZ")))
 print(Sys.getenv("HOME") == Sys.getenv("HOME"))
+
+# **R 的实参是值语义**（copy-on-modify，2026-09-26 接了）：函数里改形参改的是自己那一份，
+# 调用方那条向量一个字节都不动。这一层的向量是一块 `(ptr real)`、按指针交进去，所以
+# 从前 `x[1] <- 99` 直接写到了调用方的内存上 —— 静默答错，而且是"过后才发现自己的数据
+# 变了"那一种。现在形参里**被写过元素**的那几格一进来就抄一份（`r_copyv` /
+# `r_copy_str`）；只是重绑（`x <- 别的`）的不抄 —— 那本来就看不见。
+setfirst <- function(x) { x[1] <- 99; x }
+vv <- c(1, 2)
+print(setfirst(vv))
+print(vv)
+growit <- function(x) { x[5] <- 9; x }
+print(growit(vv))
+print(vv)
+setstr <- function(s) { s[1] <- "z"; s }
+ww <- c("a", "b")
+print(setstr(ww))
+print(ww)
+rebind <- function(x) { x <- c(7); x }
+print(rebind(vv))
+print(vv)
+# 真写起来最常见的形状：函数里就地排一遍（调用方那条不动）
+bub <- function(v) {
+  n <- length(v)
+  for (i in 1:(n - 1)) {
+    for (j in 1:(n - i)) {
+      if (v[j] > v[j + 1]) {
+        t <- v[j]
+        v[j] <- v[j + 1]
+        v[j + 1] <- t
+      }
+    }
+  }
+  v
+}
+zz <- c(3, 1, 2)
+print(bub(zz))
+print(zz)

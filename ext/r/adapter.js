@@ -261,6 +261,8 @@ const FN_DEPS = new Map([
   ['r_nm_pos', []],
   ['r_nm_pick', []],
   ['r_nm_keys', []],
+  ['r_copy_str', []],
+  ['r_copyv', []],
   ['r_at_keys', ['r_na']],
   ['r_mask_str', ['r_is_na']],
   ['r_drop_na', ['r_is_na']],
@@ -5696,7 +5698,7 @@ function strFnDecl(name) {
 /** 这一批由 `strvFnDecl` 发（形状都是"一条 `(arr string)` 进"）。 */
 const STRV_FNS = new Set([
   'r_cat_str', 'r_print_str', 'r_join_str', 'r_rev_str', 'r_nchar_v', 'r_upper_v', 'r_lower_v',
-  'r_pick_str', 'r_mask_str', 'r_split', 'r_at_name', 'r_nm_at', 'r_sat1', 'r_nm_pos', 'r_nm_pick', 'r_nm_keys',
+  'r_pick_str', 'r_mask_str', 'r_split', 'r_at_name', 'r_nm_at', 'r_sat1', 'r_nm_pos', 'r_nm_pick', 'r_nm_keys', 'r_copy_str',
   'r_gsub', 'r_gsub_v', 'r_grepl_v', 'r_grep_i', 'r_grep_s', 'r_rep_str', 'r_ifelse_s',
   'r_substr_v', 'r_trim_v', 'r_starts_v', 'r_ends_v',
   /* base 那四条字符向量常量 + `strrep` 在字符向量上那一格。 */
@@ -6985,6 +6987,21 @@ function strvFnDecl(name) {
       ],
     };
   }
+  if (name === 'r_copy_str') {
+    /* 字符向量那一格的"抄一份"（与 `r_copyv` 同一条账：R 的实参是值语义）。 */
+    return {
+      kind: 'fn',
+      name,
+      params: P,
+      ret: RSTRV,
+      body: [
+        letI('n', svLen(v)),
+        { kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), nm('n')) },
+        loop([{ kind: 'assign', target: svGet(nm('o'), i), value: svGet(v, i) }], nm('n')),
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
   if (name === 'r_rev_str') {
     return {
       kind: 'fn',
@@ -8164,6 +8181,30 @@ function vecFnDecl(name) {
           }],
         },
       ], 0)],
+    };
+  }
+  if (name === 'r_copyv') {
+    /**
+     * **抄一份**。R 的实参是值语义（copy-on-modify）：`f <- function(x) { x[1] <- 99; x }`
+     * 改的是**函数自己那一份**，调用方那条向量一个字节都不动。
+     *
+     * 这一层的向量是一块 `(ptr real)`，按指针交进去 —— 于是 `x[1] <- 99` 会写到调用方
+     * 那块内存上（量出来 2026-09-26：`v` 在调用之后变成了 `99 2`，而 R 那边还是 `1 2`，
+     * **静默答错**）。所以形参里"被写过元素"的那几格在函数**一进来就抄一份**
+     * （`fnDecl` 里那一段）—— R 自己也是这时候复制的，代价一样。
+     */
+    const out = { kind: 'name', name: 'o' };
+    return {
+      kind: 'fn',
+      name,
+      params: P,
+      ret: RVEC,
+      body: [
+        declLen(),
+        ...vecNewAs('o', len),
+        loop([vecSet(out, i, vecGet(v, i))], 0),
+        { kind: 'return', values: [out] },
+      ],
     };
   }
   if (name === 'r_rev') {
@@ -10011,7 +10052,36 @@ function fnDecl(name, node, types) {
       decls.push({ kind: 'let', name: nmVar(n), type: RSTRV, init: zeroInit(RSTRV) });
     }
   }
-  const all = [...decls, ...stmts];
+  /**
+   * **形参里"被写过元素"的那几格，一进来就抄一份**（R 的 copy-on-modify）。
+   *
+   * 量出来（`Rscript`，2026-09-26）：`h <- function(x) { x[1] <- 99; x }` 之后
+   * `v` 在 R 那边还是 `1 2`，而这一层印的是 `99 2` —— 向量是一块 `(ptr real)`、按指针
+   * 交进去，`x[1] <- 99` 直接写到了调用方那块内存上。**静默答错**，而且是最难查的一种
+   * （调用方后面才发现自己的数据变了）。
+   *
+   * 只抄"真写过元素"的那几格（`x[i] <- …` / `x[[k]] <- …`）—— 光是 `x <- 别的` 那种重绑
+   * 不会让调用方看见，抄了也是白抄。R 自己也是在"要写"那一刻复制的，所以代价同形。
+   */
+  const copies = [];
+  for (const p of params) {
+    const t = local.get(p);
+    if (t === undefined) continue;
+    let written = false;
+    eachAssign(body, ({ target }) => {
+      if ((tag(target) === 'sub1' || tag(target) === 'sub2')
+          && tag(kids(target)[0]) === 'sym'
+          && mangle(nameOf(kids(target)[0])) === p) written = true;
+    });
+    if (!written) continue;
+    const pv = { kind: 'name', name: p };
+    if (isVecTy(t)) {
+      copies.push({ kind: 'assign', target: pv, value: lglCall('r_copyv', pv) });
+    } else if (isStrVec(t)) {
+      copies.push({ kind: 'assign', target: pv, value: lglCall('r_copy_str', pv) });
+    }
+  }
+  const all = [...decls, ...copies, ...stmts];
   /* 回什么：拿最后那一格带值的 `return` 里的表达式类型算（`local` 已经推完了）。 */
   const ret = all.some((s) => hasValueReturn(s)) ? (returnType(body, local) ?? INT) : { kind: 'void' };
   return {
