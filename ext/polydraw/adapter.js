@@ -2264,6 +2264,57 @@ function bodyOf(blk, params, C, curFn) {
  */
 const offName = (n) => `${n}$o`;
 
+/**
+ * **入口收一整块那一档**（`(a[16])` —— EvalDraw 的"自己写乐器"模式，`insts/` 那一族
+ * 五份脚本全是它）：宿主每采样调一次，那 16 格是**它传进来的寄存器**。
+ *
+ * 我们这边没有 MIDI 那一侧，所以在入口里**就地开一块**、按 `evaldraw.txt:1270-1296`
+ * 那张表把初值填上（不是全零 —— `a[3] = 1/samprate` 要是 0，脚本里"推时间"那种循环
+ * 就永远不动）。默认那三个数照说明书的例子取：`samprate = 44100`、
+ * `midifrq = 60`（中央 C）、`midivol = 64`（"64 = normal"）。
+ *
+ *   a[0] 采样计数 0            a[1] 每采样的增量 2^((f-57)/12)*220*2π/sr
+ *   a[2] 按下起的秒数 0        a[3] 1/sr
+ *   a[4] 松开起的秒数 1e32     a[5] 音量系数 exp(v*.03)*512
+ *   a[6] MIDI 音高 f           a[7] MIDI 音量 v         a[8..15] 草稿 0
+ *
+ * 值在这儿**算成字面量**（不是发 `exp`/`PI` 的算式）—— 三条腿拿到同一个数，
+ * 于是出图照旧逐字节相同。偏移那一格（`a$o`）是 0：这块是就地开的，起点就是 0。
+ */
+function instrumentDecl(name, C) {
+  const n = (C.arrs.get(name) ?? [1]).reduce((a, b) => a * b, 1);
+  const sr = 44100;
+  const midifrq = 60;
+  const midivol = 64;
+  const init = new Map([
+    [1, (2 ** ((midifrq - 57) / 12)) * 220 * Math.PI * 2 / sr],
+    [3, 1 / sr],
+    [4, 1e32],
+    [5, Math.exp(midivol * 0.03) * 512],
+    [6, midifrq],
+    [7, midivol],
+  ]);
+  const out = [{
+    kind: 'let',
+    name,
+    type: ARR,
+    init: {
+      kind: 'builtin',
+      name: 'anew',
+      args: [{ kind: 'type', type: ARR }, { kind: 'int', value: String(n) }],
+    },
+  }];
+  for (const [i, v] of init) {
+    if (i >= n) continue;
+    out.push({
+      kind: 'assign',
+      target: { kind: 'index', obj: nameRef(name), index: { kind: 'int', value: String(i) } },
+      value: num(v),
+    });
+  }
+  return out;
+}
+
 function paramInfos(psNode, C, register = true) {
   return kids(psNode).flatMap((p) => {
     const one = paramOne(p, C, register);
@@ -2570,14 +2621,18 @@ export function evalToIR(cst, host, src = '') {
 
   /* 主函数：EVAL 里它的形参是宿主传进来的（PolyDraw 不传，`()` 是常态）——
      有形参就在入口里当零值的局部量。 */
-  const mainPs = paramInfos(kids(mainNode)[0], C).map((p) => p.name);
-  C.valParams = new Set(mainPs);
+  const mainInfos = paramInfos(kids(mainNode)[0], C);
+  const mainPs = mainInfos.map((p) => p.name);
+  /* 按值那一族才算 `valParams`（`&x` 取地址要据此在入口里开箱子）—— 收整块的那个不算。 */
+  C.valParams = new Set(mainInfos.filter((p) => p.type !== ARR).map((p) => p.name));
   C.boxed = boxedFor(mainNode, C);
-  /* 主函数的形参都是按值的 real —— 上一份函数留下的偏移表不许串到这儿。 */
+  /* 上一份函数留下的偏移表不许串到这儿：入口那格整块是**就地开的**（起点 0），
+     所以这儿的偏移永远是 0，不用登记。 */
   C.offs = new Map();
   C.innerLabels = new Map();
   const mainBody = [
-    ...mainPs.map((p) => ({ kind: 'let', name: p, type: REAL })),
+    ...mainInfos.flatMap((p) => (p.type === ARR ? instrumentDecl(p.name, C)
+      : [{ kind: 'let', name: p.name, type: REAL }])),
     ...bodyOf(kids(mainNode)[1], mainPs, C, '主函数'),
   ];
   /**

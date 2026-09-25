@@ -1,0 +1,26 @@
+// ext/evaldraw/examples/inst.kc —— **入口收一整块**（`(a[16])`：自己写乐器那一档）
+//
+// 口径逐字抄 `evaldraw.txt:1258-1296`：「(a[16]) The recommended mode for creating your own
+// instruments. Here, 'a' can be thought of as a structure - even though it's passed to the
+// code like a 16-element array.」每采样调一次，那 16 格是宿主传进来的寄存器，初值在那张
+// 表里写着（a[0]=0 / a[1]=2^((f-57)/12)*220*2π/sr / a[2]=0 / a[3]=1/sr / a[4]=1e32 /
+// a[5]=exp(v*.03)*512 / a[6]=f / a[7]=v / a[8..15]=0）。
+//
+// 我们这边没有 MIDI 那一侧，所以在入口里就地开一块、按那张表把初值填上（默认
+// sr=44100、f=60 中央 C、v=64）。这一份判三样：
+//   * 入口的 `a[16]` 形参真是**一整块**（`a[s]` 是下标，不是"给一个 real 加下标"）；
+//   * 那六格非零初值按说明书给（其中 a[3] 要是 0，语料里"推时间"那种循环就永远不动）；
+//   * 草稿寄存器（a[8..15]）是 0，而且写得进去、读得回来。
+//
+// 语料里 `insts/` 那五份（`inst3` / `inst4` / `sawmow2` / `sawmow3` / `blowup`）全靠它。
+
+(a[16])
+enum {s,sinc,t,tinc,toff,volsc,midifrq,midivol};
+
+printf("frq=%g,%g\n", a[midifrq], a[midivol]);
+printf("inc=%.9f,%.9f\n", a[sinc], a[tinc]);
+printf("off=%g vol=%.4f\n", a[toff], a[volsc]);
+a[s] += a[sinc]; a[t] += a[tinc];
+printf("step=%.9f,%.9f\n", a[s], a[t]);
+a[8] = 7; a[15] = a[8]*2;
+printf("scratch=%g,%g,%g\n", a[9], a[8], a[15]);
