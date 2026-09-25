@@ -80,3 +80,18 @@ print(as.numeric(c(1L, 2L)))
 print(as.numeric(c(TRUE, FALSE, NA)))
 print(as.integer(c(1.7, -2.7, NA)))
 print(as.integer(c(10, 20)))
+
+# `sprintf` 在向量上**出一整条字符向量**（R 的常用写法）。落法是"摊成元素、再套一遍同一条
+# 排版"：拿一格合成的 `sprintf(fmt, 那几格标量临时量)` 递归下来 —— 旗子 / 宽度 / 精度 /
+# 进制那一大段只有一份实现。长度按回收取最长的那一格；有一格零长就整条零长。
+ns <- c("a", "b", "c")
+print(sprintf("%d: %s", 1:3, ns))
+print(sprintf("x%d", 1:2))
+print(sprintf("%d-%d", 1:2, 1:4))
+print(sprintf("%5.2f|", c(1.5, 22.25)))
+print(sprintf("%d%%", 1:2))
+print(sprintf("%s", c(1.5, 2)))
+print(sprintf("%s", c(TRUE, FALSE)))
+print(sprintf("%d", integer(0)))
+print(sprintf("[%-4s]", ns))
+cat(sprintf("%03d", 7), "\n")

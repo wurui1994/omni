@@ -1053,7 +1053,14 @@ function applyTy(fn, x, types) {
       }) ? RSTRV : STR;
     }
     case 'as.character': return STR;
-    case 'sprintf': return STR;
+    case 'sprintf': {
+      /* 有一格实参是向量 → 出一整条字符向量（见 `sprintfOf` 里那段账）。 */
+      const ps = posArgs(x).slice(1);
+      return ps.some((a) => {
+        const t = typeOfExpr(a, types);
+        return isVecTy(t) || isStrVec(t);
+      }) ? RSTRV : STR;
+    }
     /* 串那一族在字符向量上逐元素（出来还是一条字符向量 / 逻辑向量）。 */
     case 'substr': case 'substring': case 'trimws': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : STR;
@@ -1604,6 +1611,18 @@ function rmathCall(rname, spec, args, argTys) {
 }
 
 
+/* ─── 合成几格 CST 节点（给"摊成元素再套一遍"那种改写用） ────────────────
+ *
+ * 为什么要合成节点而不是另写一份逐元素的排版：`sprintf` 的排版那一大段（旗子 / 宽度 /
+ * 精度 / 进制 / 两套有效数字）只该有**一份**实现。把向量实参换成一格标量临时量的
+ * `(sym …)`、再拿一格合成的 `sprintf(fmt, 那几格临时量)` 递归下来，那一份就照用。
+ */
+const cstList = (t, ...ks) => ({ kind: 'list', items: [{ kind: 'atom', value: t }, ...ks] });
+const cstSym = (nm) => cstList('sym', { kind: 'atom', value: nm });
+const cstCall = (fnName, argVals) => cstList(
+  'call', cstSym(fnName), ...argVals.map((v) => cstList('arg', v)),
+);
+
 /**
  * `sprintf(fmt, …)` —— **格式串在编译期就拆开**，落成一串接起来的片段。
  *
@@ -1625,6 +1644,78 @@ function sprintfOf(x, types) {
   }
   const fmt = String(leaf(kids(args[0])[0]));
   const rest = args.slice(1);
+  /**
+   * **有一格实参是向量 → R 出一整条字符向量**（`sprintf("%d: %s", 1:3, ns)` 是常用写法）。
+   *
+   * 办法是"摊成元素、再套一遍同一条排版"：每格向量实参存进一格临时量、逐格取出来绑到
+   * 一格标量临时量上，然后拿一格**合成的** `sprintf(fmt, 那几格标量)` 调用节点递归下来
+   * （`cstCall` / `cstSym`）—— 于是旗子 / 宽度 / 精度 / 进制那一大段只有一份实现。
+   *
+   * 长度按 R 的回收取**最长**的那一格（`sprintf("%d-%d", 1:2, 1:4)` 出 4 格，量出来的）；
+   * 有一格是零长就整条零长（`character(0)`），那时循环一圈都不转 —— 也就不会对 0 取模。
+   */
+  const vecAt = rest.map((a) => {
+    const t = typeOfExpr(a, types);
+    return isVecTy(t) || isStrVec(t);
+  });
+  if (vecAt.some((v) => v)) {
+    const nm = (s) => ({ kind: 'name', name: s });
+    const I = (v) => ({ kind: 'int', value: v });
+    const stmts = [];
+    const child = new Map(types);
+    const elems = [];
+    const lens = [];
+    const subst = rest.map((a, k) => {
+      if (!vecAt[k]) return a;
+      const t = typeOfExpr(a, types);
+      const str = isStrVec(t);
+      const vn = fresh('sv');
+      const ln = fresh('sn');
+      stmts.push({ kind: 'let', name: vn, type: str ? RSTRV : t, init: exprOf(a, types) });
+      stmts.push({
+        kind: 'let', name: ln, type: INT, init: str ? svLen(nm(vn)) : vecLen(nm(vn)),
+      });
+      lens.push(nm(ln));
+      const en = fresh('se');
+      const et = str ? STR : (isLglTy(t) ? RLGL1 : REAL);
+      child.set(en, et);
+      elems.push({ en, vn, ln, str, et });
+      return cstSym(en);
+    });
+    const mv = fresh('sm');
+    stmts.push({ kind: 'let', name: mv, type: INT, init: lens[0] });
+    for (const l of lens.slice(1)) {
+      stmts.push({ kind: 'if', cond: b('>', l, nm(mv)), then: [{ kind: 'assign', target: nm(mv), value: l }], else_: null });
+    }
+    /* 有一格是零长就整条零长（R 的口径）—— 这一句摆在取最长之后，才盖得住。 */
+    for (const l of lens) {
+      stmts.push({ kind: 'if', cond: b('==', l, I(0)), then: [{ kind: 'assign', target: nm(mv), value: I(0) }], else_: null });
+    }
+    const out = fresh('so');
+    stmts.push({ kind: 'let', name: out, type: RSTRV, init: call1('anew', tyArg(RSTRV), nm(mv)) });
+    const iv = fresh('si');
+    const body = elems.map((e) => ({
+      kind: 'let',
+      name: e.en,
+      type: e.et,
+      init: e.str
+        ? svGet(nm(e.vn), b('%', nm(iv), nm(e.ln)))
+        : vecGet(nm(e.vn), b('%', nm(iv), nm(e.ln))),
+    }));
+    body.push({
+      kind: 'assign',
+      target: svGet(nm(out), nm(iv)),
+      value: sprintfOf(cstCall('sprintf', [args[0], ...subst]), child),
+    });
+    stmts.push({
+      kind: 'for',
+      init: { kind: 'let', name: iv, type: INT, init: I(0) },
+      cond: b('<', nm(iv), nm(mv)),
+      post: { kind: 'assign', target: nm(iv), value: b('+', nm(iv), I(1)) },
+      body,
+    });
+    return { kind: 'block-expr', stmts, value: nm(out) };
+  }
   const S = (v) => ({ kind: 'string', value: v });
   const pieces = [];
   let lit = '';
