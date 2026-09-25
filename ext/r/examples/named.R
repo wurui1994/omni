@@ -133,3 +133,18 @@ print(pk[c(1, 5)])       # 越界那一格：值是 NA、名字印 `<NA>`
 print(pk[pk > 100])      # 一格都没挑着 → 零长
 print(names(pk[-1]))
 cat(sum(pk[pk > 1]), "\n")
+
+# `c(…)` 里名字是**接起来**的（2026-09-26 接了）：带名字的向量把它那几格名字逐格抄过来，
+# 不带名字的那几格补空串（R 印出来那一列是空的），写着名字的字面量照写。
+cv <- c(a = 1, bb = 4)
+cu <- c(3, 9)
+print(c(cv, 4))
+print(c(cv, d = 4))
+print(c(cv, cu))
+print(c(cu, cv))
+print(c(cv, cv))
+print(c(1, cv))
+print(c(cv, c(z = 7)))
+print(names(c(cv, 4)))
+print(c(c(p = TRUE), FALSE))
+cat(sum(c(cv, 4)), "\n")

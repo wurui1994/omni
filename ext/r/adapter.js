@@ -611,7 +611,9 @@ const NAME_KEEP_NUM = new Set([
   'round', 'signif', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
   'sinh', 'cosh', 'tanh', 'cumsum', 'cumprod', 'cummax', 'cummin', 'zapsmall',
 ]);
-const NAME_KEEP = new Set([...NAME_KEEP_LGL, ...NAME_KEEP_NUM, 'rev', 'head', 'tail', 'sort']);
+/* `NAME_KEEP` 只管那道门（`callOf` 里"名字跟不住就报"那一句）：这几格的名字跟得住。
+   `c` 也在里头 —— 它的名字是**接起来**而不是原样跟着（见 `namesExprOf` 的 `c` 那一格）。 */
+const NAME_KEEP = new Set([...NAME_KEEP_LGL, ...NAME_KEEP_NUM, 'rev', 'head', 'tail', 'sort', 'c']);
 /** 第 i 格（0 起）。方言的 `{kind:'index'}` 落成 `(aget …)`，赋值那侧落 `(aset …)`。 */
 const svGet = (v, i) => ({ kind: 'index', obj: v, index: i });
 const svLen = (v) => call1('alen', v);
@@ -1011,18 +1013,62 @@ function namesExprOf(x, types) {
   if (tag(x) !== 'call' || tag(kids(x)[0]) !== 'sym') return null;
   const fn = nameOf(kids(x)[0]);
   if (fn === 'c') {
+    /**
+     * `c(…)` 的名字那一条。两种实参各出各的名字（量出来的，`Rscript`，2026-09-26）：
+     *
+     *   `c(a = 1, b = 2)`   名字是写着的那几个字面量，没写的是**空串**
+     *   `c(v, 4)`           v 是带名字的向量 → 把 v 的名字**逐格抄过来**，
+     *                       后面那格没名字就是空串（R 印出来那一列是空的）
+     *   `c(v, d = 4)`       两种混着：抄完 v 的再补一格 `"d"`
+     *
+     * 长度要在运行期才知道（v 有几格），所以用 `anew(…, 0)` + `apush` 一格格接，
+     * 与 `r_uniq_str` 那一族同一个写法。带名字的向量那一格的**名字表达式**要先存进一格
+     * 临时量（长度与取值各要读一遍）；不带名字的向量那一格要知道它有几格 ——
+     * 那条数据因此**求值两遍**（与 `sapply` 的 `USE.NAMES` 同一条账，明写在 SPEC）。
+     */
     const as = argsOf(x);
-    if (!as.some((a) => a.name !== null)) return null;
+    const tys = as.map((a) => typeOfExpr(a.value, types));
+    if (!as.some((a) => a.name !== null) && !tys.some((t) => isNamedTy(t))) return null;
     const tmp = fresh('nm');
     const tv = { kind: 'name', name: tmp };
     const stmts = [{
-      kind: 'let', name: tmp, type: RSTRV, init: call1('anew', tyArg(RSTRV), { kind: 'int', value: as.length }),
+      kind: 'let', name: tmp, type: RSTRV, init: call1('anew', tyArg(RSTRV), { kind: 'int', value: 0 }),
     }];
-    as.forEach((a, i) => stmts.push({
-      kind: 'assign',
-      target: { kind: 'index', obj: tv, index: { kind: 'int', value: i } },
-      value: { kind: 'string', value: a.name ?? '' },
-    }));
+    const push = (e) => ({ kind: 'builtin-stmt', name: 'apush', args: [tv, e] });
+    const blank = { kind: 'string', value: '' };
+    as.forEach((a, i) => {
+      const t = tys[i];
+      if (isNamedTy(t)) {
+        const ns = namesExprOf(a.value, types);
+        if (ns === null) throw new Error('r->IR: c() 里有一格带名字的向量，可名字那一条推不出来');
+        const nv = fresh('cn');
+        const j = fresh('cj');
+        stmts.push({ kind: 'let', name: nv, type: RSTRV, init: ns });
+        stmts.push({
+          kind: 'for',
+          init: { kind: 'let', name: j, type: INT, init: { kind: 'int', value: 0 } },
+          cond: b('<', { kind: 'name', name: j }, svLen({ kind: 'name', name: nv })),
+          post: { kind: 'assign', target: { kind: 'name', name: j }, value: b('+', { kind: 'name', name: j }, { kind: 'int', value: 1 }) },
+          body: [push(svGet({ kind: 'name', name: nv }, { kind: 'name', name: j }))],
+        });
+        return;
+      }
+      if (isVecTy(t) || isStrVec(t)) {
+        /* 不带名字的向量：它那几格在 R 里名字都是空串，所以按长度补。 */
+        const j = fresh('cj');
+        const lv = fresh('cl');
+        stmts.push({ kind: 'let', name: lv, type: INT, init: isStrVec(t) ? svLen(exprOf(a.value, types)) : vecLen(exprOf(a.value, types)) });
+        stmts.push({
+          kind: 'for',
+          init: { kind: 'let', name: j, type: INT, init: { kind: 'int', value: 0 } },
+          cond: b('<', { kind: 'name', name: j }, { kind: 'name', name: lv }),
+          post: { kind: 'assign', target: { kind: 'name', name: j }, value: b('+', { kind: 'name', name: j }, { kind: 'int', value: 1 }) },
+          body: [push(blank)],
+        });
+        return;
+      }
+      stmts.push(push({ kind: 'string', value: a.name ?? '' }));
+    });
     return { kind: 'block-expr', stmts, value: tv };
   }
   /**
@@ -1537,11 +1583,15 @@ function applyTy(fn, x, types) {
         return t.kind === 'bool' || isLgl1(t) || isLglTy(t);
       })) {
         /* `c(a = TRUE, b = FALSE)` 是**带名字的逻辑向量** —— 从前这儿一律落 `RLGL`，
-           于是 `print` 印的是 `[1] TRUE FALSE` 而 R 印的是名字一行、真假一行（静默差两行）。 */
-        return argsOf(x).some((a) => a.name !== null) ? RNLGL : RLGL;
+           于是 `print` 印的是 `[1] TRUE FALSE` 而 R 印的是名字一行、真假一行（静默差两行）。
+           `c(带名字的逻辑向量, TRUE)` 也算 —— 名字是接起来的（`namesExprOf` 的 `c`）。 */
+        const anyNm = argsOf(x).some((a) => a.name !== null)
+          || cargs.some((a) => isNamedTy(typeOfExpr(a, types)));
+        return anyNm ? RNLGL : RLGL;
       }
-      /* `c(a = 1, b = 2)` —— 带名字的数值向量（名字那一条见 `namesExprOf`）。 */
-      return argsOf(x).some((a) => a.name !== null) ? RNVEC : RVEC;
+      /* `c(a = 1, b = 2)` / `c(带名字的向量, 4)` —— 带名字的数值向量（见 `namesExprOf`）。 */
+      return argsOf(x).some((a) => a.name !== null)
+        || cargs.some((a) => isNamedTy(typeOfExpr(a, types))) ? RNVEC : RVEC;
     }
     /* 名字那几格：`names(v)` 出一条字符向量、`setNames` 出带名字的向量、`unname` 把名字摘掉。 */
     case 'names': return RSTRV;
