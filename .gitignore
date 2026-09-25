@@ -27,3 +27,5 @@ package-lock.json
 
 # `omni ninja` 的构建日志（记"上一趟这条边的命令与用时"，脏判定要它）
 /.omni_log
+
+/r-target.md
