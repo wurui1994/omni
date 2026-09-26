@@ -1171,6 +1171,46 @@ function taintedSym(node) {
   }
   return null;
 }
+/**
+ * **一格"从带名字的向量里取出来的元素"，名字在 R 里会一路跟着走。**（量出来 2026-09-26）
+ *
+ * R 的 `v["a"]` 是一条**长度 1 的带名字向量**，不是一格裸数 —— 所以
+ * `print(v["a"] + 1)` / `print(sqrt(v["a"]))` / `print(max(v) == v["a"])` 印出来都带
+ * 那个名字，甚至 `x <- v["a"] + 1` 之后 `print(x)` 也带。这一层的标量没有"名字"那一条，
+ * 于是这几格从前**静默少印一行名字**。
+ *
+ * 这一档的办法是：**印的时候当场报**（退到 libR，答案与版式都对）。
+ * `cat(…)` 不受影响 —— 它本来就不印名字。`print(v["a"])` 自己那一格也照旧接着
+ * （名字那一条在印法里单独摆，见 `r_nm_pos`），所以这道门只拦"**套在别的算式里**"那一半。
+ *
+ * 拦不住的那一半明写在 SPEC：名字过了函数的形参（`f(v["a"])` 里的形参）就看不见了。
+ */
+const NAMED_ELEM_VARS = new Set();
+function namedElemHit(node, types, top) {
+  if (node === null || node === undefined || !isList(node)) return false;
+  if (tag(node) === 'paren') return namedElemHit(kids(node)[0], types, top);
+  if (tag(node) === 'sym') return NAMED_ELEM_VARS.has(mangle(nameOf(node)));
+  /* `[[ ]]` **不带名字**（量出来 `v[["a"]] + 1` 印的是 `[1] 4`，没有名字那一行）——
+     所以这道门只看 `[ ]`。 */
+  if (tag(node) === 'sub1') {
+    const ot = typeOfExpr(kids(node)[0], types);
+    const rt = typeOfExpr(node, types);
+    const scalar = rt !== undefined && !isVecTy(rt) && !isStrVec(rt) && rt.kind !== 'map';
+    if ((isNamedTy(ot) || isNamedStr(ot)) && scalar && top !== true) return true;
+  }
+  for (const k of kids(node)) if (namedElemHit(k, types, false)) return true;
+  return false;
+}
+function collectNamedElem(node, types) {
+  if (node === null || node === undefined || !isList(node)) return;
+  if (isAssign(node)) {
+    const { target, value } = assignParts(node);
+    if (tag(target) === 'sym' && namedElemHit(value, types, false)) {
+      NAMED_ELEM_VARS.add(mangle(nameOf(target)));
+    }
+  }
+  for (const k of kids(node)) collectNamedElem(k, types);
+}
 function collectNonAscii(node) {
   if (node === null || node === undefined || !isList(node)) return;
   if (isAssign(node)) {
@@ -2101,7 +2141,11 @@ function applyTy(fn, x, types) {
       const sArgs = posArgs(x);
       /* 两支是串 → 出字符向量（test 是向量）或者一格串（test 是标量）。 */
       if (sArgs.length === 3 && [1, 2].some((k) => typeOfExpr(sArgs[k], types).kind === 'string')) {
-        return isVecTy(typeOfExpr(sArgs[0], types)) ? RSTRV : STR;
+        const tt = typeOfExpr(sArgs[0], types);
+        /* 名字只从 test 那一格来（与下头数那一侧同一条）—— 从前这儿一律落 `RSTRV`，
+           于是 `ifelse(c(a=3,b=1) > 1, "big", "small")` 少印名字那一行（量出来的）。 */
+        if (!isVecTy(tt)) return STR;
+        return isNamedTy(tt) ? RNSTRV : RSTRV;
       }
       const lgl = args.length === 3
         && [1, 2].every((k) => {
@@ -2122,7 +2166,10 @@ function applyTy(fn, x, types) {
        `rev` 的元素类型跟着进去的那条走（字符向量倒过来还是字符向量）。 */
     case 'rev': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
-      if (isStrVec(t)) return RSTRV;
+      /* 名字跟着倒过来（`namesExprOf` 的 rev 那一格就是 `r_rev_str(名字)`）——
+         从前字符向量那一侧一律落 `RSTRV`，于是 `rev(c(x="p", y="q"))` 印出来**少了名字
+         那一行**（量出来的，2026-09-26）。 */
+      if (isStrVec(t)) return isNamedStr(t) ? RNSTRV : RSTRV;
       return isVecTy(t) ? t : RVEC;
     }
     case 'seq_along': case 'seq_len': return RIVEC;
@@ -6832,6 +6879,16 @@ function callOf(x, types, extra, want, stmtPos) {
  */
 function printValStmt(node, types) {
   const t = typeOfExpr(node, types);
+  /* **名字跟着"取出来那一格"走那一档在这儿拦**（见 `namedElemHit` 上那段账）：
+     `print(v["a"] + 1)` 在 R 里印的是带名字那两行，而这一层的标量没有名字那一条。
+     `print(v["a"])` 自己那一格照旧接着（名字在印法里单独摆），所以 top 传 true。 */
+  if (namedElemHit(node, types, true)) {
+    throw new Error('r->IR: 印的是"从带名字的向量里取出来那一格"算出来的值'
+      + '（`v["a"] + 1` / `sqrt(v["a"])` / `x <- v["a"] + 1` 之后的 `x`）——'
+      + ' R 那儿它是一条**长度 1 的带名字向量**，印出来带名字那一行，'
+      + '而这一层的标量没有名字那一条（见 ext/r/SPEC.md 第二节）。'
+      + '`cat(…)` 那一档不受影响');
+  }
   const wr = (s) => ({ kind: 'builtin-stmt', name: 'write', args: [s] });
   /**
    * **`print(names(表))` / `print(unlist(表))`：空表那一格 R 印的是 `NULL`**
@@ -13708,6 +13765,10 @@ export function rToIR(tree) {
   /* **哪些名字被 `names()` 问过** —— 只给它们开"键那一条"影子（见 `keysVar`）。 */
   KEYS_VARS.clear();
   collectKeysVars(tree);
+  /* **哪些名字装过"从带名字的向量里取出来那一格"** —— 印法那道门要靠它（见
+     `namedElemHit`）。这一趟要在类型定下来之后才准，所以摆在 `inferFns` 之后；
+     这儿先清空，真扫在下头（`collectNamedElem`）。 */
+  NAMED_ELEM_VARS.clear();
   const items = kids(tree);
   const fns = [];
   const rest = [];
@@ -13732,6 +13793,9 @@ export function rToIR(tree) {
   const decls = fns.map((f) => fnDecl(f.name, f.node, new Map()));  /* 顶层剩下的那些：拼成一格假的 `(block …)` 交给同一条推断与同一条降级。 */
   const mainBlock = { kind: 'list', items: [{ kind: 'atom', value: 'block' }, ...rest] };
   const types = inferTypes(mainBlock, []);
+  /* **哪些名字装过"从带名字的向量里取出来那一格"** —— 印法那道门要靠它（见
+     `namedElemHit`）。要在类型定下来之后扫，不然"那条向量带不带名字"还不知道。 */
+  collectNamedElem(mainBlock, types);
   const stmts = rest.map((k) => topStmtOf(k, types));
   const lets = [];
   for (const [n, t] of types) {

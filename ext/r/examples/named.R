@@ -341,3 +341,13 @@ print(append(apu, apw))
 apq <- c(y = 8, z = 9)
 print(append(apv, apq))
 print(append(apv, 9))
+
+## rev / ifelse 在带名字那一侧也把名字带过去（字符向量那一格从前少印一行）
+nsx <- c(x = "p", y = "q")
+print(rev(nsx))
+print(ifelse(c(a = 3, b = 1, c = 2) > 1, "big", "small"))
+## cat 不印名字 —— 所以"取出来那一格"套在算式里那一档在 cat 上照旧接得住
+ncv <- c(a = 3, b = 1)
+cat(ncv["a"] + 1, ncv[1] * 2, "\n")
+print(ncv["a"])
+print(ncv[["a"]] + 1)
