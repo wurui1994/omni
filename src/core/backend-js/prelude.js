@@ -1211,6 +1211,14 @@ function $fnOne(key, mk) {
   if (o === undefined) { o = mk(); $fnOnes.set(key, o); }
   return o;
 }
+// **换一个程序要清这张表**（宿主在装下一份产物之前调它）。这张表按**名字**记，而
+// 它记住的那个薄适配器**闭着上一个程序那份模块的作用域** —— 一页里连着跑两份脚本时
+// （Studio 那一档：运行时那一份按 URL 缓存、永远只有一份），第二份脚本的
+// omni_mk_ref_gt_moveto 会拿到**第一份**的适配器，于是它调的是上一个程序的
+// gt_moveto：那份模块的全局（字模、光标、字号）从来没初始化过，画出来就是一片空白，
+// **不报错、帧还在涨**。踩出来的样子：ext/evaldraw/examples/text.kc 单独跑好好的，
+// 前头跑过别的脚本之后一个像素都不画（7059 次 setpix -> 0 次）。
+function $fnOnesReset() { $fnOnes.clear(); }
 // 成员派发的兜底（ADR-0011 决策 12）：派发器的形参个数是表里的最大值，末尾多出来的
 // undefined 等于没给 —— 削掉再调，C 侧的 omni_js_call_n 是同一套。
 function $js_call_n(f, args) {

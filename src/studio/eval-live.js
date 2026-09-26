@@ -89,6 +89,12 @@ export async function runUnits(mainUrl, units = []) {
   SINK = (s, err) => (err ? errs : outs).push(s);
   let code = 0;
   try {
+    /* **换一个程序先清那张"具名函数当值用"的单件表**（`$fnOnesReset`，见 prelude 里
+       那一格的注）：它按名字记、记的是闭着上一个程序模块作用域的薄适配器，而运行时
+       那一份模块在这一页里**按 URL 只有一份**。不清的话第二份脚本会拿到第一份的
+       适配器，调到上一个程序那份从没初始化的全局上 —— 不报错、帧还在涨、一个像素
+       都不画（`text.kc` 就是这么被吃掉的）。 */
+    if (typeof globalThis.$fnOnesReset === 'function') globalThis.$fnOnesReset();
     if (SEEN.has(mainUrl)) {
       /* **同一份内容再跑一趟**：URL 一个字都没变 ⇒ 模块登记表命中 ⇒ `import` **不会再执行**
          （量出来的样子是"过网 0 字节、可是一帧都没画"）。那时把各家的 `omni_init_…`

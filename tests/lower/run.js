@@ -18,7 +18,7 @@
 //   node tests/lower/run.js awk      只跑名字里带 awk 的那几格
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LANGS } from '../../src/core/lower/langs.js';
@@ -418,6 +418,70 @@ if (only.length === 0 || only.some((x) => 'gfx'.includes(x))) {
     ok('换个 cwd 跑：落点跟着缓存根走、cwd 底下不落东西', '绝对路径 + 按脚本名');
   }
   rmSync(away, { recursive: true, force: true });
+}
+
+/* ── **一页里连着跑两份脚本**：换程序要清那张"具名函数当值用"的单件表 ──────────────
+ *
+ * `$fnOnes` 按**名字**记，记的是**闭着上一个程序那份模块作用域**的薄适配器；而运行时
+ * 那一份（`omni_rt_<哈希>.js`）在一个宿主里只有一份（浏览器按 URL 缓存、node 按路径缓存）。
+ * 于是第二份脚本的 `omni_mk_ref_gt_moveto` 会拿到第一份的适配器 —— 调到上一个程序那份
+ * 从没初始化过的全局上，**不报错、帧还在涨、一个像素都不画**。
+ *
+ * 这一格判的是**宿主那一侧的契约**（`$fnOnesReset`，`src/studio/eval-live.js` 在换程序
+ * 之前调它）：先跑 `draw2d.kc`，再跑 `text.kc`，第二份照样得画出那 300 多个 `setpix`。
+ * 判据不靠浏览器 —— 同一个机制在 node 里一模一样（模块登记表是同一件事）。
+ */
+if (only.length === 0 || only.some((x) => 'fnone'.includes(x))) {
+  const mk = (rel) => {
+    const r = spawnSync(process.execPath, [CLI, 'emit', 'js', join(ROOT, rel),
+      '--units', '--gfx', 'host'], { encoding: 'utf8' });
+    try { return JSON.parse((r.stdout ?? '').trim().split('\n').pop()).main; } catch { return null; }
+  };
+  const a = mk('ext/evaldraw/examples/draw2d.kc');
+  const b = mk('ext/evaldraw/examples/text.kc');
+  if (a === null || b === null) no('两份产物都要出得来', `draw2d=${a} text=${b}`);
+  else {
+    /* `head` 是"先跑哪一份"（空 = 只跑 text.kc，那一趟的数就是**尺子**）。
+       为什么要这把尺子：串味的样子**不是"一个像素都不画"**，而是
+       "第二份画出了第一份的图"（量到过 200/200 —— 那正是 draw2d 的数）。 */
+    const drv = (head) => `
+const ops = new Map();
+let frames = 0;
+globalThis.__OMNI_GFX = {
+  kind: 'null',
+  call(nm) {
+    ops.set(nm, (ops.get(nm) ?? 0) + 1);
+    if (nm === 'nextframe') { frames += 1; return frames <= 1 ? 1 : 0; }
+    return 0;
+  },
+  batch: () => 0, tex: () => 0, arr: () => 0, def: () => 0,
+  size: () => 320 * 65536 + 240, input: () => 0,
+  present() {}, snapshot: () => new Uint8Array(0), misses: () => [],
+  setFrame() {}, frames: () => 1, stop() {}, step() {}, reset() {},
+};
+${head === null ? '' : `await import(${JSON.stringify(head)});
+ops.clear(); frames = 0;
+/* 宿主换程序：照 src/studio/eval-live.js 那一句清表 */
+globalThis.$fnOnesReset();`}
+await import(${JSON.stringify(b)});
+console.log('##' + JSON.stringify({ setpix: ops.get('setpix') ?? 0 }));
+`;
+    const run = (head) => {
+      const p = join(ROOT, '.omni-cache', `fnone-drv${head === null ? 0 : 1}.mjs`);
+      writeFileSync(p, drv(head));
+      const r = spawnSync(process.execPath, [p], { encoding: 'utf8' });
+      rmSync(p, { force: true });
+      const line = (r.stdout ?? '').split('\n').find((s) => s.startsWith('##')) ?? '';
+      try { return JSON.parse(line.slice(2)).setpix; } catch { return -1; }
+    };
+    const alone = run(null);
+    const after = run(a);
+    if (alone < 100) no('一页两份脚本：尺子先得立住', `text.kc 单独跑只发了 ${alone} 次 setpix`);
+    else if (after !== alone) {
+      no('一页里连着跑两份：第二份画的还得是它自己',
+        `单独跑 ${alone} 次 setpix，跟在 draw2d 后面变成 ${after} 次 —— 单件表串味了`);
+    } else ok(`一页里连着跑两份：第二份画的还是它自己（setpix ${alone}）`);
+  }
 }
 
 /* ── GLSL 那一层：int/float 混着算时补 `float(…)`（`ext/polydraw/glsl-type.js`）────
