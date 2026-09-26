@@ -299,7 +299,12 @@ if (process.platform === 'darwin') {
   /* 一个进程里连着跑三趟（`OMNI_AS_LIB=1` 之后 `runCli` 可以被 import 而不自己跑）。 */
   const driver = join(w, 'drive.mjs');
   writeFileSync(driver, `process.env.OMNI_AS_LIB = '1';
-process.env.OMNI_TIMEOUT = '0';
+/* **关枪，不关预算**（与 studio/worker.js 同一条）：这一格驱动在**一个进程里**连跑三趟，
+   到点给本进程一枪会把驱动自己打死。从前这儿写的是 OMNI_TIMEOUT = '0'，可那个环境变量
+   会跟着孩子走 —— spawnSync 没了时限、生成出来的程序里那格 SIGALRM 与外部看门狗也一起
+   关掉，三层全丢（cli.js 的 runTimeout 那段注释记着量出来的后果：孤儿进程跑 28 分钟）。
+   OMNI_CLI_NO_SHOT 只关"开枪"那一格，预算照旧算（host/native.js 的 runTimeout）。 */
+process.env.OMNI_CLI_NO_SHOT = '1';
 /* asy 的模块是按 CWD 找的（import mbox;），所以驱动得站在那个临时目录里跑；
    缓存根于是要显式指一下，不然会落到临时目录下面另开一棵。
    （这几行在生成出来的驱动里 —— 不能带反引号，会把外面那个模板切开。） */
