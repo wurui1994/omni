@@ -31,6 +31,7 @@ import {
   containsList, indexOfList, countList, valuesList, dictPopOf, dictSetDefaultOf,
   concatList, repeatList, reversedList, stepSlice, bankRound,
   caseMapOf, charClassOf, rfindOf, copyList, copyDict, charsOf, dictOfPairs,
+  listEqOf, listCmpOf, dictEqOf,
 } from './builtins.js';
 
 /** 一格名字节点（`(n x)`）的文本；也收裸记号。 */
@@ -1057,11 +1058,50 @@ function cmpOne(o, a, b, C) {
     }
     return pre.length === 0 ? out : { kind: 'block-expr', stmts: pre, value: out };
   }
+  /* 表 / 字典：方言里没有"比容器"这一族算子，现场发一趟走一遍（`seqCmp`）。 */
+  const seq = seqCmp(o, op, a, b, ta, tb, C);
+  if (seq !== null) return seq;
   let l = a;
   let r = b;
   if (ta.kind === 'real' && tb.kind === 'int') r = toReal(b, C);
   if (ta.kind === 'int' && tb.kind === 'real') l = toReal(a, C);
   return { kind: 'binop', op, left: l, right: r };
+}
+
+/** 两格类型能不能逐格比出个结果来（`int` 与 `real` 算能 —— `cmpOne` 会提升）。 */
+const numish = (t) => t.kind === 'int' || t.kind === 'real';
+
+/**
+ * **表与字典的比较** —— 方言里没有这一族算子，落下去就是**比句柄**：
+ * `[1, 2] == [1, 2]` 会静默答 False（量到过，与元组那一处同一个病）。
+ * 认不出来就回 `null`，由 `cmpOne` 接着往下走。
+ */
+function seqCmp(o, op, a, b, ta, tb, C) {
+  const eq = (x, y) => cmpOne('==', x, y, C);
+  if (ta.kind === 'arr' && tb.kind === 'arr') {
+    const same = sameType(ta.elem, tb.elem) || (numish(ta.elem) && numish(tb.elem));
+    if (op === '==' || op === '!=') {
+      /* 元素类型对不上（`[1] == ["1"]`）—— python 逐格比也是 False，编译期就能定。 */
+      if (!same) return { kind: 'bool', value: op === '!=' };
+      return listEqOf(a, b, C, eq, op === '!=');
+    }
+    if (!same) {
+      throw new Error(`python->IR: 元素类型不同的两张表比 \`${o}\` 还没接`
+        + '（python 逐格比到第一处不同，那一处两边类型不同会 TypeError）');
+    }
+    needOrd(ta.elem, C, `表上的 \`${o}\``);
+    return listCmpOf(a, b, C, (x, y) => cmpOne('<', x, y, C), op);
+  }
+  if (ta.kind === 'map' && tb.kind === 'map') {
+    if (op !== '==' && op !== '!=') {
+      throw new Error(`python->IR: 字典上的 \`${o}\` —— python 里字典没有大小之分（TypeError）`);
+    }
+    const same = sameType(ta.key, tb.key)
+      && (sameType(ta.value, tb.value) || (numish(ta.value) && numish(tb.value)));
+    if (!same) return { kind: 'bool', value: op === '!=' };
+    return dictEqOf(a, b, C, eq, op === '!=');
+  }
+  return null;
 }
 
 /** 一格 `==`（`builtins.js` 那几格"找"要它 —— 元素是箱子时按标签分派）。 */

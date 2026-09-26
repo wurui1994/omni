@@ -1165,6 +1165,120 @@ export function countOf(s0, sub0, C, start0 = null, end0 = null) {
   return h.wrap(cnt);
 }
 
+/**
+ * `xs == ys` —— **逐格比**（长度先对上）。方言里没有"比两张表"这一格算子，落下去就是
+ * 比句柄：`[1, 2] == [1, 2]` 会静默答 False（量到过，与元组那一处同一个病）。
+ * `eq` 由 `expr.js` 递进来（元素可能是箱子、元组、又一张表）。
+ */
+export function listEqOf(a0, b0, C, eq, negate) {
+  const h = holder(C);
+  const a = h.keep(a0, 'le_a');
+  const b = h.keep(b0, 'le_b');
+  const r = h.decl('le_r', BOOL, bin('==', call1('alen', [a]), call1('alen', [b])));
+  const i = h.decl('le_i', INT, int(0));
+  h.pre.push({
+    kind: 'while',
+    cond: bin('&&', r, bin('<', i, call1('alen', [a]))),
+    body: [
+      {
+        kind: 'if',
+        cond: {
+          kind: 'unop',
+          op: '!',
+          operand: eq({ kind: 'index', obj: a, index: i }, { kind: 'index', obj: b, index: i }),
+        },
+        then: [{ kind: 'assign', target: r, value: { kind: 'bool', value: false } }],
+        else_: null,
+      },
+      inc(i),
+    ],
+  });
+  return h.wrap(negate ? { kind: 'unop', op: '!', operand: r } : r);
+}
+
+/**
+ * `xs < ys` 那四格 —— **字典序**：走到第一处不同，谁小谁小；一路都一样就**短的小**。
+ * 与元组那一处的区别是长度要到运行时才知道，所以得发一趟循环、拿一格 `done` 顶着
+ * （方言里没有"从循环里带值出来"那一档，`break` 只管跳）。
+ */
+export function listCmpOf(a0, b0, C, less, op) {
+  const h = holder(C);
+  const a = h.keep(a0, 'lc_a');
+  const b = h.keep(b0, 'lc_b');
+  const la = h.decl('lc_p', INT, call1('alen', [a]));
+  const lb = h.decl('lc_q', INT, call1('alen', [b]));
+  const r = h.decl('lc_r', BOOL, { kind: 'bool', value: false });
+  const done = h.decl('lc_d', BOOL, { kind: 'bool', value: false });
+  const i = h.decl('lc_i', INT, int(0));
+  const ai = { kind: 'index', obj: a, index: i };
+  const bi = { kind: 'index', obj: b, index: i };
+  const settle = (val) => [
+    { kind: 'assign', target: r, value: { kind: 'bool', value: val } },
+    { kind: 'assign', target: done, value: { kind: 'bool', value: true } },
+  ];
+  h.pre.push({
+    kind: 'while',
+    cond: bin('&&', { kind: 'unop', op: '!', operand: done },
+      bin('&&', bin('<', i, la), bin('<', i, lb))),
+    body: [
+      {
+        kind: 'if',
+        cond: less(ai, bi),
+        then: settle(op[0] === '<'),
+        else_: [{
+          kind: 'if',
+          cond: less(bi, ai),
+          then: settle(op[0] === '>'),
+          else_: [inc(i)],
+        }],
+      },
+    ],
+  });
+  /* 前缀一路相等：长度说了算，而且用的就是原来那个算子（`<=` 在这儿才允许相等）。 */
+  h.pre.push({
+    kind: 'if',
+    cond: { kind: 'unop', op: '!', operand: done },
+    then: [{ kind: 'assign', target: r, value: bin(op, la, lb) }],
+    else_: null,
+  });
+  return h.wrap(r);
+}
+
+/**
+ * `d == e` —— 键数一样、而且 d 的每一格键 e 都有、值也一样。
+ * （字典没有大小之分：python 里 `d < e` 是 TypeError。）
+ */
+export function dictEqOf(a0, b0, C, eq, negate) {
+  const h = holder(C);
+  const a = h.keep(a0, 'de_a');
+  const b = h.keep(b0, 'de_b');
+  const at = C.tyOfIR(a);
+  const ks = h.decl('de_ks', arrOf(at.key), call1('dkeys', [a]));
+  const r = h.decl('de_r', BOOL, bin('==', call1('dlen', [a]), call1('dlen', [b])));
+  const i = h.decl('de_i', INT, int(0));
+  const k = { kind: 'index', obj: ks, index: i };
+  h.pre.push({
+    kind: 'while',
+    cond: bin('&&', r, bin('<', i, call1('alen', [ks]))),
+    body: [
+      {
+        kind: 'if',
+        cond: call1('dhas', [b, k]),
+        /* 有这格键才敢取值（`dget` 取不到是当场报）。 */
+        then: [{
+          kind: 'if',
+          cond: { kind: 'unop', op: '!', operand: eq(call1('dget', [a, k]), call1('dget', [b, k])) },
+          then: [{ kind: 'assign', target: r, value: { kind: 'bool', value: false } }],
+          else_: null,
+        }],
+        else_: [{ kind: 'assign', target: r, value: { kind: 'bool', value: false } }],
+      },
+      inc(i),
+    ],
+  });
+  return h.wrap(negate ? { kind: 'unop', op: '!', operand: r } : r);
+}
+
 /** `s.startswith(p)` / `s.endswith(p)` —— 比一段（方言里没有这一格算子）。 */
 export function startsEndsOf(s0, p0, atStart, C) {
   const h = holder(C);
