@@ -77,3 +77,19 @@ print("{:05d} {:.2f} {:x}".format(42, 3.14159, 255))
 print("{:+.3f} {:*^7}".format(2.5, "hi"), "{:8.3f}|".format(1.0 / 3.0))
 print("{{}} {}".format(7), "{!r} {!s}".format("q", "q"))
 print("no fields".format(), "{}".format([1, 2]), "{}".format(True))
+
+# ---- 段里带副作用：次序要按源码来 --------------------------------------------
+# 凡是"把几段拼成一个表达式"的地方，段里带的那几句会被提到整句最前头，于是**后面那一段的
+# 活儿跑在前面那一段的副作用之前**，而 python 是从左到右算的。量到的原话：
+# `f"{xs.pop()} {xs}"` 答 `2 [1, 2]`（python 是 `2 [1]`）—— 转 `xs` 那趟循环跑在
+# `apop` 之前。四种拼法（f-string / `+` / `%` / `.format()`）现在都按次序钉住。
+xs = [1, 2]
+print(f"{xs.pop()} {xs}")
+ys = [3, 4]
+print(str(ys.pop()) + " " + str(ys))
+zs = [5, 6]
+print("%s %s" % (zs.pop(), zs))
+ws = [7, 8]
+print("{} {}".format(ws.pop(), ws))
+vs = [9, 10]
+print(f"{vs.pop()}/{vs.pop()}/{vs}")

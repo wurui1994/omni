@@ -195,16 +195,41 @@ export function fstringParts(x, C) {
  *   * 别的格式说明**当场报**：那是一整套微语言（`Python/formatter_unicode.c`），
  *     对齐 / 填充 / 千分位 / 进制都在里头，猜一个出来就是印错。
  */
-function fstringOf(x, C) {
-  const pieces = fstringParts(x, C).map((p) => (p.lit !== undefined
-    ? { kind: 'string', value: p.lit }
-    : fmtField(exprOf(p.tree, C), p, C)));
-  if (pieces.length === 0) return { kind: 'string', value: '' };
+/**
+ * **一段拼串先钉住**（纯的那几段不必）。
+ *
+ * 凡是"把几段拼成一个表达式"的地方都要走这一条：段里带的 `block-expr` 那几句会被提到
+ * 整句最前头，于是**后面那一段的活儿跑在前面那一段的副作用之前**，而 python 是从左到右
+ * 算的。量到的原话：`f"{xs.pop()} {xs}"` 答 `2 [1, 2]`（python 是 `2 [1]`）——
+ * 转 `xs` 那趟循环跑在 `apop` 之前。与 `print` 的实参按次序钉住是同一条账。
+ */
+function pinPiece(v, C, pre, p = 'cc') {
+  if (isPure(v)) return v;
+  const t = ty(v, C);
+  if (t.kind === 'void') return v;
+  const n = C.fresh(p);
+  C.bind(n, t);
+  pre.push({ kind: 'let', name: n, type: t, init: v });
+  return { kind: 'name', name: n };
+}
+
+/** 一串段按次序钉住再用 `+` 折起来（头一段不是串时先补一格空串）。 */
+function concatPieces(pieces0, C, p = 'cc') {
+  if (pieces0.length === 0) return { kind: 'string', value: '' };
+  const pre = [];
+  const pieces = pieces0.map((v) => pinPiece(v, C, pre, p));
   let out = pieces[0];
   /* 头一段不是串时先补一格空串 —— 方言的 `+` 要两边同型。 */
   if (ty(out, C).kind !== 'string') out = { kind: 'binop', op: '+', left: { kind: 'string', value: '' }, right: out };
   for (let i = 1; i < pieces.length; i += 1) out = { kind: 'binop', op: '+', left: out, right: pieces[i] };
-  return out;
+  return pre.length === 0 ? out : { kind: 'block-expr', stmts: pre, value: out };
+}
+
+function fstringOf(x, C) {
+  const pieces = fstringParts(x, C).map((p) => (p.lit !== undefined
+    ? { kind: 'string', value: p.lit }
+    : fmtField(exprOf(p.tree, C), p, C)));
+  return concatPieces(pieces, C, 'fs_c');
 }
 
 /**
@@ -1551,10 +1576,7 @@ function percentOf(aTok, bTok, C) {
     pieces.push(convPiece(p, exprOf(argToks[k], C), C));
     k += 1;
   }
-  if (pieces.length === 0) return { kind: 'string', value: '' };
-  let out = pieces[0];
-  for (let i = 1; i < pieces.length; i += 1) out = { kind: 'binop', op: '+', left: out, right: pieces[i] };
-  return out;
+  return concatPieces(pieces, C, 'pc_c');
 }
 
 /** 一格转换：算出文本，再按标志补符号与宽度。 */
@@ -1659,6 +1681,15 @@ function binOf(x, C) {
   let b = exprOf(bTok, C);
   let ta = ty(a, C);
   let tb = ty(b, C);
+  /* **两边都带副作用时左边先钉住** —— python 从左到右算，而这一层把两段拼成一个表达式：
+     段里带的 `block-expr` 那几句会被提到整句最前头，于是右边那一段的活儿跑在左边那一段
+     的副作用之前。量到的原话：`str(ys.pop()) + " " + str(ys)` 答 `4 [3, 4]`
+     （python 是 `4 [3]`）。见 `pinPiece` 上头那段账。 */
+  if (!isPure(a) && !isPure(b)) {
+    const pre0 = [];
+    a = pinPiece(a, C, pre0, 'bl_a');
+    if (pre0.length > 0) a = { kind: 'block-expr', stmts: pre0, value: a };
+  }
 
   /* python 的 bool **就是** int 的一种（`True + True` 是 2、`True * 2` 是 2）。
      方言里那是两档类型，所以这儿现折一格 `b ? 1 : 0`。只在两边都是数或布尔时折 ——
@@ -2422,8 +2453,7 @@ function formatOf(tmpl, args, C) {
     }
   }
   flush();
-  if (out.length === 0) return { kind: 'string', value: '' };
-  return out.reduce((l, r) => ({ kind: 'binop', op: '+', left: l, right: r }));
+  return concatPieces(out, C, 'ft_c');
 }
 
 /**
