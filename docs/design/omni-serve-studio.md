@@ -382,9 +382,10 @@ PolyDraw 与 EvalDraw 各带一整棵例子树（`polydraw/{examples,ken,tigrou}
 `asyUnitModules` 要的 `sections`（照 `link.js` 里的用法记下来，省下一趟翻代码）：
 
     ids      单元号，**0 是入口**
-    secs     Map<id, 顶层项的 sx 文本[]>   —— 一项一条（`(fn …)` / `(global …)` …）
+    secs     Map<id, {cls, glb, fns, wraps}>  —— 四格都是"顶层项正文"的数组
     keys     Map<id, {file, imps?}>        —— `nameOf(keys.get(id))` 决定产物名
-    main     入口 `(main …)` 里的那几句
+    main     入口 `(main …)` **里的那几句**（不带外壳；拼回去时每句缩进四格）
+    weak     生成物（名字只由内容决定的那一族；EVAL 这边是空表）
     skipped? Map<id, {sigs}>               —— 这一趟不降正文、产物留着的那几份
     extra?   [{name, key, sigs}]           —— 只剩产物、连单元都不存在的那几份
 
