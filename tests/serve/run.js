@@ -17,7 +17,7 @@ import { promisify } from 'node:util';
 
 const execFile = promisify(execFileCb);
 import { startServer, shellToArgv, safePath, buildTree } from '../../src/core/serve.js';
-import { natCompare, byIdeOrder } from '../../src/core/studio/shared.js';
+import { natCompare, byIdeOrder, mounts } from '../../src/core/studio/shared.js';
 /* 网页那一侧的**纯函数那一半**（`src/studio/render.js`：高亮 / markdown / EPS -> SVG /
    GLSL 的源码修修）。它一个 DOM 都不碰，所以在这儿直接 import 就能判 ——
    不必拉一套无头浏览器进来。 */
@@ -196,12 +196,23 @@ eq('tcc a.c -o a', ['c', 'tcc', 'a.c', '-o', 'a']);
 eq('awk -f x.awk', ['run', 'x.awk']);
 ok('shellToArgv 不认的回 null', shellToArgv('rm -rf /') === null);
 
-/* 树：五棵根（文档 / 例子 / 判据 / 语法 / 语法判据）、`tests/all.js` 那种跑手不进树。 */
+/* 树：五棵固定的根（文档 / 例子 / 判据 / 语法 / 语法判据）**外加挂载点那几棵**
+   （`mounts()`：仓库外的例子目录按自己的结构挂进来，见 `studio/shared.js` 的头注 ——
+   那份语料这台机器上有没有不一定，所以数目按 `mounts()` 算，不写死）。
+   `tests/all.js` 那种跑手不进树。 */
 const tree = buildTree(root);
+const NROOT = 5 + mounts().length;
 const paths = [];
 const collect = (n) => { if (n.kind === 'file') paths.push(n.path); else (n.children ?? []).forEach(collect); };
 tree.roots.forEach(collect);
-ok('buildTree 五棵根', tree.roots.length === 5, `${tree.roots.length}`);
+ok(`buildTree ${NROOT} 棵根`, tree.roots.length === NROOT, `${tree.roots.length}`);
+/* 挂载点那几棵：**按它自己的结构**（`polydraw/ken/balls.pss` 这样），而且素材不进树。 */
+for (const m of mounts()) {
+  const own = paths.filter((p) => p.startsWith(`${m.path}/`));
+  ok(`挂载点 ${m.path} 挂上了（${own.length} 份）`, own.length > 0
+    && own.every((p) => m.exts === null || m.exts.includes(p.slice(p.lastIndexOf('.')))),
+  own.slice(0, 3).join(' '));
+}
 ok('buildTree 收到文件', paths.length > 300, `${paths.length} 份`);
 ok('buildTree 不收判据的跑手', !paths.includes('tests/all.js'));
 /* `ext/` 底下只许两样进树：**examples 里的例子**与**语法文件**。
@@ -211,7 +222,10 @@ ok('buildTree 只收 examples 与 .grammar', paths.filter((p) => p.startsWith('e
   .every((p) => p.includes('/examples/') || p.endsWith('.grammar')));
 ok('buildTree 收得到语法文件', paths.includes('ext/go/go.grammar')
   && paths.includes('tests/glr/grammars/expr.grammar'));
-ok('buildTree 不收 ext 里的实现', !paths.some((p) => p.startsWith('ext/') && p.endsWith('.js')));
+/* `ext/` 底下的 `.js` 只许是**例子**（`ext/js/examples/*.js` 那三份 gfx 例子就在首页上）——
+   实现用的那一堆（adapter / 运行时）一份都不许进。 */
+ok('buildTree 不收 ext 里的实现', !paths.some((p) => p.startsWith('ext/')
+  && p.endsWith('.js') && !p.includes('/examples/')));
 ok('buildTree 收 html 例子', paths.some((p) => p.startsWith('ext/html/examples/') && p.endsWith('.html')));
 ok('buildTree 收 asy 的 draw', paths.some((p) => p.startsWith('tests/asy/draw/')));
 /* **首页那张策展清单**：每一格都得在树上（首页点一下要能打开它），
@@ -263,7 +277,7 @@ try {
   ok('/api/health 200', h.code === 200 && JSON.parse(h.text).ok === true);
 
   const t = await get('/api/tree');
-  ok('/api/tree 200', t.code === 200 && JSON.parse(t.text).roots.length === 5);
+  ok('/api/tree 200', t.code === 200 && JSON.parse(t.text).roots.length === NROOT);
 
   const f = await get(`/api/file?path=${encodeURIComponent('docs/guide.md')}`);
   ok('/api/file 读到文档', f.code === 200 && JSON.parse(f.text).lang === 'markdown');
