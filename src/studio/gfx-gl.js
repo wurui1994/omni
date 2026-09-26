@@ -482,10 +482,15 @@ const shOf = (kind, name) => SH.src.get(`${kind}|${name}`) ?? null;
  * 口径：`docs/design/eval-realtime-gpu.md` 13.2（**必须与 WebGL 对齐，不许两种模型**）。
  *
  * 脚本自带 `#version` 的就原样递下去（它自己写好了新式的，不动它）。
+ *
+ * **precision 那几行不止 float 一格**：ES 3.00 只给 `sampler2D`/`samplerCube` 定了默认
+ * 精度，`sampler3D` 没有 —— 于是 `ken/texture3d.pss` 那一族（体素那块 64³）编不过：
+ * `ERROR: 0:9: 'sampler3D' : No precision specified`。桌面 GL 压根没有精度这回事，
+ * 所以这一格是浏览器这一档独有的头，不是脚本要改的东西。
  */
 function toEs300(kind, src) {
   if (src.includes('#version')) return src;
-  return `#version 300 es\nprecision highp float;\n${src}`;
+  return `#version 300 es\nprecision highp float;\nprecision highp sampler3D;\n${src}`;
 }
 
 /** 这一段原文是**ARB 汇编**（`!!ARBvp1.0` / `!!ARBfp1.0`）不是 GLSL 吗？见 §19.2。 */
@@ -619,43 +624,54 @@ const TX = {
 function texOf(slot) {
   let t = TX.slots.get(slot);
   if (t === undefined) {
-    t = { id: D.gl.createTexture(), w: 0, h: 0, fmt: 0 };
+    /* `tar` 是这一槽**现在是哪一种纹理**（2D / 3D）—— `glbindtexture` 要按它绑，
+       绑错了 GL 会把这一槽当不完整的纹理，采样一律回黑（`ken/texture3d.pss` 那一族）。 */
+    t = { id: D.gl.createTexture(), w: 0, h: 0, d: 1, fmt: 0, tar: D.gl.TEXTURE_2D };
     TX.slots.set(slot, t);
   }
   return t;
 }
 
 /** 过滤与环绕那两段位（`0xf0` / `0xf00`）-> GL 的参数。 */
-function texParams(fmt) {
+function texParams(fmt, tar = 0) {
   const gl = D.gl;
+  const t = tar === 0 ? gl.TEXTURE_2D : tar;
   const filt = fmt & 0xf0;
   const wrap = fmt & 0xf00;
   const mip = filt >= 0x20;
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER,
+  gl.texParameteri(t, gl.TEXTURE_MAG_FILTER,
     filt === 0x10 ? gl.NEAREST : gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER,
+  gl.texParameteri(t, gl.TEXTURE_MIN_FILTER,
     mip ? gl.LINEAR_MIPMAP_LINEAR : (filt === 0x10 ? gl.NEAREST : gl.LINEAR));
   const w = wrap === 0x100 ? gl.MIRRORED_REPEAT
     : (wrap === 0 ? gl.REPEAT : gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, w);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, w);
+  gl.texParameteri(t, gl.TEXTURE_WRAP_S, w);
+  gl.texParameteri(t, gl.TEXTURE_WRAP_T, w);
+  /* 3D 那一档还有第三根轴（`ken/texture3d.pss` 按 >1 的 z 采样）。 */
+  if (t === gl.TEXTURE_3D) gl.texParameteri(t, gl.TEXTURE_WRAP_R, w);
   return mip;
 }
 
 function texIn(slot, w, h, d, fmt, px) {
   const gl = D.gl;
   if (gl === null) return 0;
-  if (d !== 1) {
-    throw new Error(`gfxtex：这一档只接 2D 纹理（层 = ${d}）—— 3D 纹理（GLSETTEX 六实参`
-      + '那一档）在 WebGL2 上要 TEXTURE_3D，还没接');
-  }
   /* 纹理是**按 draw call 的状态**：攒着的批要先画掉，不然它们会拿到新图。 */
   flush();
   const kind = fmt & 15;
   const t = texOf(slot);
+  /* **`层 > 1` 就是 3D 那一档**（`kglsettexarray3` 的第三格是 zsiz，`polydraw.c:1400`）——
+     口径照本机那一档（`omni_ev_gl_tex`）。这一槽从前若是 2D，换目标就得换纹理对象：
+     GL 的纹理对象一旦绑过某个目标就定死了（"already has a target" 会报错）。 */
+  const tar = d > 1 ? gl.TEXTURE_3D : gl.TEXTURE_2D;
+  if (t.tar !== tar && t.w !== 0) {
+    gl.deleteTexture(t.id);
+    t.id = gl.createTexture();
+  }
+  t.tar = tar;
+  const three = tar === gl.TEXTURE_3D;
   gl.activeTexture(gl.TEXTURE0 + TX.unit);
-  gl.bindTexture(gl.TEXTURE_2D, t.id);
-  const n = w * h;
+  gl.bindTexture(tar, t.id);
+  const n = w * h * (d > 0 ? d : 1);
   if (kind === 0) {
     /* `KGL_BGRA32`：一格 double 是一格打包好的像素（与 `rgb()` 回的那种数同一形）。
        WebGL 没有 BGRA，所以这儿摊成 RGBA。高 8 位有值就当 alpha，没有就是不透明
@@ -667,28 +683,36 @@ function texIn(slot, w, h, d, fmt, px) {
       b[i * 4 + 1] = (v >> 8) & 255;
       b[i * 4 + 2] = v & 255;
       const al = (v >>> 24) & 255;
-      b[i * 4 + 3] = al === 0 ? 255 : al;
+      /* **3D 那一档 alpha 原样收**：那一族体素（`rgba(r,g,b,(issol!=0)*48)`）空的地方
+         alpha 就是 0，当成不透明会把一块体素整块糊实（本机那一档的头注记过这一格）。
+         2D 那一档照旧"0 当不透明"——脚本用 `rgb()` 造的图没人看 alpha。 */
+      b[i * 4 + 3] = three ? al : (al === 0 ? 255 : al);
     }
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, b);
+    if (three) gl.texImage3D(tar, 0, gl.RGBA8, w, h, d, 0, gl.RGBA, gl.UNSIGNED_BYTE, b);
+    else gl.texImage2D(tar, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, b);
   } else if (kind === 1) {
     const b = new Uint8Array(n);
     for (let i = 0; i < n; i++) b[i] = Math.max(0, Math.min(255, Math.trunc(px[i])));
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, w, h, 0, gl.RED, gl.UNSIGNED_BYTE, b);
+    if (three) gl.texImage3D(tar, 0, gl.R8, w, h, d, 0, gl.RED, gl.UNSIGNED_BYTE, b);
+    else gl.texImage2D(tar, 0, gl.R8, w, h, 0, gl.RED, gl.UNSIGNED_BYTE, b);
   } else if (kind === 4) {
     const f = new Float32Array(n);
     for (let i = 0; i < n; i++) f[i] = px[i];
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, w, h, 0, gl.RED, gl.FLOAT, f);
+    if (three) gl.texImage3D(tar, 0, gl.R32F, w, h, d, 0, gl.RED, gl.FLOAT, f);
+    else gl.texImage2D(tar, 0, gl.R32F, w, h, 0, gl.RED, gl.FLOAT, f);
   } else if (kind === 5) {
     const f = new Float32Array(n * 4);
     for (let i = 0; i < n * 4; i++) f[i] = px[i];
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, w, h, 0, gl.RGBA, gl.FLOAT, f);
+    if (three) gl.texImage3D(tar, 0, gl.RGBA32F, w, h, d, 0, gl.RGBA, gl.FLOAT, f);
+    else gl.texImage2D(tar, 0, gl.RGBA32F, w, h, 0, gl.RGBA, gl.FLOAT, f);
   } else {
     throw new Error(`gfxtex：这一档没接 KGL 格式 ${kind}（KGL_SHORT/KGL_INT）——`
       + ' 有的是 BGRA32(0) / CHAR(1) / FLOAT(4) / VEC4(5)');
   }
-  if (texParams(fmt)) gl.generateMipmap(gl.TEXTURE_2D);
+  if (texParams(fmt, tar)) gl.generateMipmap(tar);
   t.w = w;
   t.h = h;
+  t.d = d;
   t.fmt = fmt;
   return 0;
 }
@@ -730,6 +754,12 @@ function capEnd(slot) {
   const w = CAP.w === 0 ? D.w : CAP.w;
   const h = CAP.h === 0 ? D.h : CAP.h;
   const t = texOf(slot);
+  /* 这一槽从前可能是 3D（`texIn` 那一档）—— 换回 2D 要换纹理对象（目标定死一次）。 */
+  if (t.tar !== gl.TEXTURE_2D && t.w !== 0) {
+    gl.deleteTexture(t.id);
+    t.id = gl.createTexture();
+  }
+  t.tar = gl.TEXTURE_2D;
   gl.activeTexture(gl.TEXTURE0 + TX.unit);
   gl.bindTexture(gl.TEXTURE_2D, t.id);
   /* **内部格式要跟着读缓冲**：`alpha: false` 的画布是 RGB8，往 RGBA 拷是
@@ -794,6 +824,12 @@ function texFile(slot, name, fmt) {
   FT.st.set(key, 'load');
   flush();
   const t = texOf(slot);
+  /* 这一槽从前可能是 3D —— 换回 2D 要换纹理对象（见 `texIn` 那一句的注）。 */
+  if (t.tar !== gl.TEXTURE_2D && t.w !== 0) {
+    gl.deleteTexture(t.id);
+    t.id = gl.createTexture();
+  }
+  t.tar = gl.TEXTURE_2D;
   gl.activeTexture(gl.TEXTURE0 + TX.unit);
   gl.bindTexture(gl.TEXTURE_2D, t.id);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
@@ -1102,8 +1138,14 @@ function call(name, args) {
       const slot = Math.trunc(a(0));
       const t = TX.slots.get(slot);
       gl.activeTexture(gl.TEXTURE0 + TX.unit);
-      /* 还没设过内容的槽：绑一格空的（与 PolyDraw 一样不报 —— 画出来是黑的）。 */
-      gl.bindTexture(gl.TEXTURE_2D, t === undefined ? texOf(slot).id : t.id);
+      /* 还没设过内容的槽：绑一格空的（与 PolyDraw 一样不报 —— 画出来是黑的）。
+         **按这一槽自己的目标绑**（2D / 3D，见 `texOf` 的注）。 */
+      if (t === undefined) {
+        const n2 = texOf(slot);
+        gl.bindTexture(n2.tar, n2.id);
+      } else {
+        gl.bindTexture(t.tar, t.id);
+      }
       return 0;
     }
     /* **文件纹理**（见 `texFile` 的头注）：名字在方言里是名字表的下标。 */
