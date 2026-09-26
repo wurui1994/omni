@@ -29,6 +29,21 @@ def letters(text: str) -> dict[str, int]:
     return seen
 
 
+def letters2(text: str) -> dict[str, int]:
+    """同一件事**不带标注** —— `{}` 的键值类型从后面那句 `seen[ch] = 1` 认。
+
+    要紧的是那一句在 **else 支**里：`scanBinds` 那一趟从前不剥 `(else (body …))`
+    这一层，于是 else 支里的赋值一格都不绑，这儿会报"空字典的键值类型推不出来"。
+    """
+    seen = {}
+    for ch in text:
+        if ch in seen:
+            seen[ch] = seen[ch] + 1
+        else:
+            seen[ch] = 1
+    return seen
+
+
 def sum_values(d: dict[str, int]) -> int:
     s = 0
     for k in d:
@@ -100,6 +115,19 @@ def main():
     counts = letters("abracadabra")
     print(counts)
     print(list(counts.keys()))
+    print(letters2("abracadabra"), letters2("") == counts)
+
+    # 空字典**不带标注**：键值类型从后面那句 `m[k] = v` 认
+    m = {}
+    m["k"] = 1
+    m["j"] = 2
+    print(m, len(m), m["k"])
+    nums = {}
+    nums[1] = "one"
+    print(nums, nums[1])
+    reals = {}
+    reals["pi"] = 3.5
+    print(reals)
 
 
 main()

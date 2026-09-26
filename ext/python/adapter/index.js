@@ -27,7 +27,7 @@
 // `if __name__ == "__main__": main()` 这个惯用写法直接能跑。
 
 import { tag, kids, leaf, part } from '../../../src/core/lower/cst.js';
-import { INT, STR, BOOL, DYN, arrOf, sameType, typeOf, named } from '../../../src/core/lower/ty-of.js';
+import { INT, STR, BOOL, DYN, arrOf, dictOf, sameType, typeOf, named } from '../../../src/core/lower/ty-of.js';
 import { typeToSx } from '../../../src/core/lower/ty.js';
 import {
   exprOf, condOf, nameOf, typeOfAnnot, tyOfCst, tyArg, pyStr, pyRepr, lenOf, hasFields, fstringParts, cmpEq,
@@ -98,7 +98,11 @@ export function pyToIR(tree, ctx = {}) {
 
 /** `(line a b)` 那一层摊掉 —— 顶层与块体里都是这个形状。 */
 function flatten(items) {
-  return items.flatMap((s) => (tag(s) === 'line' || tag(s) === 'body' ? flatten(kids(s)) : [s]));
+  /* `else` 也剥一层：`(else (body …))`。`scanBinds` 那一侧把 `(else …)` 整格递进来
+     （`if` / `while` / `for` 三处都是），只剥 line / body 的话那一支**一格都不绑** ——
+     量到过：`out = {}` 之后只在 else 支里写 `out[k] = v`，报"空字典的键值类型推不出来"。
+     语句发射那几处递进来的一定是 `body`，所以多剥这一层不影响它们。 */
+  return items.flatMap((s) => (['line', 'body', 'else'].includes(tag(s)) ? flatten(kids(s)) : [s]));
 }
 
 /* ─── class ───────────────────────────────────────────────────────────────── */
@@ -671,6 +675,7 @@ function scanOne(s, C, rets) {
             continue;
           }
         }
+        if (tag(one) === 'index') bindEmptyDict(one, t, C);
         bindTarget(one, t, C);
       }
       return;
@@ -885,6 +890,25 @@ function elemOf(it, node, C) {
     if (tup !== null) return unifyPy(tup);
   }
   return null;
+}
+
+/**
+ * **`d = {}` 之后 `d[k] = v`** —— 空字典的键值类型从这一句认（与 `xs = []` 之后
+ * `xs.append(v)` 那一格同一条办法：赋值那一句先不绑，等走到用它的那一句）。
+ * 键只认 int 与 str（方言的字典键就这两档）。
+ */
+function bindEmptyDict(target, vt, C) {
+  if (vt === null || vt === undefined) return;
+  const base = kids(target)[0];
+  if (tag(base) !== 'n') return;
+  const n = String(nameOf(base));
+  const local = C.inScope() && !C.isDeclGlobal(n);
+  if ((local ? C.lookupHere(n) : C.lookup(n)) !== null) return;
+  const subs = kids(part(target, 'subs') ?? { kind: 'list', items: [] });
+  if (subs.length !== 1) return;
+  const kt = tyOfCst(subs[0], C);
+  if (kt === null || !['int', 'string'].includes(kt.kind)) return;
+  C.bind(C.ref(n), dictOf(vt, kt));
 }
 
 /** 一格赋值目标登记进作用域（元组目标逐格登记）。 */
