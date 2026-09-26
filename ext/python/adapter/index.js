@@ -51,7 +51,9 @@ export function pyToIR(tree) {
   /* ---- 发射 ------------------------------------------------------------------ */
   const decls = [];
   for (const [name, ty] of C.globals) decls.push({ kind: 'global', name: C.ref(name), type: ty });
-  for (const [nm, node] of C.fnNodes) decls.push(fnDecl(nm, node, C));
+  for (const [nm, insts] of C.insts) {
+    for (const inst of insts) decls.push(fnDecl(nm, inst, C));
+  }
 
   C.push();
   const body = [
@@ -68,6 +70,22 @@ function flatten(items) {
   return items.flatMap((s) => (tag(s) === 'line' || tag(s) === 'body' ? flatten(kids(s)) : [s]));
 }
 
+/** 一格类型的短名（单态化的名字后缀与那张表的键都用它）。 */
+function tyTag(t) {
+  if (t === null || t === undefined) return '_';
+  switch (t.kind) {
+    case 'int': return 'int';
+    case 'real': return 'float';
+    case 'string': return 'str';
+    case 'bool': return 'bool';
+    case 'void': return 'none';
+    case 'arr': return `list_${tyTag(t.elem)}`;
+    case 'map': return `dict_${tyTag(t.key)}_${tyTag(t.value)}`;
+    default: return t.name ?? 'x';
+  }
+}
+const tyKey = (types) => types.map(tyTag).join(',');
+
 /* ─── 上下文 ──────────────────────────────────────────────────────────────── */
 
 function makeCtx() {
@@ -80,6 +98,32 @@ function makeCtx() {
     inFn: false,
     /** 函数名 → { params: [{name,type}], ret }。签名，推断填。 */
     fns: new Map(),
+    /**
+     * **单态化那张表**：python 的函数名 → 一串"实例"。
+     * `add(2, 3)` 与 `add(1.5, 2.5)` 在 python 里是同一个函数，在方言里是两个 ——
+     * 所以按**实参类型的元组**各生成一格，名字加后缀（`add__int_int` / `add__float_float`）。
+     * 只有一格实例时不加后缀（多数函数是这一档，`.sx` 读起来干净）。
+     * 每一格：`{ key, mangled, params, ret, annots, retAnnot }`。
+     */
+    insts: new Map(),
+    /**
+     * 一处调用该落到哪一格实例上：先按实参类型精确找，找不到再试"int 提到 real"。
+     * 实参类型还没推出来（null）时，只有一格实例就用它 —— 那是推断头一两轮的常态。
+     */
+    resolveFn: (nm, argTys) => {
+      const list = C.insts.get(nm);
+      if (list === undefined || list.length === 0) return null;
+      if (argTys.some((t) => t === null || t === undefined)) {
+        return list.length === 1 ? list[0] : null;
+      }
+      const want = tyKey(argTys);
+      const exact = list.find((i) => i.key === want);
+      if (exact !== undefined) return exact;
+      const up = list.find((i) => i.params.length === argTys.length
+        && i.params.every((p, k) => p.type !== null
+          && (sameType(p.type, argTys[k]) || (p.type.kind === 'real' && argTys[k].kind === 'int'))));
+      return up ?? null;
+    },
     /** 函数名 → 那棵 `(def …)`。 */
     fnNodes: new Map(),
     /** 模块级变量名 → 类型。 */
@@ -152,93 +196,103 @@ const paramsOf = (f) => kids(part(f, 'params') ?? { kind: 'list', items: [] });
 /**
  * 形参、返回类型、模块级变量 —— 整个扫三轮，每轮只填得出来的那几格。
  * 三轮之后还缺的当场报（见文件头那四条）。
+ *
+ * **单态化**在这一趟里：一个 python 函数按"实参类型的元组"生成几格实例。
+ * `add(2, 3)` 与 `add(1.5, 2.5)` 在 python 里是同一个 `add`，在方言里是两个函数。
  */
 function infer(C, tree, scriptStmts) {
   C.globals.set('__name__', STR);
 
-  /* 签名的骨架：名字先摆上，类型第一轮再填（`C.fns` 一有条目，`tyOfCst` 才认得这个调用）。 */
+  /* 每个函数先摆一格骨架（标注读出来、形参的名字定下来）。 */
+  const shells = new Map();
   for (const [nm, f] of C.fnNodes) {
     const ps = paramsOf(f);
     for (const p of ps) {
       if (tag(p) !== 'p') throw new Error(`python->IR: \`def ${nm}\` 的形参里有 \`${tag(p)}\` —— 还没接（*args / **kw / 位置标记）`);
       if (part(p, 'default') !== undefined) throw new Error(`python->IR: \`def ${nm}\` 的形参带默认值 —— 还没接`);
     }
-    C.fns.set(nm, {
-      params: ps.map((p) => ({ name: C.ref(String(nameOf(kids(p)[0]))), type: null })),
-      ret: null,
+    shells.set(nm, {
+      names: ps.map((p) => C.ref(String(nameOf(kids(p)[0])))),
       annots: ps.map((p) => typeOfAnnot(kids(p)[1], C)),
       retAnnot: typeOfAnnot(kids(part(f, 'ret') ?? { kind: 'list', items: [] })[0], C),
     });
+    /* 形参全带标注的那一档第一轮就定得下来；别的先摆一格空表，等调用点。 */
+    const sh = shells.get(nm);
+    C.insts.set(nm, sh.annots.every((a) => a !== null) ? [mkInst(nm, sh, sh.annots)] : []);
   }
 
   for (let round = 0; round < 3; round += 1) {
-    for (const [nm, sig] of C.fns) {
-      sig.params.forEach((p, i) => {
-        if (p.type === null && sig.annots[i] !== null) p.type = sig.annots[i];
-      });
-      if (sig.params.some((p) => p.type === null)) inferParamsFromCalls(nm, sig, tree, C);
-      if (sig.ret === null) {
-        sig.ret = sig.retAnnot !== null ? sig.retAnnot : inferRet(nm, sig, C);
+    for (const [nm, sh] of shells) collectInsts(nm, sh, tree, C);
+    for (const [nm, list] of C.insts) {
+      const { retAnnot } = shells.get(nm);
+      for (const inst of list) {
+        /* **每轮都重算一遍**（不是"空着才算"）：头一轮里被调方的返回类型可能还没定，
+           那时算出来的是个下界；到最后一轮全定了，不一致的地方才现形。 */
+        inst.ret = retAnnot !== null ? retAnnot : inferRet(nm, inst, C);
       }
     }
     for (const s of scriptStmts) scanBinds(s, C);
   }
 
-  for (const [nm, sig] of C.fns) {
-    sig.params.forEach((p, i) => {
-      if (p.type === null) {
-        throw new Error(`python->IR: \`def ${nm}\` 的第 ${i + 1} 格形参 '${p.name}' 的类型推不出来`
-          + ' —— 给它一格标注（`def f(x: int)`），或者在这份源码里调它一次');
-      }
-    });
-    if (sig.ret === null) sig.ret = { kind: 'void' };
+  /* 名字：只有一格实例时不加后缀（多数函数是这一档），多格时加类型后缀。 */
+  for (const [nm, list] of C.insts) {
+    if (list.length === 0) {
+      throw new Error(`python->IR: \`def ${nm}\` 的形参类型推不出来 —— 给它一格标注`
+        + '（`def f(x: int)`），或者在这份源码里调它一次');
+    }
+    for (const inst of list) {
+      inst.mangled = list.length === 1
+        ? C.ref(nm)
+        : `${C.ref(nm)}__${inst.key.replace(/[^A-Za-z0-9_]/g, '_')}`;
+      if (inst.ret === null) inst.ret = { kind: 'void' };
+      C.fns.set(inst.mangled, { params: inst.params, ret: inst.ret });
+    }
   }
 }
 
+/** 一格实例。 */
+function mkInst(nm, sh, types) {
+  return {
+    key: tyKey(types),
+    mangled: null,
+    params: sh.names.map((n, i) => ({ name: n, type: types[i] })),
+    ret: null,
+  };
+}
+
 /**
- * 从调用点推形参：全树找 `f(…)`，把每一格实参的类型收齐。
+ * 从调用点收实例：全树找 `f(…)`，每一组**全都推得出来**的实参类型就是一格实例。
  *
- * **同一格形参在两处收到不同的类型就当场报** —— 那是 python 的鸭子类型撞上方言的静态
- * 类型：`add(2, 3)` 与 `add(1.5, 2.5)` 在 python 里是同一个函数，在方言里是两个。
- * 悄悄挑一个的后果是另一处答错（或者被方言那一层拦下来，而那时的报错离根因很远）。
- * 真正的出路是**单态化**（按实参类型生成 `add_int` / `add_real`），那是下一刀。
+ * 形参带标注的那几格听标注（调用点只补没标注的）。一组都收不到、而形参又没标全的，
+ * 这一轮就先空着 —— 三轮之后还空着的在 `infer` 末尾当场报。
  */
-function inferParamsFromCalls(nm, sig, tree, C) {
-  const seen = sig.params.map(() => []);
+function collectInsts(nm, sh, tree, C) {
+  if (sh.annots.every((a) => a !== null)) return;      // 全标注了，不看调用点
+  const list = C.insts.get(nm);
   for (const node of allNodes(tree)) {
     if (tag(node) !== 'call') continue;
     const fn = kids(node)[0];
     if (tag(fn) !== 'n' || String(nameOf(fn)) !== nm) continue;
     const args = kids(part(node, 'args') ?? { kind: 'list', items: [] });
-    if (args.length !== sig.params.length) continue;
-    args.forEach((a, i) => {
-      const t = tyOfCst(a, C);
-      if (t !== null && !seen[i].some((x) => sameType(x, t))) seen[i].push(t);
-    });
+    if (args.length !== sh.names.length) continue;
+    const types = args.map((a, i) => sh.annots[i] ?? tyOfCst(a, C));
+    if (types.some((t) => t === null)) continue;
+    const key = tyKey(types);
+    if (!list.some((i) => i.key === key)) list.push(mkInst(nm, sh, types));
   }
-  sig.params.forEach((p, i) => {
-    if (p.type !== null || seen[i].length === 0) return;
-    if (seen[i].length > 1) {
-      throw new Error(`python->IR: \`${nm}()\` 的第 ${i + 1} 格形参在几处调用里装的东西不一样`
-        + `（${seen[i].map((t) => t.kind).join(' / ')}）—— 单态化还没接。`
-        + '这一刀里请给它一格标注，并且各处都递同一种东西');
-    }
-    [p.type] = seen[i];
-  });
 }
 
-/** 扫函数体里的 `return` —— 形参都定了才问得出来（一格没定就回 null，下一轮再来）。 */
-function inferRet(nm, sig, C) {
-  if (sig.params.some((p) => p.type === null)) return null;
+/** 扫一格实例的函数体收 `return`。 */
+function inferRet(nm, inst, C) {
   const f = C.fnNodes.get(nm);
   C.push();
-  for (const p of sig.params) C.bind(p.name, p.type);
+  for (const p of inst.params) C.bind(p.name, p.type);
   const rets = [];
   scanBinds(part(f, 'body'), C, rets);
   C.pop();
   if (rets.length === 0) return { kind: 'void' };
   const known = rets.filter((t) => t !== null);
-  if (known.length !== rets.length) return null;          // 还有推不出来的，下一轮
+  if (known.length === 0) return null;                 // 全没定，下一轮再来
   for (const t of known) {
     if (!sameType(t, known[0])) {
       throw new Error(`python->IR: \`def ${nm}\` 的几处 return 不同型（${known[0].kind} / ${t.kind}）`
@@ -329,25 +383,25 @@ function bindTarget(t, ty, C) {
  * `if c: x = 1` 那一句里的 `let` 就锁在 if 的块里 —— 后面读 x 时方言当场报
  * "未声明的变量"。R 那一门与 lua 那台 VM 都是同一条办法。
  */
-function fnDecl(nm, node, C) {
-  const sig = C.fns.get(nm);
+function fnDecl(nm, inst, C) {
+  const node = C.fnNodes.get(nm);
   const bodyNode = part(node, 'body') ?? { kind: 'list', items: [] };
   C.push();
   const wasIn = C.inFn;
   C.inFn = true;
-  for (const p of sig.params) C.bind(p.name, p.type);
+  for (const p of inst.params) C.bind(p.name, p.type);
   /* 先只走一趟"绑定"（不建 IR）—— 于是局部量的名字与类型在发第一句之前就全知道了。 */
   scanBinds(bodyNode, C);
-  const pnames = new Set(sig.params.map((p) => p.name));
+  const pnames = new Set(inst.params.map((p) => p.name));
   const locals = C.localsHere().filter(([n]) => !pnames.has(n));
   const stmts = flatten(kids(bodyNode)).flatMap((s) => stmtsOf(s, C));
   C.inFn = wasIn;
   C.pop();
   return {
     kind: 'fn',
-    name: C.ref(nm),
-    params: sig.params,
-    ret: sig.ret,
+    name: inst.mangled,
+    params: inst.params,
+    ret: inst.ret,
     body: [...locals.map(([n, t]) => ({ kind: 'let', name: n, type: t, init: null })), ...stmts],
   };
 }
@@ -773,8 +827,13 @@ export const PY_HOOKS = {
 
 // ---- 这一批明说的不足（不猜）----------------------------------------------------
 //   1. `class` / `try` / `with` / `match` / 生成器 / 闭包 / 装饰器都没接。
-//   2. 整数是 64 位（python 的 int 没有上界）—— 溢出的那一档要等 `longobject.c` 接上来。
-//   3. 浮点转串走方言的 `tostr`，与 python 的 `repr` 不逐字节相同（那一格要 `dtoa.c`）。
-//   4. `round()` 是 C 的 round（远离零），python 是银行家舍入 —— `.5` 那一格答得不一样。
-//   5. 循环变量不外泄（python 里 `for i in …` 之后还读得到 i）。
-//   6. f-string 里那段表达式、`%` 格式化、`.format()` 都没接。
+//   2. 单态化按**实参类型的元组**分（`add(2,3)` 与 `add(1.5,2.5)` 各一格），可
+//      **只按返回类型分不出来**：`def f(): return []` 在两处要不同的元素类型时报错。
+//   3. 整数是 64 位（python 的 int 没有上界）—— 溢出的那一档要等 `longobject.c` 接上来。
+//   4. `str(float)` 走方言的 `(srepr E)`（15/16/17 位里挑第一个能往返的），与 CPython 差
+//      指数形式的门槛（`1e15` 我们出 `1e+15`）。`ext/python/build.js` 已经把 CPython 自己那份
+//      dtoa 编出来了，接上它是下一刀。
+//   5. `round()` 是 C 的 round（远离零），python 是银行家舍入 —— `.5` 那一格答得不一样。
+//   6. 循环变量不外泄（python 里 `for i in …` 之后还读得到 i）。
+//   7. f-string 里那段表达式、`%` 格式化、`.format()` 都没接。
+//   8. 字典转串没接（方言里没有"走一遍字典的键"那一格算子）。

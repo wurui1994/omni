@@ -6,11 +6,7 @@ GREETING = "hello"
 LIMIT = 5
 
 
-def add(a: int, b: int) -> int:
-    return a + b
-
-
-def addf(a: float, b: float) -> float:
+def add(a, b):
     return a + b
 
 
@@ -38,7 +34,7 @@ def total(xs: list[int]) -> int:
 
 def main():
     print(GREETING, "world")
-    print(add(2, 3), addf(1.5, 2.5))
+    print(add(2, 3), add(1.5, 2.5))
 
     # 整数除法那三格：python 与 C 不一样的地方
     print(7 / 2, 7 // 2, 7 % 2)

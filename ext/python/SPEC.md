@@ -58,7 +58,11 @@ R 那一门（ADR-0045/0046/0047，`r-lang` 分支）已经把这条路走通过
   python 的 `str(float)` / `repr(float)` 走 `%.6g` 的话每一处浮点输出都差一截。
 - **`tests/python/run.js`** —— 外部尺子：同一份 .py，我们跑一遍、本机 `python3` 跑一遍，
   **stdout 逐字节相同**才算过。两条腿都量（解释器 + `--mode js`）。
-  现在 4 份例子 × 2 条腿 = **8 绿 0 红**（尺子 Python 3.14.7）。
+  现在 5 份例子 × 2 条腿 = **10 绿 0 红**（尺子 Python 3.14.7）。
+- **单态化** —— 一个 python 函数按**实参类型的元组**生成几格实例
+  （`add(2,3)` 与 `add(1.5,2.5)` 与 `add("a","b")` 落成三格 `add__int_int` /
+  `add__float_float` / `add__str_str`；只有一格实例时不加后缀）。这是 python 的鸭子类型
+  撞上方言静态类型的出路，也是往后 `class` 与容器泛型的地基。判据是 `examples/generic.py`。
 - **借 CPython 的 C 那一半开工了**（`ext/python/build.js` + `rt/`）。第一批借的是
   `Python/dtoa.c`（David Gay 的正确舍入转换，2841 行）与 `Python/pystrtod.c`
   （CPython 的 repr 排版规则，1286 行）—— 两份**一个字都不改**。我们只加三格：
@@ -79,22 +83,20 @@ R 那一门（ADR-0045/0046/0047，`r-lang` 分支）已经把这条路走通过
 
 ### 下一刀，按顺序
 
-1. **单态化**。现在同一格形参在两处调用里装不同的东西就当场报（`add(2,3)` 与
-   `add(1.5,2.5)`）—— python 的鸭子类型撞上方言的静态类型。出路是按实参类型生成
-   `add_int` / `add_real`，这也是往后 `class` 与容器泛型的地基。
-2. **`class`**。落成方言的 `(class …)` + `<类型>_<方法>`（mojo 那一门的形状），
-   `self` 是第一格实参。
-3. **f-string 的内部结构**（PEP 701）。这要在 `lex.js` 里加一格通用能力：
+1. **`class`**。落成方言的 `(class …)` + `<类型>_<方法>`（mojo 那一门的形状），
+   `self` 是第一格实参。单态化那张表已经在了，方法按接收者类型挑实例是同一条路。
+2. **f-string 的内部结构**（PEP 701）。这要在 `lex.js` 里加一格通用能力：
    一个记号里嵌一段要再解析的文本。现在整份 f-string 是一个 STRING，8 份语料因此没过。
-4. **把借来的那份 `libomnipy` 接到语言里** —— 现在它编出来了、有判据了，可 adapter 那条路
+3. **把借来的那份 `libomnipy` 接到语言里** —— 现在它编出来了、有判据了，可 adapter 那条路
    还在用方言的 `(srepr E)`（15/16/17 位里挑第一个能往返的）。那一格与 CPython 差的是
    指数形式的门槛：`1e15` 我们出 `1e+15`、CPython 出 `1000000000000000.0`。
    接法照 R 那一门的 `ext/r/rt/ffi.js`：`(lib "libomnipy")` + `(cabi omni_py_float_repr …)`，
-   于是 `str(float)` 走的是 CPython 自己那份 dtoa。
-5. **再借两格**：`Objects/longobject.c`（大整数 —— 现在的 int 是 64 位，python 的没有上界）
+   于是 `str(float)` 走的是 CPython 自己那份 dtoa。**要先解决一格**：`cabi` 的类型词只有
+   `i32 i64 f64 ptr void`，出串那一格得想清怎么过（回 `ptr` 再转 `string`，还是加一格算子）。
+4. **再借两格**：`Objects/longobject.c`（大整数 —— 现在的 int 是 64 位，python 的没有上界）
    与 `Modules/_sre/`（正则）。这两格比浮点那一格耦合深，得先有"借来的东西怎么持有对象"
    那一层。
-6. **`try` / `with` / `match` / 生成器 / 闭包 / 装饰器** —— adapter 现在对它们当场报
+5. **`try` / `with` / `match` / 生成器 / 闭包 / 装饰器** —— adapter 现在对它们当场报
    "还没接"，不猜。
 
 ## 三、口径

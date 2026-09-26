@@ -282,8 +282,8 @@ function tyOfCall(x, C) {
     return t === null || t === undefined ? null : (t.kind === 'arr' ? t : null);
   }
   if (nm === 'range') return arrOf(INT);
-  const sig = C.fns.get(nm);
-  return sig === undefined ? null : sig.ret;
+  const inst = C.resolveFn(nm, argTys);
+  return inst === null ? null : inst.ret;
 }
 
 /* ─── 建 IR ───────────────────────────────────────────────────────────────── */
@@ -909,19 +909,24 @@ function builtinOf(nm, args, argToks, C) {
     case 'range':
       throw new Error('python->IR: `range()` 只在 `for … in range(…)` 里接了（当值用还没接）');
     default: {
-      const sig = C.fns.get(nm);
-      if (sig === undefined) throw new Error(`python->IR: 不认识 \`${nm}()\` —— 内建里没有，这份源码里也没定义`);
-      if (args.length !== sig.params.length) {
-        throw new Error(`python->IR: \`${nm}()\` 要 ${sig.params.length} 格实参，给了 ${args.length}`
-          + '（默认值那一格还没接）');
+      /* 用户函数。**单态化**：按实参类型挑一格实例（`add__int_int` / `add__float_float`）。 */
+      const argTys = args.map((a) => ty(a, C));
+      const inst = C.resolveFn(nm, argTys);
+      if (inst === null) {
+        if (!C.insts.has(nm)) {
+          throw new Error(`python->IR: 不认识 \`${nm}()\` —— 内建里没有，这份源码里也没定义`);
+        }
+        const have = C.insts.get(nm).map((i) => `(${i.key})`).join(' ');
+        throw new Error(`python->IR: \`${nm}(${argTys.map((t) => t.kind).join(', ')})\` 没有对得上的那一格`
+          + `（这份源码里生成的是 ${have}）—— 实参个数或类型对不上`);
       }
       const fixed = args.map((a, i) => {
-        const want = sig.params[i].type;
+        const want = inst.params[i].type;
         const got = ty(a, C);
         if (want.kind === 'real' && got.kind === 'int') return toReal(a, C);
         return a;
       });
-      return { kind: 'call', fn: { kind: 'name', name: C.ref(nm) }, args: fixed };
+      return { kind: 'call', fn: { kind: 'name', name: inst.mangled }, args: fixed };
     }
   }
 }
