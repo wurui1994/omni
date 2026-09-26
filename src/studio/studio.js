@@ -920,16 +920,26 @@ const RUNNABLE = new Set(['omni', 'sx', 'go', 'c', 'asy', 'js', 'lua', 'nim', 'v
  * 一页**只有一格**（WebGL 上下文个位数就到上限，每跑一趟建一格的话几趟之后
  * 早先那几格会被悄悄回收）—— 所以这儿存着，换文件/重跑只 `reset()`。
  *
- * 只有"就在本页跑"那一档能这样（单体 HTML）：`omni serve` 那一档产物在 node 那侧的
- * 工人里跑，页面的设备它碰不到 —— 那时照旧走"取回一帧表面"那条路（`gfxSurface`）。
+ * **两档都能拿到它**：
+ *   * 单体 HTML：`browser-main.js` 已经把安装器挂在 `window.__OMNI_INSTALL_GL` 上；
+ *   * `omni serve`：现取现装（`import('./gfx-gl.js')`）—— 那一档的产物由服务端
+ *     `emit js --gfx host` 出，跑在这台设备上（见 `src/studio/eval-live.js` 的头注）。
+ *     从前 serve 那一档压根不建设备，画面是"取回一帧表面"贴上去的**一张静态图**。
  */
 let GLDEV = null;
 const GL_LANGS = new Set(['pss', 'kc']);
-function glDevice() {
+async function glDevice() {
   if (GLDEV !== null) return GLDEV;
-  if (typeof window.__OMNI_INSTALL_GL !== 'function') return null;
+  let install = window.__OMNI_INSTALL_GL;
+  if (typeof install !== 'function') {
+    try {
+      const m = await import('./gfx-gl.js');
+      install = m.installGlDevice;
+    } catch { return null; }
+  }
+  if (typeof install !== 'function') return null;
   const canvas = el('canvas', 'gfx-canvas');
-  GLDEV = { dev: window.__OMNI_INSTALL_GL(canvas, 320, 240), canvas };
+  GLDEV = { dev: install(canvas, 320, 240), canvas };
   return GLDEV;
 }
 /** 停掉页面那格帧循环（换文件、跑别的语言都要它 —— 不停的话上一份脚本一直在画）。 */
@@ -1032,10 +1042,12 @@ async function run() {
    * **EVAL 两门直通 GPU 那一格**：设备先摆好（画布挂进"预览"栏、状态回初值、
    * `OMNI_GFX=host` 让画图落成 `(gfxcall …)`），然后才跑 —— 产物一跑起来就往这格
    * 上下文上画，而且帧循环（rAF）在页面这边转着，所以它是**活的**，不是一张图。
+   *
+   * **两档都走这条路**：单体里编译器就在本页；`omni serve` 那一档编译在服务端
+   * （`emit js --gfx host`）、跑在这台设备上（`eval-live.js`）。
    */
-  const live = GL_LANGS.has(S.lang) && typeof window.__OMNI_LOCAL === 'function'
-    ? glDevice()
-    : null;
+  const live = GL_LANGS.has(S.lang) ? await glDevice() : null;
+  const offline = typeof window.__OMNI_LOCAL === 'function';
   if (live !== null) {
     live.dev.reset();
     const box = $('#preview');
@@ -1048,6 +1060,46 @@ async function run() {
     showPreviewTab(true);
   } else {
     glStop();
+  }
+  /* serve 那一档的 EVAL 两门：**服务端只编（按单元产物），页面 import 启动器跑**。
+     每跑一趟过网的只有入口那几 KB —— 运行时那两格（`ev_rt_<哈希>` 与 `omni_rt`）
+     是所有脚本共用的，浏览器按 URL 缓存（见 `eval-live.js` 的头注）。 */
+  if (live !== null && !offline) {
+    try {
+      const em = await post('/api/units', {
+        path: S.path,
+        text: dirty ? currentText : undefined,
+        lang: S.lang,
+        verbose: true,
+      });
+      if (my !== S.seq) return;
+      if (dirty) S.text = currentText;
+      if (em.code !== 0 || em.main === null || em.main === undefined) {
+        $('#stderr').textContent = em.stderr ?? '';
+        setStatus('失败', 'bad');
+        return;
+      }
+      const mod = await import('./eval-live.js');
+      mod.ensureProcess();
+      globalThis.process.env.OMNI_GFX = 'host';
+      const rr = await mod.runUnits(em.main, em.units ?? []);
+      if (my !== S.seq) return;
+      $('#stdout').textContent = rr.stdout;
+      $('#stderr').textContent = rr.stderr;
+      renderStages(em.stages, em.stderr ?? '', Math.round(performance.now() - t0));
+      markStale(false);
+      showPreviewTab(true);
+      const base = rr.code === 0 ? `ok · ${Math.round(performance.now() - t0)}ms`
+        : `exit ${rr.code}`;
+      setStatus(base, rr.code === 0 ? 'ok' : 'bad');
+      liveFpsStart(base);
+      return;
+    } finally {
+      clearTimeout(graceTimer);
+      S.busy = false;
+      $('#btn-run').disabled = false;
+      $('#btn-run').classList.remove('busy');
+    }
   }
   try {
     const r = await post('/api/run', {

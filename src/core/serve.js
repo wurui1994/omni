@@ -465,9 +465,17 @@ export function startServer(opts) {
         try { acc = JSON.parse((r.stdout ?? '').trim().split('\n').pop()); } catch { acc = null; }
         if (acc === null) return json(res, 200, { ...r, main: null, error: '没拿到那一行账' });
         const url2 = (p) => `/api/mod/${p.slice(p.lastIndexOf('/') + 1)}`;
+        /* 入口那一份的名字：启动器叫 `main-<入口>.js`，剥掉那两头就是它。
+           页面**重跑同一份内容**时要的就是这张表（模块登记表按 URL 记，第二趟
+           `import` 不会再执行 —— 那时只能把各家的 `omni_init_…` 再调一遍，
+           见 `src/studio/eval-live.js` 的 `runUnits`）。 */
+        const mainName = acc.main.slice(acc.main.lastIndexOf('/') + 1);
+        const entryName2 = mainName.replace(/^main-/, '').replace(/\.js$/, '');
+        const units = [...(acc.names ?? []), entryName2]
+          .map((n) => ({ name: n, url: `/api/mod/${n}.js` }));
         return json(res, 200, {
           stdout: '', stderr: r.stderr ?? '', code: 0, via: r.via,
-          main: url2(acc.main), made: acc.made, kept: acc.kept,
+          main: url2(acc.main), made: acc.made, kept: acc.kept, units,
           names: (acc.names ?? []).map((n) => `/api/mod/${n}.js`),
         });
       }
