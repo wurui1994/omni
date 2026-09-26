@@ -743,5 +743,26 @@ for (const c of CASES) {
   }
 }
 
+/* ------------------------------------------- N. 这条腿的时限：只记不管，但要真记下来
+ *
+ * `browser-main.js` 在两趟之间印一句"上一趟超出了时限（页面里管不住，只能事后说）"，
+ * 那句话的开关是 `host/browser.js` 的 `deadlinePassed()`。而 2026-09-26 之前那张 env 表里
+ * 写着 `OMNI_TIMEOUT: '0'` —— `cli.js` 见 `sec === 0` 直接 return、`runTimeout` 一次都不调，
+ * 于是 `DEADLINE_MS` 永远是 0，那句话**一次也印不出来**。这两格钉住"预算留着、枪不领"。
+ */
+{
+  const B = await import(join(root, 'src', 'core', 'host', 'browser.js'));
+  ok('browser 腿没把跑的预算清零（那会让 deadlinePassed 永远是 false）',
+    B.env('OMNI_TIMEOUT') === undefined || Number(B.env('OMNI_TIMEOUT')) > 0,
+    `OMNI_TIMEOUT=${JSON.stringify(B.env('OMNI_TIMEOUT'))}`);
+  ok('browser 腿只关"开枪"那一格（OMNI_CLI_NO_SHOT=1）',
+    B.env('OMNI_CLI_NO_SHOT') === '1', JSON.stringify(B.env('OMNI_CLI_NO_SHOT')));
+  B.runTimeout(1, '超时');
+  await new Promise((r) => setTimeout(r, 30));
+  ok('deadlinePassed() 到点会变真', B.deadlinePassed() === true);
+  B.runTimeout(0, '超时');
+  ok('runTimeout(0) = 不限（照旧不报）', B.deadlinePassed() === false);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

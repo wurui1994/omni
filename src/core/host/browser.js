@@ -186,10 +186,27 @@ const ENV = new Map([
      `runCli`），于是十一门 + `.sx`/`.omni`/`.asy`/`.jnc`/`.js`/`.wat` 走的是**同一份
      dispatch**，页面上不再有第二套"这条腿支持哪几门"的表。 */
   ['OMNI_AS_LIB', '1'],
-  /* CLI 自己那格开发期时限会到点给整个进程一枪 —— 在页面上那是把 Studio 打死。
-     这条腿的时限只记不管（`runTimeout` / `deadlinePassed`），由 `browser-main.js`
-     在两趟之间报。 */
-  ['OMNI_TIMEOUT', '0'],
+  /**
+   * **枪不领，预算留着**（2026-09-26 改的）。
+   *
+   * CLI 自己那格开发期时限会到点给整个进程一枪 —— 在页面上那是把 Studio 打死，所以
+   * `OMNI_CLI_NO_SHOT=1`（那一格只关"开枪"，不关预算，见 `host/native.js` 的 `runTimeout`）。
+   * 这条腿的 `runTimeout` 本来就**只记不管**（往下那一格），到点由
+   * `studio/browser-main.js` 在两趟之间说一句。
+   *
+   * 从前这儿写的是 `OMNI_TIMEOUT: '0'`，本意也是"别开枪"—— 可那一格是**预算**：
+   * `cli.js` 见 `sec === 0` 就直接 return，`runTimeout` 一次都不调，于是 `DEADLINE_MS`
+   * 永远是 0、`deadlinePassed()` 永远是 false，`browser-main.js` 里那句
+   * "上一趟超出了时限（页面里管不住，只能事后说）"**一次也印不出来** —— 上头这段注写着的
+   * 机制其实是死的。与 `studio/pool.js`、`tests/eval/scan.js` 那两处是同一个毛病：
+   * 想说"别给我开枪"，写成了"一格预算都别留"。
+   *
+   * 不写 `OMNI_TIMEOUT` 了 —— 秒数照默认那条路走（环境变量 > `.env` > 30）。
+   * 生成出来的程序里那格外部看门狗在页面上起不来（要 `child_process`），`$dl_arm`
+   * 自己整段包在 try 里，所以这一改碰不到它。
+   */
+  ['OMNI_CLI_NO_SHOT', '1'],
+  /* 编一趟的预算照旧不限：页面上编十一门那一趟本来就慢，而这条腿没人能中断它。 */
   ['OMNI_BUILD_TIMEOUT', '0'],
 ]);
 

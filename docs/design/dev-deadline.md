@@ -70,6 +70,26 @@ Studio 的热工人（`src/core/studio/worker.js`）是**常驻进程**：第一
 判据（`.omni-cache/probe/` 下的一格死循环 `.sx`，三条腿各量一趟）：开枪档 JS 腿、
 不开枪档 JS 腿、不开枪档原生腿 —— `--timeout 4` 之下都在 5s 内停，`ps` 里**一格残留都没有**。
 
+## 页面那一档：只记不管，可**得真记下来**
+
+浏览器那条腿（`src/core/host/browser.js`）上没人能中断一趟已经跑起来的活 —— 页面是单线程的。
+所以那儿的 `runTimeout` **只记截止时刻**，到点由 `src/studio/browser-main.js` 在两趟之间说一句
+"上一趟超出了时限（页面里管不住，只能事后说）"，开关是 `deadlinePassed()`。
+
+那张 env 表从前写的是 `OMNI_TIMEOUT: '0'`（2026-09-26 改掉）—— 本意也是"别给我开枪"
+（第一层那一枪打下去就是把 Studio 打死），可写成了**清预算**：`cli.js` 见 `sec === 0`
+直接 return、`runTimeout` 一次都不调，于是 `DEADLINE_MS` 永远是 0、`deadlinePassed()`
+永远是 false，上面那句话**一次也印不出来**。也就是说这一档的机制整个是死的，而代码里的注
+写得像它活着。
+
+现在这儿也用 `OMNI_CLI_NO_SHOT=1`（与常驻工人同一格），`OMNI_TIMEOUT` 不写 ——
+秒数照默认那条路走。编一趟的预算照旧不限（`OMNI_BUILD_TIMEOUT=0`）：页面上编十一门本来就慢。
+
+**这是同一个毛病的第三处**（前两处：`studio/pool.js`+`worker.js`、`tests/eval/scan.js`）。
+写"别给我开枪"的人容易写成"一格预算都别留"。查法：
+`grep -rn "OMNI_TIMEOUT" --include=*.js . | grep -v omni-cache`，凡是 `'0'` 都要问一句
+"这儿真的不需要预算吗"。判据在 `tests/studio/run.js` 末尾那四格。
+
 ## 那一格外部看门狗
 
 一行 `sh`，起的时候 detach + `setsid`，干三件事：
