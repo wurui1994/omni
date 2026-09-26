@@ -1420,14 +1420,77 @@ function hdrExprOf(x, types) {
  * 且没写 `names = FALSE`。
  */
 function qNamesDefault(x) {
-  if (namedArg(x, 'probs') !== undefined) return false;
-  if (posArgs(x).length >= 2) return false;
-  const nmArg = namedArg(x, 'names');
-  if (nmArg !== undefined && !trueFlag(x, 'names')) return false;
+  const nmArg0 = namedArg(x, 'names');
+  if (nmArg0 !== undefined && !trueFlag(x, 'names')) return false;
+  /* **给了 `probs`、而那几格是编译期算得出来的数**：标签照 R 的
+     `formatC(100*probs, format="fg", width=1, digits=7)` 在编译期排好（见 `qProbLabels`）。 */
+  if (namedArg(x, 'probs') !== undefined || posArgs(x).length >= 2) return qProbLabels(x) !== null;
   return true;
 }
 /** 不给 `probs` 时 R 那五个标签（`seq(0, 1, 0.25)` 各乘 100 再加个 `%`）。 */
 const QLABELS = ['0%', '25%', '50%', '75%', '100%'];
+/**
+ * **一格写着的数**（`0.5` / `1/3` / `-2` / `(0.1)`）在编译期算出来，算不出来回 `null`。
+ *
+ * 只折字面量之间的 `+ - * /`：`quantile(x, 1/3)` 是真代码里的常见写法，而那一格
+ * 在 CST 里是一棵 `bin` 树。变量一律回 `null`（那要运行期）。
+ */
+function constNumOf(node) {
+  if (node === null || node === undefined || !isList(node)) return null;
+  const t = tag(node);
+  if (t === 'paren') return constNumOf(kids(node)[0]);
+  if (t === 'num') {
+    const txt = String(leaf(kids(node)[0])).replace(/L$/, '');
+    if (!/^[0-9.]+(e[-+]?[0-9]+)?$/i.test(txt)) return null;
+    const v = Number(txt);
+    return Number.isFinite(v) ? v : null;
+  }
+  if (t === 'un') {
+    const op = String(leaf(kids(node)[0]));
+    const v = constNumOf(kids(node)[1]);
+    if (v === null) return null;
+    if (op === '-') return -v;
+    if (op === '+') return v;
+    return null;
+  }
+  if (t === 'bin') {
+    const op = String(leaf(kids(node)[0]));
+    if (!['+', '-', '*', '/'].includes(op)) return null;
+    const a = constNumOf(kids(node)[1]);
+    const c = constNumOf(kids(node)[2]);
+    if (a === null || c === null) return null;
+    const v = op === '+' ? a + c : op === '-' ? a - c : op === '*' ? a * c : a / c;
+    return Number.isFinite(v) ? v : null;
+  }
+  return null;
+}
+/**
+ * `quantile(x, probs)` 那几个标签 —— R 排的是
+ * `paste0(formatC(100*probs, format = "fg", width = 1, digits = 7), "%")`：
+ * **7 位有效数字、定点、末尾的零削掉**（量出来 `0.5`→`50%`、`1/3`→`33.33333%`、
+ * `0.125`→`12.5%`、`0.001`→`0.1%`、`1`→`100%`）。
+ *
+ * 算不出来（probs 是变量、或者 7 位有效数字要用指数写法 —— `format = "fg"` 不会用指数，
+ * 而这儿的写法会）就回 `null`，调用点照旧当场报、退到 libR。
+ */
+function qProbLabels(x) {
+  const pn = namedArg(x, 'probs') ?? posArgs(x)[1];
+  if (pn === undefined || !isList(pn)) return null;
+  const items = (isList(pn) && tag(pn) === 'call' && isList(kids(pn)[0])
+    && tag(kids(pn)[0]) === 'sym' && nameOf(kids(pn)[0]) === 'c')
+    ? posArgs(pn) : [pn];
+  if (items.length === 0) return null;
+  const out = [];
+  for (const it of items) {
+    const p = constNumOf(it);
+    if (p === null || !(p >= 0 && p <= 1)) return null;
+    let s = (100 * p).toPrecision(7);
+    if (s.includes('e') || s.includes('E')) return null;
+    if (s.includes('.')) s = s.replace(/0+$/, '').replace(/\.$/, '');
+    out.push(`${s}%`);
+  }
+  return out;
+}
 
 function namesExprOf(x, types) {
   if (!isList(x)) return null;
@@ -1637,7 +1700,11 @@ function namesExprOf(x, types) {
    */
   if (fn === 'quantile') {
     if (!qNamesDefault(x)) return null;
-    return exprOf(cstCall('c', QLABELS.map((s) => cstStr(s))), types);
+    /* 给了 `probs` 那一档：标签在编译期排好（`qProbLabels`），与不给的那五格同一条路。 */
+    const labs = (namedArg(x, 'probs') !== undefined || posArgs(x).length >= 2)
+      ? qProbLabels(x) : QLABELS;
+    if (labs === null) return null;
+    return exprOf(cstCall('c', labs.map((s) => cstStr(s))), types);
   }
   /**
    * `which(掩码)` —— 回的是**位置**，而 R 把被选中那几格的名字一起带回来
@@ -5736,11 +5803,11 @@ function callOf(x, types, extra, want, stmtPos) {
         if (!isVecTy(t)) throw new Error(`r->IR: quantile() 的第一格实参不是向量（是 ${t.kind}）`);
         const nmArg = namedArg(x, 'names');
         const pGiven = namedArg(x, 'probs') !== undefined || n >= 2;
-        if (pGiven && (nmArg === undefined || trueFlag(x, 'names'))) {
-          throw new Error('r->IR: 给了 `probs` 的 quantile() 要明写 `names = FALSE` ——'
-            + ' 那几个标签要照 R 的 `formatC(100*probs, format = "fg", width = 1, digits = 7)` 排'
-            + '（`probs = c(0.1, 1/3)` 出 `10%` 与 `33.33333%`），这一档还没接；'
-            + '不给 `probs` 那一档的五个标签是编译期常量，名字接住了');
+        if (pGiven && (nmArg === undefined || trueFlag(x, 'names')) && qProbLabels(x) === null) {
+          throw new Error('r->IR: 给了 `probs` 的 quantile() 这一格要明写 `names = FALSE` ——'
+            + ' 那几个标签照 R 的 `formatC(100*probs, format = "fg", width = 1, digits = 7)` 排，'
+            + '而这儿的 `probs` **编译期算不出来**（是变量，或者 7 位有效数字要用指数写法）；'
+            + '写着的数那一档（`0.5` / `c(0.25, 0.75)` / `1/3`）2026-09-27 接了');
         }
         const tyArg2 = namedArg(x, 'type');
         if (tyArg2 !== undefined) {
