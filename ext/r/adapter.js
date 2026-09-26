@@ -1847,6 +1847,10 @@ function widenTy(a, c) {
      的类型标签，这一档没有（见 SPEC §4 第 5 条）。 */
   if (isStrVec(a)) return a;
   if (isStrVec(c)) return c;
+  /* 两边都是向量而只有一边**带名字**：留带名字的那个。反过来（留不带名字的）名字就
+     静默丢了 —— `print` 会少印名字那一行。不带名字的那个调用点交的是**零长**的名字
+     那一条，被调方的印法自己会退回不带名字的那一行（见 `r_print_named`）。 */
+  if (isVecTy(a) && isVecTy(c) && isNamedTy(a) !== isNamedTy(c)) return isNamedTy(a) ? a : c;
   if (isVecTy(a)) return isLglTy(a) && !isLglTy(c) && isVecTy(c) ? c : a;
   if (isVecTy(c)) return c;
   if (a.kind === c.kind) return isLgl1(a) && !isLgl1(c) ? c : a;
@@ -3581,10 +3585,13 @@ function callOf(x, types, extra, want) {
   /**
    * **名字跟不住就当场报**（见 `RNVEC` 与 `NAME_DROP_OK`）。R 会把名字带过去的那些
    * （`sort` / `rev` / `head` / `cumsum` / `abs` / `sqrt` / `round` / `is.na` / `c(v, 4)`…）
-   * 这一档只带值：静默带过去的话 `print` 会少印名字那一行。用户函数也算 —— 名字那一条
-   * 是**跟着变量**走的，传不进被调方。
+   * 这一档只带值：静默带过去的话 `print` 会少印名字那一行。
+   *
+   * **用户函数不在这道门里**（2026-09-26 接了）—— 名字那一条跟着多出来的那格影子形参
+   * 交进去（见 `fnDecl` 与下头那段 `out`）。
    */
   if (fn !== null && !NAME_DROP_OK.has(fn) && !NAME_KEEP.has(fn)
+      && !fnFormals.has(mangle(fn))
       && all.some((a) => a !== null && isNamedTy(typeOfExpr(a, types)))) {
     throw new Error(`r->IR: ${fn}() 收了一格**带名字的向量** —— 这一档名字只跟着`
       + '逐元素算术与 `names` / `setNames` / `unname` / `v["a"]` 走（见 ext/r/SPEC.md 第二节）。'
@@ -4927,20 +4934,25 @@ function callOf(x, types, extra, want) {
     throw new Error(`r->IR: R 的 \`${fn}()\` 还没接 —— ${gapHint(fn)}`);
   }
   const bound = bindArgs(fn, pnames, fnDefs.get(mangle(fn)) ?? [], x, extra !== undefined);
-  return {
-    kind: 'call',
-    fn: { kind: 'name', name: mangle(fn) },
-    args: bound.map((node, i) => {
-      const e = node === null ? extra : exprOf(node, types);
-      const pt = ptys === undefined ? undefined : ptys[i];
-      if (pt === undefined) return e;
-      const at = node === null ? undefined : typeOfExpr(node, types);
-      if (pt.kind === 'real' && at !== undefined && (at.kind === 'int' || at.kind === 'bool')) {
-        return asReal(e, at);
-      }
-      return e;
-    }),
-  };
+  /**
+   * 实参落下来。**带名字的向量那一格交两样东西**：值那一条，紧跟着名字那一条
+   * （见 `fnDecl` 里对上的那格影子形参）。名字算不出来（这一格实参不带名字）就交
+   * **零长**的那条 —— 被调方的印法自己会退回不带名字的那一行（`r_print_named`）。
+   */
+  const out = [];
+  bound.forEach((node, i) => {
+    const e = node === null ? extra : exprOf(node, types);
+    const pt = ptys === undefined ? undefined : ptys[i];
+    if (pt === undefined) { out.push(e); return; }
+    const at = node === null ? undefined : typeOfExpr(node, types);
+    if (pt.kind === 'real' && at !== undefined && (at.kind === 'int' || at.kind === 'bool')) {
+      out.push(asReal(e, at));
+    } else out.push(e);
+    if (!isNamedTy(pt)) return;
+    const ns = node === null ? null : namesExprOf(node, types);
+    out.push(ns === null ? zeroInit(RSTRV) : ns);
+  });
+  return { kind: 'call', fn: { kind: 'name', name: mangle(fn) }, args: out };
 }
 
 /**
@@ -10415,10 +10427,23 @@ function fnDecl(name, node, types) {
   const all = [...decls, ...copies, ...stmts];
   /* 回什么：拿最后那一格带值的 `return` 里的表达式类型算（`local` 已经推完了）。 */
   const ret = all.some((s) => hasValueReturn(s)) ? (returnType(body, local) ?? INT) : { kind: 'void' };
+  /**
+   * 形参落下来。**带名字的向量那一格是两格形参**：值那一条，紧跟着名字那一条
+   * （影子形参 `p__nm`，`(arr string)`）—— 于是名字跟得进函数（调用点那侧见 `callOf`）。
+   *
+   * 为什么不把名字塞进值那一条里：值是 `(ptr real)`，那块内存里没有放串的地方，
+   * 而公共层也没有"带附件的向量"。两格形参是这一层能办到的、最小的那个办法。
+   */
+  const ps = [];
+  for (const p of params) {
+    const t = local.get(p) ?? INT;
+    ps.push({ name: p, type: t });
+    if (isNamedTy(t)) ps.push({ name: nmVar(p), type: RSTRV });
+  }
   return {
     kind: 'fn',
     name,
-    params: params.map((p) => ({ name: p, type: local.get(p) ?? INT })),
+    params: ps,
     ret,
     body: all,
   };

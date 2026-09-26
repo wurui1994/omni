@@ -210,3 +210,37 @@ print(append(av, 9, after = 0))
 print(append(av, c(8, 9), after = 2))
 print(names(append(av, 9)))
 cat(length(append(av, 9)), sum(append(av, 9)), "\n")
+
+# 带名字的向量**交得进函数**了（2026-09-26）：名字那一条跟着多出来的一格影子形参走
+# （`x` 之后紧跟一格 `x__nm`）。同一格形参有时带名字有时不带 —— 不带的那一处交的是
+# **零长**的名字那一条，被调方的印法自己退回不带名字的那一行。
+# 交**出来**还没接（名字那一条出不了函数）—— 所以这儿不写 `function(x) x[k]` 那种形状。
+fv <- c(a = 1, bb = 2, ccc = 3)
+peek <- function(x) {
+  print(x)
+  cat(length(x), sum(x), "\n")
+}
+peek(fv)
+peek(c(10, 20, 30))
+deep <- function(y) {
+  peek(y)
+  print(y["bb"])
+  print(y[c(1, 3)])
+  print(sort(y))
+  print(rev(y))
+  print(y * 10)
+  cat(names(y)[1], nchar(names(y)[3]), "\n")
+}
+deep(fv)
+two <- function(p, q) {
+  print(p)
+  cat(sum(q), "\n")
+}
+two(fv, c(x = 7, y = 8))
+bump <- function(x) {
+  x[1] <- 99
+  print(x)
+  cat("--\n")
+}
+bump(fv)
+print(fv)
