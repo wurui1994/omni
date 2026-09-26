@@ -729,6 +729,9 @@ const NAME_DROP_OK = new Set([
   'names', 'setNames', 'unname', 'as.vector', 'print', 'invisible', 'cat',
   'paste', 'paste0', 'sprintf', 'length', 'sum', 'mean', 'max', 'min', 'prod',
   'var', 'sd', 'range', 'any', 'all', 'unique', 'seq_along', 'seq_len',
+  /* `order` 回的是**位置**，R 自己也不带名字（量出来 `order(c(a=3,b=1))` 是没名字的
+     `2 1`）—— 从前它不在这张表上，于是带名字的向量进来白白退一档。 */
+  'order',
   /* `duplicated` 量出来 R 自己也丢名字（2026-09-26）—— 从前这张表外，于是带名字的向量上报。 */
   'duplicated',
   'as.character', 'as.numeric', 'as.double', 'as.integer', 'as.logical',

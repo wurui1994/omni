@@ -351,3 +351,8 @@ ncv <- c(a = 3, b = 1)
 cat(ncv["a"] + 1, ncv[1] * 2, "\n")
 print(ncv["a"])
 print(ncv[["a"]] + 1)
+## order 回的是位置，R 自己也不带名字 —— 所以带名字的向量进来不必退档
+nov <- c(a = 3, b = 1, c = 2)
+print(order(nov))
+print(nov[order(nov)])
+cat(order(nov), order(nov, decreasing = TRUE), "\n")
