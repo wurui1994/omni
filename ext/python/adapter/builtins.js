@@ -130,7 +130,7 @@ export function anyAllOf(xs0, wantAll, C, truthy) {
  * `sorted(xs)` —— **插入排序**（python 的 sort 是稳定的，插入排序也是；
  * 这儿要的是"答得对"，不是"快"。真要快得先有"函数值当比较器"那一层）。
  */
-export function sortedOf(xs0, C) {
+export function sortedOf(xs0, C, desc = false) {
   const h = holder(C);
   const xs = h.keep(xs0, 'st_xs');
   const t = C.tyOfIR(xs);
@@ -161,7 +161,8 @@ export function sortedOf(xs0, C) {
       { kind: 'assign', target: k, value: bin('-', j, int(1)) },
       {
         kind: 'while',
-        cond: bin('&&', bin('>=', k, int(0)), bin('>', { kind: 'index', obj: out, index: k }, cur)),
+        cond: bin('&&', bin('>=', k, int(0)),
+          bin(desc ? '<' : '>', { kind: 'index', obj: out, index: k }, cur)),
         body: [
           {
             kind: 'assign',

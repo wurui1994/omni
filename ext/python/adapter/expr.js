@@ -409,7 +409,8 @@ function tyOfBin(x, C) {
 /** 一格调用装的是什么。 */
 function tyOfCall(x, C) {
   const [fn, argsTok] = kids(x);
-  const args = argsTok === undefined ? [] : kids(argsTok);
+  /* 命名实参先排回位置上（不然单态化那一趟按次序挑实例会挑错 —— 量出来的）。 */
+  const args = kwOrder(fn, argsTok === undefined ? [] : kids(argsTok), C);
   const argTys = args.map((a) => tyOfCst(a, C));
   if (tag(fn) === 'attr') {
     /* `math.*` 先答 —— `math` 不是一格值，问它装什么会回 null。 */
@@ -1644,10 +1645,73 @@ function pickOf(a, b, op, C) {
   return pre.length === 0 ? value : { kind: 'block-expr', stmts: pre, value };
 }
 
+/**
+ * **命名实参**（`f(b=2, a=1)`）排回位置上。
+ *
+ * 这一层没有"默认值"那一档（`def` 的形参带默认值当场报），所以命名实参只是**换次序**：
+ * 按形参名字把它塞回那一格就行，每一格都必须有值。
+ *
+ * 只对**这份源码里定义的函数与类**这么办（形参名字从那棵 `def` 上读）。内建各有各的
+ * 规矩（`print(sep=, end=)`、`sorted(reverse=)`），在各自那一处收。
+ */
+export function kwOrder(fn, toks, C) {
+  if (!toks.some((a) => tag(a) === 'kw')) return toks;
+  if (tag(fn) !== 'n') return toks;
+  const nm = String(nameOf(fn));
+  const def = C.fnNodes.get(C.records.has(nm) ? `${nm}.__init__` : nm);
+  if (def === undefined) return toks;
+  const ps = kids(part(def, 'params') ?? { kind: 'list', items: [] })
+    .filter((p) => tag(p) === 'p')
+    .map((p) => String(nameOf(kids(p)[0])));
+  /* 造一格记录时第一格形参是 self —— 调用点不给它。 */
+  const names = C.records.has(nm) ? ps.slice(1) : ps;
+  const out = toks.filter((a) => tag(a) !== 'kw');
+  for (const a of toks) {
+    if (tag(a) !== 'kw') continue;
+    const k = String(leaf(kids(a)[0]));
+    const at = names.indexOf(k);
+    if (at < 0) {
+      throw new Error(`python->IR: \`${nm}()\` 没有叫 \`${k}\` 的形参`
+        + `（有的是 ${names.join(' / ')}）`);
+    }
+    if (out[at] !== undefined) throw new Error(`python->IR: \`${nm}()\` 的 \`${k}\` 给了两回`);
+    out[at] = kids(a)[1];
+  }
+  for (let i = 0; i < names.length; i += 1) {
+    if (out[i] === undefined) {
+      throw new Error(`python->IR: \`${nm}()\` 的形参 \`${names[i]}\` 没给值`
+        + '（这一层没有默认值那一档）');
+    }
+  }
+  return out;
+}
+
 /** 一格调用：内建、`math.*`、方法、用户函数。 */
 export function callOf(x, C) {
   const [fn, argsTok] = kids(x);
-  const argToks = argsTok === undefined ? [] : kids(argsTok);
+  const argToks = kwOrder(fn, argsTok === undefined ? [] : kids(argsTok), C);
+  /* `sorted(xs, reverse=True)` —— 要在**算实参之前**拦（下面那一圈见了 `kw` 就报）。
+     `reverse` 只收布尔字面量：两种比法是两条循环，得在编译期定。
+     `key=` 没接 —— 那要有"函数当值"那一档。 */
+  if (tag(fn) === 'n' && String(nameOf(fn)) === 'sorted'
+    && argToks.some((a) => tag(a) === 'kw')) {
+    const pos = argToks.filter((a) => tag(a) !== 'kw');
+    if (pos.length !== 1) throw new Error('python->IR: `sorted()` 收一格表');
+    let desc = false;
+    for (const a of argToks.filter((y) => tag(y) === 'kw')) {
+      const k = String(leaf(kids(a)[0]));
+      if (k !== 'reverse') {
+        throw new Error(`python->IR: \`sorted(${k}=…)\` 还没接（接了的是 reverse=）`);
+      }
+      const v = kids(a)[1];
+      if (tag(v) !== 'true' && tag(v) !== 'false') {
+        throw new Error('python->IR: `sorted(reverse=…)` 要写成 True / False 字面量'
+          + '（两种比法是两条循环，得在编译期定）');
+      }
+      desc = tag(v) === 'true';
+    }
+    return sortedOf(exprOf(pos[0], C), C, desc);
+  }
   for (const a of argToks) {
     if (['kw', 'star', 'starstar'].includes(tag(a))) {
       throw new Error(`python->IR: 实参里的 \`${tag(a)}\` 还没接（命名实参 / 展开）`);

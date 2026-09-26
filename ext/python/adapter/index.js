@@ -31,6 +31,7 @@ import { INT, STR, DYN, arrOf, sameType, typeOf, named } from '../../../src/core
 import { typeToSx } from '../../../src/core/lower/ty.js';
 import {
   exprOf, condOf, nameOf, typeOfAnnot, tyOfCst, tyArg, pyStr, pyRepr, lenOf, hasFields, fstringParts, cmpEq,
+  kwOrder,
 } from './expr.js';
 import {
   reverseStmts, clearStmts, extendStmts, insertStmts, dropAtStmts, indexOfList,
@@ -519,7 +520,9 @@ function collectInsts(nm, sh, tree, C) {
   for (const node of nodes) {
     if (tag(node) !== 'call') continue;
     const fn = kids(node)[0];
-    const args = kids(part(node, 'args') ?? { kind: 'list', items: [] });    if (dot < 0) {
+    /* 命名实参先排回位置上（不然按次序取的类型会错位）。 */
+    const args = kwOrder(fn, kids(part(node, 'args') ?? { kind: 'list', items: [] }), C);
+    if (dot < 0) {
       /* 普通函数：`f(…)`。 */
       if (tag(fn) === 'n' && String(nameOf(fn)) === nm && args.length === sh.names.length) {
         take(args, null);
@@ -580,9 +583,21 @@ function scanBinds(x, C, rets = null) {
 function scanOne(s, C, rets) {
   switch (tag(s)) {
     case 'assign': {
-      const t = tyOfCst(kids(s)[kids(s).length - 1], C);
+      const v = kids(s)[kids(s).length - 1];
+      const t = tyOfCst(v, C);
       for (const g of kids(part(s, 'lhs') ?? { kind: 'list', items: [] })) {
-        bindTarget(kids(g)[0], t, C);
+        const one = kids(g)[0];
+        /* **`a, b = x, y`**（含 `a, b = b, a` 那个交换）—— 两边逐格对着绑。
+           这一格从前漏了：`bindTarget` 的元组那一支把**整个右边的类型**按到每一格
+           名字上，而 `tyOfCst((tuple …))` 答 null —— 于是一格都没绑，
+           发到 `.sx` 那侧报"未声明的变量 'a'"（量出来的）。
+           左右格数不一样那件事留给发射那一趟报（`assignTo` 里那句话更具体）。 */
+        if (tag(one) === 'tuple' && tag(v) === 'tuple'
+          && kids(one).length === kids(v).length) {
+          kids(one).forEach((tt, i) => bindTarget(tt, tyOfCst(kids(v)[i], C), C));
+          continue;
+        }
+        bindTarget(one, t, C);
       }
       return;
     }
@@ -1023,25 +1038,27 @@ function listMut(m, box, argToks, C) {
  */
 function printStmt(argToks, C) {
   let end = null;
+  let sep = null;
   const pos = [];
   for (const a of argToks) {
     if (tag(a) === 'kw') {
       const k = String(leaf(kids(a)[0]));
-      if (k !== 'end') throw new Error(`python->IR: \`print(${k}=…)\` 还没接（只接了 end=）`);
-      end = exprOf(kids(a)[1], C);
-      continue;
+      if (k === 'end') { end = exprOf(kids(a)[1], C); continue; }
+      if (k === 'sep') { sep = exprOf(kids(a)[1], C); continue; }
+      throw new Error(`python->IR: \`print(${k}=…)\` 还没接（接了的是 end= 与 sep=）`);
     }
-    if (['star', 'starstar', 'genexp'].includes(tag(a))) {
+    if (['star', 'starstar'].includes(tag(a))) {
       throw new Error(`python->IR: \`print\` 的实参里有 \`${tag(a)}\` —— 还没接`);
     }
     pos.push(a);
   }
   const parts = pos.map((a) => pyStr(exprOf(a, C), C));
+  const gap = sep ?? { kind: 'string', value: ' ' };
   let value = parts.length === 0 ? { kind: 'string', value: '' } : parts[0];
   for (const p of parts.slice(1)) {
     value = {
       kind: 'binop', op: '+',
-      left: { kind: 'binop', op: '+', left: value, right: { kind: 'string', value: ' ' } },
+      left: { kind: 'binop', op: '+', left: value, right: gap },
       right: p,
     };
   }
