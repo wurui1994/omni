@@ -6890,17 +6890,60 @@ function assignOf(x, types) {
       }
       return vecSet(o, zeroBased(kv, kt), val);
     }
-    /* 字符向量的元素写（`labels[2] <- "x"`）。**越界不会现长** —— R 那边
-       `labels[n+1] <- s` 会把向量接长，这儿是 `(aset …)`，越界当场报（明写在 SPEC）。 */
+    /**
+     * 字符向量的元素写（`labels[2] <- "x"`）。**越界不会现长** —— R 那边
+     * `labels[n+1] <- s` 会把向量接长、中间填 `NA_character_`，而这一档没有那种值
+     * （见 SPEC 第四节第 12 条）。
+     *
+     * 越界那一趟**在运行期停下来，报的是这句话**（2026-09-26 改的）：从前撞的是方言那句
+     * `array index out of range: 3 (length 2)` —— 那句既说不清是哪一行 R 代码，也不告诉人
+     * "接长要 `NA_character_`"。拦不住的那一半（下标与长度都是运行期才知道的）就明写在
+     * 这儿：这一格是"报得晚"，不是静默答错。
+     *
+     * 下标 `<= 0` 也在这儿拦：`s[0] <- "z"` 在 R 那边是**一格也不写**，`s[-1] <- "z"` 是
+     * "除了第一格，别的都写" —— 两种都没接，从前也是撞方言那句 `index out of range: -1`。
+     */
     if (isStrVec(ot)) {
       const vt2 = typeOfExpr(value, types);
       if (vt2.kind !== 'string') {
         throw new Error(`r->IR: 往字符向量里写的不是串（是 ${vt2.kind}）`);
       }
+      const skN = fresh('sk');
+      const skE = { kind: 'name', name: skN };
       return {
-        kind: 'assign',
-        target: svGet(o, zeroBased(exprOf(keys[0], types), typeOfExpr(keys[0], types))),
-        value: exprOf(value, types),
+        kind: 'block',
+        stmts: [
+          { kind: 'let', name: skN, type: INT, init: zeroBased(exprOf(keys[0], types), typeOfExpr(keys[0], types)) },
+          {
+            kind: 'if',
+            cond: b('<', skE, { kind: 'int', value: 0 }),
+            then: [{
+              kind: 'builtin-stmt',
+              name: 'fail',
+              args: [{
+                kind: 'string',
+                value: 'v[k] <- 串：下标不是正数 —— R 那边 0 是一格也不写、负数是"除了这几格都写"，'
+                  + '字符向量的这两种写法这一档都没接（见 ext/r/SPEC.md 第四节第 12 条）',
+              }],
+            }],
+            else_: null,
+          },
+          {
+            kind: 'if',
+            cond: b('>=', skE, svLen(o)),
+            then: [{
+              kind: 'builtin-stmt',
+              name: 'fail',
+              args: [{
+                kind: 'string',
+                value: 'v[k] <- 串：下标超出了这条字符向量的长度 —— R 那边会把它接长、'
+                  + '中间填 NA_character_，而这一档没有那种值（见 ext/r/SPEC.md 第四节第 12 条）',
+              }],
+            }],
+            else_: null,
+          },
+          { kind: 'assign', target: svGet(o, skE), value: exprOf(value, types) },
+        ],
       };
     }
     throw new Error(`r->IR: ${nameOf(obj)} 上的下标写不知道是数组还是表 —— 推出来是 ${ot.kind}`);

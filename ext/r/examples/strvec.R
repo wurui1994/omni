@@ -288,3 +288,16 @@ print(nsz)
 print(nchar(unname(nsz)))
 for (ns in unname(nsv)) cat(ns, "")
 cat("\n")
+
+## 字符向量的元素写：下标是运行期算出来的那几趟（越界/0/负下标当场报，见 SPEC 4.12）
+wv <- c("a", "b", "c", "d")
+wi <- 2L
+wv[wi] <- "B"
+wv[wi + 1L] <- toupper(wv[1])
+wv[length(wv)] <- paste0(wv[2], "!")
+cat(wv, "\n")
+print(nchar(wv))
+for (wk in seq_along(wv)) wv[wk] <- paste0(wk, wv[wk])
+print(wv)
+wv[2.9] <- "trunc"
+cat(wv[2], wv[3], "\n")
