@@ -27,7 +27,7 @@
 // `if __name__ == "__main__": main()` 这个惯用写法直接能跑。
 
 import { tag, kids, leaf, part } from '../../../src/core/lower/cst.js';
-import { INT, STR, DYN, sameType, typeOf, named } from '../../../src/core/lower/ty-of.js';
+import { INT, STR, DYN, arrOf, sameType, typeOf, named } from '../../../src/core/lower/ty-of.js';
 import { typeToSx } from '../../../src/core/lower/ty.js';
 import {
   exprOf, condOf, nameOf, typeOfAnnot, tyOfCst, tyArg, pyStr, lenOf, hasFields, fstringParts,
@@ -344,6 +344,8 @@ function makeCtx() {
       fns: new Map([...C.fns].map(([k, v]) => [C.ref(k), v])),
       fields: new Map([...C.records].map((e) => [e[1].type.name, e[1].fields])),
     }),
+    /** 一格**已经建好的 IR 表达式**装的是什么（`builtins.js` 那几格现场发循环的要它）。 */
+    tyOfIR: (e) => typeOf(e, C.tyCtx()),
     /** 按**方言里那个名字**查（`tyCtx().env` 收到的是改过的名字）。 */
     lookupRef: (n) => {
       for (let i = scopes.length - 1; i >= 0; i -= 1) {
@@ -600,6 +602,30 @@ function scanOne(s, C, rets) {
     case 'return':
       if (rets !== null) rets.push(kids(s).length === 0 ? { kind: 'void' } : tyOfCst(kids(s)[0], C));
       return;
+    /**
+     * **`xs = []` 之后 `xs.append(v)`** —— python 里最常见的那一格写法。
+     *
+     * 空表的元素类型从**往里 append 的那个值**认：`tyOfCst([])` 答不出来（空的），
+     * 于是赋值那一句先不绑，等走到这一句时按 `arr<那个值的类型>` 绑上。
+     * 语句是按次序扫的，所以 `parts = []` 在前、`parts.append(…)` 在后就够了；
+     * 反过来（先 append 再赋空表）python 自己也不成立。
+     */
+    case 'expr': {
+      const e = kids(s)[0];
+      if (tag(e) !== 'call') return;
+      const fn = kids(e)[0];
+      if (tag(fn) !== 'attr' || String(leaf(kids(fn)[1])) !== 'append') return;
+      const box = kids(fn)[0];
+      if (tag(box) !== 'n') return;
+      const n = String(nameOf(box));
+      const local = C.inScope() && !C.isDeclGlobal(n);
+      if ((local ? C.lookupHere(n) : C.lookup(n)) !== null) return;
+      const as = kids(part(e, 'args') ?? { kind: 'list', items: [] });
+      if (as.length !== 1) return;
+      const et = tyOfCst(as[0], C);
+      if (et !== null) C.bind(C.ref(n), arrOf(et));
+      return;
+    }
     default:
   }
 }
@@ -830,7 +856,22 @@ function assignTo(t, valueTok, C) {
     ts.forEach((tt, i) => out.push(...writeTo(tt, tmps[i], C)));
     return out;
   }
+  /* **`xs = []` / `d = {}`**：空容器自己答不出元素类型，可这一格名字的类型
+     `scanBinds` 那一趟已经认出来了（从 `xs.append(v)` 或标注）—— 按它造。 */
+  if (tag(t) === 'n' && ['list', 'dict'].includes(tag(valueTok)) && kids(valueTok).length === 0) {
+    const want = C.lookup(String(nameOf(t)));
+    if (want !== null && want.kind === (tag(valueTok) === 'list' ? 'arr' : 'map')) {
+      return writeTo(t, emptyOf(want), C);
+    }
+  }
   return writeTo(t, exprOf(valueTok, C), C);
+}
+
+/** 一格空容器（类型已经知道了）。 */
+function emptyOf(t) {
+  return t.kind === 'arr'
+    ? { kind: 'builtin', name: 'anew', args: [tyArg(t), { kind: 'int', value: 0 }] }
+    : { kind: 'builtin', name: 'dnew', args: [tyArg(t)] };
 }
 
 /** 一格目标 ← 一格**算好了**的值。 */

@@ -24,6 +24,10 @@ import {
   isDyn, boxOf, unify, dynText, dynTruthy, dynBin, noneOf, isNoneOf,
 } from './dyn.js';
 import { splitFString } from './fstring.js';
+import {
+  sumOf, pickList, anyAllOf, sortedOf, rangeList,
+  joinOf, splitOf, stripOf, replaceOf, startsEndsOf,
+} from './builtins.js';
 
 /** 一格名字节点（`(n x)`）的文本；也收裸记号。 */
 export const nameOf = (x) => (tag(x) === 'n' ? leaf(kids(x)[0]) : leaf(x));
@@ -257,12 +261,17 @@ function methodType(recvTy, name, argTys) {
     return null;
   }
   if (recvTy.kind === 'map') {
-    if (name === 'get') return recvTy.value;
+    /* `d.get(k)` —— 键不在时 python 交 `None`，所以**交的是一格箱子**（dyn），不是值的类型。
+       `d.get(k, v)` 交"值的类型与默认值的类型合成一格"（一样就是它，不一样退到 dyn）。 */
+    if (name === 'get') {
+      if (argTys.length <= 1) return DYN;
+      return unify([recvTy.value, argTys[1]]);
+    }
     if (name === 'keys') return arrOf(recvTy.key);
     if (name === 'values') return arrOf(recvTy.value);
     return null;
   }
-  return argTys === undefined ? null : null;
+  return null;
 }
 
 /** 一格 CST 表达式装的是什么（推不出来回 `null`）。 */
@@ -387,7 +396,14 @@ function tyOfCall(x, C) {
   /* `C(…)` —— 造一格记录，交的就是那个类。 */
   if (C.records.has(nm)) return C.records.get(nm).type;
   if (BUILTIN_RET.has(nm)) return BUILTIN_RET.get(nm);
-  if (nm === 'abs' || nm === 'min' || nm === 'max') return argTys[0] ?? null;
+  if (nm === 'abs') return argTys[0] ?? null;
+  if (nm === 'min' || nm === 'max') {
+    const t = argTys[0];
+    if (t === null || t === undefined) return null;
+    /* 一格实参那是一格表（`min(xs)` 交元素）；两格以上逐个挑（交的还是同一档）。 */
+    return args.length === 1 ? (t.kind === 'arr' ? t.elem : null) : t;
+  }
+  if (nm === 'any' || nm === 'all') return BOOL;
   if (nm === 'sum') {
     const t = argTys[0];
     return t === null || t === undefined ? null : (t.kind === 'arr' ? t.elem : null);
@@ -1039,6 +1055,13 @@ export function callOf(x, C) {
       throw new Error(`python->IR: 实参里的 \`${tag(a)}\` 还没接（命名实参 / 展开 / 生成器）`);
     }
   }
+  /* `list(range(…))` —— **要在算实参之前拦**（`range(…)` 当值用没接，算它就报了）。
+     range 当值用最常见的去处就是这一处。 */
+  if (tag(fn) === 'n' && String(nameOf(fn)) === 'list' && argToks.length === 1
+    && tag(argToks[0]) === 'call' && tag(kids(argToks[0])[0]) === 'n'
+    && String(nameOf(kids(argToks[0])[0])) === 'range') {
+    return rangeListOf(argToks[0], C);
+  }
   const args = argToks.map((a) => exprOf(a, C));
 
   /* `math.sqrt(x)` 那一族 —— 先看它，再看方法（`math` 不是一格值）。 */
@@ -1058,8 +1081,28 @@ export function callOf(x, C) {
   return builtinOf(nm, args, argToks, C);
 }
 
-/** `C(a, b)` —— `(cnew C)` 造一格，`C___init__(obj, a, b)` 填，值是那一格。 */
-function newRecord(rec, args, C) {
+/**
+ * `list(range(a, b, step))` —— 实参与 `for … in range(…)` 那一处同一条规矩
+ * （1~3 格，步长要是一格非零整数字面量）。
+ */
+function rangeListOf(callTok, C) {
+  const as = kids(part(callTok, 'args') ?? { kind: 'list', items: [] });
+  if (as.length === 0 || as.length > 3) throw new Error('python->IR: `range()` 收 1~3 格实参');
+  const from = as.length === 1 ? { kind: 'int', value: 0 } : exprOf(as[0], C);
+  const to = as.length === 1 ? exprOf(as[0], C) : exprOf(as[1], C);
+  let step = 1;
+  if (as.length === 3) {
+    const sv = exprOf(as[2], C);
+    if (sv.kind !== 'int' || sv.value === 0n || sv.value === 0) {
+      throw new Error('python->IR: `range(a, b, step)` 的步长要是一格非零整数字面量 —— '
+        + '往前往后是两条循环，编译期就得定下来');
+    }
+    step = Number(sv.value);
+  }
+  return rangeList(from, to, step, C);
+}
+
+/** `C(a, b)` —— `(cnew C)` 造一格，`C___init__(obj, a, b)` 填，值是那一格。 */function newRecord(rec, args, C) {
   const tmp = C.fresh('obj');
   C.bind(tmp, rec.type);
   const obj = { kind: 'name', name: tmp };
@@ -1113,8 +1156,32 @@ function builtinOf(nm, args, argToks, C) {
       if (t0.kind === 'real') return { kind: 'rmath', fn: 'fabs', args };
       return pickOf(args[0], { kind: 'unop', op: '-', operand: args[0] }, '>', C);
     case 'min': case 'max': {
-      if (args.length !== 2) throw new Error(`python->IR: \`${nm}()\` 只接两格实参`);
-      return pickOf(args[0], args[1], nm === 'min' ? '<' : '>', C);
+      const op = nm === 'min' ? '<' : '>';
+      if (args.length === 0) throw new Error(`python->IR: \`${nm}()\` 至少要一格实参`);
+      /* 一格实参：那是一格表（`min(xs)`）。两格以上：逐个挑（`min(a, b, c)`）。 */
+      if (args.length === 1) return pickList(args[0], op, nm, C);
+      let best = args[0];
+      for (let i = 1; i < args.length; i += 1) best = pickOf(best, args[i], op, C);
+      return best;
+    }
+    case 'sum': {
+      if (args.length !== 1) throw new Error('python->IR: `sum(xs, start)` 的第二格还没接');
+      return sumOf(args[0], C);
+    }
+    case 'any': case 'all': {
+      if (args.length !== 1) throw new Error(`python->IR: \`${nm}()\` 收一格表`);
+      return anyAllOf(args[0], nm === 'all', C, condOfExpr);
+    }
+    case 'sorted': {
+      if (args.length !== 1) throw new Error('python->IR: `sorted(xs, key=…)` 那几格还没接');
+      return sortedOf(args[0], C);
+    }
+    case 'list': {
+      /* `list(range(…))` —— range 当值用只在这一处接了（那是它最常见的去处）。 */
+      if (args.length !== 1) throw new Error('python->IR: `list()` 收一格实参');
+      const t = ty(args[0], C);
+      if (t.kind === 'arr') return args[0];      // `list(xs)` 抄一份 —— 这儿先当同一格
+      throw new Error(`python->IR: \`list(${t.kind})\` 还没接（\`list(range(…))\` 接了）`);
     }
     case 'round': {
       /* python 的 `round` 是**银行家舍入**（`round(0.5)` 是 0，`round(1.5)` 是 2）——
@@ -1176,12 +1243,55 @@ function methodOf(recvTok, name, args, C) {
   if (t.kind === 'string') {
     if (name === 'upper' && args.length === 0) return { kind: 'builtin', name: 'supper', args: [recv] };
     if (name === 'find' && args.length === 1) return { kind: 'builtin', name: 'sfind', args: [recv, args[0]] };
+    /* 下面这几格**现场发一趟循环**（`builtins.js`）—— 方言的串那一族只有五格算子，
+       python 的这几个方法是它自己的规矩（空段算一格、去哪几个空白字符）。 */
+    if (name === 'join' && args.length === 1) return joinOf(recv, args[0], C);
+    if (name === 'split' && args.length === 1) return splitOf(recv, args[0], C);
+    if (name === 'split' && args.length === 0) {
+      throw new Error('python->IR: `.split()` 不带分隔符那一档还没接'
+        + '（它按连续空白切，而且首尾的空段不算 —— 与带分隔符是两条规矩）');
+    }
+    if (name === 'strip' && args.length === 0) return stripOf(recv, true, true, C);
+    if (name === 'lstrip' && args.length === 0) return stripOf(recv, true, false, C);
+    if (name === 'rstrip' && args.length === 0) return stripOf(recv, false, true, C);
+    if (name === 'replace' && args.length === 2) return replaceOf(recv, args[0], args[1], C);
+    if (name === 'startswith' && args.length === 1) return startsEndsOf(recv, args[0], true, C);
+    if (name === 'endswith' && args.length === 1) return startsEndsOf(recv, args[0], false, C);
     throw new Error(`python->IR: 串上的 \`.${name}()\` 还没接`
-      + '（方言里串那一族只有 slen / sfind / ssub / srep / supper）');
+      + '（接了的是 upper / find / join / split / strip / lstrip / rstrip / replace'
+      + ' / startswith / endswith）');
   }
   if (t.kind === 'map') {
-    if (name === 'get' && args.length === 1) return { kind: 'builtin', name: 'dget', args: [recv, args[0]] };
-    throw new Error(`python->IR: 字典上的 \`.${name}()\` 还没接`);
+    /* `d.get(k)` —— 键不在里头 python 交 `None`，所以这一格**交的是箱子**（dyn）：
+       有就装进去、没有就 `(dnull)`。**方言的 `dget` 在键不在时交的是零值** ——
+       直接用它会印出个 `0` 来（量到过），所以要自己先问一句 `dhas`。 */
+    if (name === 'get' && args.length === 1) {
+      return {
+        kind: 'ternary', type: DYN,
+        cond: { kind: 'builtin', name: 'dhas', args: [recv, args[0]] },
+        then: boxOf({ kind: 'builtin', name: 'dget', args: [recv, args[0]] }, C),
+        else_: noneOf(),
+      };
+    }
+    /* `d.get(k, v)` —— 两边合成一格（一样就是它，不一样两边都装箱）。 */
+    if (name === 'get' && args.length === 2) {
+      const vt = t.value;
+      const dt = ty(args[1], C);
+      const both = unify([vt, dt]);
+      if (both === null) {
+        throw new Error(`python->IR: \`.get(k, 默认值)\` 里字典装 ${vt.kind}、默认值是 ${dt.kind}`
+          + ' —— 合不成一格');
+      }
+      const hit = { kind: 'builtin', name: 'dget', args: [recv, args[0]] };
+      return {
+        kind: 'ternary', type: both,
+        cond: { kind: 'builtin', name: 'dhas', args: [recv, args[0]] },
+        then: isDyn(both) && !isDyn(vt) ? boxOf(hit, C) : hit,
+        else_: isDyn(both) && !isDyn(dt) ? boxOf(args[1], C)
+          : (both.kind === 'real' && dt.kind === 'int' ? toReal(args[1], C) : args[1]),
+      };
+    }
+    throw new Error(`python->IR: 字典上的 \`.${name}()\` 还没接（\`.get()\` 接了）`);
   }
   throw new Error(`python->IR: \`.${name}()\` 的接收者装的是 ${t.kind} —— 还没接`);
 }
