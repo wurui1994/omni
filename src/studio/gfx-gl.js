@@ -42,6 +42,9 @@ const D = {
      2D 这一档没有深度，次序就是全部（判据里踩过一次：十字被圆盖住了）。 */
   batches: [],
   fno: 0, t0: 0,
+  /* **画过几回**（只增不减）：`getpix` 拿它当"这一帧的读回还新不新"的印记 ——
+     一格像素一次 `readPixels` 太贵，所以整帧读一次、缓存到下一笔画之前（见 `getPix`）。 */
+  dseq: 0,
   frameFn: null, raf: 0,          /* 每帧那一格函数 + rAF 的句柄（帧循环在页面这边） */
   /* **性能那几格**（实时那一档的核心指标，`perf()` 交出去给状态栏显示）：
      `pn`/`psum` 是这一段里的帧数与耗时和（量的是"帧函数 + flush"那一截，
@@ -249,6 +252,8 @@ const B = { prog: 0, mvp: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
  * （`u_mvp` 由语言那一侧发的四句 `batchmvp` 给，见 `docs/design/eval-realtime-gpu.md` 9.4）。
  */
 function batch(kind, prog = null, mvp = null, tex = false) {
+  /* 这一笔之后"读回来的那一帧"就旧了（见 `D.dseq` 的注）。 */
+  D.dseq += 1;
   const last = D.batches[D.batches.length - 1];
   if (last !== undefined && last.kind === kind && last.depth === G.depth
     && last.prog === prog && last.attrVer === G.attrVer
@@ -1003,6 +1008,35 @@ function attrSet(loc, val) {
   return 0;
 }
 
+/* ---------------------------------------------------------------- 读回一格像素
+ *
+ * `getpix(x,y)`（`gethlin` 那一族也靠它）：这一档的画面在 GPU 上，一格像素一次
+ * `readPixels` 是**几十微秒**级的同步等待 —— 一个 `for` 循环读几千格就是几百毫秒。
+ * 所以**整帧读一次、缓存住**：`D.dseq`（画过几回）当印记，下一笔画之前的所有
+ * `getpix` 共用同一份读回。读回来的行序是下上翻的（`readPixels` 从最下面一行起），
+ * 脚本的 y=0 在最上面，所以取下标时翻回来。
+ *
+ * 语义照 CPU 备选那一档（`gfx-cpu.js` 的 `getpix/2`）：出界回 0，回的是 `0xRRGGBB`。
+ */
+const RP = { seq: -1, px: null };
+
+function getPix(x, y) {
+  const gl = D.gl;
+  if (gl === null) return 0;
+  const xi = Math.trunc(x);
+  const yi = Math.trunc(y);
+  if (!(xi >= 0 && yi >= 0 && xi < D.w && yi < D.h)) return 0;
+  if (RP.seq !== D.dseq || RP.px === null) {
+    flush();
+    const n = D.w * D.h * 4;
+    if (RP.px === null || RP.px.length !== n) RP.px = new Uint8Array(n);
+    gl.readPixels(0, 0, D.w, D.h, gl.RGBA, gl.UNSIGNED_BYTE, RP.px);
+    RP.seq = D.dseq;
+  }
+  const o = ((D.h - 1 - yi) * D.w + xi) * 4;
+  return (RP.px[o] << 16) | (RP.px[o + 1] << 8) | RP.px[o + 2];
+}
+
 /* ---------------------------------------------------------------- 那张名字表 */
 
 /**
@@ -1030,12 +1064,14 @@ function call(name, args) {
   switch (`${name}/${args.length}`) {
     case 'cls/3':
       flush();                                  /* 先把攒着的画掉，再清 —— 次序与脚本一致 */
+      D.dseq += 1;                              /* 清屏也是一笔画（`getpix` 的读回要作废） */
       gl.clearColor(clamp01(a(0)), clamp01(a(1)), clamp01(a(2)), 1);
       gl.clear(gl.COLOR_BUFFER_BIT);
       return 0;
     /* `cls(打包好的颜色)`：EvalDraw 里最常见的那个写法（`cls(0)`）。 */
     case 'cls/1': {
       flush();
+      D.dseq += 1;
       const v = Math.trunc(a(0)) & 0xffffff;
       gl.clearColor(((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255, 1);
       gl.clear(gl.COLOR_BUFFER_BIT);
@@ -1111,8 +1147,8 @@ function call(name, args) {
     case 'klock/0': return (performance.now() - D.t0) / 1000;
     /* `FRAMEINIT`（见 CPU 备选那一份的注）：第一帧 1、之后 0。 */
     case 'frameinit/0': return D.fno <= 1 ? 1 : 0;
-    /* `getpix(x,y)`：这一档要从 GPU 读回一格像素 —— 每格一次 `readPixels` 太贵，
-       所以**明着拒**（`gethlin` 那一族在这一档没有落点，CPU 备选那一档有）。 */
+    /* `getpix(x,y)`：整帧读一次再按下标取（见 `getPix` 的头注）。 */
+    case 'getpix/2': return getPix(a(0), a(1));
     case 'xres/0': return D.w;
     case 'yres/0': return D.h;
     /* ── 输入那一族。位置是 canvas 像素，`bstatus`/`keystatus` 脚本写得动（消一次点击）。 */
@@ -1406,6 +1442,8 @@ function reset() {
   FT.st.clear();
   CAP.w = 0;
   CAP.h = 0;
+  /* 读回那一份缓存跟着作废（下一份脚本的第一笔 `getpix` 要真读一趟）。 */
+  RP.seq = -1;
   /* **没接住的那本账也清**：它是"这一趟这份脚本缺哪几格"的账 —— 不清的话下一份脚本
      背着上一份的债（踩过一次：`drawsph.pss` 的账里挂着上一份的 `drawspr/4`，
      而它压根没调过 `drawspr`）。 */
