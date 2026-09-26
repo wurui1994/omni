@@ -106,3 +106,21 @@ print(got, qq)
 print(qq.pop(0), qq)
 rr = [1, 2, 3]
 print(rr.pop(-1), rr)
+
+# ---- .insert 的负下标 ---------------------------------------------------------
+# python 的 `insert(i, x)` 落在 `max(0, len + i)`（len 是**插之前**那个长度），
+# 所以 `-1` 是"插在最后一格之前"。量出来的原话：`[9,3,8,1,2,7].insert(-1, 6)`
+# 从前插到了最前头（负的一律夹成 0）。
+ins = [9, 3, 8, 1, 2]
+ins.insert(0, 0)
+ins.insert(2, 7)
+ins.insert(99, 5)
+ins.insert(-1, 6)
+ins.insert(-99, 4)
+print(ins, len(ins))
+ins1 = [1]
+ins1.insert(-1, 0)
+print(ins1)
+ins0: list[int] = []
+ins0.insert(-3, 1)
+print(ins0)

@@ -915,11 +915,21 @@ export function clearStmts(xs, C) {
 export function insertStmts(xs, at0, v, C) {
   const h = holder(C);
   const at = h.keep(at0, 'is_at', INT);
+  /* **负下标要先加原来的长度**（python: `insert(i, x)` 的位置是 `max(0, len + i)`，
+     len 是**插之前**那个长度）—— 量出来的原话：`[9,3,8,1,2,7].insert(-1, 6)` 在 python 里
+     插在最后一格之前（`…, 2, 6, 7`），从前这儿把负的一律夹成 0，插到了最前头。
+     所以长度要在 `apush` **之前**取。 */
+  const n0 = h.decl('is_n', INT, call1('alen', [xs]));
   h.pre.push({ kind: 'builtin-stmt', name: 'apush', args: [xs, v] });
   const j = h.decl('is_j', INT, bin('-', call1('alen', [xs]), int(1)));
   /* python 的 `insert` 把下标**夹到 [0, len]**（超了就是追加），所以这儿也夹一次。 */
+  const from0 = { kind: 'binop', op: '+', left: n0, right: at };
   const lo = h.decl('is_lo', INT, {
-    kind: 'ternary', type: INT, cond: bin('<', at, int(0)), then: int(0), else_: at,
+    kind: 'ternary',
+    type: INT,
+    cond: bin('<', at, int(0)),
+    then: { kind: 'ternary', type: INT, cond: bin('<', from0, int(0)), then: int(0), else_: from0 },
+    else_: at,
   });
   h.pre.push({
     kind: 'while',
