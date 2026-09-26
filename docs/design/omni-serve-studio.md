@@ -404,3 +404,8 @@ PolyDraw 与 EvalDraw 各带一整棵例子树（`polydraw/{examples,ken,tigrou}
    归 `ev_rt`、其余归入口，`(main …)` 归入口；
 4. 两格 `sections` 交给 `asyUnitModules` —— 往后 `UnitIndex` 看见 `ev_rt` 那一行的键
    没变就**连 emit 都不做**，盘上那份 `ev_rt.js` 原样留着。
+
+还有一处要注意（下一格开工前先看）：`sections.main` 要的是**语句行**（拼回去时
+每句缩进四格），而 `sxForms` 切出来的 `(main (do …))` 是整项。所以还欠一格
+"把 `(do …)` 拆成语句"的拆法（与 `sxForms` 同一个深度计数的写法，放在
+`build/modules.js` 里一起）—— 别在 EVAL 那边另写一份。
