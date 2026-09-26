@@ -7890,10 +7890,15 @@ function printFnDecl(name) {
           wr(S('named logical(0)\n')),
           { kind: 'return', values: [] },
         ]),
-        iff(b('<', call1('alen', ns), nm('n')), [
+        iff(b('==', call1('alen', ns), I(0)), [
           { kind: 'expr-stmt', expr: lglCall('r_print_lgl', v) },
           { kind: 'return', values: [] },
         ]),
+        iff(b('<', call1('alen', ns), nm('n')), [{
+          kind: 'builtin-stmt',
+          name: 'fail',
+          args: [{ kind: 'string', value: 'print(带名字的逻辑向量): 名字那一条比值那一条短 —— 名字跟丢了一截（空的是 unname 那一档，照旧印不带名字的那一行）' }],
+        }]),
         letI('cw', I(1)),
         {
           kind: 'for',
@@ -7958,10 +7963,23 @@ function printFnDecl(name) {
           wr(b('+', b('+', S('named '), nm('z')), S('\n'))),
           { kind: 'return', values: [] },
         ]),
-        iff(b('<', call1('alen', ns), nm('n')), [
+        /**
+         * 名字那一条**空着**是 `unname(v)` 那一档（值语义：名字摆在影子变量里，
+         * `unname` 就是把它清空）—— 那时印的就是不带名字的那一行，R 也是这样。
+         *
+         * 可**"不空但短了"是另一回事**：那说明名字跟丢了一截（量出来一次：`head(v, -1)`
+         * 从前在名字那侧算出空数组 —— 见 `r_head_str`），而退回不带名字的那一行会
+         * **静默少印一行**。所以这一格分开：空的照旧退，短的当场停下来。
+         */
+        iff(b('==', call1('alen', ns), I(0)), [
           { kind: 'expr-stmt', expr: lglCall('r_print_num', v, nm('z')) },
           { kind: 'return', values: [] },
         ]),
+        iff(b('<', call1('alen', ns), nm('n')), [{
+          kind: 'builtin-stmt',
+          name: 'fail',
+          args: [{ kind: 'string', value: 'print(带名字的向量): 名字那一条比值那一条短 —— 名字跟丢了一截（空的是 unname 那一档，照旧印不带名字的那一行）' }],
+        }]),
         ...agg,
         letI('cw', nm('w')),
         {
