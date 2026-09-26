@@ -28,7 +28,7 @@ import { splitPercent, percentArity } from './percent.js';
 import {
   sumOf, pickList, anyAllOf, sortedOf, rangeList,
   joinOf, splitOf, stripOf, replaceOf, startsEndsOf, justOf,
-  containsList, indexOfList, countList, valuesList,
+  containsList, indexOfList, countList, valuesList, dictPopOf,
 } from './builtins.js';
 
 /** 一格名字节点（`(n x)`）的文本；也收裸记号。 */
@@ -272,6 +272,12 @@ function methodType(recvTy, name, argTys) {
     }
     if (name === 'keys') return arrOf(recvTy.key);
     if (name === 'values') return arrOf(recvTy.value);
+    /* `d.pop(k)` 键不在是 KeyError（不是 `None`）—— 所以交的是**值的类型**，
+       与 `.get(k)` 那一格正相反。两格实参时与 `.get` 同：两边合成一格。 */
+    if (name === 'pop') {
+      if (argTys.length <= 1) return recvTy.value;
+      return unify([recvTy.value, argTys[1]]);
+    }
     return null;
   }
   return null;
@@ -1512,8 +1518,39 @@ function methodOf(recvTok, name, args, C) {
     }
     /* `d.values()` —— 键表走一遍，逐个 `dget`（`builtins.js`）。 */
     if (name === 'values' && args.length === 0) return valuesList(recv, C);
+    /* `d.pop(k)` / `d.pop(k, 默认值)` —— 取走一格。合型那一套与 `.get()` 逐字同一条。 */
+    if (name === 'pop' && (args.length === 1 || args.length === 2)) {
+      const vt = t.value;
+      const keep = (e) => e;
+      /* 键不在那句话里带上键本身（`KeyError: 'z'`，与 python 的末行同形）。 */
+      const missMsg = {
+        kind: 'binop', op: '+',
+        left: { kind: 'string', value: 'KeyError: ' },
+        right: pyRepr(args[0], C),
+      };
+      if (args.length === 1) {
+        return dictPopOf(recv, args[0], {
+          dflt: null, both: vt, boxHit: keep, boxDflt: keep, missMsg,
+        }, C);
+      }
+      const dt = ty(args[1], C);
+      const both = unify([vt, dt]);
+      if (both === null) {
+        throw new Error(`python->IR: \`.pop(k, 默认值)\` 里字典装 ${vt.kind}、默认值是 ${dt.kind}`
+          + ' —— 合不成一格');
+      }
+      return dictPopOf(recv, args[0], {
+        dflt: args[1], both, missMsg,
+        boxHit: (e) => (isDyn(both) && !isDyn(vt) ? boxOf(e, C) : e),
+        boxDflt: (e) => (isDyn(both) && !isDyn(dt) ? boxOf(e, C)
+          : (both.kind === 'real' && dt.kind === 'int' ? toReal(e, C) : e)),
+      }, C);
+    }
+    if (name === 'clear') {
+      throw new Error('python->IR: `d.clear()` 交 None，所以只当语句用（`d.clear()` 单独一行）');
+    }
     throw new Error(`python->IR: 字典上的 \`.${name}()\` 还没接`
-      + '（接了的是 get / keys / values；`.items()` 只在 `for k, v in d.items():` 里接）');
+      + '（接了的是 get / keys / values / pop / clear；`.items()` 只在 `for k, v in d.items():` 里接）');
   }
   throw new Error(`python->IR: \`.${name}()\` 的接收者装的是 ${t.kind} —— 还没接`);
 }

@@ -121,6 +121,8 @@ function builtinType(e, ctx) {
       return t.kind === 'map' ? t.value : INT;
     }
     case 'dhas': return BOOL;
+    /* `(ddel d k)` 答的是"原先在不在"。 */
+    case 'ddel': return BOOL;
     /* `(dkeys d)` 交一格 `(arr K)`（不是 list —— 方言里没有那个词）。 */
     case 'dkeys': {
       const t = typeOf(e.args[0], ctx);

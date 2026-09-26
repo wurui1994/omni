@@ -228,6 +228,67 @@ export function valuesList(d0, C) {
   return h.wrap(out);
 }
 
+/**
+ * `d.clear()` —— 走一遍键表逐个 `ddel`。**不能边走边删**：键表是抄出来的一份
+ * （`dkeys` 那一格），所以走它、删字典，两边不打搅。
+ */
+export function dictClearStmts(d0, C) {
+  const h = holder(C);
+  const d = h.keep(d0, 'dc_d');
+  const t = C.tyOfIR(d);
+  if (t.kind !== 'map') throw new Error(`python->IR: \`.clear()\` 的接收者装的是 ${t.kind}`);
+  const ks = h.decl('dc_ks', arrOf(t.key), call1('dkeys', [d]));
+  const i = h.decl('dc_i', INT, int(0));
+  h.pre.push({
+    kind: 'while',
+    cond: bin('<', i, call1('alen', [ks])),
+    body: [
+      { kind: 'expr-stmt', expr: call1('ddel', [d, { kind: 'index', obj: ks, index: i }]) },
+      inc(i),
+    ],
+  });
+  return h.pre;
+}
+
+/**
+ * `d.pop(k)` / `d.pop(k, 默认值)` —— 取走一格。
+ *
+ * 一格 block-expr：先落一个临时量装值，再 `ddel`。**次序要紧** —— `dget` 得在
+ * `ddel` 之前，删过之后那一格就读不到了。
+ *
+ * 一格实参时键不在是 KeyError（`(fail missMsg)`，那句话由调用方拼 —— 里头要
+ * `repr(键)`，而 `pyRepr` 不在这一份里）；两格时答默认值、字典不动。
+ * `both`（值与默认值合成的那一格）与 `box`（两侧各自要不要装箱）也都由调用方给。
+ */
+export function dictPopOf(d0, k0, o, C) {
+  const h = holder(C);
+  const d = h.keep(d0, 'dp_d');
+  const k = h.keep(k0, 'dp_k');
+  const out = h.decl('dp_v', o.both, zeroLike(o.both));
+  h.pre.push({
+    kind: 'if',
+    cond: call1('dhas', [d, k]),
+    then: [
+      { kind: 'assign', target: out, value: o.boxHit(call1('dget', [d, k])) },
+      { kind: 'expr-stmt', expr: call1('ddel', [d, k]) },
+    ],
+    else_: o.dflt === null
+      ? [{ kind: 'builtin-stmt', name: 'fail', args: [o.missMsg] }]
+      : [{ kind: 'assign', target: out, value: o.boxDflt(o.dflt) }],
+  });
+  return h.wrap(out);
+}
+
+/** 一格类型的"零"（`dp_v` 那个临时量要先有个初值 —— 方言里 let 必须给）。 */
+function zeroLike(t) {
+  if (t.kind === 'int') return int(0);
+  if (t.kind === 'real') return { kind: 'real', value: 0 };
+  if (t.kind === 'bool') return { kind: 'bool', value: false };
+  if (t.kind === 'string') return str('');
+  if (t.kind === 'dyn') return call1('dnull', []);
+  throw new Error(`python->IR: \`.pop()\` 交 ${t.kind} 还没接`);
+}
+
 /* ─── 表上那几个"找"与"改"（`in` / index / count / insert / remove / …）─────── */
 
 /**

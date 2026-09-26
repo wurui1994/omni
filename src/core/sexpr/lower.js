@@ -37,7 +37,7 @@
  *         | (splat TYPE E) | (vlit TYPE E...) | (lane E N) | (hsum E)
  *         | (bnew TYPE E) | (bget E E) | (blen E) | (gid)
  *         | (anew TYPE E) | (aget E E) | (alen E) | (apop E)
- *         | (dnew TYPE) | (dget E E) | (dhas E E) | (dlen E) | (dkeys E)
+ *         | (dnew TYPE) | (dget E E) | (dhas E E) | (dlen E) | (dkeys E) | (ddel E E)
  *         | (new NAME) | (fld E 字段) | (cnew NAME)
  *         | (fnref NAME) | (mkclo NAME E...) | (cap NAME) | (callfn E E...)
  *         | (dyn E) | (dtag E) | (asint E) | (asreal E) | (asbool E) | (asstr E)
@@ -2883,7 +2883,7 @@ class CoreLowerer {
       || h === 'pcast' || h === 'peq') return this.ptrExpr(n, h);
     if (h === 'anew' || h === 'aget' || h === 'alen' || h === 'apop') return this.arrExpr(n, h);
     if (h === 'dnew' || h === 'dget' || h === 'dhas' || h === 'dlen'
-      || h === 'dkeys') return this.dictExpr(n, h);
+      || h === 'dkeys' || h === 'ddel') return this.dictExpr(n, h);
     // 结构体的两条读侧（写侧是语句 fldset）：`(new Point)` 零值，`(fld p x)` 读字段。
     // 没有"结构体字面量"：字段一多，字面量就要么按顺序（改字段顺序会静默改语义）、
     // 要么带名字（那是命名实参那套东西，属于各语言的前端）。零值 + 逐个 fldset 少一条路。
@@ -3183,6 +3183,7 @@ class CoreLowerer {
    *   (dlen d)            有几格              -> length 内建
    *   (dset d k v)        写；键不在就**长一格**（语句，见 dictWrite）
    *   (dkeys d)           所有的键，交一格 `(arr K)`（第一百六十片）
+   *   (ddel d k)          删一格，答原先在不在 -> remove 内建（同上一片）
    *
    * `dkeys` 为什么不直接落成 `keys` 那个内建：`keys` 交的是 `list<K>`，而方言里
    * 只有 `(arr T)` 这一格可命名 —— `list` 这个词根本没有。两者在 js/解释两条腿上
@@ -3194,8 +3195,7 @@ class CoreLowerer {
    * 键的次序：就是 `_keys` 的次序 —— 插入序（`d->keys[]` 按插入追加，删除只灭 live）。
    * 与 Python 3.7+ 的 dict 同一条，所以 `for k in d` 对得上。
    *
-   * 刻意没有的：字面量（`(dnew …)` + 逐个 `(dset …)` 少一条路，与结构体那儿同一条理由）、
-   * 删除。
+   * 刻意没有的：字面量（`(dnew …)` + 逐个 `(dset …)` 少一条路，与结构体那儿同一条理由）。
    */
   dictExpr(n, h) {
     if (h === 'dnew') {
@@ -3223,6 +3223,13 @@ class CoreLowerer {
     }
     if (h === 'dhas') {
       return { kind: 'Builtin', name: 'contains', args: [d, k], recvType: d.type, type: BOOL };
+    }
+    /* `(ddel d k)` —— 删一格，答"原先在不在"。与 `dhas` 一样是**表达式**（那一格布尔
+       是真有用的：`del d[k]` 在 python 里键不在就 KeyError，各前端拿它判）。
+       运行时那一半早就有（`OMNI_DICT_DEFINE` 里的 `_remove`，墓碑都维护了），
+       `remove` 这格内建 backend-c / backend-js / interp 三条腿也都认。 */
+    if (h === 'ddel') {
+      return { kind: 'Builtin', name: 'remove', args: [d, k], recvType: d.type, type: BOOL };
     }
     return { kind: 'IndexGet', obj: d, index: k, recvType: d.type, type: d.type.val };
   }

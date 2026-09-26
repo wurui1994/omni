@@ -1,0 +1,67 @@
+;; 字典删一格（第一百六十一片）：`(ddel d k)` 答的是**原先在不在**。
+;;
+;; 与 `dkeys` 那一片同一条来路：**运行时那一半早就有** —— `OMNI_DICT_DEFINE` 里的
+;; `NAME##_remove` 连墓碑（`idx[h] = -1`）与小表那条没有索引的路都写好了，
+;; `remove` 这格内建 backend-c / backend-js / interp 三条腿也都认。缺的只是方言
+;; 这一侧的开口。
+;;
+;; 为什么答一格布尔而不是当语句（`dset` 那样）：`del d[k]` 在 python 里键不在就
+;; KeyError、`d.pop(k)` 也是 —— 那一格布尔是各前端真要拿去判的，不是"写回的值没人用"。
+;;
+;; 这一份要钉的两件事：
+;;   1. 删过之后 `dlen` / `dhas` / `dkeys` 三处都跟着变（墓碑没漏）；
+;;   2. **删过再加，键的次序还是插入序** —— 删只灭 `live[i]`，不挪 `keys[]`，
+;;      新的一格追在尾巴上，所以 b/c/d 这一串才对。
+(module
+  ;; 穿过函数：字典是句柄，就地删，回来调用方看得见
+  (fn drop ((d (dict string int)) (k string)) bool
+    (ret (ddel (var d) (var k))))
+
+  (main
+    (let m (dict string int) (dnew (dict string int)))
+    (dset (var m) (str "a") (int 1))
+    (dset (var m) (str "b") (int 3))
+    (dset (var m) (str "c") (int 9))
+    (print (dlen (var m)))
+
+    ;; 删在的那一格：答 true，长度少一格，`dhas` 跟着变
+    (print (ddel (var m) (str "a")))
+    (print (dlen (var m)))
+    (print (dhas (var m) (str "a")))
+
+    ;; 再删一次同一个键：答 false，什么都不动
+    (print (ddel (var m) (str "a")))
+    (print (dlen (var m)))
+
+    ;; 键表里也没了
+    (print (alen (dkeys (var m))))
+    (print (aget (dkeys (var m)) (int 0)))
+    (print (aget (dkeys (var m)) (int 1)))
+
+    ;; 删过再加：新的一格追在尾巴上（插入序没被删乱）
+    (dset (var m) (str "d") (int 4))
+    (print (dlen (var m)))
+    (print (aget (dkeys (var m)) (int 2)))
+
+    ;; 删到空
+    (print (ddel (var m) (str "b")))
+    (print (ddel (var m) (str "c")))
+    (print (ddel (var m) (str "d")))
+    (print (dlen (var m)))
+    (print (alen (dkeys (var m))))
+
+    ;; 另一种键（int）—— C 那条腿为它另生成一份容器
+    (let r (dict int real) (dnew (dict int real)))
+    (dset (var r) (int 1) (real 1.5))
+    (dset (var r) (int 2) (real 2.5))
+    (print (ddel (var r) (int 1)))
+    (print (dlen (var r)))
+    (print (dhas (var r) (int 9)))
+    (print (dget (var r) (int 2)))
+
+    ;; 函数里删：句柄，就地改
+    (let s (dict string int) (dnew (dict string int)))
+    (dset (var s) (str "x") (int 1))
+    (dset (var s) (str "y") (int 2))
+    (print (call drop (var s) (str "x")))
+    (print (dlen (var s)))))

@@ -30,10 +30,11 @@ import { tag, kids, leaf, part } from '../../../src/core/lower/cst.js';
 import { INT, STR, DYN, arrOf, sameType, typeOf, named } from '../../../src/core/lower/ty-of.js';
 import { typeToSx } from '../../../src/core/lower/ty.js';
 import {
-  exprOf, condOf, nameOf, typeOfAnnot, tyOfCst, tyArg, pyStr, lenOf, hasFields, fstringParts, cmpEq,
+  exprOf, condOf, nameOf, typeOfAnnot, tyOfCst, tyArg, pyStr, pyRepr, lenOf, hasFields, fstringParts, cmpEq,
 } from './expr.js';
 import {
   reverseStmts, clearStmts, extendStmts, insertStmts, dropAtStmts, indexOfList,
+  dictClearStmts,
 } from './builtins.js';
 import { boxOf, unifyPy } from './dyn.js';
 
@@ -877,11 +878,61 @@ export function stmtsOf(x, C) {
       throw new Error('python->IR: 函数里套函数还没接');
     case 'class':
       throw new Error('python->IR: `class` 还没接（下一刀）');
-    case 'try': case 'with': case 'match': case 'del': case 'decorated': case 'async':
+    case 'del': return delStmt(x, C);
+    case 'try': case 'with': case 'match': case 'decorated': case 'async':
       throw new Error(`python->IR: \`${tag(x)}\` 还没接`);
     default:
       throw new Error(`python->IR: 这一格语句还没接：${tag(x)}`);
   }
+}
+
+/**
+ * `del d[k]` / `del xs[i]`（可以一句删几格：`del d["a"], xs[0]`）。
+ *
+ * 字典那一格落在方言的 `(ddel d k)` 上 —— 它答"原先在不在"，所以 KeyError 就是
+ * 「答 false 就 `(fail …)`」。表那一格没有新算子：`dropAtStmts` 往前挪一格再 `apop`
+ * （与 `.pop(i)` 逐字同一条路）。
+ *
+ * **`del 名字` 不接**：那要有"这一格还绑着没有"这一层，而方言里一格变量就是一格槽位，
+ * 没有"没绑"这一档 —— 猜一个（比如置零值）会让后面读到的东西看着像对的。
+ */
+function delStmt(x, C) {
+  const t = kids(x)[0];
+  const ts = tag(t) === 'tuple' ? kids(t) : [t];
+  const out = [];
+  for (const one of ts) out.push(...delOne(one, C));
+  return out;
+}
+
+function delOne(t, C) {
+  if (tag(t) !== 'index') {
+    throw new Error(`python->IR: \`del ${tag(t) === 'n' ? String(nameOf(t)) : tag(t)}\` 还没接`
+      + ' —— `del` 只接下标那一格（`del d[k]` / `del xs[i]`）。'
+      + '`del 名字` 要有"这一格还绑着没有"那一层，方言里一格变量就是一格槽位，没有那一档');
+  }
+  const box = exprOf(kids(t)[0], C);
+  const subs = kids(part(t, 'subs') ?? { kind: 'list', items: [] });
+  if (subs.length !== 1) throw new Error('python->IR: `del` 收一格下标');
+  if (tag(subs[0]) === 'slice') throw new Error('python->IR: `del xs[1:3]` 还没接');
+  const bt = typeOfIR(box, C);
+  const key = exprOf(subs[0], C);
+  if (bt.kind === 'map') {
+    /* 键不在就 KeyError。那句话里带上键本身（`KeyError: 'z'`，与 python 的末行同形）——
+       键是运行期的值，所以拼的是一格串表达式，不是编译期的字面量。 */
+    const msg = {
+      kind: 'binop', op: '+',
+      left: { kind: 'string', value: 'KeyError: ' },
+      right: pyRepr(key, C),
+    };
+    return [{
+      kind: 'if',
+      cond: { kind: 'unop', op: '!', operand: { kind: 'builtin', name: 'ddel', args: [box, key] } },
+      then: [{ kind: 'builtin-stmt', name: 'fail', args: [msg] }],
+      else_: null,
+    }];
+  }
+  if (bt.kind === 'arr') return dropAtStmts(box, wrapIdxForWrite(box, key, C), C);
+  throw new Error(`python->IR: \`del\` 落在 ${bt.kind} 上还没接（串在 python 里不可改）`);
 }
 
 /** 语句位置上的一格表达式。`print(…)` 与**改原表**那几格方法不交值，各自一格。 */
@@ -894,7 +945,14 @@ function exprStmtOf(e, C) {
       const m = String(leaf(kids(fn)[1]));
       if (LIST_MUT.has(m)) {
         const box = exprOf(kids(fn)[0], C);
-        if (typeOfIR(box, C).kind === 'arr') return listMut(m, box, argToks, C);
+        const t = typeOfIR(box, C);
+        if (t.kind === 'arr') return listMut(m, box, argToks, C);
+        /* 字典的 `.clear()` —— python 里交 None，所以只当语句用。没给方言加算子：
+           走一遍键表逐个 `ddel` 就是（`dictClearStmts`）。 */
+        if (t.kind === 'map' && m === 'clear') {
+          if (argToks.length !== 0) throw new Error('python->IR: `.clear()` 不收实参');
+          return dictClearStmts(box, C);
+        }
       }
     }
   }

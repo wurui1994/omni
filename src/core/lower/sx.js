@@ -109,8 +109,9 @@ export const SX_ARITY = {
      lua / awk / go / V / nim 的 map 全落这五格。**`dnew` 收的是一格类型**（空字典的键值
      类型在方言这一层必须写出来 —— 那一层不推导，只检查）。
      `dkeys` 是第六格：交**所有的键**，一格 `(arr K)`，次序是插入序（与 Python 3.7+ 同）。
-     交 arr 而不是 list：方言里 `list` 这个词根本没有。 */
-  dnew: 1, dget: 2, dset: 3, dhas: 2, dlen: 1, dkeys: 1,
+     交 arr 而不是 list：方言里 `list` 这个词根本没有。
+     `ddel` 是第七格：删一格，答"原先在不在"（运行时那个 `_remove` 早就在）。 */
+  dnew: 1, dget: 2, dset: 3, dhas: 2, dlen: 1, dkeys: 1, ddel: 2,
   /* 数组那一族：`(anew (arr T) N)` 造、`aget` / `aset` 取写、`apush` 追加、`alen` 长度、
      `apop` 弹出。**下标从 0 起、上界不含**（各语言的差别由它自己的 adapter 摆平）。 */
   anew: 2, aget: 2, aset: 3, apush: 2, alen: 1, apop: 1,
@@ -247,6 +248,8 @@ export const dhas = (d, k) => op('dhas', d, k);
 export const dlen = (d) => op('dlen', d);
 /** 所有的键，一格 `(arr K)`。次序是插入序 —— `for k in d` 靠的就是这一条。 */
 export const dkeys = (d) => op('dkeys', d);
+/** 删一格；答的是**原先在不在**（`del d[k]` 的 KeyError 靠它判）。 */
+export const ddel = (d, k) => op('ddel', d, k);
 
 /* ─── 数组那一族（下标 0 起、上界不含） ──────────────────────────────────── */
 /** 造一格数组：**要类型与长度**（`(anew (arr int) (int 3))`）。 */
