@@ -18,8 +18,11 @@ import {
   tag, kids, leaf, part,
 } from '../../../src/core/lower/cst.js';
 import {
-  INT, REAL, STR, BOOL, arrOf, dictOf, typeOf, sameType,
+  INT, REAL, STR, BOOL, DYN, arrOf, dictOf, typeOf, sameType,
 } from '../../../src/core/lower/ty-of.js';
+import {
+  isDyn, boxOf, unify, dynText, dynTruthy, dynBin, noneOf, isNoneOf,
+} from './dyn.js';
 
 /** 一格名字节点（`(n x)`）的文本；也收裸记号。 */
 export const nameOf = (x) => (tag(x) === 'n' ? leaf(kids(x)[0]) : leaf(x));
@@ -181,6 +184,8 @@ export function tyOfCst(x, C) {
     case 'num': return numValue(leaf(kids(x)[0])).kind === 'real' ? REAL : INT;
     case 'str': return STR;
     case 'true': case 'false': return BOOL;
+    /* `None` 就是一格箱子（标签 `"null"`）—— 所以 `x = None` 之后 `x = 1` 自然合成 dyn。 */
+    case 'none': return DYN;
     case 'paren': case 'expr': return tyOfCst(kids(x)[0], C);
     case 'n': return C.lookup(String(nameOf(x)));
     case 'walrus': return tyOfCst(kids(x)[1], C);
@@ -197,13 +202,16 @@ export function tyOfCst(x, C) {
     case 'bin': return tyOfBin(x, C);
     case 'list': {
       const ts = kids(x).map((k) => tyOfCst(k, C));
-      return ts.length === 0 || ts[0] === null ? null : arrOf(ts[0]);
+      /* 异质的表退到 `(arr dyn)` —— 与 `listOf` 那一侧同一条口径（`unify`）。 */
+      const elem = unify(ts);
+      return elem === null ? null : arrOf(elem);
     }
     case 'dict': {
       const items = kids(x);
-      if (items.length === 0 || tag(items[0]) !== 'kv') return null;
-      const k = tyOfCst(kids(items[0])[0], C);
-      const v = tyOfCst(kids(items[0])[1], C);
+      if (items.length === 0 || items.some((it) => tag(it) !== 'kv')) return null;
+      const k = unify(items.map((it) => tyOfCst(kids(it)[0], C)));
+      /* 值不同型退到 dyn —— 与 `dictLit` 那一侧同一条口径。 */
+      const v = unify(items.map((it) => tyOfCst(kids(it)[1], C)));
       return k === null || v === null ? null : dictOf(v, k);
     }
     case 'listcomp': {
@@ -220,7 +228,13 @@ export function tyOfCst(x, C) {
       if (base.kind === 'string') return STR;                          // `s[i]` 是一格串
       return null;
     }
-    case 'attr': return null;
+    /* `p.x` —— 记录的字段。 */
+    case 'attr': {
+      const rec = C.recOf(tyOfCst(kids(x)[0], C));
+      if (rec === null) return null;
+      const f = rec.fields.find((y) => y.name === String(leaf(kids(x)[1])));
+      return f === undefined ? null : f.type;
+    }
     case 'call': return tyOfCall(x, C);
     default: return null;
   }
@@ -231,9 +245,14 @@ function tyOfBin(x, C) {
   const [opTok, a, b] = kids(x);
   const o = String(leaf(opTok));
   if (CMP.has(o)) return BOOL;
+  const taD = tyOfCst(a, C);
+  const tbD = tyOfCst(b, C);
+  /* 有一边是箱子：算出来的还是一格箱子（`dynBin` 每一支都装回去 —— 那几支的类型不一样，
+     方言里三目两支必须同型）。 */
+  if (isDyn(taD) || isDyn(tbD)) return DYN;
   if (o === '/') return REAL;
-  const ta = tyOfCst(a, C);
-  const tb = tyOfCst(b, C);
+  const ta = taD;
+  const tb = tbD;
   if (BITS.has(o)) return ta ?? tb;
   if (o === '**') {
     if (ta === null || tb === null) return null;
@@ -266,10 +285,19 @@ function tyOfCall(x, C) {
       const f = String(leaf(kids(fn)[1]));
       return MATH_INT.has(f) ? INT : (MATH.has(f) ? REAL : null);
     }
-    return methodType(tyOfCst(kids(fn)[0], C), String(leaf(kids(fn)[1])), argTys);
+    const recvTy = tyOfCst(kids(fn)[0], C);
+    /* 方法：接收者装的是一格记录。 */
+    const rec = C.recOf(recvTy);
+    if (rec !== null) {
+      const inst = C.resolveMethod(rec.name, String(leaf(kids(fn)[1])), [recvTy, ...argTys]);
+      return inst === null ? null : inst.ret;
+    }
+    return methodType(recvTy, String(leaf(kids(fn)[1])), argTys);
   }
   if (tag(fn) !== 'n') return null;
   const nm = String(nameOf(fn));
+  /* `C(…)` —— 造一格记录，交的就是那个类。 */
+  if (C.records.has(nm)) return C.records.get(nm).type;
   if (BUILTIN_RET.has(nm)) return BUILTIN_RET.get(nm);
   if (nm === 'abs' || nm === 'min' || nm === 'max') return argTys[0] ?? null;
   if (nm === 'sum') {
@@ -308,6 +336,8 @@ const isPure = (e) => ['int', 'real', 'string', 'bool', 'name'].includes(e.kind)
 export function pyStr(e, C) {
   const t = ty(e, C);
   if (t.kind === 'string') return e;
+  /* 箱子在 `str()` 这一侧不给串加引号（`print(x)` 里 x 装着 `"a"` 印的是 `a`）。 */
+  if (t.kind === 'dyn') return dynText(e, C, false);
   return pyRepr(e, C);
 }
 
@@ -320,6 +350,9 @@ export function pyStr(e, C) {
  */
 export function pyRepr(e, C) {
   const t = ty(e, C);
+  /* 一格箱子：按 `(dtag …)` 逐档分派（`dyn.js`）—— 运行期才知道装的是什么，
+     这一层不必也不该在编译期定死它。 */
+  if (t.kind === 'dyn') return dynText(e, C, true);
   if (t.kind === 'bool') {
     return {
       kind: 'ternary', type: STR, cond: e,
@@ -432,7 +465,7 @@ export function exprOf(x, C) {
     case 'str': return { kind: 'string', value: strValue(x) };
     case 'true': return { kind: 'bool', value: true };
     case 'false': return { kind: 'bool', value: false };
-    case 'none': throw new Error('python->IR: `None` 还没接（方言里没有"没有值"那一格）');
+    case 'none': return noneOf();
     case 'paren': case 'expr': return exprOf(kids(x)[0], C);
     case 'n': {
       const n = String(nameOf(x));
@@ -497,9 +530,22 @@ export function exprOf(x, C) {
     case 'list': return listOf(kids(x), C);
     case 'dict': return dictLit(x, C);
     case 'index': return indexOf(x, C);
-    case 'attr':
-      throw new Error(`python->IR: 属性 \`.${String(leaf(kids(x)[1]))}\` 当值用还没接`
-        + '（方法调用接了，模块属性没接）');
+    /* `p.x` —— 记录的字段。 */
+    case 'attr': {
+      const obj = exprOf(kids(x)[0], C);
+      const name = String(leaf(kids(x)[1]));
+      const rec = C.recOf(ty(obj, C));
+      if (rec === null) {
+        throw new Error(`python->IR: \`.${name}\` 的接收者装的是 ${ty(obj, C).kind} —— 还没接`
+          + '（模块属性没接；记录的字段接了）');
+      }
+      if (!rec.fields.some((f) => f.name === name)) {
+        throw new Error(`python->IR: \`${rec.name}\` 没有字段 \`${name}\``
+          + `（有的是 ${rec.fields.map((f) => f.name).join(' ') || '（一格都没有）'}）`
+          + ' —— 字段只从类级标注与 `__init__` 顶层那几句 `self.x = …` 认');
+      }
+      return { kind: 'field', obj, name };
+    }
     case 'call': return callOf(x, C);
     default:
       throw new Error(`python->IR: 这一格表达式还没接：${tag(x)}`);
@@ -530,7 +576,12 @@ function cmpOf(x, C) {
     return o === 'in' ? inner : { kind: 'unop', op: '!', operand: inner };
   }
   if (o === 'is' || o === 'isnot') {
-    throw new Error('python->IR: `is` / `is not` 还没接（要先有 `None` 与对象同一性）');
+    /* 这个值域里"同一性"只有一格可问的：**是不是那格空**（`x is None`）。
+       别的 `is`（两个对象是不是同一格）要方言那一层有"比引用"那一格算子，还没有。 */
+    if (tag(bTok) === 'none') return isNoneOf(exprOf(aTok, C), C, o === 'isnot');
+    if (tag(aTok) === 'none') return isNoneOf(exprOf(bTok, C), C, o === 'isnot');
+    throw new Error('python->IR: `is` / `is not` 只接了与 `None` 比那一格'
+      + '（两个对象的同一性要方言里有"比引用"那一格算子）');
   }
   return cmpOne(o, exprOf(aTok, C), exprOf(bTok, C), C);
 }
@@ -541,6 +592,8 @@ function cmpOne(o, a, b, C) {
   if (op === undefined) throw new Error(`python->IR: 这个比较算子还没接：${o}`);
   const ta = ty(a, C);
   const tb = ty(b, C);
+  /* 有一边是箱子：标签一样才比值，不一样 `==` 是 False（python 的 `1 == "1"`）。 */
+  if (isDyn(ta) || isDyn(tb)) return dynBin(op, a, b, C);
   let l = a;
   let r = b;
   if (ta.kind === 'real' && tb.kind === 'int') r = toReal(b, C);
@@ -562,6 +615,23 @@ function containsOf(box, needle, C) {
   throw new Error(`python->IR: \`in\` 作用在 ${t.kind} 上还没接（字典与串接了）`);
 }
 
+/**
+ * 箱子上那三格要的算法（`dyn.js` 只管按标签分派，规矩在这儿）。
+ *
+ * `**` 的整数那一支：python 里 `2 ** -1` 是 0.5，而这儿只知道"两边都是整数"、
+ * **不知道指数的符号** —— 所以整数那一支也按 real 算完再 `toint`，负指数会答错
+ * （静态那一侧靠"指数是非负整数字面量"才敢说 int，箱子上没有那个信息）。
+ * 这一条**明说**：真要准得在运行期再分一支 `指数 < 0`，那一支还没接。
+ */
+const DYN_ARITH = (C) => ({
+  '//': (l, r, wantInt) => floorDiv(l, r, wantInt, C),
+  '%': (l, r, wantInt) => pyMod(l, r, wantInt, C),
+  '**': (l, r, wantInt) => {
+    const p = { kind: 'rmath', fn: 'pow', args: [toReal(l, C), toReal(r, C)] };
+    return wantInt ? { kind: 'builtin', name: 'toint', args: [p] } : p;
+  },
+});
+
 /** 二元算术与位运算 —— python 的四处规矩都在这儿（见文件头 1~4）。 */
 function binOf(x, C) {
   const [opTok, aTok, bTok] = kids(x);
@@ -570,6 +640,10 @@ function binOf(x, C) {
   const b = exprOf(bTok, C);
   const ta = ty(a, C);
   const tb = ty(b, C);
+
+  /* 0. 有一边是箱子：按 `(dtag …)` 两边各问一次，走 `dyn.js` 那一族。
+     `//` `%` `**` 的算法（python 那三条规矩）从这儿递进去 —— 静态那一侧用的是同一份。 */
+  if (isDyn(ta) || isDyn(tb)) return dynBin(o, a, b, C, DYN_ARITH(C));
 
   /* 1. `/` 永远是浮点。 */
   if (o === '/') return { kind: 'binop', op: '/', left: toReal(a, C), right: toReal(b, C) };
@@ -623,16 +697,20 @@ function binOf(x, C) {
   return { kind: 'binop', op: o, left: l, right: r };
 }
 
-/** `[a, b, c]` —— 方言里"造"与"填"是两件事，所以落成临时量 + 逐格 aset。 */
+/**
+ * `[a, b, c]` —— 方言里"造"与"填"是两件事，所以落成临时量 + 逐格 aset。
+ *
+ * **异质的表退到 `(arr dyn)`**（`[1, "a", 2.5]` 在 python 里天经地义）：表本身还是静态的
+ * 一格数组，动态的是元素。装不进箱子的那几档（表里套表、记录）才报 —— 见 `dyn.js` 文件头。
+ */
 function listOf(items, C) {
   const vs = items.map((k) => exprOf(k, C));
   if (vs.length === 0) throw new Error('python->IR: 空表 `[]` 的元素类型推不出来 —— 给它一格标注（`xs: list[int] = []`）');
-  const elem = ty(vs[0], C);
-  for (const [i, v] of vs.entries()) {
-    if (!sameType(ty(v, C), elem)) {
-      throw new Error(`python->IR: 表里第 ${i + 1} 格装的是 ${ty(v, C).kind}，第 1 格是 ${elem.kind}`
-        + ' —— 方言里一格数组只装一种东西');
-    }
+  const elem = unify(vs.map((v) => ty(v, C)));
+  if (elem === null) {
+    const ks = vs.map((v) => ty(v, C).kind).join(' / ');
+    throw new Error(`python->IR: 这张表里装着 ${ks} —— 合不成一格`
+      + '（异质的表退到 `(arr dyn)`，但表与记录装不进那格箱子）');
   }
   const tmp = C.fresh('list');
   const t = arrOf(elem);
@@ -644,7 +722,7 @@ function listOf(items, C) {
   vs.forEach((v, i) => stmts.push({
     kind: 'assign',
     target: { kind: 'index', obj: { kind: 'name', name: tmp }, index: { kind: 'int', value: i } },
-    value: v,
+    value: isDyn(elem) ? boxOf(v, C) : v,
   }));
   return { kind: 'block-expr', stmts, value: { kind: 'name', name: tmp } };
 }
@@ -659,12 +737,30 @@ function dictLit(x, C) {
     throw new Error('python->IR: 空字典 `{}` 的键值类型推不出来 —— 给它一格标注（`d: dict[str, int] = {}`）');
   }
   const pairs = items.map((it) => [exprOf(kids(it)[0], C), exprOf(kids(it)[1], C)]);
-  const t = dictOf(ty(pairs[0][1], C), ty(pairs[0][0], C));
+  /* **值不同型就退到 dyn**（`{"n": 1, "s": "two"}` —— python 里的配置字典多是这个样）。
+     键那一侧不退：方言的字典键只有 int 与 string 两档，而"键有时是数有时是串"
+     在真代码里基本不出现 —— 撞上了当场说清，比悄悄合成一格好。 */
+  const keyT = unify(pairs.map((p) => ty(p[0], C)));
+  if (keyT === null || (keyT.kind !== 'int' && keyT.kind !== 'string')) {
+    const ks = [...new Set(pairs.map((p) => ty(p[0], C).kind))].join(' / ');
+    throw new Error(`python->IR: 这张字典的键装着 ${ks} —— 方言的字典键只有 int 与 str 两档`);
+  }
+  const valT = unify(pairs.map((p) => ty(p[1], C)));
+  if (valT === null) {
+    const vs2 = [...new Set(pairs.map((p) => ty(p[1], C).kind))].join(' / ');
+    throw new Error(`python->IR: 这张字典的值装着 ${vs2} —— 合不成一格`
+      + '（异质的值退到 dyn，但表与记录装不进那格箱子）');
+  }
+  const t = dictOf(valT, keyT);
   const tmp = C.fresh('dict');
   C.bind(tmp, t);
   const stmts = [{ kind: 'let', name: tmp, type: t, init: { kind: 'builtin', name: 'dnew', args: [tyArg(t)] } }];
   for (const [k, v] of pairs) {
-    stmts.push({ kind: 'builtin-stmt', name: 'dset', args: [{ kind: 'name', name: tmp }, k, v] });
+    stmts.push({
+      kind: 'builtin-stmt',
+      name: 'dset',
+      args: [{ kind: 'name', name: tmp }, k, isDyn(valT) ? boxOf(v, C) : v],
+    });
   }
   return { kind: 'block-expr', stmts, value: { kind: 'name', name: tmp } };
 }
@@ -868,7 +964,38 @@ export function callOf(x, C) {
   }
   if (tag(fn) === 'attr') return methodOf(kids(fn)[0], String(leaf(kids(fn)[1])), args, C);
   if (tag(fn) !== 'n') throw new Error(`python->IR: 被调的那一格是 ${tag(fn)} —— 还没接`);
-  return builtinOf(String(nameOf(fn)), args, argToks, C);
+  const nm = String(nameOf(fn));
+  /* `C(a, b)` —— **造一格记录再调 `__init__`**（python 那边就是这两步）。 */
+  if (C.records.has(nm)) return newRecord(C.records.get(nm), args, C);
+  return builtinOf(nm, args, argToks, C);
+}
+
+/** `C(a, b)` —— `(cnew C)` 造一格，`C___init__(obj, a, b)` 填，值是那一格。 */
+function newRecord(rec, args, C) {
+  const tmp = C.fresh('obj');
+  C.bind(tmp, rec.type);
+  const obj = { kind: 'name', name: tmp };
+  const stmts = [{
+    kind: 'let', name: tmp, type: rec.type, init: { kind: 'new-record', type: rec.type, ref: true, fields: [] },
+  }];
+  const inst = C.resolveMethod(rec.name, '__init__', [rec.type, ...args.map((a) => ty(a, C))]);
+  if (rec.methods.has('__init__')) {
+    if (inst === null) {
+      throw new Error(`python->IR: \`${rec.name}(…)\` 对不上 \`__init__\` 的形参`
+        + '（个数或类型）—— 默认值与命名实参都还没接');
+    }
+    const fixed = args.map((a, i) => {
+      const want = inst.params[i + 1].type;
+      return want.kind === 'real' && ty(a, C).kind === 'int' ? toReal(a, C) : a;
+    });
+    stmts.push({
+      kind: 'expr-stmt',
+      expr: { kind: 'call', fn: { kind: 'name', name: inst.mangled }, args: [obj, ...fixed] },
+    });
+  } else if (args.length > 0) {
+    throw new Error(`python->IR: \`class ${rec.name}\` 没有 \`__init__\`，可 \`${rec.name}(…)\` 递了实参`);
+  }
+  return { kind: 'block-expr', stmts, value: obj };
 }
 
 /** 内建函数与用户函数。 */
@@ -936,6 +1063,23 @@ function builtinOf(nm, args, argToks, C) {
 function methodOf(recvTok, name, args, C) {
   const recv = exprOf(recvTok, C);
   const t = ty(recv, C);
+  /* 记录：`<类名>_<方法名>`，接收者是第一格实参（mojo 那一门同一个落点）。 */
+  const rec = C.recOf(t);
+  if (rec !== null) {
+    const inst = C.resolveMethod(rec.name, name, [t, ...args.map((a) => ty(a, C))]);
+    if (inst === null) {
+      if (!rec.methods.has(name)) {
+        throw new Error(`python->IR: \`${rec.name}\` 没有方法 \`${name}\``
+          + `（有的是 ${[...rec.methods.keys()].join(' ')}）`);
+      }
+      throw new Error(`python->IR: \`${rec.name}.${name}(…)\` 对不上那一格的形参（个数或类型）`);
+    }
+    const fixed = args.map((a, i) => {
+      const want = inst.params[i + 1].type;
+      return want.kind === 'real' && ty(a, C).kind === 'int' ? toReal(a, C) : a;
+    });
+    return { kind: 'call', fn: { kind: 'name', name: inst.mangled }, args: [recv, ...fixed] };
+  }
   if (t.kind === 'arr') {
     if (name === 'pop' && args.length === 0) return { kind: 'builtin', name: 'apop', args: [recv] };
     if (name === 'append') throw new Error('python->IR: `.append()` 不交值（当语句用是接了的）');
@@ -970,5 +1114,9 @@ export function condOfExpr(e, C) {
   if (t.kind === 'arr' || t.kind === 'string' || t.kind === 'map') {
     return { kind: 'binop', op: '!=', left: lenOf(e, C), right: { kind: 'int', value: 0 } };
   }
+  /* 一格对象默认是真（python 的规矩：没有 `__bool__` / `__len__` 就真）。 */
+  if (t.kind === 'named') return { kind: 'bool', value: true };
+  /* 一格箱子：按标签分派（`dyn.js` 的 `dynTruthy`）。 */
+  if (t.kind === 'dyn') return dynTruthy(e, C);
   throw new Error(`python->IR: ${t.kind} 当条件用还没接`);
 }

@@ -88,22 +88,84 @@ R 那一门（ADR-0045/0046/0047，`r-lang` 分支）已经把这条路走通过
   （35 格手挑的边界 + 2000 格定死的伪随机位模式扫描）。
   顺带这是 `src/core/build/`（那台 JS 写的 ninja）的第二个生产调用者（第一个是 R 的运行时）。
 
+* **推不出类型就退到 dyn**（`ext/python/adapter/dyn.js`）。这一刀改的是一个**错结论** ——
+  原先这一门写着「方言是静态类型，所以推不出来的地方必须当场报，要一格标注」。不对：
+  * 方言那一侧早就有真动态那一族（`(dyn E)` / `(dtag E)` / `(as* E)`，钉在
+    `tests/sexpr/cases/48-dyn.sx`，四条腿已通），C 侧是 `omni_dyn` 那个带标签的 24 字节胖值；
+  * **JS 整门语言跑的就是这条道**（ADR-0011 决策 1：「JS 的每个值都是 `dynamic`，
+    不给 JS 做类型推断」），而 js→C 是自举主干 —— 动态性比 python 强的东西早就编到 C 了；
+  * 口径按 ADR-0008：**异质 ⇒ 统一降为 dynamic**，一条规则，不做联合类型。
+  缺的只是"标准 IR 那一层没写下这一族" —— 所以 `src/core/lower/sx.js` 的 `SX_ARITY` 补了
+  `dyn` / `dtag` / `as*` 八格、`ty-of.js` 加了 `DYN` 与它们的类型、`ty.js` 的 `zeroOf` 加了
+  dyn 那一格零值。C 那条腿上 `(arr dyn)` 另外要两处：`hir/types.js` 的
+  `sizeOf(dynamic) = 24`（量出来的）与 `arrIsBlob` 收 dynamic（值语义的聚合，与 vec 同桶）。
+  这一门于是退得下去的有这几处：**异质的表**（`[1, "two", 3.5, True]` → `(arr dyn)`）、
+  **异质的字典**（`{"name": "omni", "port": 8080}` → `(dict string dyn)`）、
+  **换类型的变量**（`x = 1` 之后 `x = "s"`）、**交不同东西的函数**（一支 return 数一支 return 串）、
+  **`None`**（标签是 `"null"` 的那一格 —— 于是"可能没有值"这一族不必写 `Optional[int]`）、
+  **箱子上的算术与比较**（`+ - * / // % **` 与那六个比较，按 `(dtag …)` 两边各问一次）。
+  判据：`ext/python/examples/` 的 `dynlist.py` / `dynvar.py` / `dyndict.py` / `none.py`
+  三条腿与 python3 逐字节相同；`tests/sexpr/cases/55-dyn-arr.sx` 钉住 `(arr dyn)` 本身。
+  **推得出来仍然优先**：单态化、标注、三轮推断一格没动 —— dyn 只在真的合不成一格时才用
+  （箱子上的加减乘除要按标签分派，比静态那条路贵）。
+  顺带钉出并修掉的两处真错：
+  * `(dnull)` 之前**方言这一面写不出来** —— `DynNull` 那个 OIR 节点四条腿本来就都认
+    （backend-c 的 `omni_dyn_null()`、backend-js 与 interp 的 `null`、MIR 的常量），
+    缺的只是源码里的写法。补一格 `(dnull)`，`None` 与 dyn 的零值就都有着落了。
+  * **函数体里赋一个名字就是造一格局部**（python 的规矩）—— 原先绑定那一趟用的是
+    `lookup`（会一路看到模块级那张表），于是函数里的 `v` 撞上模块级同名的 `v` 时
+    局部那一格根本不生成，`set` 打到模块级去了。改成 `lookupHere`，
+    并让绑定那一趟也认 `global x`（不然 `control.py` 的 `global TICKS` 反过来坏掉）。
+  明说的不足：**位运算落在箱子上还没接**（方言的位运算要两边都是 int，而箱子里是什么
+  运行期才知道）；箱子上的 `**` 遇到**负指数**会答错（那一支只知道"两边都是整数"，
+  不知道指数的符号）；表与记录**装不进**箱子
+  （`DYN_BOXABLE` 只有 int / real / bool / string / 函数 / `(dict string dyn)`）；
+  箱子里装着函数或字典时印出来的是标签本身，不是 python 的 `<function f at 0x…>`；
+  `None < None` 这几个在 python 里是 TypeError，这儿答 False。
+
+* **`class`**（`declareClasses` / `inferFields` + `expr.js` 的 `attr` / `newRecord` / `methodOf`）。
+  落成方言的 `(class …)`（**引用语义** —— 两个名字指同一格）+ 方法降成
+  `<类名>_<方法名>` 的普通函数，`self` 是第一格实参（mojo 那一门同一个落点）。
+  字段从**类级标注**与 `__init__` 顶层那几句 `self.x = …` 认；方法按接收者类型挑实例，
+  走的是单态化那张表（与自由函数同一条路）。
+  判据：`ext/python/examples/classes.py` 三条腿与 python3 逐字节相同。
+  明说的不足：**类不按实参单态化**（一格 `(class …)` 只有一份字段表）——
+  `Point(3, 4)` 与 `Point(1.5, 2.5)` 混着造时字段该退到 dyn，而方言的字段还不收 dyn，
+  所以 adapter 在自己这一侧报清楚并让人加一格标注（`x: float`）。
+  继承、类方法 / 静态方法、`__init__` 之外造字段、`if` 里才出现的字段都还没接。
+
 ### 下一刀，按顺序
 
-1. **`class`**。落成方言的 `(class …)` + `<类型>_<方法>`（mojo 那一门的形状），
-   `self` 是第一格实参。单态化那张表已经在了，方法按接收者类型挑实例是同一条路。
-2. **f-string 的内部结构**（PEP 701）。这要在 `lex.js` 里加一格通用能力：
+1. **f-string 的内部结构**（PEP 701）。这要在 `lex.js` 里加一格通用能力：
    一个记号里嵌一段要再解析的文本。现在整份 f-string 是一个 STRING，8 份语料因此没过。
-3. **把借来的那份 `libomnipy` 接到语言里**。现在 `str(float)` 已经与 CPython 逐字节相同了
+2. **箱子上剩下那几格**：位运算（要一支"两边都是 int 才算"）；`**` 的负指数
+   （要在运行期再分一支 `指数 < 0`）；把箱子里的函数拆出来调（`(asfn …)` 那一格，
+   于是 `f = g` 之后 `f()` 与 lua 的元表同一条路）。
+3. **方言的字段收 dyn**（`src/core/sexpr/lower.js` 的字段白名单里没有它）。
+   量到的地方：`Point(3, 4)` 与 `Point(1.5, 2.5)` 混着造 —— 类**不按实参单态化**
+   （一格 `(class …)` 只有一份字段表），所以字段该退到 dyn，而那一层当场拒。
+   现在 adapter 在自己这一侧报清楚并让人加标注；`sizeOf(dynamic) = 24` 已经有了，
+   剩下的是 `structLayout` / 零值 / 四条腿各自的字段读写要一起验。
+4. **走一遍字典的键**（`for k in d` / `d.keys()` / `print(d)` 全卡在这一格）。
+   查过一遍，缺口的位置很具体：**运行时那一半早就有**
+   （`omni_container.h:215` 的 `NAME##_keys`，而且 `sexpr/lower.js:321-323` 每登记一格
+   `(dict K V)` 都顺手登记 `listType(k)`，**就是为了让生成的 C 里 `keys()` 编得过**），
+   `keys` 这格 Builtin 在 backend-c / backend-js / interp 三条腿上也都认。
+   卡的是**类型**：`_keys` 交出来的是 `list<K>`，而方言里只有 `(arr T)` 这一档，
+   `list` 这个词根本没有。两条出路都要先定下来：
+   给方言加 `list` 那一档（两种数组会把整层搞乱），还是让 `(dkeys D)` 交 `(arr K)`
+   并在 OIR 里插一格 list→arr 的转换节点（现在没有这样的节点）。
+   这一格不接，`print(dict)` 与 `for k in d` 就都还报"还没接"。
+5. **把借来的那份 `libomnipy` 接到语言里**。现在 `str(float)` 已经与 CPython 逐字节相同了
    （走我们自己那三份 `py_repr`），所以这一刀**不再是正确性问题**，而是"借来的那一半要
    真用上"：接上之后浮点格式化只有一份实现（CPython 的），三条腿不必各守一份。
    卡点还在：`cabi` 的类型词只有 `i32 i64 f64 ptr void`，**出串那一格怎么过**得先定
    （回 `ptr` 再转 `string`，还是给方言加一格算子），而且 `ccall` 在 JS 那条腿上要 N-API
    扩展（ADR-0038）—— 也就是说接上之后 `omni run` / `--mode js` 会退档，得先想清这一点。
-4. **再借两格**：`Objects/longobject.c`（大整数 —— 现在的 int 是 64 位，python 的没有上界）
+6. **再借两格**：`Objects/longobject.c`（大整数 —— 现在的 int 是 64 位，python 的没有上界）
    与 `Modules/_sre/`（正则）。这两格比浮点那一格耦合深，得先有"借来的东西怎么持有对象"
    那一层。
-5. **`try` / `with` / `match` / 生成器 / 闭包 / 装饰器** —— adapter 现在对它们当场报
+7. **`try` / `with` / `match` / 生成器 / 闭包 / 装饰器** —— adapter 现在对它们当场报
    "还没接"，不猜。
 
 ## 三、口径

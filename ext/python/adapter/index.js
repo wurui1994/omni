@@ -10,8 +10,12 @@
 //   2. 返回类型：形参定了之后扫函数体里的 `return`；
 //   3. 模块级变量：从它的初值推；
 //   4. 以上三件互相依赖（`g = f(1)` 要先有 f 的返回类型，而 f 的形参可能来自 `f(g)`），
-//      所以**整个扫三轮**，每轮只填得出来的那几格。三轮之后还推不出来的**当场报**，
-//      并且说清"给它一格标注"—— 不猜一个 int 了事（猜错的症状是跑起来印错数）。
+//      所以**整个扫三轮**，每轮只填得出来的那几格。
+//
+// **推不出来的退到 dyn**（`./dyn.js`），不是当场报要标注 —— 那是个错结论：方言那一侧早就有
+// 真动态那一族，而 JS 整门语言就跑在它上面（ADR-0011 决策 1），js→C 还是自举主干。
+// 口径按 ADR-0008：异质 ⇒ 统一降为 dynamic。**推得出来仍然优先**（箱子上的算术要按
+// `(dtag …)` 分派，比静态那条路贵），所以单态化与三轮推断一格没动。
 //
 // ## 入口
 //
@@ -23,11 +27,12 @@
 // `if __name__ == "__main__": main()` 这个惯用写法直接能跑。
 
 import { tag, kids, leaf, part } from '../../../src/core/lower/cst.js';
-import { INT, STR, sameType, typeOf } from '../../../src/core/lower/ty-of.js';
+import { INT, STR, DYN, sameType, typeOf, named } from '../../../src/core/lower/ty-of.js';
 import { typeToSx } from '../../../src/core/lower/ty.js';
 import {
   exprOf, condOf, nameOf, typeOfAnnot, tyOfCst, tyArg, pyStr, lenOf,
 } from './expr.js';
+import { boxOf, unifyPy } from './dyn.js';
 
 /** 一格已经建好的 IR 表达式装的是什么。 */
 const typeOfIR = (e, C) => typeOf(e, C.tyCtx());
@@ -39,17 +44,23 @@ export function pyToIR(tree) {
   const C = makeCtx();
   const top = flatten(kids(tree));
   const fnNodes = top.filter((s) => tag(s) === 'def');
-  const scriptStmts = top.filter((s) => tag(s) !== 'def');
+  const classNodes = top.filter((s) => tag(s) === 'class');
+  const scriptStmts = top.filter((s) => tag(s) !== 'def' && tag(s) !== 'class');
 
   for (const f of fnNodes) {
     const nm = String(nameOf(kids(f).find((y) => tag(y) === 'n')));
     if (C.fnNodes.has(nm)) throw new Error(`python->IR: \`def ${nm}\` 定义了两遍 —— 还没接（后一个盖前一个）`);
     C.fnNodes.set(nm, f);
   }
+  declareClasses(classNodes, C);
   infer(C, tree, scriptStmts);
 
   /* ---- 发射 ------------------------------------------------------------------ */
   const decls = [];
+  /* 记录的声明要**排在函数前面**（方言那一层先收类型再收签名）。 */
+  for (const [, rec] of C.records) {
+    decls.push({ kind: 'class', name: rec.type.name, fields: rec.fields });
+  }
   for (const [name, ty] of C.globals) decls.push({ kind: 'global', name: C.ref(name), type: ty });
   for (const [nm, insts] of C.insts) {
     for (const inst of insts) decls.push(fnDecl(nm, inst, C));
@@ -68,6 +79,113 @@ export function pyToIR(tree) {
 /** `(line a b)` 那一层摊掉 —— 顶层与块体里都是这个形状。 */
 function flatten(items) {
   return items.flatMap((s) => (tag(s) === 'line' || tag(s) === 'body' ? flatten(kids(s)) : [s]));
+}
+
+/* ─── class ───────────────────────────────────────────────────────────────── */
+
+/**
+ * 登记每个 `class` 的名字与方法。**字段等推断那几轮再算** —— 字段的类型来自
+ * `__init__` 里的 `self.x = …`，而那要先知道 `__init__` 的形参装什么。
+ *
+ * 落点照 mojo 那一门（`ext/mojo/adapter/index.js`）：方言的 `(class …)`（引用语义），
+ * 方法落成普通函数 `<类名>_<方法名>`，`self` 是第一格实参 —— 单态分派，声明里写着它属于谁。
+ */
+function declareClasses(nodes, C) {
+  for (const cls of nodes) {
+    const nm = String(nameOf(kids(cls).find((y) => tag(y) === 'n')));
+    if (C.records.has(nm)) throw new Error(`python->IR: \`class ${nm}\` 定义了两遍 —— 还没接`);
+    if (kids(part(cls, 'bases') ?? { kind: 'list', items: [] }).length > 0) {
+      throw new Error(`python->IR: \`class ${nm}(…)\` 的继承还没接`);
+    }
+    if (part(cls, 'tparams') !== undefined) {
+      throw new Error(`python->IR: \`class ${nm}[T]\` 的类型形参还没接`);
+    }
+    const rec = {
+      name: nm,
+      type: named(C.ref(nm), true),
+      fields: [],
+      methods: new Map(),
+      annots: [],
+    };
+    for (const s of flatten(kids(part(cls, 'body') ?? { kind: 'list', items: [] }))) {
+      if (tag(s) === 'def') {
+        const mn = String(nameOf(kids(s).find((y) => tag(y) === 'n')));
+        rec.methods.set(mn, s);
+        C.fnNodes.set(`${nm}.${mn}`, s);
+        continue;
+      }
+      /* 类级的标注就是字段声明（`x: int`）。 */
+      if (tag(s) === 'annot') { rec.annots.push(s); continue; }
+      /* 文档串与 `pass` 忽略；别的当场报（类体里的赋值是**类属性**，那是另一格）。 */
+      if (tag(s) === 'pass') continue;
+      if (tag(s) === 'expr' && tag(kids(s)[0]) === 'str') continue;
+      throw new Error(`python->IR: \`class ${nm}\` 的体里有 \`${tag(s)}\` —— 还没接`
+        + '（只接了方法、类级标注、文档串与 pass）');
+    }
+    C.records.set(nm, rec);
+  }
+}
+
+/**
+ * 一格类的字段 = 类级标注 + `__init__` 顶层那几句 `self.x = …`（按出现次序）。
+ *
+ * **标注优先**；没标注的字段把**所有 `__init__` 实例**里看到的类型合成一格（`unifyPy`）——
+ * 类不像函数那样按实参单态化（一个 `(class Point …)` 只有一份字段表），所以
+ * `Point(3, 4)` 与 `Point(1.5, 2.5)` 里 `x` 装的东西不同型时，那一格**退到 dyn**。
+ * 要静态的那一档，给字段一格标注（`x: float`）。
+ *
+ * **明说的近似**：只扫 `__init__` 的**顶层语句**。`if …: self.x = 1` 那种条件里才出现的
+ * 字段收不到 —— 那时报的是"这个字段不在记录里"，离根因不远，所以先不猜。
+ */
+function inferFields(rec, C) {
+  /* 名字 → 看到过的那几格类型（按第一次出现的次序记名字）。 */
+  const order = [];
+  const seen = new Map();
+  const add = (n, t) => {
+    if (t === null || t === undefined) return;
+    if (!seen.has(n)) { order.push(n); seen.set(n, []); }
+    seen.get(n).push(t);
+  };
+  const annotated = new Set();
+  for (const a of rec.annots) {
+    const n = String(nameOf(kids(a)[0]));
+    const t = typeOfAnnot(kids(a)[1], C);
+    if (t === null) continue;
+    annotated.add(n);
+    add(n, t);
+  }
+  const init = rec.methods.get('__init__');
+  for (const inst of C.insts.get(`${rec.name}.__init__`) ?? []) {
+    if (init === undefined) break;
+    C.push();
+    for (const p of inst.params) C.bind(p.name, p.type);
+    for (const s of flatten(kids(part(init, 'body') ?? { kind: 'list', items: [] }))) {
+      if (tag(s) !== 'assign') continue;
+      const value = kids(s)[kids(s).length - 1];
+      for (const g of kids(part(s, 'lhs') ?? { kind: 'list', items: [] })) {
+        const t0 = kids(g)[0];
+        if (tag(t0) !== 'attr') continue;
+        if (tag(kids(t0)[0]) !== 'n' || String(nameOf(kids(t0)[0])) !== 'self') continue;
+        const n = String(leaf(kids(t0)[1]));
+        if (annotated.has(n)) continue;              // 标注说了算
+        add(n, tyOfCst(value, C));
+      }
+    }
+    C.pop();
+  }
+  rec.fields = order
+    .map((n) => ({ name: n, type: unifyPy(seen.get(n)) }))
+    .filter((f) => f.type !== null);
+  /* 字段退到 dyn 这一档**方言那一侧还不收**（`(class …)` 的字段白名单里没有 dyn，
+     见 `src/core/sexpr/lower.js` 的字段检查）—— 所以在这儿报，别让它落到下一层
+     变成"类 Point 没有字段 'x'"那一串连锁错。 */
+  for (const f of rec.fields) {
+    if (f.type.kind !== 'dyn') continue;
+    const ks = [...new Set(seen.get(f.name).map((t) => t.kind))].join(' / ');
+    throw new Error(`python->IR: \`${rec.name}.${f.name}\` 在几处造出来时装的是 ${ks}`
+      + ' —— 类不按实参单态化（一格 `(class …)` 只有一份字段表），而方言的字段还不收 dyn'
+      + `（给它一格标注，如 \`${f.name}: float\`；或者两处都造成同一种）`);
+  }
 }
 
 /** 一格类型的短名（单态化的名字后缀与那张表的键都用它）。 */
@@ -96,6 +214,8 @@ function makeCtx() {
   const C = {
     /** 现在在不在函数体里（模块级的赋值是给 `(global …)` 的 `set`，函数里的是 `let`）。 */
     inFn: false,
+    /** 当前在发的这格函数交出来的类型（`return` 那一句要按它装箱 / 提 real）。 */
+    retTy: null,
     /** 函数名 → { params: [{name,type}], ret }。签名，推断填。 */
     fns: new Map(),
     /**
@@ -110,6 +230,11 @@ function makeCtx() {
      * 一处调用该落到哪一格实例上：先按实参类型精确找，找不到再试"int 提到 real"。
      * 实参类型还没推出来（null）时，只有一格实例就用它 —— 那是推断头一两轮的常态。
      */
+    /** 一格具名类型对应的那格记录（字段表 / 方法表靠它）。 */
+    recOf: (t) => (t === null || t === undefined || t.kind !== 'named' ? null
+      : ([...C.records].map((e) => e[1]).find((r) => r.type.name === t.name) ?? null)),
+    /** 一处方法调用该落到哪一格实例上。 */
+    resolveMethod: (cls, m, argTys) => C.resolveFn(`${cls}.${m}`, argTys),
     resolveFn: (nm, argTys) => {
       const list = C.insts.get(nm);
       if (list === undefined || list.length === 0) return null;
@@ -151,6 +276,21 @@ function makeCtx() {
     },
     /** 这一层里有没有（决定发 `let` 还是 `set`）。 */
     here: (n) => (scopes.length > 0 && scopes[scopes.length - 1].has(C.ref(n))),
+    /**
+     * **只看这一层**装的是什么（`lookup` 会一路看到模块级那张表）。
+     *
+     * 赋值那一侧要它：python 里**函数体内赋一个名字就是造一格局部**（除非说了 `global`），
+     * 哪怕模块级有个同名的。用 `lookup` 的症状是那格局部根本不生成，
+     * `set` 打到模块级那一格上去 —— 量到的是 `for v in xs` 里的 v 撞上模块级的 v
+     * （"'v' 是 dynamic，赋的值是 int"）。
+     */
+    lookupHere: (n) => {
+      if (scopes.length === 0) return C.globals.get(n) ?? null;
+      const v = scopes[scopes.length - 1].get(C.ref(n));
+      return v === undefined ? null : v;
+    },
+    /** 在不在某一层作用域里（函数体、或推断时那一趟临时的那层）。 */
+    inScope: () => scopes.length > 0,
     /** 这一层登记过的名字与类型（函数体开头那一批 `let` 靠它）。 */
     localsHere: () => (scopes.length === 0 ? [] : [...scopes[scopes.length - 1]]),
     /** 名字装的是什么；找不到回 `null`。 */
@@ -165,7 +305,7 @@ function makeCtx() {
     tyCtx: () => ({
       env: { get: (n) => C.lookupRef(n) },
       fns: new Map([...C.fns].map(([k, v]) => [C.ref(k), v])),
-      fields: new Map(),
+      fields: new Map([...C.records].map((e) => [e[1].type.name, e[1].fields])),
     }),
     /** 按**方言里那个名字**查（`tyCtx().env` 收到的是改过的名字）。 */
     lookupRef: (n) => {
@@ -211,10 +351,21 @@ function infer(C, tree, scriptStmts) {
       if (tag(p) !== 'p') throw new Error(`python->IR: \`def ${nm}\` 的形参里有 \`${tag(p)}\` —— 还没接（*args / **kw / 位置标记）`);
       if (part(p, 'default') !== undefined) throw new Error(`python->IR: \`def ${nm}\` 的形参带默认值 —— 还没接`);
     }
+    /* 方法的名字是 `<类名>.<方法名>`（`declareClasses` 摆进来的）。它的第一格形参是
+       `self`，类型就是那个类 —— 相当于自带一格标注，所以调用点不必推它。 */
+    const dot = nm.indexOf('.');
+    const rec = dot < 0 ? null : C.records.get(nm.slice(0, dot));
+    if (rec !== null) {
+      if (ps.length === 0 || String(nameOf(kids(ps[0])[0])) !== 'self') {
+        throw new Error(`python->IR: \`class ${rec.name}\` 的 \`${nm.slice(dot + 1)}\` 第一格形参不是 self`
+          + ' —— 类方法 / 静态方法还没接');
+      }
+    }
     shells.set(nm, {
       names: ps.map((p) => C.ref(String(nameOf(kids(p)[0])))),
-      annots: ps.map((p) => typeOfAnnot(kids(p)[1], C)),
+      annots: ps.map((p, i) => (rec !== null && i === 0 ? rec.type : typeOfAnnot(kids(p)[1], C))),
       retAnnot: typeOfAnnot(kids(part(f, 'ret') ?? { kind: 'list', items: [] })[0], C),
+      rec,
     });
     /* 形参全带标注的那一档第一轮就定得下来；别的先摆一格空表，等调用点。 */
     const sh = shells.get(nm);
@@ -223,6 +374,8 @@ function infer(C, tree, scriptStmts) {
 
   for (let round = 0; round < 3; round += 1) {
     for (const [nm, sh] of shells) collectInsts(nm, sh, tree, C);
+    /* 字段要在方法体扫 `return` 之前算好（`self.x` 的类型靠它）。 */
+    for (const [, rec] of C.records) inferFields(rec, C);
     for (const [nm, list] of C.insts) {
       const { retAnnot } = shells.get(nm);
       for (const inst of list) {
@@ -234,19 +387,30 @@ function infer(C, tree, scriptStmts) {
     for (const s of scriptStmts) scanBinds(s, C);
   }
 
-  /* 名字：只有一格实例时不加后缀（多数函数是这一档），多格时加类型后缀。 */
+  /* 名字：只有一格实例时不加后缀（多数函数是这一档），多格时加类型后缀。
+     方法的名字是 `<类名>_<方法名>`（mojo 那一门同一个落点）。 */
   for (const [nm, list] of C.insts) {
+    /* 一个调用点都没有、形参又没标注（这份源码里根本没调它）—— 那几格退到 dyn，
+       发一格实例出去。从前这儿是当场报"给它一格标注"；不必，`dyn.js` 那条道就是为它来的。 */
     if (list.length === 0) {
-      throw new Error(`python->IR: \`def ${nm}\` 的形参类型推不出来 —— 给它一格标注`
-        + '（`def f(x: int)`），或者在这份源码里调它一次');
+      const sh = shells.get(nm);
+      const inst = mkInst(nm, sh, sh.annots.map((a) => a ?? DYN));
+      inst.ret = sh.retAnnot !== null ? sh.retAnnot : inferRet(nm, inst, C);
+      list.push(inst);
     }
+    const base = nm.indexOf('.') < 0 ? C.ref(nm) : C.ref(nm.replace('.', '_'));
     for (const inst of list) {
       inst.mangled = list.length === 1
-        ? C.ref(nm)
-        : `${C.ref(nm)}__${inst.key.replace(/[^A-Za-z0-9_]/g, '_')}`;
+        ? base
+        : `${base}__${inst.key.replace(/[^A-Za-z0-9_]/g, '_')}`;
       if (inst.ret === null) inst.ret = { kind: 'void' };
       C.fns.set(inst.mangled, { params: inst.params, ret: inst.ret });
     }
+  }
+  /* `__init__` 交的是 void（python 那边不许 return 值）—— 造一格靠 `cnew` + 调它。 */
+  for (const [, rec] of C.records) {
+    const list = C.insts.get(`${rec.name}.__init__`);
+    if (list !== undefined) for (const inst of list) inst.ret = { kind: 'void' };
   }
 }
 
@@ -269,16 +433,44 @@ function mkInst(nm, sh, types) {
 function collectInsts(nm, sh, tree, C) {
   if (sh.annots.every((a) => a !== null)) return;      // 全标注了，不看调用点
   const list = C.insts.get(nm);
+  const dot = nm.indexOf('.');
+  /** 一格调用点的实参类型（`self` 那一格由 `sh.annots[0]` 给）。 */
+  const take = (args, selfTy) => {
+    const types = sh.names.map((_, i) => {
+      if (i === 0 && selfTy !== null) return selfTy;
+      const k = selfTy === null ? i : i - 1;
+      return sh.annots[i] ?? tyOfCst(args[k], C);
+    });
+    if (types.some((t) => t === null)) return;
+    const key = tyKey(types);
+    if (!list.some((i) => i.key === key)) list.push(mkInst(nm, sh, types));
+  };
+
   for (const node of allNodes(tree)) {
     if (tag(node) !== 'call') continue;
     const fn = kids(node)[0];
-    if (tag(fn) !== 'n' || String(nameOf(fn)) !== nm) continue;
     const args = kids(part(node, 'args') ?? { kind: 'list', items: [] });
-    if (args.length !== sh.names.length) continue;
-    const types = args.map((a, i) => sh.annots[i] ?? tyOfCst(a, C));
-    if (types.some((t) => t === null)) continue;
-    const key = tyKey(types);
-    if (!list.some((i) => i.key === key)) list.push(mkInst(nm, sh, types));
+    if (dot < 0) {
+      /* 普通函数：`f(…)`。 */
+      if (tag(fn) === 'n' && String(nameOf(fn)) === nm && args.length === sh.names.length) {
+        take(args, null);
+      }
+      continue;
+    }
+    const cname = nm.slice(0, dot);
+    const mname = nm.slice(dot + 1);
+    /* 造一格：`C(…)` -> `C.__init__(self, …)`。 */
+    if (mname === '__init__' && tag(fn) === 'n' && String(nameOf(fn)) === cname
+      && args.length === sh.names.length - 1) {
+      take(args, sh.annots[0]);
+      continue;
+    }
+    /* 方法：`recv.m(…)`，而 recv 装的正是这个类。 */
+    if (tag(fn) === 'attr' && String(leaf(kids(fn)[1])) === mname
+      && args.length === sh.names.length - 1) {
+      const rt = tyOfCst(kids(fn)[0], C);
+      if (rt !== null && rt.kind === 'named' && rt.name === sh.annots[0].name) take(args, sh.annots[0]);
+    }
   }
 }
 
@@ -293,13 +485,18 @@ function inferRet(nm, inst, C) {
   if (rets.length === 0) return { kind: 'void' };
   const known = rets.filter((t) => t !== null);
   if (known.length === 0) return null;                 // 全没定，下一轮再来
-  for (const t of known) {
-    if (!sameType(t, known[0])) {
-      throw new Error(`python->IR: \`def ${nm}\` 的几处 return 不同型（${known[0].kind} / ${t.kind}）`
-        + ' —— 方言那一层一格函数只交一种东西');
-    }
+  /* **几处 return 不同型就合成一格**（`unifyPy`）—— 一样就是它、int 与 real 提到 real、
+     别的退到 dyn。`void` 与有值的混着来才真的没法合（那是源码本身的事），当场报。 */
+  if (known.some((t) => t.kind === 'void') && known.some((t) => t.kind !== 'void')) {
+    throw new Error(`python->IR: \`def ${nm}\` 有的 return 带值、有的不带 —— 补齐它`);
   }
-  return known[0];
+  const u = unifyPy(known);
+  if (u === null) {
+    const ks = [...new Set(known.map((t) => t.kind))].join(' / ');
+    throw new Error(`python->IR: \`def ${nm}\` 的几处 return 装着 ${ks} —— 合不成一格`
+      + '（不同型的退到 dyn，但表与记录装不进那格箱子）');
+  }
+  return u;
 }
 
 /**
@@ -326,6 +523,12 @@ function scanOne(s, C, rets) {
       return;
     }
     case 'walrus': return;
+    /* `global x` —— **绑定这一趟也要认它**（不然下面那句 `x = …` 会被当成造一格局部，
+       于是函数体开头多一格 `let x` 把模块级那一格遮住，写进去的东西外头看不见。
+       量到的是 control.py 的 `global TICKS` —— `assert TICKS == 5` 当场不成立）。 */
+    case 'global':
+      for (const n of kids(s)) C.markGlobal(String(leaf(n)));
+      return;
     case 'for': {
       const it = tyOfCst(kids(part(s, 'in') ?? { kind: 'list', items: [] })[0], C);
       bindTarget(kids(s)[0], elemOf(it, kids(part(s, 'in') ?? { kind: 'list', items: [] })[0]), C);
@@ -365,7 +568,16 @@ function bindTarget(t, ty, C) {
   if (ty === null || ty === undefined) return;
   if (tag(t) === 'n') {
     const n = String(nameOf(t));
-    if (C.lookup(n) === null) C.bind(C.ref(n), ty);
+    /* **函数体里赋一个名字就是造一格局部**（python 的规矩，除非说了 `global`）——
+       所以只看这一层，不要一路看到模块级那张表去（见 `lookupHere` 那段话）。 */
+    const local = C.inScope() && !C.isDeclGlobal(n);
+    const had = local ? C.lookupHere(n) : C.lookup(n);
+    /* **写了几回就合成一格**（`unifyPy`）：一样就是它、int 与 real 混着来也合成箱子、
+       别的退到 dyn。从前这儿是"第一回见到就定死"，于是 `x = 1` 之后 `x = "s"`
+       只能当场报"一格变量只装一种东西" —— 那是个错结论，见 `dyn.js` 文件头。 */
+    if (had === null) { C.bind(C.ref(n), ty); return; }
+    const u = unifyPy([had, ty]);
+    if (u !== null && !sameType(u, had)) C.bind(C.ref(n), u);
     return;
   }
   if (tag(t) === 'tuple') {
@@ -388,7 +600,9 @@ function fnDecl(nm, inst, C) {
   const bodyNode = part(node, 'body') ?? { kind: 'list', items: [] };
   C.push();
   const wasIn = C.inFn;
+  const wasRet = C.retTy;
   C.inFn = true;
+  C.retTy = inst.ret;
   for (const p of inst.params) C.bind(p.name, p.type);
   /* 先只走一趟"绑定"（不建 IR）—— 于是局部量的名字与类型在发第一句之前就全知道了。 */
   scanBinds(bodyNode, C);
@@ -396,6 +610,7 @@ function fnDecl(nm, inst, C) {
   const locals = C.localsHere().filter(([n]) => !pnames.has(n));
   const stmts = flatten(kids(bodyNode)).flatMap((s) => stmtsOf(s, C));
   C.inFn = wasIn;
+  C.retTy = wasRet;
   C.pop();
   return {
     kind: 'fn',
@@ -435,7 +650,19 @@ export function stmtsOf(x, C) {
     case 'for': return [forStmt(x, C)];
     case 'return': {
       const vs = kids(x);
-      return [{ kind: 'return', values: vs.length === 0 ? [] : [exprOf(vs[0], C)] }];
+      if (vs.length === 0) return [{ kind: 'return', values: [] }];
+      const v = exprOf(vs[0], C);
+      /* 交出去的那一格要与**签名**对上（`inferRet` 那一侧用 `unifyPy` 合出来的）：
+         签名是 dyn 就装箱、是 real 而这一支交的是 int 就提上去。 */
+      const want = C.retTy;
+      const got = typeOfIR(v, C);
+      if (want !== null && want !== undefined && !sameType(want, got)) {
+        if (want.kind === 'dyn') return [{ kind: 'return', values: [boxOf(v, C)] }];
+        if (want.kind === 'real' && got.kind === 'int') {
+          return [{ kind: 'return', values: [{ kind: 'builtin', name: 'toreal', args: [v] }] }];
+        }
+      }
+      return [{ kind: 'return', values: [v] }];
     }
     case 'break': return [{ kind: 'break', label: null }];
     case 'continue': return [{ kind: 'continue', label: null }];
@@ -466,7 +693,11 @@ function exprStmtOf(e, C) {
     if (tag(fn) === 'attr' && String(leaf(kids(fn)[1])) === 'append') {
       const box = exprOf(kids(fn)[0], C);
       if (argToks.length !== 1) throw new Error('python->IR: `.append()` 只收一格实参');
-      return [{ kind: 'builtin-stmt', name: 'apush', args: [box, exprOf(argToks[0], C)] }];
+      const bt = typeOfIR(box, C);
+      let v = exprOf(argToks[0], C);
+      /* 表装的是箱子时先装箱（`xs = [1, "a"]` 之后 `xs.append(2.5)`）。 */
+      if (bt.kind === 'arr' && bt.elem.kind === 'dyn') v = boxOf(v, C);
+      return [{ kind: 'builtin-stmt', name: 'apush', args: [box, v] }];
     }
   }
   return [{ kind: 'expr-stmt', expr: exprOf(e, C) }];
@@ -559,12 +790,18 @@ function writeTo(t, value, C) {
     const got = typeOfIR(value, C);
     if (want !== null && !sameType(want, got)) {
       /* int 装进 real 的格子里是许的（`x = 1` 之后 `x = 1.5` 那种在 python 里合法，
-         而方言里一格变量只有一种类型 —— 所以 int 提到 real，反过来当场报）。 */
+         而方言里一格变量只有一种类型 —— 所以 int 提到 real）。 */
       if (want.kind === 'real' && got.kind === 'int') {
         return [{ kind: 'assign', target: { kind: 'name', name: C.ref(n) }, value: { kind: 'builtin', name: 'toreal', args: [value] } }];
       }
+      /* 这一格声明成了箱子（`scanBinds` 那一趟合成出来的）—— 装进去就是了。
+         「一格变量只装一种东西」从前在这儿是个当场报的错，现在它只是**推得出来的那一档**
+         的说法；推不出来的退到 dyn，见 `dyn.js` 文件头。 */
+      if (want.kind === 'dyn') {
+        return [{ kind: 'assign', target: { kind: 'name', name: C.ref(n) }, value: boxOf(value, C) }];
+      }
       throw new Error(`python->IR: '${n}' 先装 ${want.kind}、后装 ${got.kind}`
-        + ' —— 方言里一格变量只装一种东西（换个名字，或者两处都写成同一种）');
+        + `，而 ${got.kind} 装不进 dyn 那格箱子 —— 换个名字，或者两处都写成同一种`);
     }
     if (want === null) C.bind(C.ref(n), got);
     return [{ kind: 'assign', target: { kind: 'name', name: C.ref(n) }, value }];
@@ -576,17 +813,46 @@ function writeTo(t, value, C) {
     if (tag(subs[0]) === 'slice') throw new Error('python->IR: 给切片赋值（`xs[1:3] = …`）还没接');
     const bt = typeOfIR(box, C);
     const key = exprOf(subs[0], C);
-    if (bt.kind === 'map') return [{ kind: 'builtin-stmt', name: 'dset', args: [box, key, value] }];
+    /* 容器装的是箱子时，写进去的那一格要先装箱（`d["k"] = 1` / `xs[0] = "a"`）。 */
+    const elemT = bt.kind === 'map' ? bt.value : (bt.kind === 'arr' ? bt.elem : null);
+    const v = elemT !== null && elemT.kind === 'dyn' ? boxOf(value, C) : value;
+    if (bt.kind === 'map') return [{ kind: 'builtin-stmt', name: 'dset', args: [box, key, v] }];
     if (bt.kind === 'arr') {
       return [{
         kind: 'assign',
         target: { kind: 'index', obj: box, index: wrapIdxForWrite(box, key, C) },
-        value,
+        value: v,
       }];
     }
     throw new Error(`python->IR: 往 ${bt.kind} 上按下标写还没接（串在 python 里不可改）`);
   }
-  if (tag(t) === 'attr') throw new Error('python->IR: 给属性赋值还没接（要先有 class）');
+  if (tag(t) === 'attr') {
+    const obj = exprOf(kids(t)[0], C);
+    const name = String(leaf(kids(t)[1]));
+    const rec = C.recOf(typeOfIR(obj, C));
+    if (rec === null) {
+      throw new Error(`python->IR: 往 ${typeOfIR(obj, C).kind} 的 \`.${name}\` 上写还没接`
+        + '（记录的字段接了，模块属性没接）');
+    }
+    const f = rec.fields.find((y) => y.name === name);
+    if (f === undefined) {
+      throw new Error(`python->IR: \`${rec.name}\` 没有字段 \`${name}\``
+        + ' —— 字段只从类级标注与 `__init__` 顶层那几句 `self.x = …` 认');
+    }
+    const got = typeOfIR(value, C);
+    let v = value;
+    /* 与名字那一侧同一条：int 装进 real 的格子里提上去，声明成箱子的装箱。 */
+    if (!sameType(f.type, got)) {
+      if (f.type.kind === 'real' && got.kind === 'int') {
+        v = { kind: 'builtin', name: 'toreal', args: [value] };
+      } else if (f.type.kind === 'dyn') {
+        v = boxOf(value, C);
+      } else {
+        throw new Error(`python->IR: \`${rec.name}.${name}\` 装的是 ${f.type.kind}，这儿给的是 ${got.kind}`);
+      }
+    }
+    return [{ kind: 'assign', target: { kind: 'field', obj, name }, value: v }];
+  }
   if (tag(t) === 'star') throw new Error('python->IR: 带星号的赋值目标（`*rest`）还没接');
   throw new Error(`python->IR: 赋值的左边是 \`${tag(t)}\` —— 还没接`);
 }
