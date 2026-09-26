@@ -299,6 +299,62 @@ try {
     `${JSON.stringify(r.json.stdout)} != ${JSON.stringify(local)}`);
   ok('/api/run 带阶段信息', (r.json.stderr ?? '').split('\n').some((l) => l.startsWith('omni:')));
 
+  /**
+   * **EVAL 两门：按单元产物那条路**（`/api/units` + `/api/mod`，
+   * `docs/design/omni-serve-studio.md` §9.3）。判的是那条路的**账**，不是"跑通了"：
+   *
+   *   * 头一趟新编两份（`ev_rt` + 入口）、**再一趟一份都不编**；
+   *   * 换一份脚本只编入口（`ev_rt` 原样复用）—— 这就是"公共部分不重发"；
+   *   * 启动器只有几百字节，而且 `import` 的名字里带内容哈希；
+   *   * `ev_rt_*` / `omni_rt_*` 发的是 immutable（浏览器一次都不再问），
+   *     入口与启动器 `no-cache`（改一行就得换）。
+   */
+  {
+    const one = 'ext/polydraw/examples/02-gl.pss';
+    const two = 'ext/polydraw/examples/04-shader.pss';
+    const u1 = await post('/api/units', { path: one });
+    const u2 = await post('/api/units', { path: one });
+    const u3 = await post('/api/units', { path: two });
+    /* **判的是关系，不是绝对数**：这个目录是共用的，上一趟判据（或者一次手动跑）
+       留下的产物就在盘上，所以"头一趟编两份"只在冷盘上成立。冷热都成立的是这三条：
+         * 同一份脚本再来一趟 **一份都不编**，两格都算复用；
+         * 换一份脚本**最多编一份**（入口），而且至少复用一份（`ev_rt`）；
+         * 两趟看见的是**同一格** `ev_rt`（公共部分不重发的落点）。 */
+    const rtOf = (j) => (j.units ?? []).map((x) => x.name).find((n) => n.startsWith('ev_rt_'));
+    ok('/api/units 再一趟零份新编、换脚本只编入口、ev_rt 是同一格',
+      u2.json.made === 0 && u2.json.kept === u1.json.made + u1.json.kept
+      && u3.json.made <= 1 && u3.json.kept >= 1
+      && rtOf(u1.json) !== undefined && rtOf(u1.json) === rtOf(u3.json),
+      JSON.stringify([u1.json.made, u1.json.kept, u2.json.made, u2.json.kept,
+        u3.json.made, u3.json.kept, rtOf(u1.json), rtOf(u3.json)]));
+    ok('/api/units 回的是 /api/mod 下的启动器 + 那张单元表',
+      typeof u1.json.main === 'string' && u1.json.main.startsWith('/api/mod/main-')
+      && Array.isArray(u1.json.units) && u1.json.units.length >= 2
+      && u1.json.units.every((x) => typeof x.name === 'string' && x.url.startsWith('/api/mod/')),
+      JSON.stringify(u1.json).slice(0, 200));
+    const boot = await get(u1.json.main);
+    ok('启动器只有几百字节、引的名字带内容哈希',
+      boot.code === 200 && boot.text.length < 2000
+      && /import '\.\/ev_rt_[0-9a-f]+\.js'|from '\.\/ev_rt_[0-9a-f]+\.js'/.test(boot.text)
+      && /import '\.\/omni_rt(_[0-9a-f]+)?\.js'/.test(boot.text),
+      `${boot.text.length}B ${JSON.stringify(boot.text.slice(0, 120))}`);
+    /* 缓存头分两档 —— 这一格是"过网字节"那笔账的地基（共用那两份不再取）。 */
+    const rt = u1.json.units.find((x) => x.name.startsWith('ev_rt_'));
+    const hdr = async (p2) => (await fetch(s.url + p2)).headers.get('cache-control');
+    ok('ev_rt 发 immutable、启动器不缓存',
+      /immutable/.test(await hdr(rt.url)) && /no-cache/.test(await hdr(u1.json.main)),
+      `${await hdr(rt.url)} | ${await hdr(u1.json.main)}`);
+    /* 路径穿越：`fetch` 会先把 `..` 归一掉（那一条压根到不了这个处理器），
+       所以判的是**编码过的那一种**与"不是 .js 的名字"，外加"没有这一份就 404"。 */
+    ok('/api/mod 拦白名单外与路径穿越',
+      (await get('/api/mod/%2e%2e%2f.env')).code === 400
+      && (await get('/api/mod/index.log')).code === 400
+      && (await get('/api/mod/nope.js')).code === 404,
+      `${(await get('/api/mod/%2e%2e%2f.env')).code} `
+      + `${(await get('/api/mod/index.log')).code} `
+      + `${(await get('/api/mod/nope.js')).code}`);
+  }
+
   /* **会 spawn 的那几门也要收得到输出**（2026-09-22 修的一个真 bug）：
    * 常驻工人把 `process.stdout.write` 换成了收集器，而 `stdio:'inherit'` 的孩子直接写 fd 1
    * —— 那一格在工人里是 NDJSON 协议的通道。症状是 Studio 上 `.asy` `code=0` 而输出空的
