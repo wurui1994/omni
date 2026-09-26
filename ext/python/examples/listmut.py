@@ -93,3 +93,16 @@ print(sl7)
 sl8 = [1, 2, 3]
 sl8[0:99] = [4]
 print(sl8)
+
+# `.pop()` / `.pop(i)` **当值用**（`v = xs.pop()`）。顺带钉一条会答错的：
+# `print(xs.pop(), xs)` —— python 是**从左到右**把实参算完的，而这儿是把几段拼成一个
+# 大表达式，段里的 block-expr 那几句会被提到整句最前头，于是后面那一段的转串跑在前面
+# 那一段的副作用**之前**（原先答 `2 [1, 2]`）。现在实参按次序各落一格临时量。
+pp = [1, 2]
+print(pp.pop(), pp)
+qq = [1, 2, 3]
+got = qq.pop()
+print(got, qq)
+print(qq.pop(0), qq)
+rr = [1, 2, 3]
+print(rr.pop(-1), rr)

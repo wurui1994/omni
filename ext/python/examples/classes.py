@@ -83,3 +83,25 @@ print(tg)
 print(tg.bump(), tg.bump(5), tg.n)
 print(tg)
 print(Tagged("x", 9))
+
+
+# `self.xs: list[int] = []` —— **带标注的那一句是 `annot` 不是 `assign`**，
+# 从前认字段那一趟只看 `assign`，于是这一格字段根本没认出来（报"没有字段 items（一格都没有）"）。
+class Stack:
+    def __init__(self):
+        self.items: list[int] = []
+
+    def push(self, v: int):
+        self.items.append(v)
+
+    def pop(self) -> int:
+        return self.items.pop()
+
+    def empty(self) -> bool:
+        return len(self.items) == 0
+
+
+st = Stack()
+st.push(1)
+st.push(2)
+print(st.pop(), st.empty(), len(st.items), st.items)

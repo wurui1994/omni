@@ -28,7 +28,7 @@ import { splitPercent, percentArity } from './percent.js';
 import {
   sumOf, pickList, anyAllOf, sortedOf, rangeList,
   joinOf, splitOf, splitWsOf, countOf, stripOf, replaceOf, startsEndsOf, justOf,
-  containsList, indexOfList, countList, valuesList, dictPopOf, dictSetDefaultOf,
+  containsList, indexOfList, countList, valuesList, dictPopOf, dictSetDefaultOf, dropAtStmts,
   concatList, repeatList, reversedList, stepSlice, bankRound,
   caseMapOf, charClassOf, rfindOf, copyList, copyDict, charsOf, dictOfPairs,
   sortByKeyStmts, pickByKeyOf,
@@ -614,6 +614,8 @@ function tyOfCall(x, C) {
        `min(xs, key=…)` 的类型答成那张表）。 */
     if (args.filter((a) => tag(a) !== 'kw').length !== 1) return t;
     if (t.kind === 'arr') return t.elem;
+    /* `min(字典)` / `max(字典[, key=…])` —— 字典走的是**键**。 */
+    if (t.kind === 'map') return t.key;
     return t.kind === 'string' ? STR : null;
   }
   if (nm === 'any' || nm === 'all') return BOOL;
@@ -663,7 +665,16 @@ function tyOfCall(x, C) {
     const one = x.kind === 'int' && y.kind === 'int' ? INT : REAL;
     return tupleRec([one, one], C).type;
   }
+  /* `dict(一串两格的元组)` —— 键值类型从元组来。不接这一条的症状是
+     `d = dict(pairs)` 那格名字**一直没绑上**，发到 `.sx` 那侧报"未声明的变量 'd'"。 */
+  if (nm === 'dict' && argTys.length === 1) {
+    const t = argTys[0];
+    if (t == null || t.kind !== 'arr') return null;
+    const tup = tupleOf(C.recOf(t.elem));
+    return tup !== null && tup.length === 2 ? dictOf(tup[1], tup[0]) : null;
+  }
   if (nm === 'range') return arrOf(INT);
+
   const inst = C.resolveFn(nm, argTys);
   return inst === null ? null : inst.ret;
 }
@@ -2807,7 +2818,10 @@ export function callOf(x, C) {
       if (k !== 'key') throw new Error(`python->IR: \`${nm0}(${k}=…)\` 还没接（接了的是 key=）`);
       keyTok = kids(a)[1];
     }
-    const xs0 = exprOf(pos[0], C);
+    const raw0 = exprOf(pos[0], C);
+    /* `max(d, key=…)` —— **字典走的是键**（与 `for k in d` / `sorted(d)` 一条）。 */
+    const xs0 = ty(raw0, C).kind === 'map'
+      ? { kind: 'builtin', name: 'dkeys', args: [raw0] } : raw0;
     const pre = [];
     const bn = C.fresh('pk_xs');
     const bt0 = ty(xs0, C);
@@ -3030,7 +3044,10 @@ function builtinOf(nm, args, argToks, C) {
       /* 一格实参：那是一格表（`min(xs)`），串也算（一格一个字符）。
          两格以上：逐个挑（`min(a, b, c)`）。 */
       if (args.length === 1) {
-        const one = t0.kind === 'string' ? charsOf(args[0], C) : args[0];
+        /* 串一格一个字符；**字典走的是键**（与 `for k in d` / `sorted(d)` 一条）。 */
+        let one = args[0];
+        if (t0.kind === 'string') one = charsOf(args[0], C);
+        if (t0.kind === 'map') one = { kind: 'builtin', name: 'dkeys', args: [args[0]] };
         const tOne = ty(one, C);
         if (tOne.kind === 'arr') needOrd(tOne.elem, C, `${nm}()`);
         return pickList(one, op, nm, C, less);
@@ -3226,6 +3243,28 @@ function methodOf(recvTok, name, args, C) {
   }
   if (t.kind === 'arr') {
     if (name === 'pop' && args.length === 0) return { kind: 'builtin', name: 'apop', args: [recv] };
+    /* `xs.pop(i)` **当值用** —— 先把那一格读出来，再把它抽掉（`apop` 只管末尾那一格）。 */
+    if (name === 'pop' && args.length === 1) {
+      const pre = [];
+      let box = recv;
+      if (!isPure(recv)) {
+        const bn = C.fresh('pp_xs');
+        C.bind(bn, t);
+        pre.push({ kind: 'let', name: bn, type: t, init: recv });
+        box = { kind: 'name', name: bn };
+      }
+      const at = wrapIndex(box, args[0], C);
+      const an = C.fresh('pp_at');
+      C.bind(an, INT);
+      pre.push({ kind: 'let', name: an, type: INT, init: at });
+      const iv = { kind: 'name', name: an };
+      const vn = C.fresh('pp_v');
+      C.bind(vn, t.elem);
+      pre.push({ kind: 'let', name: vn, type: t.elem, init: { kind: 'index', obj: box, index: iv } });
+      pre.push(...dropAtStmts(box, iv, C));
+      return { kind: 'block-expr', stmts: pre, value: { kind: 'name', name: vn } };
+    }
+
     if (name === 'index' && args.length === 1) return indexOfList(recv, args[0], C, (l, r) => cmpOne('==', l, r, C));
     if (name === 'count' && args.length === 1) return countList(recv, args[0], C, (l, r) => cmpOne('==', l, r, C));
     /* `.copy()` —— 抄一张新表（浅抄，与 python 同）。 */

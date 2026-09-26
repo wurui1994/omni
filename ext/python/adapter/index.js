@@ -186,6 +186,21 @@ function inferFields(rec, C) {
     C.push();
     for (const p of inst.params) C.bind(p.name, p.type);
     for (const s of flatten(kids(part(init, 'body') ?? { kind: 'list', items: [] }))) {
+      /* **`self.xs: list[int] = []`** —— 带标注的那一句是 `annot` 不是 `assign`，
+         从前这儿只看 `assign`，于是那一格字段**根本没认出来**（症状：`Stack` 没有字段
+         `items`（一格都没有））。标注就在手上，照它算，比从右边猜准。 */
+      if (tag(s) === 'annot') {
+        const t0 = kids(s)[0];
+        if (tag(t0) !== 'attr') continue;
+        if (tag(kids(t0)[0]) !== 'n' || String(nameOf(kids(t0)[0])) !== 'self') continue;
+        const n = String(leaf(kids(t0)[1]));
+        const at = typeOfAnnot(kids(s)[1], C);
+        if (at !== null) {
+          annotated.add(n);
+          add(n, at);
+        }
+        continue;
+      }
       if (tag(s) !== 'assign') continue;
       const value = kids(s)[kids(s).length - 1];
       for (const g of kids(part(s, 'lhs') ?? { kind: 'list', items: [] })) {
@@ -818,6 +833,26 @@ function scanOne(s, C, rets) {
       const fn = kids(e)[0];
       if (tag(fn) !== 'attr' || String(leaf(kids(fn)[1])) !== 'append') return;
       const box = kids(fn)[0];
+      /**
+       * **`d = {}` 之后 `d[k].append(v)`** —— "字典装一串表"那种分组写法（python 里到处
+       * 都是）。空字典那一句认不出类型，`d[k] = []` 那一句也认不出（右边是空表），
+       * 唯一说得清的就是这一句：键的类型从下标来、元素的类型从 append 的那个值来。
+       */
+      if (tag(box) === 'index') {
+        const base = kids(box)[0];
+        if (tag(base) !== 'n') return;
+        const bn = String(nameOf(base));
+        const blocal = C.inScope() && !C.isDeclGlobal(bn);
+        if ((blocal ? C.lookupHere(bn) : C.lookup(bn)) !== null) return;
+        const subs0 = kids(part(box, 'subs') ?? { kind: 'list', items: [] });
+        const as0 = kids(part(e, 'args') ?? { kind: 'list', items: [] });
+        if (subs0.length !== 1 || as0.length !== 1) return;
+        const kt0 = tyOfCst(subs0[0], C);
+        const vt0 = tyOfCst(as0[0], C);
+        if (kt0 === null || vt0 === null || !['int', 'string'].includes(kt0.kind)) return;
+        C.bind(C.ref(bn), dictOf(arrOf(vt0), kt0));
+        return;
+      }
       if (tag(box) !== 'n') return;
       const n = String(nameOf(box));
       const local = C.inScope() && !C.isDeclGlobal(n);
@@ -1353,7 +1388,24 @@ function printStmt(argToks, C) {
     }
     value = joinOf(gap, ps, C);
   } else {
-    const parts = pos.map((a) => pyStr(exprOf(a, C), C));
+    /**
+     * **实参先按次序各落一格临时量**（两格以上、而且那一格不纯时）。
+     *
+     * python 是**从左到右**把实参算完的，而这儿是把几段拼成一个大表达式 —— 段里带的
+     * `block-expr` 那几句会被提到整句的最前头，于是**后面那一段的转串跑在前面那一段的
+     * 副作用之前**。量到的原话：`print(xs.pop(), xs)` 答 `2 [1, 2]`（python 是 `2 [1]`）——
+     * 转 `xs` 那一趟循环跑在 `apop` 之前。先按次序钉住实参，次序就回来了。
+     */
+    const vals = pos.map((a, k) => {
+      const v = exprOf(a, C);
+      if (pos.length < 2 || ['int', 'real', 'string', 'bool', 'name'].includes(v.kind)) return v;
+      const t0 = typeOfIR(v, C);
+      const n0 = C.fresh(`pr_a${k}`);
+      C.bind(n0, t0);
+      pre.push({ kind: 'let', name: n0, type: t0, init: v });
+      return { kind: 'name', name: n0 };
+    });
+    const parts = vals.map((v) => pyStr(v, C));
     value = parts.length === 0 ? { kind: 'string', value: '' } : parts[0];
     for (const p of parts.slice(1)) {
       value = {
@@ -1458,12 +1510,19 @@ function assignTo(t, valueTok, C) {
     ts.forEach((tt, i) => out.push(...writeTo(tt, tmps[i], C)));
     return out;
   }
-  /* **`xs[a:b] = []`** —— 空表的元素类型从**左边那张表**来（右边自己答不出）。 */
-  if (tag(t) === 'index' && tag(valueTok) === 'list' && kids(valueTok).length === 0) {
+  /* **`xs[a:b] = []` 与 `d[k] = []`** —— 空容器的类型从**左边那一格**来（右边答不出）。 */
+  if (tag(t) === 'index' && ['list', 'dict'].includes(tag(valueTok))
+    && kids(valueTok).length === 0) {
     const subs0 = kids(part(t, 'subs') ?? { kind: 'list', items: [] });
-    if (subs0.length === 1 && tag(subs0[0]) === 'slice') {
-      const bt1 = tyOfCst(kids(t)[0], C);
-      if (bt1 !== null && bt1.kind === 'arr') return writeTo(t, emptyOf(bt1), C);
+    const bt1 = tyOfCst(kids(t)[0], C);
+    if (subs0.length === 1 && tag(subs0[0]) === 'slice'
+      && bt1 !== null && bt1.kind === 'arr' && tag(valueTok) === 'list') {
+      return writeTo(t, emptyOf(bt1), C);
+    }
+    /* `d[k] = []` / `d[k] = {}` —— 字典的**值**那一档说了算。 */
+    if (subs0.length === 1 && bt1 !== null && bt1.kind === 'map'
+      && bt1.value.kind === (tag(valueTok) === 'list' ? 'arr' : 'map')) {
+      return writeTo(t, emptyOf(bt1.value), C);
     }
   }
   /* **`xs = []` / `d = {}`**：空容器自己答不出元素类型，可这一格名字的类型
@@ -1619,6 +1678,15 @@ function annotStmt(x, C) {
   const init = part(x, 'init');
   const t = typeOfAnnot(annot, C);
   if (t === null) throw new Error(`python->IR: 这一格类型标注还没接（认得 int / float / str / bool / list[T] / dict[K,V]）`);
+  /* **`self.xs: list[int] = []`** —— 标注只管类型（字段那一侧 `inferFields` 已经照它算了），
+     这儿把那一句赋值发出去就行；空容器按标注造。 */
+  if (tag(target) === 'attr') {
+    if (init === undefined) return [];
+    const v0 = kids(init)[0];
+    const empty = (tag(v0) === 'list' && kids(v0).length === 0 && t.kind === 'arr')
+      || (tag(v0) === 'dict' && kids(v0).length === 0 && t.kind === 'map');
+    return writeTo(target, empty ? emptyOf(t) : exprOf(v0, C), C);
+  }
   if (tag(target) !== 'n') throw new Error('python->IR: 带标注的赋值目标只接一格名字');
   const n = String(nameOf(target));
   if (C.lookup(n) === null) C.bind(C.ref(n), t);
