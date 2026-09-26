@@ -169,6 +169,8 @@ const NATIVE_OPS = {
   fmtSci: 'js_fmt_sci',
   fmtGen: 'js_fmt_gen',
   reprReal: 'js_repr_real',
+  /* python 的 repr(float)（方言的 (srepr E)）—— 与 reprReal 只差排版的门槛。 */
+  pyReprReal: 'js_pyrepr_real',
   callJsOp: 'js_call_op',
   wrapFn: 'js_wrap_fn',
   callFnValue: 'js_call_fn',

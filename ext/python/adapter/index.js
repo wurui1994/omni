@@ -830,9 +830,9 @@ export const PY_HOOKS = {
 //   2. 单态化按**实参类型的元组**分（`add(2,3)` 与 `add(1.5,2.5)` 各一格），可
 //      **只按返回类型分不出来**：`def f(): return []` 在两处要不同的元素类型时报错。
 //   3. 整数是 64 位（python 的 int 没有上界）—— 溢出的那一档要等 `longobject.c` 接上来。
-//   4. `str(float)` 走方言的 `(srepr E)`（15/16/17 位里挑第一个能往返的），与 CPython 差
-//      指数形式的门槛（`1e15` 我们出 `1e+15`）。`ext/python/build.js` 已经把 CPython 自己那份
-//      dtoa 编出来了，接上它是下一刀。
+//   4. `str(float)` 走方言的 `(srepr E)`，与 CPython **逐字节相同**（三条腿都量过）。
+//      不过它是我们自己那三份实现，不是 CPython 的 `dtoa.c`（那一份已经编出来了，
+//      见 `ext/python/build.js`，接上它要先解决"出串怎么过 cabi"）。
 //   5. `round()` 是 C 的 round（远离零），python 是银行家舍入 —— `.5` 那一格答得不一样。
 //   6. 循环变量不外泄（python 里 `for i in …` 之后还读得到 i）。
 //   7. f-string 里那段表达式、`%` 格式化、`.format()` 都没接。

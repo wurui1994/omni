@@ -2007,12 +2007,14 @@ class CoreLowerer {
       }
       return { kind: 'Builtin', name: 'to_string_g', args: [v, p], type: STRING, argType: REAL };
     }
-    /* `(srepr E)` —— **往返无损的 real 文本**。与 `(tostr E)` 的 %.6g 是两条不同规则
-       （ADR-0005）：这一格取 15/16/17 位里第一个能 `strtod` 回原值的，再保证末尾有
-       `.0` 或 `e`。Omni 自己那一层本来就有它（`repr(x)`，`hir/check.js`），三条腿的实现
-       也早就在（`omni_repr_real` / `$repr_real` / `reprReal`）—— **缺的一直只是方言这个口**。
-       谁要它：python 的 `str(float)` 与 `repr(float)` 就是最短往返（`4.0` 不是 `4`、
-       `0.1` 不是 `0.100000`），走 %.6g 的话每一处浮点输出都与 CPython 差一截。 */
+    /* `(srepr E)` —— **python 的 `repr(float)` / `str(float)`**。
+       与 `(tostr E)` 的 %.6g 是两条不同规则，与 Omni 自己那格 `repr(x)` 也**不是同一条**：
+       数字都取最短往返，可排版的门槛不同 —— 这一格是"定点当且仅当 `-4 < decpt <= 16`"
+       （CPython `Python/pystrtod.c` 的 `format_float_short`，`'r'` 那一档），而 `repr(x)`
+       走的是 `%.{15,16,17}g`，门槛跟着有效位数走。于是 `1e15` 两者分叉：python 印
+       `1000000000000000.0`，`%.15g` 印 `1e+15`。
+       三条腿各有一份实现，逐字节相同（`omni_pyrepr_real` / `$pyrepr_real` / `pyReprReal`）。
+       int 那一档直接走 `to_string`（python 的 `str(int)` 与它逐字相同）。 */
     if (h === 'srepr') {
       if (n.items.length !== 2) return this.err(n, '(srepr E) 要 1 个参数');
       const v = this.expr(n.items[1]);
@@ -2023,7 +2025,7 @@ class CoreLowerer {
       if (v.type.k !== 'real') {
         return this.err(n, `(srepr E) 只接受 int / real，这里是 ${coreTypeText(v.type)}`);
       }
-      return { kind: 'Builtin', name: 'repr', args: [v], type: STRING, argType: REAL };
+      return { kind: 'Builtin', name: 'py_repr', args: [v], type: STRING, argType: REAL };
     }
     // `(rmath "NAME" A [B])`：real 上的数学函数。名单是**量出来的**（runtime/omni_math.c
     // 的头注里写着）：只有各家实现必然一致的那几个进得来 —— sqrt 是 IEEE-754 强制正确

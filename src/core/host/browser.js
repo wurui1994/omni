@@ -29,7 +29,7 @@
 
 export {
   i32Op, i32ToU, i32Wrap, typeTag, hasJsEngine, evalJs,
-  fmtReal, fmtFixed, fmtSci, fmtGen, fmtRealG, reprReal,
+  fmtReal, fmtFixed, fmtSci, fmtGen, fmtRealG, reprReal, pyReprReal,
   callJsOp, wrapFn, callFnValue,
 } from './pure.js';
 

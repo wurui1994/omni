@@ -11,7 +11,7 @@
 // 语言子集里的东西：不用 TextEncoder（自己按 UTF-8 编）、不用 new Function、不用正则字面量
 // 以外的正则。
 
-import { stdout, stdoutBytes, typeTag, fmtReal, fmtRealG, fmtFixed, fmtSci, fmtGen, reprReal, callJsOp, readText, writeText, writeBinary, mkdirAll, spawn, env } from '../host/native.js';
+import { stdout, stdoutBytes, typeTag, fmtReal, fmtRealG, fmtFixed, fmtSci, fmtGen, reprReal, pyReprReal, callJsOp, readText, writeText, writeBinary, mkdirAll, spawn, env } from '../host/native.js';
 import { JS_ABI, JS_MEMBERS } from '../hir/js_abi.js';
 import { pngFromRgba, surfaceKind } from '../host/png.js';
 import { OmniError } from '../source/diag.js';
@@ -1201,6 +1201,9 @@ export function applyBuiltin(I, e, a) {
     case 'chr': return chrOf(a[0]);
     case 'fail': rtError(a[0]); return undefined;
     case 'repr': return reprOf(a[0]);
+    /* python 的 repr(float)（方言的 `(srepr E)`）。inf / nan 在这一格是**合法的**
+       （python 印 inf / nan），所以不走 reprOf 那道非有限就报错的门。 */
+    case 'py_repr': return pyReprReal(a[0]);
     case 'int_of_string': return intOfString(a[0]);
     case 'real_of_string': return realOfString(a[0]);
     // `(readtext E)`：整份读一份文本文件。三条腿一份语义（JS 那边 $read_text、

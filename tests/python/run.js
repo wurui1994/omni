@@ -10,17 +10,20 @@
 //               （这棵参考树是 3.16.0a0，`lazy import` / `except A, B:` 在 3.14 上是语法错）。
 //   * `FAIL` —— 编得出来、跑得起来，但**答得不一样**，或者崩了。那是真错。
 //
-// 两条腿都量：默认那条（`omni run`，走解释器）与 `--mode js`（发 JS 再跑）。
-// 浮点转串、负数取模这些格子在两条腿上各有一份实现，只量一条就等于只量了一半。
+// 三条腿都量：默认那条（`omni run`，走解释器）、`--mode js`（发 JS 再跑）、以及
+// `omni build`（发 C 再编再跑）。浮点转串、负数取模这些格子在三条腿上**各有一份实现**
+// （`host/pure.js` / `backend-js/prelude.js` / `runtime/omni_fmt.c`），只量一条就等于只量了三分之一。
 
 import { execFileSync } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { readdirSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
 const examples = join(root, 'ext', 'python', 'examples');
+const out = join(root, '.omni-cache', 'py-e2e');
+mkdirSync(out, { recursive: true });
 
 /** 一趟命令，两条流一起收（报错也是输出的一部分）。 */
 function run(cmd, args, timeout = 120000) {
@@ -45,31 +48,37 @@ for (const f of files) {
     skip++;
     continue;
   }
-  /* 两条腿：默认（解释器）与 `--mode js`（发 JS 再跑）。 */
-  for (const mode of [[], ['--mode', 'js']]) {
-    const tag = mode.length === 0 ? 'interp' : 'js';
+  /* 三条腿：默认（解释器）、`--mode js`（发 JS 再跑）、`build`（发 C 再编再跑）。 */
+  for (const leg of ['interp', 'js', 'c']) {
     let got = null;
     try {
-      got = run('node', [join(root, 'src', 'cli.js'), 'run', src, ...mode]);
+      if (leg === 'c') {
+        const exe = join(out, f.slice(0, -3));
+        run('node', [join(root, 'src', 'cli.js'), 'build', src, '-o', exe], 300000);
+        got = run(exe, []);
+      } else {
+        got = run('node', [join(root, 'src', 'cli.js'), 'run', src,
+          ...(leg === 'js' ? ['--mode', 'js'] : [])]);
+      }
     } catch (e) {
       const all = String(e.stdout || '') + String(e.stderr || e.message);
       if (/还没接/.test(all)) {
         const why = all.split('\n').filter((x) => x.trim()).pop();
-        console.log(`  skip ${f} [${tag}]（缺口：${why?.slice(0, 96)}）`);
+        console.log(`  skip ${f} [${leg}]（缺口：${why?.slice(0, 96)}）`);
         skip++;
         continue;
       }
-      console.log(`  FAIL ${f} [${tag}] 跑不起来：${all.split('\n').filter((x) => x.trim()).pop()?.slice(0, 120)}`);
+      console.log(`  FAIL ${f} [${leg}] 跑不起来：${all.split('\n').filter((x) => x.trim()).pop()?.slice(0, 120)}`);
       fail++;
       continue;
     }
     if (got === want) {
       pass++;
-      console.log(`  ok   ${f} [${tag}]（与 python3 逐字节相同，${want.split('\n').length - 1} 行）`);
+      console.log(`  ok   ${f} [${leg}]（与 python3 逐字节相同，${want.split('\n').length - 1} 行）`);
     } else {
       fail++;
       const [g, w] = firstDiff(got, want);
-      console.log(`  FAIL ${f} [${tag}] 输出不同\n       我们：${JSON.stringify(g)}\n       py  ：${JSON.stringify(w)}`);
+      console.log(`  FAIL ${f} [${leg}] 输出不同\n       我们：${JSON.stringify(g)}\n       py  ：${JSON.stringify(w)}`);
     }
   }
 }

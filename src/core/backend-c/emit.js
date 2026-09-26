@@ -2917,6 +2917,8 @@ class CEmitter {
       case 'chr': return `omni_chr(${a[0]})`;
       case 'fail': return `omni_fail(${a[0]})`;
       case 'repr': return `omni_repr_real(${a[0]})`;
+      /* python 的 repr(float)（方言的 `(srepr E)`）—— 排版门槛与上一条不同，见 omni_fmt.c */
+      case 'py_repr': return `omni_pyrepr_real(${a[0]})`;
       case 'int_of_string': return `omni_int_of_string(${a[0]})`;
       case 'real_of_string': return `omni_real_of_string(${a[0]})`;
       case 'read_text': return `omni_read_text(${a[0]})`;

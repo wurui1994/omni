@@ -57,12 +57,19 @@ R 那一门（ADR-0045/0046/0047，`r-lang` 分支）已经把这条路走通过
   （`omni_repr_real` / `$repr_real` / `reprReal`）本来就在，缺的只是方言这个口；
   python 的 `str(float)` / `repr(float)` 走 `%.6g` 的话每一处浮点输出都差一截。
 - **`tests/python/run.js`** —— 外部尺子：同一份 .py，我们跑一遍、本机 `python3` 跑一遍，
-  **stdout 逐字节相同**才算过。两条腿都量（解释器 + `--mode js`）。
-  现在 5 份例子 × 2 条腿 = **10 绿 0 红**（尺子 Python 3.14.7）。
+  **stdout 逐字节相同**才算过。**三条腿都量**（`omni run` 走解释器、`--mode js` 发 JS、
+  `omni build` 发 C 再编）—— 浮点转串这些格子在三条腿上各有一份实现，只量一条等于只量了
+  三分之一。现在 6 份例子 × 3 条腿 = **18 绿 0 红**（尺子 Python 3.14.7）。
 - **单态化** —— 一个 python 函数按**实参类型的元组**生成几格实例
   （`add(2,3)` 与 `add(1.5,2.5)` 与 `add("a","b")` 落成三格 `add__int_int` /
   `add__float_float` / `add__str_str`；只有一格实例时不加后缀）。这是 python 的鸭子类型
   撞上方言静态类型的出路，也是往后 `class` 与容器泛型的地基。判据是 `examples/generic.py`。
+- **`(srepr E)` 换成 python 自己那条排版规则** —— 从前它借的是 Omni 的 `repr(x)`
+  （`%.{15,16,17}g` 的门槛跟着有效位数走），于是 `1e15` 印成 `1e+15` 而 CPython 印
+  `1000000000000000.0`。现在三条腿各有一份 `py_repr`（`omni_pyrepr_real` /
+  `$pyrepr_real` / `pyReprReal`）：数字取最短往返，**定点当且仅当 `-4 < decpt <= 16`**
+  —— 与 `Python/pystrtod.c` 的 `format_float_short` 同一条。判据是
+  `examples/floatrepr.py`（10 的幂从 1e-11 扫到 1e19，三条腿都逐字节相同）。
 - **借 CPython 的 C 那一半开工了**（`ext/python/build.js` + `rt/`）。第一批借的是
   `Python/dtoa.c`（David Gay 的正确舍入转换，2841 行）与 `Python/pystrtod.c`
   （CPython 的 repr 排版规则，1286 行）—— 两份**一个字都不改**。我们只加三格：
@@ -87,12 +94,12 @@ R 那一门（ADR-0045/0046/0047，`r-lang` 分支）已经把这条路走通过
    `self` 是第一格实参。单态化那张表已经在了，方法按接收者类型挑实例是同一条路。
 2. **f-string 的内部结构**（PEP 701）。这要在 `lex.js` 里加一格通用能力：
    一个记号里嵌一段要再解析的文本。现在整份 f-string 是一个 STRING，8 份语料因此没过。
-3. **把借来的那份 `libomnipy` 接到语言里** —— 现在它编出来了、有判据了，可 adapter 那条路
-   还在用方言的 `(srepr E)`（15/16/17 位里挑第一个能往返的）。那一格与 CPython 差的是
-   指数形式的门槛：`1e15` 我们出 `1e+15`、CPython 出 `1000000000000000.0`。
-   接法照 R 那一门的 `ext/r/rt/ffi.js`：`(lib "libomnipy")` + `(cabi omni_py_float_repr …)`，
-   于是 `str(float)` 走的是 CPython 自己那份 dtoa。**要先解决一格**：`cabi` 的类型词只有
-   `i32 i64 f64 ptr void`，出串那一格得想清怎么过（回 `ptr` 再转 `string`，还是加一格算子）。
+3. **把借来的那份 `libomnipy` 接到语言里**。现在 `str(float)` 已经与 CPython 逐字节相同了
+   （走我们自己那三份 `py_repr`），所以这一刀**不再是正确性问题**，而是"借来的那一半要
+   真用上"：接上之后浮点格式化只有一份实现（CPython 的），三条腿不必各守一份。
+   卡点还在：`cabi` 的类型词只有 `i32 i64 f64 ptr void`，**出串那一格怎么过**得先定
+   （回 `ptr` 再转 `string`，还是给方言加一格算子），而且 `ccall` 在 JS 那条腿上要 N-API
+   扩展（ADR-0038）—— 也就是说接上之后 `omni run` / `--mode js` 会退档，得先想清这一点。
 4. **再借两格**：`Objects/longobject.c`（大整数 —— 现在的 int 是 64 位，python 的没有上界）
    与 `Modules/_sre/`（正则）。这两格比浮点那一格耦合深，得先有"借来的东西怎么持有对象"
    那一层。

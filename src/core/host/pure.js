@@ -301,6 +301,62 @@ export function reprReal(x) {
 function reprTail(s) {
   return /[.eE]/.test(s) ? s : `${s}.0`;
 }
+
+/**
+ * **python 的 `repr(float)` / `str(float)`**（`(srepr E)` 那一格）。
+ *
+ * 与上面那个 `reprReal` 的差别**只有排版的门槛**：
+ *   * `reprReal` 走 `%.{15,16,17}g`，而 `%g` 的门槛跟着有效位数 P 走；
+ *   * python 的门槛是定死的：**定点当且仅当 `-4 < decpt <= 16`**，否则指数形式
+ *     （出处：CPython `Python/pystrtod.c` 的 `format_float_short`，`'r'` 那一档）。
+ * 于是 `1e15` 两者分叉：python 印 `1000000000000000.0`，`%.15g` 印 `1e+15`。
+ *
+ * 数字本身取**最短往返**：1..17 位里第一个能读回原值的（`toExponential(q-1)` 出
+ * `d.ddde±X`）—— 与 C 那侧 `%.{q-1}e` + `strtod` 是同一件事，三条腿逐字节相同。
+ * **不用 `toExponential()` 不带位数那一种**：那一格在自编译的子集里不存在
+ * （`js_abi.js` 的 `js_num_to_exp` 是 arity 2）。
+ */
+export function pyReprReal(x) {
+  if (Number.isNaN(x)) return 'nan';
+  if (x === Infinity) return 'inf';
+  if (x === -Infinity) return '-inf';
+  /* `-0.0` 印 `-0.0`。不用 `Object.is`：`1 / -0` 是 -Infinity，这一格更窄。 */
+  if (x === 0) return 1 / x < 0 ? '-0.0' : '0.0';
+  let s = x.toExponential(16);
+  for (let q = 1; q <= 17; q += 1) {
+    const t = x.toExponential(q - 1);
+    if (Number(t) === x) { s = t; break; }
+  }
+  let neg = false;
+  if (s.charCodeAt(0) === 45) { neg = true; s = s.slice(1); }
+  const ei = s.indexOf('e');
+  const mant = s.slice(0, ei);
+  const decpt = Number(s.slice(ei + 1)) + 1;
+  const dot = mant.indexOf('.');
+  const digs = dot < 0 ? mant : mant.slice(0, dot) + mant.slice(dot + 1);
+  return (neg ? '-' : '') + pyLayout(digs, decpt);
+}
+
+/** 数字串 + 小数点位置 → python 的排版（正数那一半）。 */
+function pyLayout(digs, decpt) {
+  const nd = digs.length;
+  if (decpt > -4 && decpt <= 16) {
+    if (decpt <= 0) return `0.${zeros(-decpt)}${digs}`;
+    if (decpt >= nd) return `${digs}${zeros(decpt - nd)}.0`;
+    return `${digs.slice(0, decpt)}.${digs.slice(decpt)}`;
+  }
+  const head = nd > 1 ? `${digs.slice(0, 1)}.${digs.slice(1)}` : digs;
+  const e = decpt - 1;
+  const a = e < 0 ? -e : e;
+  /* 指数**至少两位、一定带符号**（python 与 C 的 `%e` 同一条）。 */
+  return `${head}e${e < 0 ? '-' : '+'}${a < 10 ? '0' : ''}${a}`;
+}
+
+function zeros(n) {
+  let s = '';
+  for (let i = 0; i < n; i += 1) s += '0';
+  return s;
+}
 /* ------------------------------------------------------------ 按名字调一条 op
  * 解释器（ADR-0013）唯一的出口：它手里的 op 名字是运行期的值，而两个后端里 op 调用
  * 都是编译期展开的。降级之后这一条走 js_call_op —— 两个后端各自按 JS_ABI 表生成那个

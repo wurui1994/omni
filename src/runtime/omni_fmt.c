@@ -2199,3 +2199,81 @@ omni_str omni_repr_real(double v) {
   snprintf(buf, sizeof buf, "%.17g", v);
   return omni_repr_tail(buf);
 }
+
+/* python 的 `repr(float)` / `str(float)`（方言的 `(srepr E)`）。
+   与上面那个 omni_repr_real 的差别**只有排版的门槛**：这一格是"定点当且仅当
+   -4 < decpt <= 16"，而 %g 那一族的门槛跟着有效位数 P 走 —— 于是 1e15 两者分叉
+   （python 印 1000000000000000.0，%.15g 印 1e+15）。
+   数字本身取最短往返：1..17 位里第一个能 strtod 回原值的（`%.{p-1}e` 出 d.ddde±XX）。
+   口径：CPython 的 Python/pystrtod.c 的 format_float_short，'r' 那一档。
+   三条腿（这儿 / prelude 的 $pyrepr_real / host/pure.js 的 pyReprReal）逐字节相同。 */
+omni_str omni_pyrepr_real(double v) {
+  if (isnan(v)) return omni_str_fmt("nan");
+  if (isinf(v)) return omni_str_fmt(v < 0 ? "-inf" : "inf");
+  if (v == 0.0) return omni_str_fmt(signbit(v) ? "-0.0" : "0.0");
+
+  char buf[64];
+  int p = 17;
+  for (int q = 1; q <= 17; q++) {
+    snprintf(buf, sizeof buf, "%.*e", q - 1, v);
+    if (strtod(buf, NULL) == v) { p = q; break; }
+  }
+  snprintf(buf, sizeof buf, "%.*e", p - 1, v);
+
+  /* 拆成 符号 / 数字串 / decpt（小数点该落在数字串的第几位之前）。 */
+  const char *s = buf;
+  int neg = 0;
+  if (*s == '-') { neg = 1; s++; }
+  char digs[24];
+  int nd = 0;
+  digs[nd++] = *s++;
+  if (*s == '.') {
+    s++;
+    while (*s != 0 && *s != 'e') digs[nd++] = *s++;
+  }
+  digs[nd] = 0;
+  const char *ep = strchr(s, 'e');
+  int decpt = (ep == NULL ? 0 : atoi(ep + 1)) + 1;
+
+  char out[64];
+  int n = 0;
+  if (neg) out[n++] = '-';
+  if (decpt > -4 && decpt <= 16) {
+    if (decpt <= 0) {
+      out[n++] = '0';
+      out[n++] = '.';
+      for (int i = 0; i < -decpt; i++) out[n++] = '0';
+      memcpy(out + n, digs, (size_t)nd);
+      n += nd;
+    } else if (decpt >= nd) {
+      memcpy(out + n, digs, (size_t)nd);
+      n += nd;
+      for (int i = nd; i < decpt; i++) out[n++] = '0';
+      out[n++] = '.';
+      out[n++] = '0';
+    } else {
+      memcpy(out + n, digs, (size_t)decpt);
+      n += decpt;
+      out[n++] = '.';
+      memcpy(out + n, digs + decpt, (size_t)(nd - decpt));
+      n += nd - decpt;
+    }
+  } else {
+    out[n++] = digs[0];
+    if (nd > 1) {
+      out[n++] = '.';
+      memcpy(out + n, digs + 1, (size_t)(nd - 1));
+      n += nd - 1;
+    }
+    int e = decpt - 1;
+    int a = e < 0 ? -e : e;
+    out[n++] = 'e';
+    out[n++] = e < 0 ? '-' : '+';
+    /* 指数**至少两位、一定带符号**（python 与 C 的 %e 同一条）。 */
+    if (a >= 100) out[n++] = (char)('0' + a / 100);
+    out[n++] = (char)('0' + (a / 10) % 10);
+    out[n++] = (char)('0' + a % 10);
+  }
+  out[n] = 0;
+  return omni_str_fmt("%s", out);
+}

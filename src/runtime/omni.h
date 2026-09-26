@@ -385,6 +385,8 @@ omni_str omni_str_genk(double v, int64_t p);
 omni_str omni_str_bool(bool v);
 omni_str omni_str_string(omni_str v);
 omni_str omni_repr_real(double v);
+/* python 的 repr(float)（方言的 `(srepr E)`）—— 与上一条只差排版的门槛。 */
+omni_str omni_pyrepr_real(double v);
 /* `(readtext E)`：整份读一份文本文件（读不到是运行期错误） */
 omni_str omni_read_text(omni_str path);
 /* `(getenv E)`：读宿主的一格环境设置，没设就是空串（**不报错**：没设是常态） */
@@ -779,6 +781,7 @@ omni_dyn omni_js_type_tag(omni_dyn v);
 omni_dyn omni_js_fmt_real(omni_dyn v);
 omni_dyn omni_js_fmt_real_g(omni_dyn v, omni_dyn p);
 omni_dyn omni_js_repr_real(omni_dyn v);
+omni_dyn omni_js_pyrepr_real(omni_dyn v);
 /* `%f` / `%e` / `%g` 那三种排版，同一条纪律（用的就是上面 omni_str_fixed 那几份）。
    js_fmt_gen 的第三个实参是"留不留尾随零"（omni_str_gen 与 omni_str_genk 的分工）。 */
 omni_dyn omni_js_fmt_fixed(omni_dyn v, omni_dyn p);

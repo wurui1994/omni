@@ -743,6 +743,9 @@ export const JS_ABI = {
   js_fmt_sci: { js: '$js_fmt_sci', c: 'omni_js_fmt_sci', arity: 2 },
   js_fmt_gen: { js: '$js_fmt_gen', c: 'omni_js_fmt_gen', arity: 3 },
   js_repr_real: { js: '$js_repr_real', c: 'omni_js_repr_real', arity: 1 },
+  // python 的 repr(float)（方言的 `(srepr E)`）：与上一条只差排版的门槛（定点当且仅当
+  // -4 < decpt <= 16），数字本身一样是最短往返。口径：CPython Python/pystrtod.c 的 format_float_short。
+  js_pyrepr_real: { js: '$js_pyrepr_real', c: 'omni_js_pyrepr_real', arity: 1 },
   js_eval: { js: '$js_eval', c: 'omni_js_eval', arity: 1 },
   js_eval_captured: { js: '$js_eval_captured', c: 'omni_js_eval_captured', arity: 1 },
 

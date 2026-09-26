@@ -1061,6 +1061,8 @@ class JsEmitter {
       case 'chr': return `$chr(${a[0]})`;
       case 'fail': return `$rt_error(${a[0]})`;
       case 'repr': return `$repr_real(${a[0]})`;
+      /* python 的 repr(float)（方言的 `(srepr E)`）—— 排版门槛与上一条不同，见 prelude.js */
+      case 'py_repr': return `$pyrepr_real(${a[0]})`;
       case 'int_of_string': return `$int_of_string(${a[0]})`;
       case 'real_of_string': return `$real_of_string(${a[0]})`;
       case 'read_text': return `$read_text(${a[0]})`;

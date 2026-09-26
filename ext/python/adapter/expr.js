@@ -300,9 +300,10 @@ const isPure = (e) => ['int', 'real', 'string', 'bool', 'name'].includes(e.kind)
  *     是 `%.6g`（出 `4` 与 `0.1`）—— 所以走 `(srepr E)` 那一格；
  *   * 整数两边一样。
  *
- * `srepr` 与 CPython 还差一处：指数形式的门槛。CPython 的 repr 在 `exp >= 16` 时转指数，
- * `srepr` 是"15/16/17 位里第一个能往返的"那个 P，于是 `1e15` 我们出 `1e+15`、CPython 出
- * `1000000000000000.0`。真要逐位相同得接 `Python/dtoa.c`（那是借 CPython 的 C 那一刀）。
+ * `srepr` 与 CPython 逐字节相同（`tests/python/examples/floatrepr.py` 三条腿都量过）：
+ * 数字取最短往返，排版的门槛是"定点当且仅当 `-4 < decpt <= 16`" —— 与
+ * `Python/pystrtod.c` 的 `format_float_short` 同一条。**不是** `%g` 那一族的门槛
+ * （那个跟着有效位数走，`1e15` 会印成 `1e+15`）。
  */
 export function pyStr(e, C) {
   const t = ty(e, C);

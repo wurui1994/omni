@@ -723,6 +723,52 @@ function $reprTail(s) {
   return (s.indexOf(".") >= 0 || s.indexOf("e") >= 0) ? s : s + ".0";
 }
 
+// python 的 repr(float) / str(float)（方言的 (srepr E)）。与 $repr_real 的差别**只有排版的
+// 门槛**：这一格是"定点当且仅当 -4 < decpt <= 16"，而 %g 那一族的门槛跟着有效位数 P 走 ——
+// 于是 1e15 两者分叉（python 印 1000000000000000.0，%.15g 印 1e+15）。
+// 数字本身取最短往返（toExponential() 不带位数就是这一格）。
+// 口径：CPython 的 Python/pystrtod.c 的 format_float_short，'r' 那一档。
+// 三条腿（这儿 / host/pure.js 的 pyReprReal / runtime 的 omni_pyrepr_real）逐字节相同。
+function $pyrepr_real(x) {
+  if (Number.isNaN(x)) return "nan";
+  if (x === Infinity) return "inf";
+  if (x === -Infinity) return "-inf";
+  if (x === 0) return 1 / x < 0 ? "-0.0" : "0.0";
+  // 最短往返：1..17 位里第一个能读回原值的（与 C 那侧 %.{q-1}e + strtod 同一件事）。
+  // 不用 toExponential() 不带位数那一种：自编译的子集里它不存在（js_num_to_exp 是 arity 2）。
+  let s = x.toExponential(16);
+  for (let q = 1; q <= 17; q++) {
+    const t = x.toExponential(q - 1);
+    if (Number(t) === x) { s = t; break; }
+  }
+  let neg = false;
+  if (s.charCodeAt(0) === 45) { neg = true; s = s.slice(1); }
+  const ei = s.indexOf("e");
+  const mant = s.slice(0, ei);
+  const decpt = Number(s.slice(ei + 1)) + 1;
+  const dot = mant.indexOf(".");
+  const digs = dot < 0 ? mant : mant.slice(0, dot) + mant.slice(dot + 1);
+  return (neg ? "-" : "") + $pyLayout(digs, decpt);
+}
+function $pyLayout(digs, decpt) {
+  const nd = digs.length;
+  if (decpt > -4 && decpt <= 16) {
+    if (decpt <= 0) return "0." + $pyZeros(-decpt) + digs;
+    if (decpt >= nd) return digs + $pyZeros(decpt - nd) + ".0";
+    return digs.slice(0, decpt) + "." + digs.slice(decpt);
+  }
+  const head = nd > 1 ? digs.slice(0, 1) + "." + digs.slice(1) : digs;
+  const e = decpt - 1;
+  const a = e < 0 ? -e : e;
+  // 指数**至少两位、一定带符号**（python 与 C 的 %e 同一条）
+  return head + "e" + (e < 0 ? "-" : "+") + (a < 10 ? "0" : "") + a;
+}
+function $pyZeros(n) {
+  let s = "";
+  for (let i = 0; i < n; i++) s += "0";
+  return s;
+}
+
 const $str_int = (x) => x.toString();
 const $str_real = (x) => $fmt_real(x);
 const $str_bool = (x) => (x ? "true" : "false");
@@ -6111,6 +6157,7 @@ function $js_fmt_fixed(x, p) { return $str_fixed(x, p); }
 function $js_fmt_sci(x, p) { return $str_sci(x, p); }
 function $js_fmt_gen(x, p, keep) { return keep ? $str_genk(x, p) : $str_gen(x, p); }
 function $js_repr_real(x) { return $repr_real(x); }
+function $js_pyrepr_real(x) { return $pyrepr_real(x); }
 // 解释器的函数值（ADR-0013 决策 3）。传进来的 f 是解释器自己那个两形参的 lambda，降级后
 // 它的实参是**一条表**（JS 域的唯一签名），所以这里要造一条转接记录：宿主按 fp(self, args)
 // 调这个值，转接把 (self, args) 装成那条表再调 f。恒等是不行的 —— 那样 f 会把 args[0]
