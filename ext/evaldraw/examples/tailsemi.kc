@@ -1,0 +1,28 @@
+// ext/evaldraw/examples/tailsemi.kc —— **末尾那句表达式带分号也是返回值**
+//
+// `eval.txt:92` 只写了"末尾那句表达式是返回值，而且不需要分号"。带分号那一档**照样是
+// 返回值** —— 拿 arm64 那棵工作树的 `eval_bench`（真 `kasm87` 编出来的机器码）量的：
+//
+//     (x) 3+x;                      -> 8     带分号，照样是返回值
+//     (x) y=3+x;                    -> 8     **赋值也算**，值是赋进去的那个
+//     (x) {3+x;}                    -> 8     末尾是块 ⇒ 看块里最后那句
+//     (x) y=3+x; if(x>0) y=99;      -> 0     末尾是 if / for / while ⇒ 0
+//     (x){return(f(x));} f(a){a*2;} -> 10    用户函数同一条规矩
+//
+// 少这一格的代价不是"少个返回值"而是**整幅图黑掉**：`voxes/meatball.kc` 的最后一句是
+// `a > (x*x+y*y+z*z-.9);`，3D 体素那一档拿它当"实心还是空气"，回 0 就是满盘空气。
+//
+// 落点是 `ext/polydraw/adapter.js` 的 `tailReturn`（`bodyOf` 的收尾一格），
+// 所以两门语言、每个函数体走的都是同一条路。
+
+() {
+  printf("semi=%g\n", fsemi(5));
+  printf("asg=%g\n", fasg(5));
+  printf("blk=%g\n", fblk(5));
+  printf("ctl=%g\n", fctl(5));
+}
+
+fsemi(v) { v*3; }
+fasg(v) { w = v*4; }
+fblk(v) { { v*6; } }
+fctl(v) { w = v*5; if (v > 0) w = 99; }

@@ -9,10 +9,10 @@
 //     (x,y,t)             2D + 时间（秒）
 //     (x,y,&r,&g,&b)      2D：脚本自己给颜色（0..255），回值不管
 //     (x,y,t,&r,&g,&b)    上面两档合起来
-//     (x,y,z,&r,&g,&b)    3D 体素                              ← 还没接
-//     (x,y,z,t,&r,&g,&b)  3D 体素 + 时间                       ← 还没接
+//     (x,y,z,&r,&g,&b)    3D 体素：**单位立方体里的网格**，每格调一次
+//     (x,y,z,t,&r,&g,&b)  3D 体素 + 时间
 //
-// ## 这一份接的是 2D 那四档
+// ## 这一份接的是 2D 那四档 + 3D 体素那两档
 //
 // **循环在语言这一侧**（与 `gl-rt.js` 同一条规矩：设备只收批/行，不收"每像素一句"）：
 // 每帧先按 `frameinit` 调一次主体（脚本在那一趟里预算与时间有关的 static），
@@ -30,19 +30,22 @@
 //    —— 也就是蓝→青→绿→黄→红那条常见的彩虹带，端点与说明书对得上。
 
 import {
-  ARR, num, str, nm, bin, call, bi, rm, set, letR, ret, iff, whil, ex, aset, aget, ix, fn, glob,
-  anew,
+  ARR, num, str, nm, bin, call, bi, rm, set, letR, letI, inum, agetI, asetI, ret, iff, whil, ex,
+  aset, aget, fn, glob, anew, tern,
 } from './ir.js';
 
 /** 一格宿主调用（与 `gl-rt.js` 的 `dev` 同一格）。 */
 const dev = (name, args = []) => bi('gfxcall', [str(name), ...args]);
 
 /** 这一档的模块级那几格（`ev_` 前缀 —— 脚本里的名字不会撞）。 */
-export const GRAPH_GLOBALS = ['ev_fi', 'ev_gx0', 'ev_gy0', 'ev_gx1', 'ev_gy1', 'ev_rown'];
+export const GRAPH_GLOBALS = ['ev_fi', 'ev_gx0', 'ev_gy0', 'ev_gx1', 'ev_gy1', 'ev_rown',
+  /* 3D 体素那两档：网格边长（开出来那一趟记在这儿）。 */
+  'ev_vn'];
 
 export function graphGlobalDecls() {
   return [...GRAPH_GLOBALS.map((n) => glob(n)),
-    glob('ev_row', ARR), glob('ev_cr', ARR), glob('ev_cg', ARR), glob('ev_cb', ARR)];
+    glob('ev_row', ARR), glob('ev_cr', ARR), glob('ev_cg', ARR), glob('ev_cb', ARR),
+    glob('ev_vox', ARR)];
 }
 
 /** 网格的默认（`evaldraw.txt:1620`：`setgrid(-4,3,4,-3)`）。 */
@@ -168,5 +171,166 @@ export function graphFrameStmts(pix, shape) {
       ex(bi('gfxarr', [str('setrow'), nm('ev_py'), num(0), nm('ev_w'), num(0), nm('ev_row')])),
       set('ev_py', bin('+', nm('ev_py'), num(1))),
     ]),
+  ];
+}
+
+/* ============================================================ 3D 体素那两档
+ *
+ * 口径（`evaldraw.txt:1311`）：函数在**单位立方体 (-1,-1,-1)..(1,1,1) 里的网格**上
+ * 每格调一次，回值 `> 0` 是实心、`<= 0` 是空气，颜色从 `&r,&g,&b` 拿（0..255）。
+ *
+ * 落法：**评估 + 抽面 + 画立方体**三步，全在语言这一侧（设备只收顶点批）——
+ *
+ *   1. N³ 次调主体，一格一格存进 `ev_vox`（实心存打包好的颜色，空气存 -1）；
+ *   2. 只画**表面**那些面：六个方向上邻居是空气（或出了网格）才发那一面；
+ *   3. 每面一个 `GL_QUADS` 的四边形，走 `gl-rt.js` 那台立即模式的状态机
+ *      （`gl_begin(7)` / `gl_vertex3` / `gl_color3` / `gl_end`）。
+ *
+ * **三处明写偏差**（evaldraw 没有源码，说明书只钉住"网格 + 回值 + 颜色"这三件事）：
+ *
+ *   * 网格边长固定 `VOXRES`（说明书里那是菜单项 `voxres`，语料里没人读它）；
+ *   * **镜头固定**（说明书里是鼠标拖的）—— 在 `(2.2,-2.6,1.9)` 看原点、上是 +z；
+ *   * 面的明暗按**法向**给一格常数因子（没有光照那一摊）：顶最亮、底最暗。
+ */
+
+/** 体素网格的边长。32³ = 32768 次调用一帧 —— 判据那条线（一份 ≤ 10s）下够用。 */
+const VOXRES = 32;
+
+/** 六个面：`[名字, 轴, 正负, 明暗, 四个角(用 x0/x1/y0/y1/z0/z1 拼)]`。 */
+const FACES = [
+  ['nx', 'ix', -1, 0.65, [[0, 0, 0], [0, 0, 1], [0, 1, 1], [0, 1, 0]]],
+  ['px', 'ix', +1, 0.80, [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]]],
+  ['ny', 'iy', -1, 0.55, [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]]],
+  ['py', 'iy', +1, 0.90, [[0, 1, 0], [0, 1, 1], [1, 1, 1], [1, 1, 0]]],
+  ['nz', 'iz', -1, 0.45, [[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]]],
+  ['pz', 'iz', +1, 1.00, [[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]]],
+];
+
+/** 一批攒多少个四边形就断一次（`gl-rt.js` 的顶点上限是 16384 格）。 */
+const QMAX = 3000;
+
+/** 网格坐标：第 `i` 格（0..N-1）的**边**落在 -1 + i*2/N 上。 */
+const edge = (i) => bin('+', num(-1), bin('*', i, num(2 / VOXRES)));
+
+/**
+ * 一格四边形：颜色（按面的明暗因子）+ 四个角 + 攒够就断批。
+ * `c` 是那一格打包好的颜色（0xRRGGBB），拆成三格 0..1 再乘明暗。
+ */
+function quadStmts(shade, corners) {
+  const chan = (e) => bin('*', bin('/', e, num(255)), num(shade));
+  const co = (k) => nm(['ev_x0', 'ev_y0', 'ev_z0'][k]);
+  const c1 = (k) => nm(['ev_x1', 'ev_y1', 'ev_z1'][k]);
+  return [
+    ex(call('gl_color3', [chan(nm('ev_vr')), chan(nm('ev_vg')), chan(nm('ev_vb'))])),
+    ...corners.map(([a, b, c]) => ex(call('gl_vertex3',
+      [(a ? c1 : co)(0), (b ? c1 : co)(1), (c ? c1 : co)(2)]))),
+    set('ev_q', bin('+', nm('ev_q'), inum(1))),
+    iff(bin('>=', nm('ev_q'), inum(QMAX)), [
+      ex(call('gl_end', [])),
+      ex(call('gl_begin', [num(7)])),
+      set('ev_q', inum(0)),
+    ]),
+  ];
+}
+
+/**
+ * 一个面：**邻居是空气才画**。先把"邻居是不是空气"算进一格局部量 ——
+ * `||` 在这一层不保证短路，而出了网格那一头下标会越界，所以分两句写。
+ */
+function faceStmts([name, axis, sgn, shade, corners]) {
+  const off = axis === 'ix' ? 1 : axis === 'iy' ? VOXRES : VOXRES * VOXRES;
+  const at = sgn < 0 ? bin('-', nm('ev_k'), inum(off)) : bin('+', nm('ev_k'), inum(off));
+  /* 出了网格那一头（-1 那侧 i == 0、+1 那侧 i == N-1）：外头就是空气。 */
+  const inside = sgn < 0
+    ? bin('>', nm(`ev_${axis}`), num(0.5))
+    : bin('<', nm(`ev_${axis}`), num(VOXRES - 1.5));
+  const air = `ev_a${name}`;
+  return [
+    letR(air, num(1)),
+    iff(inside, [iff(bin('>=', agetI('ev_vox', at), num(0)), [set(air, num(0))])]),
+    iff(bin('>', nm(air), num(0.5)), quadStmts(shade, corners)),
+  ];
+}
+
+/**
+ * 一帧的 3D 体素那两档：`frameinit` 一趟 + N³ 次评估 + 抽面画立方体。
+ * `shape` 只用 `t` 那一格（颜色永远从 `&r,&g,&b` 来）。
+ */
+export function graph3dFrameStmts(pix, shape) {
+  const N = VOXRES;
+  const args = (x, y, z) => [x, y, z, ...(shape.t ? [nm('ev_tv')] : []),
+    nm('ev_cr'), num(0), nm('ev_cg'), num(0), nm('ev_cb'), num(0)];
+  const ctr = (i) => bin('+', num(-1 + 1 / N), bin('*', i, num(2 / N)));
+  return [
+    letR('ev_tv', dev('klock')),
+    /* 网格那一块：一次开好（边长是编译期常数，所以只有第一帧走这儿）。 */
+    iff(bin('!=', nm('ev_vn'), num(N)), [
+      set('ev_vox', anew(num(N * N * N))),
+      set('ev_vn', num(N)),
+    ]),
+    /* `frameinit` 那一趟（与 2D 同一条口径，`evaldraw.txt:1428`）。 */
+    set('ev_fi', num(1)),
+    ex(call(pix, args(num(0), num(0), num(0)))),
+    set('ev_fi', num(0)),
+    /* ── 一、评估：一格一格存颜色，空气存 -1 ── */
+    letI('ev_k', inum(0)),
+    letR('ev_iz', num(0)),
+    whil(bin('<', nm('ev_iz'), num(N)), [
+      letR('ev_z', ctr(nm('ev_iz'))),
+      letR('ev_iy', num(0)),
+      whil(bin('<', nm('ev_iy'), num(N)), [
+        letR('ev_y', ctr(nm('ev_iy'))),
+        letR('ev_ix', num(0)),
+        whil(bin('<', nm('ev_ix'), num(N)), [
+          letR('ev_x', ctr(nm('ev_ix'))),
+          letR('ev_s', call(pix, args(nm('ev_x'), nm('ev_y'), nm('ev_z')))),
+          asetI('ev_vox', nm('ev_k'), tern(bin('>', nm('ev_s'), num(0)),
+            call('ev_rgb', [aget('ev_cr', num(0)), aget('ev_cg', num(0)),
+              aget('ev_cb', num(0))]), num(-1))),
+          set('ev_k', bin('+', nm('ev_k'), inum(1))),
+          set('ev_ix', bin('+', nm('ev_ix'), num(1))),
+        ]),
+        set('ev_iy', bin('+', nm('ev_iy'), num(1))),
+      ]),
+      set('ev_iz', bin('+', nm('ev_iz'), num(1))),
+    ]),
+    /* ── 二、镜头（固定，明写偏差）+ 深度测试 ── */
+    ex(call('gl_framebegin', [])),
+    ex(call('gl_enable', [num(0x0b71)])),
+    ex(call('gl_lookat', [num(1.5), num(-1.75), num(1.25),
+      num(0), num(0), num(0), num(0), num(0), num(1)])),
+    /* ── 三、抽面 + 画：一格实心体素最多六面，邻居是空气的才发 ── */
+    ex(call('gl_begin', [num(7)])),
+    letI('ev_q', inum(0)),
+    set('ev_k', inum(0)),
+    set('ev_iz', num(0)),
+    whil(bin('<', nm('ev_iz'), num(N)), [
+      letR('ev_z0', edge(nm('ev_iz'))),
+      letR('ev_z1', bin('+', nm('ev_z0'), num(2 / N))),
+      letR('ev_iy', num(0)),
+      whil(bin('<', nm('ev_iy'), num(N)), [
+        letR('ev_y0', edge(nm('ev_iy'))),
+        letR('ev_y1', bin('+', nm('ev_y0'), num(2 / N))),
+        letR('ev_ix', num(0)),
+        whil(bin('<', nm('ev_ix'), num(N)), [
+          letR('ev_c', agetI('ev_vox', nm('ev_k'))),
+          iff(bin('>=', nm('ev_c'), num(0)), [
+            letR('ev_x0', edge(nm('ev_ix'))),
+            letR('ev_x1', bin('+', nm('ev_x0'), num(2 / N))),
+            letR('ev_vr', rm('floor', [bin('/', nm('ev_c'), num(65536))])),
+            letR('ev_vg', rm('floor', [bin('/', bin('-', nm('ev_c'),
+              bin('*', nm('ev_vr'), num(65536))), num(256))])),
+            letR('ev_vb', bin('-', nm('ev_c'), bin('+', bin('*', nm('ev_vr'), num(65536)),
+              bin('*', nm('ev_vg'), num(256))))),
+            ...FACES.flatMap((f) => faceStmts(f)),
+          ]),
+          set('ev_k', bin('+', nm('ev_k'), inum(1))),
+          set('ev_ix', bin('+', nm('ev_ix'), num(1))),
+        ]),
+        set('ev_iy', bin('+', nm('ev_iy'), num(1))),
+      ]),
+      set('ev_iz', bin('+', nm('ev_iz'), num(1))),
+    ]),
+    ex(call('gl_end', [])),
   ];
 }

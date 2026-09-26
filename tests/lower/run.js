@@ -27,7 +27,7 @@ import {
   BASICS, INTMATH, LOOPEXIT, DICT, UNARY, RECORD, INDEX, SLICE, CONV, VALUES, MUT,
   DEFER, BLOCKRET, METHOD, ASSERTOK, STRCAT, NUMSTR, NAMEDARG, CASEFOR, CASERANGE,
   CTIF, MEMBER, BLOCKSCOPE, BITS, CHARLIT, CTCONST, DECLS, ENUMVAL, FNVAL, FORIN,
-  HOIST, LITNONE, MATCH, METHOD2, OPTRES, POINTER, POSINIT, PUSH, INHERIT, OPOVER, TMPL, CTOR, VIRT, CTMPL, LAMBDA, FMT, FORMAT, POSTEST, CTOR2, METHOV, PUREVIRT, DTORCHAIN, MIXVIRT, OUTLINE, CTMPL2, FNOVL, METHOV2, CTOR3, REFPARAM, STATICMEM, BYVALUE, ARRFIELD, RANGEFOR, SWBREAK, NARROW, ENUMDO, DECLMIX, ARRMATH, GLOBALS, CHAIN, EVALARR, PDNOISE, EVDOWHILE, EVTAIL, EVARRVIEW, EVBLOCKCOPY, EVINST,
+  HOIST, LITNONE, MATCH, METHOD2, OPTRES, POINTER, POSINIT, PUSH, INHERIT, OPOVER, TMPL, CTOR, VIRT, CTMPL, LAMBDA, FMT, FORMAT, POSTEST, CTOR2, METHOV, PUREVIRT, DTORCHAIN, MIXVIRT, OUTLINE, CTMPL2, FNOVL, METHOV2, CTOR3, REFPARAM, STATICMEM, BYVALUE, ARRFIELD, RANGEFOR, SWBREAK, NARROW, ENUMDO, DECLMIX, ARRMATH, GLOBALS, CHAIN, EVALARR, PDNOISE, EVDOWHILE, EVTAIL, EVTAILSEMI, EVARRVIEW, EVBLOCKCOPY, EVINST,
 } from '../lib/cases.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -62,6 +62,7 @@ const FAMILIES = {
   noise: PDNOISE,
   dowhile: EVDOWHILE,
   tailexpr: EVTAIL,
+  tailsemi: EVTAILSEMI,
   arrview: EVARRVIEW,
   blockcopy: EVBLOCKCOPY,
   inst: EVINST,
@@ -130,10 +131,12 @@ const MIGRATED = {
      差别只有那张宿主表。这一格判据在的理由正是这个 —— 它证明"两门共用一份"没有走样。
      `dowhile` 与 `tailexpr` 是这门语言自己那两样写法：do-while 里的 `break`/`continue`
      （落成"旗子 + while"，从前抄两份 body 会当场报）、**末尾那句不带分号的表达式就是
-     返回值**（语料里十八份 `.kc` 这么写）。`blockcopy` 是**整块赋值与整块传参**
+     返回值**（语料里十八份 `.kc` 这么写），`tailsemi` 是**带分号那一档也算返回值**
+     （口径由 `eval_bench` 量出来，少这一格 `voxes/meatball.kc` 整幅图是黑的）。
+     `blockcopy` 是**整块赋值与整块传参**
      （说明书那句"两边大小相同就许"，见 §8.3.1）。`inst` 是**入口收一整块**（`(a[16])`：
      自己写乐器那一档，`insts/` 那五份靠它）。 */
-  evaldraw: ['basics', 'dowhile', 'tailexpr', 'arrview', 'blockcopy', 'inst'],
+  evaldraw: ['basics', 'dowhile', 'tailexpr', 'tailsemi', 'arrview', 'blockcopy', 'inst'],
 };
 
 /** 敲一条命令，回 `{ code, out, err }`（out 按行切好，末尾空行去掉）。 */

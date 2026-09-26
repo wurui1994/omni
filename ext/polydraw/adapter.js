@@ -35,7 +35,7 @@ import { gfx3FnDecls, gfx3GlobalDecls } from './gfx3-rt.js';
 import { glslAlign } from './glsl.js';
 import { NOISE_FNS, noiseGlobalDecls, noiseFnDecls } from './noise-rt.js';
 import {
-  graphGlobalDecls, graphFnDecls, graphInitStmts, graphFrameStmts,
+  graphGlobalDecls, graphFnDecls, graphInitStmts, graphFrameStmts, graph3dFrameStmts,
 } from './graph-rt.js';
 import { env } from '../../src/core/host/native.js';
 
@@ -2689,9 +2689,57 @@ function bodyOf(blk, params, C, curFn, boxInit = []) {
   }
   const prevLocalReal = C.localReal;
   C.localReal = localReal;
-  const out = [...lets, ...boxInit, ...stmtsOf(kids(blk), C)];
+  const out = [...lets, ...boxInit, ...tailReturn(stmtsOf(kids(blk), C))];
   C.localReal = prevLocalReal;
   return out;
+}
+
+/**
+ * **函数体最后那句表达式就是返回值 —— 带分号也算。**
+ *
+ * `eval.txt:92` 只写了"末尾那句表达式是返回值，而且不需要分号"，于是从前我们只在语法里
+ * 接了**不带分号**那一支（`polydraw.grammar` 的 `tail` 规则）。带分号那一档在原版里**照样
+ * 是返回值** —— 拿 arm64 那棵工作树的 `eval_bench` 量过（`kasm87` 编出来的那份真机器码）：
+ *
+ *     (x) 3+x;                     -> 8      带分号，照样是返回值
+ *     (x) y=3+x;                   -> 8      **赋值也算**，值是赋进去的那个
+ *     (x) {3+x;}                   -> 8      末尾是块 ⇒ 看块里最后那句
+ *     (x) y=3+x; if(x>0) y=99;     -> 0      末尾是 `if` / `for` / `while` ⇒ 0
+ *     (x){return(f(x));} f(a){a*2;} -> 10    **用户函数同一条规矩**
+ *
+ * 少这一格的后果不是"少个返回值"而是**整幅图黑掉**：`voxes/meatball.kc` 的最后一句是
+ * `a > (x*x+y*y+z*z-.9);`（带分号），3D 体素那一档拿它当"实心还是空气"——
+ * 回 0 就是满盘空气。
+ *
+ * 赋值那一档落成"照旧赋 + 回读那个名字"：目标不是光名字（下标写、整块写）的时候不管
+ * —— 回读要把下标表达式再算一遍，而那一格在语料里一份都没有。
+ */
+function tailReturn(list) {
+  if (list.length === 0) return list;
+  const last = list[list.length - 1];
+  if (last.kind === 'expr-stmt') {
+    return [...list.slice(0, -1), { kind: 'return', values: [last.expr] }];
+  }
+  if (last.kind === 'assign' && last.target.kind === 'name') {
+    return [...list, { kind: 'return', values: [last.target] }];
+  }
+  if (last.kind === 'block') {
+    return [...list.slice(0, -1), { kind: 'block', stmts: tailReturn(last.stmts) }];
+  }
+  return list;
+}
+
+/**
+ * `tailReturn` 的反面：把**帧体**末尾那句 `return` 退回成一句普通表达式。
+ * 为什么要这一格，见调用点的头注（入口在体后头还要补 `gl_flush` / `gfx_present`）。
+ */
+function untailFrame(list) {
+  if (list.length === 0) return list;
+  const last = list[list.length - 1];
+  if (last.kind !== 'return') return list;
+  const head = list.slice(0, -1);
+  if (last.values === undefined || last.values.length === 0) return head;
+  return [...head, { kind: 'expr-stmt', expr: last.values[0] }];
 }
 
 /**
@@ -2845,10 +2893,8 @@ function graphModeOf(infos, C) {
     throw new Error(`eval->IR: 主函数 \`(${key})\` 是 **1D 画曲线**那一档`
       + '（evaldraw.txt:1245），这条腿还没接 —— 接住的是 `()` 与 2D 那四档');
   }
-  if (key === 'x,y,z,r,g,b' || key === 'x,y,z,t,r,g,b') {
-    throw new Error(`eval->IR: 主函数 \`(${key.replace(/,([rgb])/g, ',&$1')})\` 是`
-      + ' **3D 体素**那一档（evaldraw.txt:1311），这条腿还没接');
-  }
+  if (key === 'x,y,z,r,g,b' && reals === 3) return { t: false, col: true, d3: true };
+  if (key === 'x,y,z,t,r,g,b' && reals === 4) return { t: true, col: true, d3: true };
   /* 别的（`(a[16])` 那种乐器、或者随便起的形参名）照旧：形参当零值的局部量。 */
   return null;
 }
@@ -3167,16 +3213,22 @@ export function evalToIR(cst, host, src = '') {
     ...bodyOf(kids(mainNode)[1], mainPs, C, '主函数'),
   ];
   /**
-   * **2D graphing 那四档**（`(x,y)` / `(x,y,t)` / 带 `&r,&g,&b` 的那两档）：
-   * 主体落成 `ev$pix`（每像素调一次），帧体换成"`frameinit` 一趟 + 两层循环 + 整行交出去"
-   * （`graph-rt.js`）。循环在语言这一侧 —— 设备只收**整行**，不收每像素一句。
+   * **graphing 那几档**（2D 的四档 `(x,y)` / `(x,y,t)` / 带 `&r,&g,&b` 的两档，
+   * 与 3D 体素那两档 `(x,y,z,&r,&g,&b)` / `(x,y,z,t,&r,&g,&b)`）：
+   * 主体落成 `ev$pix`（2D 每像素调一次、3D 每格体素调一次），帧体换成
+   * "`frameinit` 一趟 + 循环 + 交给设备"（`graph-rt.js`）。
+   * 循环在语言这一侧 —— 设备只收**整行**或**顶点批**，不收每像素一句。
    */
   if (C.graph !== null) {
     if (!C.gfxHost) {
-      throw new Error('eval->IR: 2D graphing 那一档（每像素调一次）要走**宿主设备**那条路'
+      throw new Error('eval->IR: graphing 那几档（每像素/每体素调一次）要走**宿主设备**那条路'
         + ' —— `--gfx ir`（产物自带光栅器）上没有整行那一格 `setrow`');
     }
     C.needGfx = true;
+    /* 3D 那两档画的是立方体 —— 走 `gl-rt.js` 那台立即模式的状态机，所以要把它带进来。
+       `usedGL` 一格不碰：每帧那句 `gl_framebegin` 由 `graph3dFrameStmts` 自己发
+       （脚本本身一句 GL 都没写）。 */
+    if (C.graph.d3 === true) C.needGL = true;
     decls.unshift(...graphGlobalDecls());
     decls.push(...graphFnDecls());
     decls.push({
@@ -3186,7 +3238,22 @@ export function evalToIR(cst, host, src = '') {
       ret: REAL,
       body: [...mainBody, { kind: 'return', values: [num(0)] }],
     });
-    mainBody = graphFrameStmts('ev$pix', C.graph);
+    mainBody = C.graph.d3 === true
+      ? graph3dFrameStmts('ev$pix', C.graph)
+      : graphFrameStmts('ev$pix', C.graph);
+  } else {
+    /**
+     * **帧体末尾那句不许是 `return`**（`()` 那一档）。
+     *
+     * 入口在体的**后头**还要补两句（攒着的顶点批 `gl_flush()` 与 `gfx_present()`，
+     * 见下头那两处）—— 末尾一句 `return` 会把它们整段变成死代码，于是**一帧都不present**，
+     * 图全黑。`tailReturn` 那一格（末尾表达式就是返回值）一上来，`01_minimal_noshader.pss`
+     * 这种"最后一句是 `glquad()`"的脚本全黑了，就是这个。
+     *
+     * 帧函数的返回值宿主压根不看（`evaldraw.txt:1237` 那张表里 `()` 这一档没有回值的
+     * 用处），所以把末尾那句 `return e` 退回成"算一遍 `e`"—— 副作用一格不少。
+     */
+    mainBody = untailFrame(mainBody);
   }
   /**
    * **每帧的 GL 初态**：PolyDraw 的宿主在调脚本之前会把 GL 摆回去

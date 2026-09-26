@@ -720,6 +720,16 @@ export const EVDOWHILE = ['i=5 n=10', 'j=7 s=16'];
 export const EVTAIL = ['a=7'];
 
 /**
+ * **带分号那一档也是返回值**（`ext/evaldraw/examples/tailsemi.kc`）。
+ *
+ * 四格口径拿 arm64 那棵工作树的 `eval_bench`（真 `kasm87` 的机器码）量的：
+ * `表达式;` 是那个值、`名字 = …;` 是赋进去的值、末尾是块就看块里最后那句、
+ * 末尾是 `if`/`for`/`while` 回 0。少这一格 `voxes/meatball.kc` 整幅图是黑的
+ * （它的实心判据就是带分号那一句）。
+ */
+export const EVTAILSEMI = ['semi=15', 'asg=20', 'blk=30', 'ctl=0'];
+
+/**
  * **`&a[i]` / `&p.x`：一格伴随的偏移形参**（`ext/evaldraw/examples/arrview.kc`）。
  *
  * 标准 IR 里没有"带偏移的视图"⇒ 收整块的形参后头跟一格 `名字$o`（口径在

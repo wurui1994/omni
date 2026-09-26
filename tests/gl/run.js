@@ -355,6 +355,68 @@ for (const [name, minFill, minColors] of [['04-shader.pss', 0.9, 1000],
   }
 }
 
+/* ── 第六节：**3D 体素那一档**（`(x,y,z,&r,&g,&b)`，2026-09-26）──────────────────
+ *
+ * 口径见 `docs/design/eval-realtime-gpu.md` §34.5：单位立方体里的网格每格调一次，
+ * 回值 `>0` 实心、颜色从 `&r,&g,&b` 拿；我们抽出表面那些面，一面一个四边形。
+ *
+ * 探针是个半径 .8 的实心球（颜色固定 (200,40,40)），判三条 —— 都是量出来的：
+ *   1. **真画出来了**（非黑格数在一个球该占的区间里，不是全黑也不是铺满）；
+ *   2. **重心在画布中心**（镜头看的是原点 —— 摆错了轴或者没摆镜头都会跑偏）；
+ *   3. **颜色是脚本给的那一族**（R 明显大于 G/B）—— 钉住 `&r,&g,&b` 真传回来了，
+ *      而不是拿调色板（2D 那两档的回值上色）画出来的。
+ */
+{
+  const probe = join(out, 'vox3d.kc');
+  writeFileSync(probe, '(x,y,z,&r,&g,&b)\nr=200; g=40; b=40;\n.64-(x*x+y*y+z*z);\n');
+  const pv3 = join(out, 'vox3d.rgba');
+  const r3 = spawnSync(process.execPath,
+    [join(ROOT, 'src/cli.js'), 'run', probe, '--backend', 'c', '-o', pv3],
+    { encoding: 'utf8', cwd: ROOT, timeout: 180000,
+      env: { ...process.env, OMNI_GFX: 'gl', OMNI_GFX_MODE: 'render' } });
+  if (r3.status !== 0 || !existsSync(pv3)) {
+    no('3D 体素那一档真画出来了', `${(r3.stdout ?? '').trim()} ${(r3.stderr ?? '').trim()}`.slice(0, 300));
+  } else {
+    const b = rgba(pv3);
+    const n = b.length / 4;
+    let nz = 0;
+    let sx = 0;
+    let sy = 0;
+    let sr = 0;
+    let sg = 0;
+    let sb = 0;
+    const w = 320;
+    for (let i = 0; i < b.length; i += 4) {
+      if (!(b[i] | b[i + 1] | b[i + 2])) continue;
+      nz++;
+      sx += (i / 4) % w;
+      sy += Math.floor((i / 4) / w);
+      sr += b[i];
+      sg += b[i + 1];
+      sb += b[i + 2];
+    }
+    if (nz > n * 0.05 && nz < n * 0.6) ok('3D 体素那一档真画出来了（一个球该占的格数）', `非黑 ${nz}/${n}`);
+    else no('3D 体素那一档真画出来了', `非黑 ${nz}/${n}（该在 5%~60% 之间）`);
+    const cx = Math.round(sx / Math.max(nz, 1));
+    const cy = Math.round(sy / Math.max(nz, 1));
+    if (nz > 0 && Math.abs(cx - w / 2) <= 12 && Math.abs(cy - 120) <= 12) {
+      ok('镜头看的是原点（重心在画布中心）', `重心 [${cx},${cy}]`);
+    } else {
+      no('镜头看的是原点', `重心 [${cx},${cy}]（该在 [160,120] 附近）`);
+    }
+    const ar = sr / Math.max(nz, 1);
+    const ag = sg / Math.max(nz, 1);
+    const ab = sb / Math.max(nz, 1);
+    if (nz > 0 && ar > ag * 2 && ar > ab * 2) {
+      ok('颜色是脚本那三格 `&r,&g,&b`（不是 2D 那两档的调色板）',
+        `平均 (${Math.round(ar)},${Math.round(ag)},${Math.round(ab)})`);
+    } else {
+      no('颜色是脚本那三格 `&r,&g,&b`',
+        `平均 (${Math.round(ar)},${Math.round(ag)},${Math.round(ab)})（R 该明显大）`);
+    }
+  }
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed（本机 OpenGL 设备）\n`);
 process.exit(fail === 0 ? 0 : 1);
 
