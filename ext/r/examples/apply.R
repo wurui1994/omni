@@ -145,3 +145,11 @@ cat(Reduce(function(a, b) if (a > b) a else b, c(3, 9, 2), accumulate = TRUE), "
 cat(length(Reduce(function(a, b) a + b, c(5), accumulate = TRUE)), "\n")
 ## accumulate = FALSE 与不写是同一件事
 cat(Reduce(function(a, b) a + b, c(1, 2, 3), accumulate = FALSE), "\n")
+## sapply / vapply：进去那条本来就带名字时，名字原样跟着（位置不动）
+spv <- c(a = 1, b = 2)
+print(sapply(spv, function(z) z * 2))
+print(vapply(spv, function(z) z + 1, numeric(1)))
+cat(sapply(spv, function(z) z * 2), names(sapply(spv, function(z) z * 2)), "\n")
+sps <- c(p = "ab", q = "c")
+print(sapply(sps, nchar))
+print(sapply(c("ab", "c"), nchar))

@@ -782,7 +782,9 @@ const NAME_KEEP_STR = new Map([
    `c` 也在里头 —— 它的名字是**接起来**而不是原样跟着（见 `namesExprOf` 的 `c` 那一格）。 */
 const NAME_KEEP = new Set([...NAME_KEEP_LGL, ...NAME_KEEP_NUM, ...NAME_KEEP_STR.keys(),
   'rev', 'head', 'tail', 'sort', 'c', 'diff', 'which.max', 'which.min', 'append', 'which',
-  'quantile', 'ifelse']);
+  'quantile', 'ifelse',
+  /* `sapply` / `vapply`：位置不动，名字原样跟着（进去那条带名字那一档，2026-09-26）。 */
+  'sapply', 'vapply']);
 /** 第 i 格（0 起）。方言的 `{kind:'index'}` 落成 `(aget …)`，赋值那侧落 `(aset …)`。 */
 const svGet = (v, i) => ({ kind: 'index', obj: v, index: i });
 const svLen = (v) => call1('alen', v);
@@ -1516,7 +1518,12 @@ function namesExprOf(x, types) {
    */
   if (fn === 'sapply' || fn === 'vapply') {
     const as = posArgs(x);
-    if (as.length < 1 || !isStrVec(typeOfExpr(as[0], types))) return null;
+    if (as.length < 1) return null;
+    const dt0 = typeOfExpr(as[0], types);
+    /* **进去那条本来就带名字**那一档（`sapply(c(a=1,b=2), f)` 在 R 里出 `a b` 一行）——
+       位置不动，所以名字原样跟着；这一格 2026-09-26 接的，从前当场报、白退一趟。 */
+    if (isNamedTy(dt0) || isNamedStr(dt0)) return namesExprOf(as[0], types);
+    if (!isStrVec(dt0)) return null;
     return exprOf(as[0], types);
   }
   /**
@@ -1986,7 +1993,10 @@ function applyTy(fn, x, types) {
   }
   /* `sapply` / `vapply` 在**字符向量**上会给结果加名字（R 的 `USE.NAMES`）——
      出来的是带名字的那几种（见 `namesExprOf` 里那一格）。 */
-  const named = strIn && (fn === 'sapply' || fn === 'vapply');
+  /* 名字有两个来源：进去那条是**字符向量**（R 的 `USE.NAMES`，名字就是那几个串），
+     或者进去那条**本来就带名字**（位置不动，名字原样跟着 —— 2026-09-26 接的）。 */
+  const named = (fn === 'sapply' || fn === 'vapply')
+    && (strIn || isNamedTy(dt) || isNamedStr(dt));
   if (bt.kind === 'string') return named ? RNSTRV : RSTRV;
   if (bt.kind === 'bool' || isLgl1(bt)) return named ? RNLGL : RLGL;
   return named ? RNVEC : RVEC;
