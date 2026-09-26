@@ -87,3 +87,17 @@ sv[["y"]] <- "qq"
 print(unlist(sv))
 cat(unlist(sv), "\n")
 cat(nchar(unname(unlist(sv))), "\n")
+
+# **`u <- unlist(d)` 之后 `u[["a"]]` 也接了**（从前这一格把 `u` 推成一张表 ——
+# `dictNames` 一看见 `[[…]]` 就那么认，而 R 里 `[[` 对**原子向量**同样合法）。
+# 现在"一望而知造向量"的那几格调用（`VEC_MAKERS`）把名字从那张表里摘出来。
+ud <- list(a = 1, b = 2)
+uu <- unlist(ud)
+print(uu)
+cat(names(uu), "\n")
+cat(uu[["a"]], uu["a"], sum(uu), "\n")
+cat(sort(uu), "\n")
+us <- sort(c(3, 1, 2))
+cat(us[[1]], us[[3]], "\n")
+ur <- rev(c(1, 2, 3))
+cat(ur[[1]], "\n")

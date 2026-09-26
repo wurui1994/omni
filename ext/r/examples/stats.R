@@ -84,3 +84,23 @@ sieve <- function(m) {
 p <- sieve(50)
 cat("primes:", p, "\n")
 cat("how many:", length(p), "\n")
+
+# **`quantile(xs)` 不给 `probs` 那一档名字接住了**：R 的五个标签
+# `0% 25% 50% 75% 100%` 是**编译期常量**，所以名字那一条走影子变量那条路
+# （合成一格 `c("0%", …)` 再发一遍），不用让 `r_quantile` 交出"值 + 名字"两样东西。
+# 给了 `probs` 的还是要明写 `names = FALSE` —— 那几个标签要照 R 的
+# `formatC(100*probs, format = "fg", width = 1, digits = 7)` 排，那是另一刀。
+qxs <- c(12.5, 3, 47, 8.25, 19, 3, 47, 0.5)
+qq <- quantile(qxs)
+print(qq)
+cat(qq, "\n")
+cat(names(qq), "\n")
+# `qq[[2]]` 在 R 里对原子向量也合法 —— 从前 `dictNames` 一看见 `[[…]]` 就把 `qq`
+# 当成一张表，于是名字那一条跟着就报。现在"一望而知造向量"的那几格调用
+# （`VEC_MAKERS`）把名字从那张表里摘出来。
+cat(qq[[2]], qq["50%"], qq[[4]] - qq[[2]], "\n")
+print(quantile(c(1, 2, 3, 4)))
+print(quantile(qxs, names = FALSE))
+print(quantile(qxs, probs = c(0, 0.5, 1), names = FALSE))
+print(quantile(c(5)))
+print(round(quantile(qxs), 2))

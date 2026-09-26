@@ -750,7 +750,8 @@ const NAME_KEEP_NUM = new Set([
 /* `NAME_KEEP` 只管那道门（`callOf` 里"名字跟不住就报"那一句）：这几格的名字跟得住。
    `c` 也在里头 —— 它的名字是**接起来**而不是原样跟着（见 `namesExprOf` 的 `c` 那一格）。 */
 const NAME_KEEP = new Set([...NAME_KEEP_LGL, ...NAME_KEEP_NUM,
-  'rev', 'head', 'tail', 'sort', 'c', 'diff', 'which.max', 'which.min', 'append', 'which']);
+  'rev', 'head', 'tail', 'sort', 'c', 'diff', 'which.max', 'which.min', 'append', 'which',
+  'quantile']);
 /** 第 i 格（0 起）。方言的 `{kind:'index'}` 落成 `(aget …)`，赋值那侧落 `(aset …)`。 */
 const svGet = (v, i) => ({ kind: 'index', obj: v, index: i });
 const svLen = (v) => call1('alen', v);
@@ -1246,6 +1247,21 @@ function hdrExprOf(x, types) {
   return S('');
 }
 
+/**
+ * `quantile(x)` 那一档回的是**带名字**的向量吗 —— 判据两条：**没给 `probs`**
+ * （给了就要照 R 的 `formatC(100*probs, format="fg", …)` 排那几个标签，那是另一刀）
+ * 且没写 `names = FALSE`。
+ */
+function qNamesDefault(x) {
+  if (namedArg(x, 'probs') !== undefined) return false;
+  if (posArgs(x).length >= 2) return false;
+  const nmArg = namedArg(x, 'names');
+  if (nmArg !== undefined && !trueFlag(x, 'names')) return false;
+  return true;
+}
+/** 不给 `probs` 时 R 那五个标签（`seq(0, 1, 0.25)` 各乘 100 再加个 `%`）。 */
+const QLABELS = ['0%', '25%', '50%', '75%', '100%'];
+
 function namesExprOf(x, types) {
   if (!isList(x)) return null;
   if (tag(x) === 'paren') return namesExprOf(kids(x)[0], types);
@@ -1417,6 +1433,16 @@ function namesExprOf(x, types) {
     return { kind: 'call', fn: { kind: 'name', name: h }, args: [ns, cnt] };
   }
   /**
+   * `quantile(x)` —— 不给 `probs` 时 R 回的是一条带名字的向量，那五个标签
+   * （`0% 25% 50% 75% 100%`）是**编译期常量**，所以名字那一条直接合成一格
+   * `c("0%", …)` 的 CST 再发一遍（与 `formatC` 改写成 `sprintf` 同一条路子，
+   * 见 `cstCall` 那段注）—— 不用给 `r_quantile` 加第二个返回值。
+   */
+  if (fn === 'quantile') {
+    if (!qNamesDefault(x)) return null;
+    return exprOf(cstCall('c', QLABELS.map((s) => cstStr(s))), types);
+  }
+  /**
    * `which(掩码)` —— 回的是**位置**，而 R 把被选中那几格的名字一起带回来
    * （量出来 `which(c(a=1,b=3,c=2) > 1)` 印 `b c` 一行、`2 3` 一行）。
    * `which(x > 2)` 在真 R 代码里很常见，所以这一格接住：名字那一条就是"按位置挑"
@@ -1528,7 +1554,23 @@ function dollarKey(node) {
  * 按名字取**（见 `RNVEC`），不是表。这一格只能按形状分 —— 被 `c(…)` / `setNames(…)`
  * 赋过的名字就是向量，不是表。
  */
-const VEC_MAKERS = new Set(['c', 'setNames', 'unname', 'numeric', 'double', 'integer', 'logical']);
+/**
+ * **右边一望而知是"造一条向量"的那几格调用** —— 这张表只有一个用处：把名字从
+ * `dictNames` 的"这是张表"里**摘出来**。`q[[2]]` / `u[["a"]]` 在 R 里对**原子向量**
+ * 也合法（`[[` 与 `[` 在这一档只差"带不带名字"），而 `dictNames` 一看见 `[[…]]`
+ * 就把那个名字当表 —— 于是 `q <- quantile(xs); q[[2]]` 会把 `q` 推成一张表，
+ * 名字那一条跟着就报（2026-09-26 撞上的）。
+ *
+ * 收进来的判据只有一条：**这个调用回的东西一定不是表**。所以 `list` 与 `table`
+ * 不在里头。
+ */
+const VEC_MAKERS = new Set(['c', 'setNames', 'unname', 'numeric', 'double', 'integer', 'logical',
+  'character',
+  /* 进出都是向量那一族（见 SPEC 第二节那一排） */
+  'sort', 'rev', 'head', 'tail', 'seq', 'seq_len', 'seq_along', 'rep', 'rep_len',
+  'cumsum', 'cumprod', 'cummax', 'cummin', 'diff', 'range', 'unique', 'which', 'order',
+  'rank', 'tabulate', 'quantile', 'unlist', 'sapply', 'vapply']);
+
 const isVecMakerCall = (node) => isList(node) && tag(node) === 'call'
   && tag(kids(node)[0]) === 'sym' && VEC_MAKERS.has(nameOf(kids(node)[0]));
 
@@ -1962,8 +2004,9 @@ function applyTy(fn, x, types) {
     case 'median': return REAL;
     /* `cor` / `cov` 回一格数（两条向量进）。 */
     case 'cor': case 'cov': return REAL;
-    /* `quantile` 回一条数值向量（`names = FALSE` 那一档 —— 见 `callOf`）。 */
-    case 'quantile': return RVEC;
+    /* `quantile` 回一条数值向量（`names = FALSE` 那一档 —— 见 `callOf`）。
+       不给 `probs` 又没关掉名字时回的是**带名字**的那一格：那五个标签是编译期常量。 */
+    case 'quantile': return qNamesDefault(x, types) ? RNVEC : RVEC;
     /* `zapsmall` 进出都是数值向量。 */
     case 'zapsmall': return RVEC;
     /* `rank` 并列取平均 —— 出来的可能带小数（`rank(c(2,2,1))` 是 `2.5 2.5 1.0`），
@@ -4987,10 +5030,16 @@ function callOf(x, types, extra, want, stmtPos) {
       }
       case 'quantile': {
         /**
-         * `quantile(x, probs, names = FALSE)` —— **只接 `names = FALSE`**：R 默认回的是
-         * 一条**带名字**的向量（`0% 25% 50% 75% 100%`），而这一档的名字是**跟着变量**走的
-         * （见第二节"带名字的向量"），一格表达式交不出"值 + 名字"两样东西。
-         * `names = FALSE` 那一档 R 回的就是裸向量，我们答得准。
+         * `quantile(x, probs, names = FALSE)`。
+         *
+         * **不给 `probs`** 那一档（`quantile(xs)`，真代码里最常见的写法）名字接住了：
+         * R 的那五个标签 `0% 25% 50% 75% 100%` 是**编译期常量**，所以名字那一条走
+         * 影子变量那条路（`namesExprOf` 里合成一格 `c("0%", …)` 再发一遍），
+         * 不用让 `r_quantile` 交出"值 + 名字"两样东西。
+         *
+         * **给了 `probs` 又没写 `names = FALSE` 的还是当场报**：那几个标签要照 R 的
+         * `formatC(100*probs, format = "fg", width = 1, digits = 7)` 排
+         * （`probs = c(0.1, 1/3)` 出的是 `10%` 与 `33.33333%`），那是另一刀。
          *
          * `type=` 只认 7（R 的默认）。缺失那一格：R 在 `na.rm = FALSE` 时**报错**
          * （不是悄悄丢掉），而我们的 `r_sort` 会丢 —— 所以没写 `na.rm = TRUE` 时
@@ -5001,10 +5050,12 @@ function callOf(x, types, extra, want, stmtPos) {
         if (isStrVec(t) || t.kind === 'string') throw new Error(strvGap('quantile'));
         if (!isVecTy(t)) throw new Error(`r->IR: quantile() 的第一格实参不是向量（是 ${t.kind}）`);
         const nmArg = namedArg(x, 'names');
-        if (nmArg === undefined || trueFlag(x, 'names')) {
-          throw new Error('r->IR: quantile() 要明写 `names = FALSE` —— R 默认回的是一条**带名字**'
-            + '的向量（`0% 25% …`），而这一档的名字跟着变量走（见 ext/r/SPEC.md 第二节），'
-            + '一格表达式交不出"值 + 名字"两样东西');
+        const pGiven = namedArg(x, 'probs') !== undefined || n >= 2;
+        if (pGiven && (nmArg === undefined || trueFlag(x, 'names'))) {
+          throw new Error('r->IR: 给了 `probs` 的 quantile() 要明写 `names = FALSE` ——'
+            + ' 那几个标签要照 R 的 `formatC(100*probs, format = "fg", width = 1, digits = 7)` 排'
+            + '（`probs = c(0.1, 1/3)` 出 `10%` 与 `33.33333%`），这一档还没接；'
+            + '不给 `probs` 那一档的五个标签是编译期常量，名字接住了');
         }
         const tyArg2 = namedArg(x, 'type');
         if (tyArg2 !== undefined) {
