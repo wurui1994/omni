@@ -207,7 +207,11 @@ function klockParts(i) {
  * "消掉一次点击/一次按键"就是这么写的（`polydraw.txt:381`、`:388`）。
  */
 function needInput() {
+  /* **窗口开着就听窗口**（`--mode view`）：每帧都重新问，不看 `D.keys` 那格缓存 ——
+     鼠标在动、键在按，缓存住就成了"输入是这一趟的常量"（那是离屏那一档的口径）。 */
+  if (winInput()) return;
   if (D.keys !== null) return;
+
   const keys = [];
   for (let i = 0; i < 256; i++) keys.push(0);
   D.keys = keys;
@@ -286,8 +290,16 @@ const G = {
   /* **名字表**（下标 -> 串）：文件纹理那一档要在这一层把下标还原成文件名、再按脚本所在的
      目录拼成路径（目录只有宿主知道，见 `texPath`）。 */
   names: [],
-  /* 读回那一格（一格一个 0xRRGGBB，与 `D.fb` 同形）：一帧只读一次，数组复用。 */
-  gpu: null,
+  /* 读回那一格。两条路同一件事，先试**整块**那条（`readBytes`，零拷贝）：
+     `gpx`/`gpv` 是 `w*h*4` 字节的 RGBA；拿不到才退回一格一个 0xRRGGBB 的 `gpu`
+     （那条路一格像素两次跨界，320×240 = 15 万次/帧，见 §16.5）。 */
+  gpu: null, gpx: null, gpv: null,
+  /* **窗口开着没有**（`--mode view`）+ 贴窗口那一块 RGBA 与输入那两块（都复用）。
+     `wasWin` 记"这一趟开过窗口"—— `nextframe` 靠它分清"窗口关了该收摊"与"压根没窗口"。 */
+  win: false, wasWin: false,
+  wbuf: null, wview: null, wst: null, wstv: null, wkeys: null, wkeysv: null,
+  /* 标题栏那格 fps（一秒一次，与原生腿那一手同一格）。 */
+  t0: -1, nf: 0,
 };
 
 const glWant = () => env('OMNI_GFX') === 'gl';
@@ -313,7 +325,10 @@ function glNeed() {
     stderr('#gfx gl 那份扩展里没有 open —— 这一趟走 CPU 备选\n');
     return false;
   }
-  if (m.open(D.w, D.h) !== 0) {
+  /* **窗口那一档先试窗口**（`--mode view`）：设备那一侧 `omni_ev_gl_win` 与
+     `omni_ev_gl_open` **二者只调一个**（开过离屏的再要窗口它直接回 1）。
+     窗口开不出来（没装 GLFW / 没有显示 / 不在主线程）就退回离屏那一句。 */
+  if (glWinOpen(m) !== true && m.open(D.w, D.h) !== 0) {
     stderr(`#gfx gl 开不出来（${m.error()}）—— 这一趟走 CPU 备选\n`);
     return false;
   }
@@ -325,6 +340,25 @@ function glNeed() {
     m.def(d[0], d[1], d[2]);
   }
   glClearHost();
+  return true;
+}
+
+/**
+ * **窗口那一档**（`--mode view` 在 js 腿上，§16.4）—— 与原生腿那一侧同一批函数
+ * （`winopen`/`winpresent`/`wintitle`/`wininput`）。回 true = 窗口开着了。
+ * 开不出来（没装 GLFW / 没有显示 / 不在主线程）就印一行、回 false：调用方退回离屏。
+ */
+function glWinOpen(m) {
+  if (modeOf() !== 'view' || typeof m.winopen !== 'function') return false;
+  const t = env('OMNI_GFX_TITLE');
+  const title = t === undefined || t === null || t === '' ? 'omni' : String(t);
+  if (m.winopen(D.w, D.h, title) !== 0) {
+    stderr(`#gfx view 开不出窗口（${m.error()}）—— 这一趟照旧离屏\n`);
+    return false;
+  }
+  G.win = true;
+  G.wasWin = true;
+  stderr(`#gfx view 窗口 ${D.w}x${D.h}\n`);
   return true;
 }
 
@@ -449,7 +483,17 @@ function cone(x0, y0, r0, x1, y1, r1, c) {
 }
 
 /** 这一帧的**裸 RGBA**（一字符一字节、第 0 行在上、alpha 恒 255）—— 两个出口都从它来。 */
+/** GPU 那一层第 i 格的颜色（0xRRGGBB）—— 两条读回路（整块 / 一格一格）归到这一格。 */
+function gpuAt(i) {
+  if (G.gpv !== null) {
+    const o = i * 4;
+    return G.gpv.getUint8(o) * 65536 + G.gpv.getUint8(o + 1) * 256 + G.gpv.getUint8(o + 2);
+  }
+  return G.gpu === null ? 0 : G.gpu[i];
+}
+
 function rgbaBytes() {
+
   const rows = [];
   for (let y = 0; y < D.h; y++) {
     let row = '';
@@ -457,7 +501,7 @@ function rgbaBytes() {
       const i = y * D.w + x;
       /* GL 那一档：`-1` 是"这一格宿主没画" ⇒ 取 GPU 那一层读回来的那一格（§16）。 */
       const raw = D.fb[i];
-      const v = (raw < 0 ? (G.gpu === null ? 0 : G.gpu[i]) : raw) & 0xffffff;
+      const v = (raw < 0 ? gpuAt(i) : raw) & 0xffffff;
       row += String.fromCharCode((v - v % 65536) / 65536)
         + String.fromCharCode((v % 65536 - v % 256) / 256)
         + String.fromCharCode(v % 256) + String.fromCharCode(255);
@@ -494,6 +538,9 @@ function frameSetup() {
 
   const n = one >= 0 ? one + 1 : intEnv('OMNI_FRAMES', 1);
   D.frames = n > 0 ? n : 1;
+  /* **窗口那一档**：默认没有上限 —— 收摊的是"窗口关了"，不是帧数（与原生腿同一句话）。
+     `OMNI_FRAMES=N` 仍然管用（判据要一个能自己停下来的口子）。 */
+  if (G.win && env('OMNI_FRAMES') === undefined && one < 0) D.frames = Number.MAX_SAFE_INTEGER;
   D.perf = env('OMNI_GFX_PERF') === '1' ? 1 : 0;
   /* 暖态从第几帧算起（缺省跳 1 帧）—— 与 `omni_fmt.c` 的 `g_gskip` 同一条口径，
      理由见 `frameEnd`。只有一帧时不跳：不然一个数都报不出来。 */
@@ -529,6 +576,8 @@ function frameEnd() {
     present();
     return;
   }
+  /* 窗口那一档：**每帧都交**（不看 dirty）—— 真实时循环，这一格就是贴 + swap + poll。 */
+  if (G.win) { present(); return; }
   if (D.dirty && D.only < 0) present();
 }
 
@@ -671,6 +720,8 @@ export function gfxCall(name, args) {
       D.refr = 0;
       if (D.frames < 0) frameSetup();
       if (D.fno > 0) frameEnd();
+      /* 窗口那一档：窗口一关就收摊（`winPresent` 里把 `G.win` 放下了）。 */
+      if (G.wasWin && !G.win) { perfReport(); return 0; }
       if (D.fno >= D.frames) { perfReport(); return 0; }
       D.fno += 1;
       D.kn = 0;                         /* 新一帧：`klock` 那个"帧内第几次"从头数 */
@@ -913,24 +964,121 @@ function outPath() {
  */
 function present() {
   if (!D.on) return;
-  /* GL 那一档：把 GPU 那一层读回来（一帧只读一次），宿主那一层（-1 = 没人画）盖上去 ——
+  /* GL 那一档：把 GPU 那一层读回来（一帧只读一次），宿主那一层（-1 = 没画）盖上去 ——
      合成在 `rgbaBytes` 里按格做（那儿本来就要逐格取一次）。 */
   if (G.on) {
-    if (G.gpu === null) {
-      const n = D.w * D.h;
-      const buf = [];
-      for (let i = 0; i < n; i++) buf.push(0);
-      G.gpu = buf;
+    if (typeof G.m.readBytes === 'function') {
+      const n8 = D.w * D.h * 4;
+      if (G.gpx === null || G.gpx.byteLength !== n8) {
+        G.gpx = new ArrayBuffer(n8);
+        G.gpv = new DataView(G.gpx);
+      }
+      G.m.readBytes(G.gpx);
+    } else {
+      if (G.gpu === null) {
+        const n = D.w * D.h;
+        const buf = [];
+        for (let i = 0; i < n; i++) buf.push(0);
+        G.gpu = buf;
+      }
+      G.m.readInto(G.gpu);
     }
-    G.m.readInto(G.gpu);
+  }
+  /* **窗口那一档**：贴到窗口上就是"交帧"（`OMNI_GFX_OUT` 给了的话顺带写一份，
+     只留最后一帧 —— 判据要的就是那个口子）。与原生腿 `omni_fmt.c` 的 `gfx_present`
+     逐句对应，所以 view 与 render 两档的画面仍然逐字节相同。 */
+  if (G.win) {
+    winPresent();
+    /* 窗口那一档**只在 `OMNI_GFX_OUT` 明说时**顺带写一份（判据要那个口子）——
+       与原生腿一致：没明说就不往 `.omni-cache/gfx/frame.png` 里每帧写一次。 */
+    const o = env('OMNI_GFX_OUT');
+    if (o === undefined || o === null || o === '') { D.dirty = false; return; }
   }
   const p = outPath();
   const cut = p.lastIndexOf('/');
   if (cut > 0) mkdirAll(p.slice(0, cut));
   const kind = surfaceKind(p);
   writeBinary(p, kind === 'rgba' ? gfxSurfaceBytes() : pngFromRgba(rgbaBytes(), D.w, D.h));
-  stdout(`#gfx ${kind} ${p} ${D.w} ${D.h}\n`);
+  if (!G.win) stdout(`#gfx ${kind} ${p} ${D.w} ${D.h}\n`);
   D.dirty = false;
+}
+
+/**
+ * 把这一帧贴到窗口上（**整块**递过去：`w*h*4` 字节的 RGBA，零拷贝 —— 与顶点那一族
+ * 同一条规矩）。窗口一关就把 `G.win` 放下：`nextframe` 那一格据此收摊。
+ */
+function winPresent() {
+  const n8 = D.w * D.h * 4;
+  if (G.wbuf === null || G.wbuf.byteLength !== n8) {
+    G.wbuf = new ArrayBuffer(n8);
+    G.wview = new DataView(G.wbuf);
+  }
+  const n = D.w * D.h;
+  /* 整块那条读回路：GPU 那一层已经是**按格对齐的 RGBA 字节**了 —— 那几格直接四字节
+     抄过去（`getInt32`/`setInt32`，一格两句），只有宿主画过的那几格要现拼。 */
+  if (G.gpv !== null) {
+    for (let i = 0; i < n; i++) {
+      const raw = D.fb[i];
+      const o = i * 4;
+      if (raw < 0) {
+        G.wview.setInt32(o, G.gpv.getInt32(o, false), false);
+        continue;
+      }
+      const v = raw & 0xffffff;
+      G.wview.setUint8(o, (v - v % 65536) / 65536);
+      G.wview.setUint8(o + 1, (v % 65536 - v % 256) / 256);
+      G.wview.setUint8(o + 2, v % 256);
+      G.wview.setUint8(o + 3, 255);
+    }
+  } else {
+    for (let i = 0; i < n; i++) {
+      const raw = D.fb[i];
+      const v = (raw < 0 ? gpuAt(i) : raw) & 0xffffff;
+      const o = i * 4;
+      G.wview.setUint8(o, (v - v % 65536) / 65536);
+      G.wview.setUint8(o + 1, (v % 65536 - v % 256) / 256);
+      G.wview.setUint8(o + 2, v % 256);
+      G.wview.setUint8(o + 3, 255);
+    }
+  }
+  if (G.m.winpresent(G.wbuf) === 0) G.win = false;
+  /* 标题上写 fps（一秒一次）—— 与原生腿那一手同一格，顺带当"帧在推进"的证据。 */
+  const now = nowMs();
+  G.nf += 1;
+  if (G.t0 < 0) G.t0 = now;
+  if (now - G.t0 >= 1000) {
+    const t = env('OMNI_GFX_TITLE');
+    const name = t === undefined || t === null || t === '' ? 'omni' : String(t);
+    G.m.wintitle(`${name} — ${ms1(G.nf * 1000 / (now - G.t0))} fps`);
+    G.t0 = now;
+    G.nf = 0;
+  }
+}
+
+/**
+ * **窗口那一档的输入**：每帧都重新问（鼠标在动、键在按）。回 true = 这一档管了。
+ * 与原生腿 `gfx_input_win` 逐句对应：`mousx/mousy` 是画布坐标（设备那侧已按
+ * 窗口/帧缓冲的比例折算过）、`keystatus[]` 是 DOS 扫描码。
+ */
+function winInput() {
+  if (!G.win || typeof G.m.wininput !== 'function') return false;
+  if (G.wst === null) {
+    G.wst = new ArrayBuffer(24);
+    G.wstv = new DataView(G.wst);
+    G.wkeys = new ArrayBuffer(256);
+    G.wkeysv = new DataView(G.wkeys);
+  }
+  if (G.m.wininput(G.wst, G.wkeys) === 0) return false;
+  D.mx = G.wstv.getFloat64(0, true);
+  D.my = G.wstv.getFloat64(8, true);
+  D.bst = Math.trunc(G.wstv.getFloat64(16, true));
+  if (D.keys === null) {
+    const keys = [];
+    for (let i = 0; i < 256; i++) keys.push(0);
+    D.keys = keys;
+  }
+  for (let i = 0; i < 256; i++) D.keys[i] = G.wkeysv.getUint8(i) !== 0 ? 1 : 0;
+  return true;
 }
 
 /* ── 顶点批（`(gfxbatch 类 数 顶点)`）：这一档的落点 ───────────────────────────

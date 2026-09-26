@@ -55,6 +55,12 @@ int omni_ev_gl_capbegin(int siz);
 int omni_ev_gl_capend(int slot);
 void omni_ev_gl_bindtex(int slot);
 void omni_ev_gl_activetex(int unit);
+/* **窗口那一档**（`--mode view`，§13.9）—— 与原生腿 `dlopen` 的那几格是同一批函数。 */
+int omni_ev_gl_win(int w, int h, const char *title);
+int omni_ev_gl_win_on(void);
+int omni_ev_gl_win_present(const unsigned char *rgba);
+void omni_ev_gl_win_title(const char *s);
+int omni_ev_gl_win_input(double *mx, double *my, long *bst, unsigned char *keys);
 
 /* ── 取实参那几手 ─────────────────────────────────────────────────────────── */
 
@@ -188,6 +194,25 @@ static napi_value jsReadInto(napi_env env, napi_callback_info info) {
   }
   free(px);
   return mknum(env, 0);
+}
+
+/**
+ * `readBytes(ab)` —— 把这一帧**整块**读回来（`ab` 要 `w*h*4` 字节，RGBA、上下正）。
+ *
+ * 与 `readInto` 同一件事，只是**零拷贝**那条路：`readInto` 一格像素两次跨界
+ * （`napi_create_double` + `napi_set_element`），320×240 就是 15 万次 / 帧 ——
+ * 量出来 js 腿 view 那一档一帧里有 ~6ms 是它（2026-09-26，§16.5）。回 0 = 成了。
+ */
+static napi_value jsReadBytes(napi_env env, napi_callback_info info) {
+  ARGS(1);
+  bool isab = false;
+  void *data = NULL;
+  size_t nb = 0;
+  if (napi_is_arraybuffer(env, a[0], &isab) != omni_napi_ok || !isab) return mknum(env, 1);
+  if (napi_get_arraybuffer_info(env, a[0], &data, &nb) != omni_napi_ok || data == NULL) {
+    return mknum(env, 1);
+  }
+  return mknum(env, omni_ev_gl_read((unsigned char *)data));
 }
 
 static napi_value jsDef(napi_env env, napi_callback_info info) {
@@ -404,6 +429,84 @@ static napi_value jsReady(napi_env env, napi_callback_info info) {
   return mknum(env, omni_ev_gl_ready());
 }
 
+/* ── **窗口那一档**（`--mode view` 在 js 腿上，§16.4）─────────────────────────
+ *
+ * 与原生腿那一侧**同一批函数**（`omni_fmt.c` 里 `dlsym` 来的那几格）—— 所以两条腿的
+ * 窗口行为天然一致：贴一张宿主合成好的 RGBA + swap + poll，输入从窗口问。
+ *
+ * 一帧只过四趟边界（`winpresent` / `wininput` / 偶尔 `wintitle`），像素是**整块**
+ * （`ArrayBuffer`，零拷贝）—— 与顶点那一族同一条规矩（见 `jsBatch` 的头注）。
+ */
+static napi_value jsWinOpen(napi_env env, napi_callback_info info) {
+  ARGS(3);
+  char *t = str(env, a[2]);
+  int r = omni_ev_gl_win((int)num(env, a[0]), (int)num(env, a[1]), t);
+  free(t);
+  return mknum(env, r);
+}
+
+static napi_value jsWinOn(napi_env env, napi_callback_info info) {
+  (void)info;
+  return mknum(env, omni_ev_gl_win_on());
+}
+
+/** `winpresent(ab)` —— `ab` 是 `w*h*4` 字节的 RGBA（上下正）。回 1 = 窗口还开着。 */
+static napi_value jsWinPresent(napi_env env, napi_callback_info info) {
+  ARGS(1);
+  bool isab = false;
+  void *data = NULL;
+  size_t nb = 0;
+  if (napi_is_arraybuffer(env, a[0], &isab) == omni_napi_ok && isab) {
+    napi_get_arraybuffer_info(env, a[0], &data, &nb);
+  }
+  return mknum(env, omni_ev_gl_win_present((const unsigned char *)data));
+}
+
+static napi_value jsWinTitle(napi_env env, napi_callback_info info) {
+  ARGS(1);
+  char *s = str(env, a[0]);
+  if (s != NULL) { omni_ev_gl_win_title(s); free(s); }
+  return mknum(env, 0);
+}
+
+/**
+ * `wininput(stateAb, keysAb)` —— 一次问完窗口那一族输入，**全写进调用方给的两块**：
+ *
+ *   `stateAb`  3 个 double：`mousx` / `mousy` / `bstatus`
+ *   `keysAb`   256 字节：`keystatus[]`（1 = 按着）
+ *
+ * 回 1 = 问到了（窗口开着）、0 = 没窗口。这么定形状是为了**一帧只过一趟边界**：
+ * 建对象/数组要每格一次 `napi_set_element`，而且那两格 N-API 函数我们这份头里没有
+ * （ADR-0038：只声明用得着的那几格）。
+ */
+static napi_value jsWinInput(napi_env env, napi_callback_info info) {
+  ARGS(2);
+  unsigned char keys[256];
+  double mx = 0, my = 0;
+  long b = 0;
+  memset(keys, 0, sizeof(keys));
+  if (omni_ev_gl_win_input(&mx, &my, &b, keys) != 0) return mknum(env, 0);
+  bool isab = false;
+  void *data = NULL;
+  size_t nb = 0;
+  if (napi_is_arraybuffer(env, a[0], &isab) == omni_napi_ok && isab
+      && napi_get_arraybuffer_info(env, a[0], &data, &nb) == omni_napi_ok
+      && data != NULL && nb >= 3 * sizeof(double)) {
+    double *st = (double *)data;
+    st[0] = mx;
+    st[1] = my;
+    st[2] = (double)b;
+  }
+  isab = false;
+  data = NULL;
+  nb = 0;
+  if (napi_is_arraybuffer(env, a[1], &isab) == omni_napi_ok && isab
+      && napi_get_arraybuffer_info(env, a[1], &data, &nb) == omni_napi_ok && data != NULL) {
+    memcpy(data, keys, nb < sizeof(keys) ? nb : sizeof(keys));
+  }
+  return mknum(env, 1);
+}
+
 #define PUT(name, fn) do { \
   napi_value f; \
   napi_create_function(env, name, (size_t)-1, fn, NULL, &f); \
@@ -418,6 +521,7 @@ napi_value napi_register_module_v1(napi_env env, napi_value exports) {
   PUT("cull", jsCull);
   PUT("batch", jsBatch);
   PUT("readInto", jsReadInto);
+  PUT("readBytes", jsReadBytes);
   PUT("def", jsDef);
   PUT("shader", jsShader);
   PUT("uniloc", jsUniloc);
@@ -440,6 +544,11 @@ napi_value napi_register_module_v1(napi_env env, napi_value exports) {
   PUT("activetex", jsActivetex);
   PUT("error", jsError);
   PUT("ready", jsReady);
+  PUT("winopen", jsWinOpen);
+  PUT("winon", jsWinOn);
+  PUT("winpresent", jsWinPresent);
+  PUT("wintitle", jsWinTitle);
+  PUT("wininput", jsWinInput);
   return exports;
 }
 

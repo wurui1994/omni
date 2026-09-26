@@ -1194,6 +1194,45 @@ N-API 那一侧收 **普通 JS 数组**（`napi_get_array_length` + `napi_get_el
 （原生腿的 dylib、js 腿的 .node）是 `cli.js` 解析旗子时顺手编出来并摆进环境的；
 只设环境变量的话它们不会被编，设备**悄悄回落 CPU 备选**（判据第一版就是这么假红的）。
 
+### 16.6 **自动 FFI** + js 腿的窗口（2026-09-26）
+
+用户定的口径：**除浏览器（WebGL2）之外，js 腿也走 FFI 那台设备，`--mode view` 也算。**
+落成三件事：
+
+1. **没明说 `--gfx` 时 CLI 自己开 `gl`**（`applyGfxFlags` + `wantsShaders`）——
+   判据是"脚本里有没有着色器"（`@v`/`@f`/`@g` 区段，或调过 `glsetshader`），
+   **不是"有没有用 GL"**：立即模式的几何 CPU 备选自己画得了，而且 `tests/lower` 的
+   `02-gl.pss` 比的就是那份软光栅的像素，偷偷换成 GPU 等于把判据换了。
+   从前 `omni run balls.pss`（默认 js 腿）当场报"这格设备（CPU 备选）没有可编程管线"。
+2. **js 腿也开得出窗口**：那份 `.node` 里补了 `winopen`/`winon`/`winpresent`/`wintitle`/
+   `wininput`（就是原生腿 `dlsym` 的同一批 C 函数），宿主那一侧 `glNeed` 在 view 模式下
+   **先试窗口**（设备那边 `omni_ev_gl_win` 与 `omni_ev_gl_open` 二者只调一个，开过离屏的
+   再要窗口它直接回 1 —— 第一版就是这么"开不出窗口（）"的）。
+   `--mode view` 默认仍补 `--backend c`（原生腿快一倍多），明说 `--backend js` 的照旧。
+3. **像素出来那条路也零拷贝**：`readBytes(ab)` —— `readInto` 一格像素两次跨界
+   （`napi_create_double` + `napi_set_element`），320×240 就是 15 万次/帧。
+
+**FFI 到底多贵**（量的是那份 `.node`，M 系列 macOS，取五趟最小值）：
+
+    ready()（空过一趟边界）        15 ns/次
+    cls(0)                       128 ns/次（里头是真 glClear）
+    batch 3 顶点（ArrayBuffer）   1.07 µs/次
+    batch 300 顶点（ArrayBuffer）  2.4 µs/次   ⇒ 边际 ~5ns/顶点，全在 GL 那一侧
+    batch 300 顶点（普通数组）     210 µs/次   ⇒ **87 倍**，所以顶点必须整块递
+    JS 侧打包（DataView）         0.68 ns/格 double
+
+`ken/balls.pss`（16384 个多边形、49152 顶点/帧）一帧只有 **59 次设备调用**
+（34 `gfxarr` + 17 `gfxbatch` + 8 格查询）—— 合批之后 draw call 本来就不频繁，
+**边界那一格一帧合计 ~1 µs**，可以忽略。剩下的差是语言那一半：
+
+    ken/balls.pss，320×240，view 模式 300 帧（同一台 GL 设备）
+    腿      每帧（循环）   墙上/帧    倍数
+    c        12.5ms       21.5ms     1.0
+    js       31.5ms       42.9ms     2.5     ← 差在 V8 跑主脚本，不在 FFI
+
+同一份脚本第 2 帧的图 **js 腿与原生腿逐字节相同**（`tests/gl` 第五节钉住这一条）。
+**js 软渲染**（不要 GPU 也能出图）记在欠账里，往后再做。
+
 ## 17. 第七刀：**正确性优先**（2026-09-24 用户定的口径）
 
 > 你需要在正确的情况下优化速度。目前还有很多例子渲染都不正确，包括基本的例子。

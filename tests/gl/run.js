@@ -292,6 +292,69 @@ for (const [name, minFill, minColors] of [['04-shader.pss', 0.9, 1000],
   }
 }
 
+/* ── 第五节：**js 腿走同一台设备**（"自动 FFI"，2026-09-26）────────────────────
+ *
+ * `--backend js` 不编不链（改完立刻能跑），设备那一半靠那份 `.node`（`process.dlopen`）——
+ * 也就是同一份 `omni_ev_gl.c`，只是进门的方式不同。这一节判三条：
+ *   1. **没明说 `--gfx` 也走 GPU**：脚本里有着色器时 CLI 自己开 `gl` 那一档
+ *      （从前 `omni run balls.pss` 当场报"CPU 备选没有可编程管线"）；
+ *   2. **两条腿逐字节相同**：同一份 `.pss` 的第 2 帧，js 腿与原生腿一个字节都不差 ——
+ *      这一条同时钉住那两条零拷贝的路（顶点 `ArrayBuffer` 进、像素 `readBytes` 出）；
+ *   3. **js 腿也开得出窗口**（`--mode view`）：窗口那张帧缓冲里真有像素。
+ */
+{
+  const src = join(ROOT, 'ext/polydraw/examples/04-shader.pss');
+  const pj = join(out, '04-shader.js.rgba');
+  const pc2 = join(out, '04-shader.c.rgba');
+  /* 第一条：**一格 `--gfx` 都不给**（`OMNI_GFX` 也不给）—— 该由 CLI 自己认出着色器。 */
+  const clean = { ...process.env };
+  delete clean.OMNI_GFX;
+  delete clean.OMNI_GFX_MODE;
+  const rj = spawnSync(process.execPath,
+    [join(ROOT, 'src/cli.js'), 'run', src, '--backend', 'js', '--frame', '2', '-o', pj],
+    { encoding: 'utf8', cwd: ROOT, timeout: 120000, env: clean });
+  if (rj.status !== 0 || !existsSync(pj)) {
+    no('js 腿：没明说 --gfx 也自己走 GPU（自动 FFI）',
+      `${(rj.stdout ?? '').trim()} ${(rj.stderr ?? '').trim()}`.slice(0, 300));
+  } else if ((rj.stderr ?? '').includes('#gfx gl 挂不上')) {
+    no('js 腿：没明说 --gfx 也自己走 GPU（自动 FFI）', (rj.stderr ?? '').trim().slice(0, 200));
+  } else {
+    const s = stat(pj);
+    if (s.nz >= s.n * 0.9) ok('js 腿：没明说 --gfx 也自己走 GPU（自动 FFI）', `非黑 ${s.nz}/${s.n}`);
+    else no('js 腿：没明说 --gfx 也自己走 GPU', `只画了 ${s.nz}/${s.n} 格（着色器没生效？）`);
+    const rc = spawnSync(process.execPath,
+      [join(ROOT, 'src/cli.js'), 'run', src, '--backend', 'c', '--frame', '2', '-o', pc2],
+      { encoding: 'utf8', cwd: ROOT, timeout: 120000, env: { ...clean, OMNI_GFX: 'gl' } });
+    if (rc.status !== 0 || !existsSync(pc2)) {
+      no('js 腿与原生腿逐字节相同（同一台 GL 设备）', (rc.stderr ?? '').trim().slice(0, 200));
+    } else {
+      const a = rgba(pj);
+      const b = rgba(pc2);
+      let diff = 0;
+      for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) diff++;
+      if (diff === 0) ok('js 腿与原生腿逐字节相同（顶点进、像素出，两条都是零拷贝）');
+      else no('js 腿与原生腿逐字节相同', `${diff} 个字节不同`);
+    }
+  }
+  /* 第三条：js 腿的窗口（`--mode view`）。开不出窗口的机器上跳过，与第四节同一档口径。 */
+  const rv2 = spawnSync(process.execPath,
+    [join(ROOT, 'src/cli.js'), 'run', src, '--backend', 'js', '--mode', 'view'],
+    { encoding: 'utf8', cwd: ROOT, timeout: 120000,
+      env: { ...clean, OMNI_FRAMES: '3', OMNI_GFX_WINDBG: '1' } });
+  const ev2 = rv2.stderr ?? '';
+  if (!ev2.includes('#gfx view 窗口')) {
+    process.stdout.write('  --   js 腿这台机器上开不出窗口 —— 那一格跳过\n');
+  } else {
+    const m2 = /#gfx win 第 \d+ 帧 非黑 (\d+)\/(\d+)/.exec(ev2);
+    if (m2 !== null && Number(m2[1]) > 0) {
+      ok('js 腿也开得出窗口（`--mode view`，那份 .node 里的 winopen/winpresent）',
+        `非黑 ${m2[1]}/${m2[2]}`);
+    } else {
+      no('js 腿也开得出窗口', `窗口那张帧缓冲里没量到像素（${ev2.trim().slice(0, 200)}）`);
+    }
+  }
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed（本机 OpenGL 设备）\n`);
 process.exit(fail === 0 ? 0 : 1);
 

@@ -3682,6 +3682,45 @@ function evGlAddon() {
 }
 
 /**
+ * **把本机 GL 设备那两份东西摆进环境变量**（编不出来就留空，设备自己回落 CPU 备选）：
+ *
+ *   `OMNI_GL_LIB`      原生腿 `dlopen` 的那份 dylib（§13.8）
+ *   `OMNI_EV_GL_ADDON` js 腿 / 解释器腿 `process.dlopen` 的那份 `.node`（§16）
+ *
+ * **两条腿共用同一份设备代码**（`src/runtime-gl/omni_ev_gl.c`），只是进门的方式不同。
+ * 回 `[lib, addon]`（拿不到的那格是 `null`）—— 调用方据此决定"要不要自己开 GL 那一档"。
+ */
+function glDevicePaths() {
+  let lib = env('OMNI_GL_LIB');
+  if (lib === undefined || lib === null || lib === '') {
+    lib = glPlugin();
+    if (lib !== null) setEnv('OMNI_GL_LIB', lib);
+  }
+  let addon = env('OMNI_EV_GL_ADDON');
+  if (addon === undefined || addon === null || addon === '') {
+    addon = evGlAddon();
+    if (addon !== null) setEnv('OMNI_EV_GL_ADDON', addon);
+  }
+  return [lib === '' ? null : lib, addon === '' ? null : addon];
+}
+
+/**
+ * 这份 EVAL 脚本**非 GPU 不可**吗（`applyGfxFlags` 的"自动 FFI"判据）。
+ *
+ * 只认**着色器**那一族：`@v` / `@f` / `@g` 区段（行首那一格，`polydraw.txt` 的写法是
+ * `@v:` 或 `@v` 单独一行），或者调过 `glsetshader`。理由见 `applyGfxFlags` 那段注：
+ * 立即模式的几何 CPU 备选自己画得了（而且那是几份判据比的像素），着色器是**当场报**。
+ *
+ * 读不着文件就回 false（编译那一步会自己报，不在这儿抢着报）。
+ */
+function wantsShaders(path) {
+  let src = '';
+  try { src = readText(path); } catch { return false; }
+  if (/(^|\n)[ \t]*@[vfg]\b/.test(src)) return true;
+  return /\bglsetshader\s*\(/i.test(src);
+}
+
+/**
  * 作业数。`OMNI_JOBS` 覆盖（1 = 退回串行），否则问 `getconf` 拿在线核数，上限 16。
  * 问不出来就 4 —— 猜一个小的比猜一个大的安全（作业数超了核数只会互相抢）。
  */
@@ -5304,7 +5343,9 @@ function applyGfxFlags(verb, path, rest) {
   /* **`--mode view`：有窗口地跑**（任务 #24 落地）。三条：
        - 窗口在**本机 OpenGL 设备**里（`src/runtime-gl/omni_ev_gl.c` 的 `omni_ev_gl_win`），
          所以没明说 `--gfx` 的时候自己把 `gl` 那一档打开 —— CPU 备选贴不了窗口；
-       - 只有**原生腿**有意思（js 腿不 dlopen 插件），所以顺手把 `--backend c` 补上；
+       - 没明说 `--backend` 就补 `c`：**两条腿都有窗口了**（js 腿走那份 `.node` 的
+         `winopen`/`winpresent`/`wininput`，§16.4），可原生腿跑得快，所以默认仍是它；
+         明说 `--backend js` 的照旧听用户的；
        - 开不出窗口（没装 GLFW / 没有显示 / 不在主线程）设备会自己回落离屏并在 stderr
          上印 `#gfx view 开不出窗口` —— 不当硬错误，与"挂不上就回落"同一档口径。 */
   if (m === 'view') {
@@ -5330,20 +5371,31 @@ function applyGfxFlags(verb, path, rest) {
       throw new OmniError(`--gfx 只有 host|gl|ir|null 四档，拿到 ${g}`);
     }
     setEnv('OMNI_GFX', g);
-    /* `gl` 那一档要两份东西摆好（编不出来就静默回落 CPU 备选）：
-         - `OMNI_GL_LIB`    原生腿 dlopen 的那份 dylib（§13.8）；
-         - `OMNI_EV_GL_ADDON` js 腿 / 解释器腿 `process.dlopen` 的那份 .node（§16）。
-       **两条腿共用同一份设备代码**，只是进门的方式不同。 */
-    if (g === 'gl') {
-      const cur = env('OMNI_GL_LIB');
-      if (cur === undefined || cur === null || cur === '') {
-        const lib = glPlugin();
-        if (lib !== null) setEnv('OMNI_GL_LIB', lib);
-      }
-      const curA = env('OMNI_EV_GL_ADDON');
-      if (curA === undefined || curA === null || curA === '') {
-        const addon = evGlAddon();
-        if (addon !== null) setEnv('OMNI_EV_GL_ADDON', addon);
+    if (g === 'gl') glDevicePaths();
+  }
+  /**
+   * **没明说 `--gfx`，可脚本要 GPU 才画得出来 —— 自己走 FFI**（2026-09-26）。
+   *
+   * 浏览器那一档本来就是 WebGL2 直通 GPU；命令行这一侧从前默认是"设备在宿主的 CPU 备选"，
+   * 于是 `omni run balls.pss`（默认 js 腿）当场报"这格设备（CPU 备选）没有可编程管线"——
+   * 明明本机有一份编得出来的 GL 设备（js 腿 `process.dlopen` 那份 `.node`、
+   * 原生腿 `dlopen` 那份 dylib），只是没人替用户打开。
+   *
+   * **判据是"脚本有没有着色器"**，不是"有没有用 GL"：立即模式的几何（`glBegin`/`glVertex`）
+   * CPU 备选自己画得了（判据 `tests/lower` 的 `02-gl.pss` 比的就是那份软光栅的像素，
+   * 不能偷偷换成 GPU），而**着色器**那一族在 CPU 备选上是**当场报**——
+   * 那才是"非 GPU 不可"。所以只认两件事：`@v`/`@f`/`@g` 区段，或者调过 `glsetshader`。
+   *
+   * 拿不到那两份东西（不是 macOS / clang 编不出来）就什么都不改：照旧回落 CPU 备选，
+   * 那句报错也照旧 —— 与"挂不上就回落"同一档口径。
+   */
+  if (g === undefined) {
+    const cur = env('OMNI_GFX');
+    if ((cur === undefined || cur === null || cur === '') && wantsShaders(path)) {
+      const [lib, addon] = glDevicePaths();
+      if (lib !== null || addon !== null) {
+        setEnv('OMNI_GFX', 'gl');
+        vStep('gfx       脚本里有着色器 —— 自己开本机 OpenGL 设备（自动 FFI）');
       }
     }
   }
