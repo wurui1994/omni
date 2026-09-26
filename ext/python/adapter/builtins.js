@@ -195,7 +195,199 @@ export function rangeList(from, to, step, C) {
   return h.wrap(out);
 }
 
-/* ─── 串上那几个 ─────────────────────────────────────────────────────────── */
+/* ─── 表上那几个"找"与"改"（`in` / index / count / insert / remove / …）─────── */
+
+/**
+ * `v in xs` —— 走一遍（方言的 `in` 只有字典与串两格）。
+ *
+ * `eq(a, b)` 由调用方给：元素可能是箱子，那时比法要按标签分派（`dyn.js` 的 `dynBin`）——
+ * 那笔账不在这一份里。
+ */
+export function containsList(xs0, v0, C, eq) {
+  const h = holder(C);
+  const xs = h.keep(xs0, 'in_xs');
+  const v = h.keep(v0, 'in_v');
+  const r = h.decl('in_r', BOOL, { kind: 'bool', value: false });
+  const i = h.decl('in_i', INT, int(0));
+  h.pre.push({
+    kind: 'while',
+    cond: bin('<', i, call1('alen', [xs])),
+    body: [
+      {
+        kind: 'if',
+        cond: eq({ kind: 'index', obj: xs, index: i }, v),
+        then: [{ kind: 'assign', target: r, value: { kind: 'bool', value: true } }, { kind: 'break', label: null }],
+        else_: null,
+      },
+      inc(i),
+    ],
+  });
+  return h.wrap(r);
+}
+
+/** `xs.index(v)` —— 找不到在 python 里是 ValueError，这儿 `(fail …)`。 */
+export function indexOfList(xs0, v0, C, eq) {
+  const h = holder(C);
+  const xs = h.keep(xs0, 'ix_xs');
+  const v = h.keep(v0, 'ix_v');
+  const at = h.decl('ix_at', INT, int(-1));
+  const i = h.decl('ix_i', INT, int(0));
+  h.pre.push({
+    kind: 'while',
+    cond: bin('<', i, call1('alen', [xs])),
+    body: [
+      {
+        kind: 'if',
+        cond: eq({ kind: 'index', obj: xs, index: i }, v),
+        then: [{ kind: 'assign', target: at, value: i }, { kind: 'break', label: null }],
+        else_: null,
+      },
+      inc(i),
+    ],
+  });
+  h.pre.push({
+    kind: 'if',
+    cond: bin('<', at, int(0)),
+    then: [{ kind: 'builtin-stmt', name: 'fail', args: [str('list.index(x): x not in list')] }],
+    else_: null,
+  });
+  return h.wrap(at);
+}
+
+/** `xs.count(v)` */
+export function countList(xs0, v0, C, eq) {
+  const h = holder(C);
+  const xs = h.keep(xs0, 'ct_xs');
+  const v = h.keep(v0, 'ct_v');
+  const n = h.decl('ct_n', INT, int(0));
+  const i = h.decl('ct_i', INT, int(0));
+  h.pre.push({
+    kind: 'while',
+    cond: bin('<', i, call1('alen', [xs])),
+    body: [
+      {
+        kind: 'if',
+        cond: eq({ kind: 'index', obj: xs, index: i }, v),
+        then: [inc(n)],
+        else_: null,
+      },
+      inc(i),
+    ],
+  });
+  return h.wrap(n);
+}
+
+/** `xs.reverse()` —— 两头往中间换（**改原表**，不交值）。 */
+export function reverseStmts(xs, C) {
+  const h = holder(C);
+  const a = h.decl('rv_a', INT, int(0));
+  const b = h.decl('rv_b', INT, bin('-', call1('alen', [xs]), int(1)));
+  const t = C.tyOfIR(xs).elem;
+  const tmp = h.decl('rv_t', t, { kind: 'index', obj: xs, index: int(0) });
+  h.pre.push({
+    kind: 'while',
+    cond: bin('<', a, b),
+    body: [
+      { kind: 'assign', target: tmp, value: { kind: 'index', obj: xs, index: a } },
+      { kind: 'assign', target: { kind: 'index', obj: xs, index: a }, value: { kind: 'index', obj: xs, index: b } },
+      { kind: 'assign', target: { kind: 'index', obj: xs, index: b }, value: tmp },
+      inc(a),
+      { kind: 'assign', target: b, value: bin('-', b, int(1)) },
+    ],
+  });
+  return h.pre;
+}
+
+/** `xs.extend(ys)` —— 逐格追加。 */
+export function extendStmts(xs, ys0, C, box) {
+  const h = holder(C);
+  const ys = h.keep(ys0, 'ex_ys');
+  const i = h.decl('ex_i', INT, int(0));
+  const one = { kind: 'index', obj: ys, index: i };
+  h.pre.push({
+    kind: 'while',
+    cond: bin('<', i, call1('alen', [ys])),
+    body: [
+      { kind: 'builtin-stmt', name: 'apush', args: [xs, box === undefined ? one : box(one)] },
+      inc(i),
+    ],
+  });
+  return h.pre;
+}
+
+/** `xs.clear()` —— 方言里没有"截断"，所以一格一格弹（`apop` 是唯一的缩法）。 */
+export function clearStmts(xs, C) {
+  const h = holder(C);
+  h.pre.push({
+    kind: 'while',
+    cond: bin('>', call1('alen', [xs]), int(0)),
+    body: [{ kind: 'expr-stmt', expr: call1('apop', [xs]) }],
+  });
+  return h.pre;
+}
+
+/** `xs.insert(i, v)` —— 先长一格，再从尾往回挪，最后写进去。 */
+export function insertStmts(xs, at0, v, C) {
+  const h = holder(C);
+  const at = h.keep(at0, 'is_at', INT);
+  h.pre.push({ kind: 'builtin-stmt', name: 'apush', args: [xs, v] });
+  const j = h.decl('is_j', INT, bin('-', call1('alen', [xs]), int(1)));
+  /* python 的 `insert` 把下标**夹到 [0, len]**（超了就是追加），所以这儿也夹一次。 */
+  const lo = h.decl('is_lo', INT, {
+    kind: 'ternary', type: INT, cond: bin('<', at, int(0)), then: int(0), else_: at,
+  });
+  h.pre.push({
+    kind: 'while',
+    cond: bin('>', j, lo),
+    body: [
+      {
+        kind: 'assign',
+        target: { kind: 'index', obj: xs, index: j },
+        value: { kind: 'index', obj: xs, index: bin('-', j, int(1)) },
+      },
+      { kind: 'assign', target: j, value: bin('-', j, int(1)) },
+    ],
+  });
+  h.pre.push({
+    kind: 'if',
+    cond: bin('<', lo, call1('alen', [xs])),
+    then: [{ kind: 'assign', target: { kind: 'index', obj: xs, index: lo }, value: v }],
+    else_: null,
+  });
+  return h.pre;
+}
+
+/** 从第 `at` 格起往左挪一格、再弹掉尾巴（`remove` 与 `pop(i)` 共用）。 */
+export function dropAtStmts(xs, at, C) {
+  const h = holder(C);
+  const j = h.decl('dr_j', INT, at);
+  h.pre.push({
+    kind: 'while',
+    cond: bin('<', j, bin('-', call1('alen', [xs]), int(1))),
+    body: [
+      {
+        kind: 'assign',
+        target: { kind: 'index', obj: xs, index: j },
+        value: { kind: 'index', obj: xs, index: bin('+', j, int(1)) },
+      },
+      inc(j),
+    ],
+  });
+  h.pre.push({ kind: 'expr-stmt', expr: call1('apop', [xs]) });
+  return h.pre;
+}
+
+/* ─── 串上那几格补宽度的 ───────────────────────────────────────────────────── */
+
+/** `s.ljust(w[, ch])` / `s.rjust(w[, ch])` / `s.zfill(w)` —— 不够宽就补，够了原样。 */
+export function justOf(s0, w0, ch, left, C) {
+  const h = holder(C);
+  const s = h.keep(s0, 'ju_s');
+  const w = h.keep(w0, 'ju_w', INT);
+  const fill = call1('srep', [ch, bin('-', w, call1('slen', [s]))]);
+  return h.wrap(left ? bin('+', s, fill) : bin('+', fill, s));
+}
+
 
 /** `sep.join(xs)` —— 第一段前面不加分隔符。 */
 export function joinOf(sep0, xs0, C) {

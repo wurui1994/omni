@@ -27,7 +27,8 @@ import { splitFString } from './fstring.js';
 import { splitPercent, percentArity } from './percent.js';
 import {
   sumOf, pickList, anyAllOf, sortedOf, rangeList,
-  joinOf, splitOf, stripOf, replaceOf, startsEndsOf,
+  joinOf, splitOf, stripOf, replaceOf, startsEndsOf, justOf,
+  containsList, indexOfList, countList,
 } from './builtins.js';
 
 /** 一格名字节点（`(n x)`）的文本；也收裸记号。 */
@@ -249,13 +250,14 @@ const BUILTIN_RET = new Map([
 function methodType(recvTy, name, argTys) {
   if (recvTy === null) return null;
   if (recvTy.kind === 'arr') {
-    if (name === 'append' || name === 'clear' || name === 'extend') return { kind: 'void' };
+    if (['append', 'clear', 'extend', 'reverse', 'insert', 'remove'].includes(name)) return { kind: 'void' };
     if (name === 'pop') return recvTy.elem;
     if (name === 'index' || name === 'count') return INT;
     return null;
   }
   if (recvTy.kind === 'string') {
-    if (['upper', 'lower', 'strip', 'lstrip', 'rstrip', 'replace', 'join'].includes(name)) return STR;
+    if (['upper', 'lower', 'strip', 'lstrip', 'rstrip', 'replace', 'join',
+      'ljust', 'rjust', 'zfill', 'center'].includes(name)) return STR;
     if (['find', 'rfind', 'count', 'index'].includes(name)) return INT;
     if (['startswith', 'endswith', 'isdigit', 'isalpha'].includes(name)) return BOOL;
     if (name === 'split') return arrOf(STR);
@@ -706,6 +708,9 @@ function cmpOne(o, a, b, C) {
   return { kind: 'binop', op, left: l, right: r };
 }
 
+/** 一格 `==`（`builtins.js` 那几格"找"要它 —— 元素是箱子时按标签分派）。 */
+export const cmpEq = (a, b, C) => cmpOne('==', a, b, C);
+
 /** `x in 容器` —— 字典是"有这个键"、串是"找得到这一段"、表是走一遍。 */
 function containsOf(box, needle, C) {
   const t = ty(box, C);
@@ -717,7 +722,9 @@ function containsOf(box, needle, C) {
       right: { kind: 'int', value: -1 },
     };
   }
-  throw new Error(`python->IR: \`in\` 作用在 ${t.kind} 上还没接（字典与串接了）`);
+  /* 表：方言里没有这一格，所以走一遍（比法与 `==` 同一条 —— 元素是箱子时按标签分派）。 */
+  if (t.kind === 'arr') return containsList(box, needle, C, (l, r) => cmpOne('==', l, r, C));
+  throw new Error(`python->IR: \`in\` 作用在 ${t.kind} 上还没接（表 / 字典 / 串接了）`);
 }
 
 /**
@@ -1363,8 +1370,13 @@ function methodOf(recvTok, name, args, C) {
   }
   if (t.kind === 'arr') {
     if (name === 'pop' && args.length === 0) return { kind: 'builtin', name: 'apop', args: [recv] };
-    if (name === 'append') throw new Error('python->IR: `.append()` 不交值（当语句用是接了的）');
-    throw new Error(`python->IR: 表上的 \`.${name}()\` 还没接`);
+    if (name === 'index' && args.length === 1) return indexOfList(recv, args[0], C, (l, r) => cmpOne('==', l, r, C));
+    if (name === 'count' && args.length === 1) return countList(recv, args[0], C, (l, r) => cmpOne('==', l, r, C));
+    if (['append', 'reverse', 'extend', 'clear', 'insert', 'remove'].includes(name)) {
+      throw new Error(`python->IR: \`.${name}()\` 不交值（当语句用是接了的）`);
+    }
+    throw new Error(`python->IR: 表上的 \`.${name}()\` 还没接`
+      + '（交值的接了 pop / index / count；改原表的那几个当语句用）');
   }
   if (t.kind === 'string') {
     if (name === 'upper' && args.length === 0) return { kind: 'builtin', name: 'supper', args: [recv] };
@@ -1383,9 +1395,17 @@ function methodOf(recvTok, name, args, C) {
     if (name === 'replace' && args.length === 2) return replaceOf(recv, args[0], args[1], C);
     if (name === 'startswith' && args.length === 1) return startsEndsOf(recv, args[0], true, C);
     if (name === 'endswith' && args.length === 1) return startsEndsOf(recv, args[0], false, C);
+    /* 补宽度那三格（`ljust` / `rjust` / `zfill`）—— 不够宽就补，够了原样。 */
+    if ((name === 'ljust' || name === 'rjust') && (args.length === 1 || args.length === 2)) {
+      const ch = args.length === 2 ? args[1] : { kind: 'string', value: ' ' };
+      return justOf(recv, args[0], ch, name === 'ljust', C);
+    }
+    if (name === 'zfill' && args.length === 1) {
+      return justOf(recv, args[0], { kind: 'string', value: '0' }, false, C);
+    }
     throw new Error(`python->IR: 串上的 \`.${name}()\` 还没接`
       + '（接了的是 upper / find / join / split / strip / lstrip / rstrip / replace'
-      + ' / startswith / endswith）');
+      + ' / startswith / endswith / ljust / rjust / zfill）');
   }
   if (t.kind === 'map') {
     /* `d.get(k)` —— 键不在里头 python 交 `None`，所以这一格**交的是箱子**（dyn）：

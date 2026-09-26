@@ -197,6 +197,17 @@ R 那一门（ADR-0045/0046/0047，`r-lang` 分支）已经把这条路走通过
   一台运行期的格式化机器 —— 那是 CPython 的 `unicodeobject.c` 里那一大段）；
   `*`（宽度从实参来）、`#`、`%(名字)s` 那一族没接。
 
+* **表上那几格"找"与"改"，以及 `in` 落在表上**。方言里表那一族只有
+  `anew` / `aget` / `aset` / `apush` / `alen` / `apop` —— 所以
+  `v in xs`、`.index(v)`、`.count(v)`、`.reverse()`、`.extend(ys)`、`.clear()`、
+  `.insert(i, v)`、`.remove(v)`、`.pop(i)` 全是**现场发一趟循环**。
+  改原表的那几格在 python 里交 `None`，所以只当语句用（`LIST_MUT` 那张表）；
+  当表达式用会当场说清。比法与 `==` 同一条（`cmpEq` —— 元素是箱子时按标签分派），
+  所以异质的表也走得通。串上顺带补了 `.ljust` / `.rjust` / `.zfill`。
+  判据：`ext/python/examples/listmut.py` 三条腿与 python3 逐字节相同。
+  几条口径是拿 python3 比出来的：`insert` 的下标**夹到 `[0, len]`**（超了就是追加）、
+  `index` 找不到是 ValueError（这儿 `(fail …)`）、`zfill` 够宽了原样不截。
+
 ### 下一刀，按顺序
 
 1. **箱子里的函数拆出来调**（`(asfn …)` 那一格 —— 于是 `f = g` 之后 `f()` 走得通，

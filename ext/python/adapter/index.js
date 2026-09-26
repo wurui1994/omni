@@ -30,8 +30,11 @@ import { tag, kids, leaf, part } from '../../../src/core/lower/cst.js';
 import { INT, STR, DYN, arrOf, sameType, typeOf, named } from '../../../src/core/lower/ty-of.js';
 import { typeToSx } from '../../../src/core/lower/ty.js';
 import {
-  exprOf, condOf, nameOf, typeOfAnnot, tyOfCst, tyArg, pyStr, lenOf, hasFields, fstringParts,
+  exprOf, condOf, nameOf, typeOfAnnot, tyOfCst, tyArg, pyStr, lenOf, hasFields, fstringParts, cmpEq,
 } from './expr.js';
+import {
+  reverseStmts, clearStmts, extendStmts, insertStmts, dropAtStmts, indexOfList,
+} from './builtins.js';
 import { boxOf, unifyPy } from './dyn.js';
 
 /** 一格已经建好的 IR 表达式装的是什么。 */
@@ -857,23 +860,67 @@ export function stmtsOf(x, C) {
   }
 }
 
-/** 语句位置上的一格表达式。`print(…)` 与 `xs.append(v)` 不交值，各自一格。 */
+/** 语句位置上的一格表达式。`print(…)` 与**改原表**那几格方法不交值，各自一格。 */
 function exprStmtOf(e, C) {
   if (tag(e) === 'call') {
     const [fn, argsTok] = kids(e);
     const argToks = argsTok === undefined ? [] : kids(argsTok);
     if (tag(fn) === 'n' && String(nameOf(fn)) === 'print') return printStmt(argToks, C);
-    if (tag(fn) === 'attr' && String(leaf(kids(fn)[1])) === 'append') {
-      const box = exprOf(kids(fn)[0], C);
-      if (argToks.length !== 1) throw new Error('python->IR: `.append()` 只收一格实参');
-      const bt = typeOfIR(box, C);
-      let v = exprOf(argToks[0], C);
-      /* 表装的是箱子时先装箱（`xs = [1, "a"]` 之后 `xs.append(2.5)`）。 */
-      if (bt.kind === 'arr' && bt.elem.kind === 'dyn') v = boxOf(v, C);
-      return [{ kind: 'builtin-stmt', name: 'apush', args: [box, v] }];
+    if (tag(fn) === 'attr') {
+      const m = String(leaf(kids(fn)[1]));
+      if (LIST_MUT.has(m)) {
+        const box = exprOf(kids(fn)[0], C);
+        if (typeOfIR(box, C).kind === 'arr') return listMut(m, box, argToks, C);
+      }
     }
   }
   return [{ kind: 'expr-stmt', expr: exprOf(e, C) }];
+}
+
+/** 表上**改原表**的那几格（python 里它们交 None，所以只当语句用）。 */
+const LIST_MUT = new Set(['append', 'reverse', 'extend', 'clear', 'insert', 'remove', 'pop']);
+
+/**
+ * `xs.append(v)` / `.reverse()` / `.extend(ys)` / `.clear()` / `.insert(i, v)` / `.remove(v)`
+ * —— 方言里只有 `apush` / `apop` / `aset`，别的都是**现场发一趟循环**（`builtins.js`）。
+ */
+function listMut(m, box, argToks, C) {
+  const et = typeOfIR(box, C).elem;
+  const arg = (k) => {
+    const v = exprOf(argToks[k], C);
+    return et.kind === 'dyn' && typeOfIR(v, C).kind !== 'dyn' ? boxOf(v, C) : v;
+  };
+  if (m === 'append') {
+    if (argToks.length !== 1) throw new Error('python->IR: `.append()` 只收一格实参');
+    return [{ kind: 'builtin-stmt', name: 'apush', args: [box, arg(0)] }];
+  }
+  if (m === 'reverse') {
+    if (argToks.length !== 0) throw new Error('python->IR: `.reverse()` 不收实参');
+    return reverseStmts(box, C);
+  }
+  if (m === 'clear') {
+    if (argToks.length !== 0) throw new Error('python->IR: `.clear()` 不收实参');
+    return clearStmts(box, C);
+  }
+  if (m === 'extend') {
+    if (argToks.length !== 1) throw new Error('python->IR: `.extend()` 只收一格实参');
+    const ys = exprOf(argToks[0], C);
+    const yt = typeOfIR(ys, C);
+    if (yt.kind !== 'arr') throw new Error(`python->IR: \`.extend()\` 收一格表（这里是 ${yt.kind}）`);
+    return extendStmts(box, ys, C, et.kind === 'dyn' && yt.elem.kind !== 'dyn' ? (v) => boxOf(v, C) : undefined);
+  }
+  if (m === 'insert') {
+    if (argToks.length !== 2) throw new Error('python->IR: `.insert(i, v)` 收两格实参');
+    return insertStmts(box, exprOf(argToks[0], C), arg(1), C);
+  }
+  if (m === 'remove') {
+    if (argToks.length !== 1) throw new Error('python->IR: `.remove(v)` 只收一格实参');
+    const at = indexOfList(box, arg(0), C, (l, r) => cmpEq(l, r, C));
+    return dropAtStmts(box, at, C);
+  }
+  /* `xs.pop()` / `xs.pop(i)` 当语句用 —— 交出来的那一格没人要，丢掉。 */
+  if (argToks.length === 0) return [{ kind: 'expr-stmt', expr: { kind: 'builtin', name: 'apop', args: [box] } }];
+  return dropAtStmts(box, exprOf(argToks[0], C), C);
 }
 
 /**
