@@ -144,6 +144,14 @@ fround(12.5, 0)  = 12                    正位数与 0 位那几格两边完全
 JS 那条腿上一做算术，1954 那个载荷就没了（`NA / 100` 会印成 `NaN`）。正位数与不给位数的
 那两档一个字没动，照旧直接交 `fround`。判据 `ext/r/examples/rmath.R` 末尾那七行。
 
+**这条缝有多宽，量过了**：拿系统 clang 直接链我们那份 `libomniRmath`，把转手过去的
+整族都与 `Rscript` 比 17 位有效数字 —— `signif`（含 `signif(1250, 2)` 这种平局）、
+`trunc` / `sign` / `pmax` / `pmin`、gamma 那一族（`gamma` / `lgamma` / `digamma` /
+`trigamma` / `beta` / `lbeta` / `choose` / `lchoose`）、`log1p` / `expm1` / `R_pow`、
+正态与二项与泊松与 gamma 与 beta 与 t 与卡方的密度/分布/分位、`besselI/J/K/Y`，
+**39 格一格不差**。也就是说两版 R 之间只有 `fround` 的负位数这一格分叉；
+探针留在 `.omni-cache/probe/cabi/nm.c`（改一行 `#define P` 就能再跑一遍）。
+
 `NaN` / `Inf` / `-Inf` 三格真值由**我们自己那份** `rt/omni_rna.c` 给（R 那边它们在解释器里）；
 `is.finite` 用 R 自己的 `R_finite`。印法照 R 的三处特例（`NaN` / `Inf` / `-Inf`），
 布尔印 `TRUE` / `FALSE` —— 都在生成出来的那格 `r_num_str` 里，用到才发。
