@@ -6378,6 +6378,27 @@ function callOf(x, types, extra, want, stmtPos) {
     const pt = ptys === undefined ? undefined : ptys[i];
     if (pt === undefined) { out.push(e); return; }
     const at = node === null ? undefined : typeOfExpr(node, types);
+    /**
+     * **形参那一格的形状对不上就当场报**（2026-09-26 补的一道门）。形参类型是
+     * `inferFns` 把所有调用点**并**出来的一格（`widenTy`），而"一会儿装串一会儿装数"
+     * 那种并不出来 —— `widenTy` 留先来的那个（它自己的注释就写着：那要运行期的类型
+     * 标签，这一档没有）。于是 `f <- function(x) x; cat(f("s"), f(1))` 的第二个调用点
+     * 照旧发出去，一路走到 `.sx` 才撞上"'f' 的第 1 个形参是 string，给的是 real" ——
+     * 那时**已经过了换档那道门**：libR 接不上，用户一个答案都拿不到（量出来的）。
+     *
+     * 这儿只看"方言收不收"这一层形状：串 / 字符向量 / 数值向量 / 表 / 一格数。
+     * 数那一格里 `int` 与 `bool` 上头会 `asReal` 加宽，所以算同一格。
+     */
+    const shapeOf = (t) => (t.kind === 'string' ? '一格串'
+      : isStrVec(t) ? '一条字符向量'
+        : isVecTy(t) ? '一条数值向量'
+          : t.kind === 'map' ? '一张表' : '一格数');
+    if (at !== undefined && shapeOf(at) !== shapeOf(pt)) {
+      throw new Error(`r->IR: ${fn}() 的第 ${i + 1} 个形参这一档是${shapeOf(pt)}，`
+        + `而这个调用点给的是${shapeOf(at)} —— 形参类型是所有调用点并出来的一格，`
+        + '"同一个形参一会儿装串一会儿装数"要运行期的类型标签，这一档没有'
+        + '（见 ext/r/SPEC.md 第四节第 5 条）');
+    }
     if (pt.kind === 'real' && at !== undefined && (at.kind === 'int' || at.kind === 'bool')) {
       out.push(asReal(e, at));
     } else out.push(e);
