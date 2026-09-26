@@ -27,7 +27,7 @@ import { splitFString } from './fstring.js';
 import { splitPercent, percentArity } from './percent.js';
 import {
   sumOf, pickList, anyAllOf, sortedOf, rangeList,
-  joinOf, splitOf, splitWsOf, countOf, stripOf, replaceOf, startsEndsOf, justOf,
+  joinOf, splitOf, rsplitOf, zfillOf, splitWsOf, countOf, stripOf, replaceOf, startsEndsOf, justOf,
   containsList, indexOfList, countList, valuesList, dictPopOf, dictSetDefaultOf, dropAtStmts,
   concatList, repeatList, reversedList, stepSlice, bankRound,
   caseMapOf, charClassOf, rfindOf, copyList, copyDict, charsOf, dictOfPairs,
@@ -464,13 +464,13 @@ function methodType(recvTy, name, argTys, C) {
     return null;
   }
   if (recvTy.kind === 'string') {
-    if (['upper', 'lower', 'title', 'capitalize', 'swapcase', 'strip', 'lstrip', 'rstrip',
+    if (['upper', 'lower', 'casefold', 'title', 'capitalize', 'swapcase', 'strip', 'lstrip', 'rstrip',
       'replace', 'join', 'ljust', 'rjust', 'zfill', 'center', 'format', 'expandtabs',
       'removeprefix', 'removesuffix'].includes(name)) return STR;
     if (['find', 'rfind', 'count', 'index', 'rindex'].includes(name)) return INT;
     if (['startswith', 'endswith',
       'isdigit', 'isalpha', 'isalnum', 'isspace', 'isupper', 'islower'].includes(name)) return BOOL;
-    if (name === 'split') return arrOf(STR);
+    if (name === 'split' || name === 'rsplit') return arrOf(STR);
     if (name === 'splitlines') return arrOf(STR);
     /* `.partition()` / `.rpartition()` —— 三格串的元组（那格记录顺手登记上）。 */
     if (name === 'partition' || name === 'rpartition') return tupleRec([STR, STR, STR], C).type;
@@ -3615,6 +3615,10 @@ function methodOf(recvTok, name, args, C) {
      */
     if (name === 'upper' && args.length === 0) return { kind: 'builtin', name: 'supper', args: [recv] };
     if (name === 'lower' && args.length === 0) return { kind: 'builtin', name: 'slower', args: [recv] };
+    /* `.casefold()` —— **ASCII 那一档就是 `.lower()`**。真正的 casefold 与 lower 只在
+       非 ASCII 上分家（`ß` → `ss`、`İ` 那一族），而非 ASCII 的大小写这一层本来就明说
+       没接（要借 `unicodeobject.c`）。所以这儿走同一格，不另编一套半对的规矩。 */
+    if (name === 'casefold' && args.length === 0) return { kind: 'builtin', name: 'slower', args: [recv] };
     if (name === 'find' && args.length === 1) return { kind: 'builtin', name: 'sfind', args: [recv, args[0]] };
     /* 下面这几格**现场发一趟循环**（`builtins.js`）—— 方言的串那一族只有五格算子，
        python 的这几个方法是它自己的规矩（空段算一格、去哪几个空白字符）。 */
@@ -3634,6 +3638,24 @@ function methodOf(recvTok, name, args, C) {
         throw new Error('python->IR: `.split(sep, maxsplit)` 的 maxsplit 要写成一格整数字面量');
       }
       return splitOf(recv, args[0], C, args.length === 2 ? Number(args[1].value) : null);
+    }
+    /* `.rsplit(sep[, maxsplit])` —— 从右往左切。**不是"先 split 再挑后几段"**：
+       maxsplit 是从右数那么多次，段数一样但分界不同
+       （`"a-b-c".rsplit("-", 1)` 是 `['a-b', 'c']`，split 是 `['a', 'b-c']`）。
+       不带分隔符的 `.rsplit()` 与 `.split()` 同一格（按连续空白切，两头的空段不算，
+       次序也一样）—— 只有带 maxsplit 时才分家，那一档还没接。 */
+    if (name === 'rsplit' && (args.length === 0 || noSep(args[0]))) {
+      if (args.length >= 1 && !(args.length === 1 && noSep(args[0]))) {
+        throw new Error('python->IR: `.rsplit(None, maxsplit)` 还没接'
+          + '（从右数那么多次与从左数不是一回事）');
+      }
+      return splitWsOf(recv, C, null);
+    }
+    if (name === 'rsplit' && (args.length === 1 || args.length === 2)) {
+      if (args.length === 2 && args[1].kind !== 'int') {
+        throw new Error('python->IR: `.rsplit(sep, maxsplit)` 的 maxsplit 要写成一格整数字面量');
+      }
+      return rsplitOf(recv, args[0], C, args.length === 2 ? Number(args[1].value) : null);
     }
     if (name === 'strip' && args.length <= 1) return stripOf(recv, true, true, C, args[0] ?? null);
     if (name === 'lstrip' && args.length <= 1) return stripOf(recv, true, false, C, args[0] ?? null);
@@ -3725,9 +3747,9 @@ function methodOf(recvTok, name, args, C) {
       const ch = args.length === 2 ? args[1] : { kind: 'string', value: ' ' };
       return justOf(recv, args[0], ch, name === 'ljust', C);
     }
-    if (name === 'zfill' && args.length === 1) {
-      return justOf(recv, args[0], { kind: 'string', value: '0' }, false, C);
-    }
+    /* `.zfill(w)` 不是 `rjust(w, "0")`：开头那一格符号要留在最前头（`"-7".zfill(4)`
+       是 `-007`）—— 量出来的，从前答 `00-7`。 */
+    if (name === 'zfill' && args.length === 1) return zfillOf(recv, args[0], C);
     /* `.center(w[, ch])` —— 与 f-string 的 `:^N` 同一格（余数放右边）。
        宽度要是字面量：`centerTo` 是按编译期的宽度拼的。 */
     if (name === 'center' && (args.length === 1 || args.length === 2)) {
@@ -3741,8 +3763,8 @@ function methodOf(recvTok, name, args, C) {
       return centerTo(recv, Number(args[0].value), ch.value, C, true);
     }
     throw new Error(`python->IR: 串上的 \`.${name}()\` 还没接`
-      + '（接了的是 upper / lower / title / capitalize / swapcase / find / rfind / index /'
-      + ' rindex / join / split / strip / lstrip / rstrip / replace / startswith / endswith /'
+      + '（接了的是 upper / lower / casefold / title / capitalize / swapcase / find / rfind / index /'
+      + ' rindex / join / split / rsplit / strip / lstrip / rstrip / replace / startswith / endswith /'
       + ' removeprefix / removesuffix / ljust / rjust / zfill / center / is*）');
   }
   if (t.kind === 'map') {

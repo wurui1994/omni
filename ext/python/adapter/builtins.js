@@ -974,6 +974,39 @@ export function justOf(s0, w0, ch, left, C) {
 }
 
 
+/**
+ * `s.zfill(w)` —— 与 `rjust(w, "0")` **不是一回事**：开头那一格符号（`+` / `-`）
+ * 要留在最前头。python 的原话：`"-7".zfill(4)` 是 `-007`，不是 `00-7`（量出来的）。
+ *
+ * 空串那一档要当心：**先问长度再取头一格字符**（`ssub(s, 0, 1)` 在空串上是
+ * "substring out of range"），所以是两层 `if`，不是一句 `&&`。
+ */
+export function zfillOf(s0, w0, C) {
+  const h = holder(C);
+  const s = h.keep(s0, 'zf_s');
+  const w = h.keep(w0, 'zf_w', INT);
+  const n = h.decl('zf_n', INT, call1('slen', [s]));
+  const pad = h.decl('zf_p', STR, call1('srep', [str('0'), bin('-', w, n)]));
+  const out = h.decl('zf_o', STR, bin('+', pad, s));
+  const first = call1('ssub', [s, int(0), int(1)]);
+  h.pre.push({
+    kind: 'if',
+    cond: bin('>', n, int(0)),
+    then: [{
+      kind: 'if',
+      cond: bin('!=', call1('sfind', [str('+-'), first]), int(-1)),
+      then: [{
+        kind: 'assign',
+        target: out,
+        value: bin('+', bin('+', first, pad), call1('ssub', [s, int(1), bin('-', n, int(1))])),
+      }],
+      else_: null,
+    }],
+    else_: null,
+  });
+  return h.wrap(out);
+}
+
 /** `sep.join(xs)` —— 第一段前面不加分隔符。 */
 export function joinOf(sep0, xs0, C) {
   const h = holder(C);
@@ -1006,6 +1039,67 @@ export function joinOf(sep0, xs0, C) {
  * `s.split(sep)` —— **分隔符不能是空串**（python 那边是 ValueError）。
  * 空段算一格（`"a,,b".split(",")` 是三格，`",".split(",")` 是两格空串）。
  */
+/**
+ * `s.rsplit(sep[, maxsplit])` —— `splitOf` 的**镜像**：从右往左找分隔符，切够
+ * `maxsplit` 次就把左边剩下的整段推进去，最后把攒出来的表倒过来（python 的次序是从左到右）。
+ *
+ * 为什么不"先 split 再挑后几段"：`maxsplit` 的语义是**从右数**那么多次，
+ * 段数一样但分界不同（`"a-b-c".rsplit("-", 1)` 是 `['a-b', 'c']`，split 是 `['a', 'b-c']`）。
+ */
+export function rsplitOf(s0, sep0, C, maxsplit = null) {
+  const h = holder(C);
+  const s = h.keep(s0, 'rs_s');
+  const sep = h.keep(sep0, 'rs_d');
+  const t = arrOf(STR);
+  const out = h.decl('rs_o', t, { kind: 'builtin', name: 'anew', args: [{ kind: 'type', type: t }, int(0)] });
+  const end = h.decl('rs_e', INT, call1('slen', [s]));
+  const head = h.decl('rs_h', STR, str(''));
+  const hit = h.decl('rs_i', INT, int(0));
+  h.pre.push({
+    kind: 'if',
+    cond: bin('==', call1('slen', [sep]), int(0)),
+    then: [{ kind: 'builtin-stmt', name: 'fail', args: [str('empty separator')] }],
+    else_: null,
+  });
+  const cut = maxsplit === null || maxsplit < 0 ? null : h.decl('rs_n', INT, int(0));
+  h.pre.push({
+    kind: 'while',
+    cond: { kind: 'bool', value: true },
+    body: [
+      { kind: 'assign', target: head, value: call1('ssub', [s, int(0), end]) },
+      { kind: 'assign', target: hit, value: rfindOf(head, sep, C) },
+      ...(cut === null ? [] : [{
+        kind: 'if',
+        cond: bin('>=', cut, int(maxsplit)),
+        then: [{ kind: 'assign', target: hit, value: int(-1) }],
+        else_: [{ kind: 'assign', target: cut, value: bin('+', cut, int(1)) }],
+      }]),
+      {
+        kind: 'if',
+        cond: bin('<', hit, int(0)),
+        then: [
+          { kind: 'builtin-stmt', name: 'apush', args: [out, head] },
+          { kind: 'break', label: null },
+        ],
+        else_: [
+          {
+            kind: 'builtin-stmt',
+            name: 'apush',
+            args: [out, call1('ssub', [
+              s,
+              bin('+', hit, call1('slen', [sep])),
+              bin('-', bin('-', end, hit), call1('slen', [sep])),
+            ])],
+          },
+          { kind: 'assign', target: end, value: hit },
+        ],
+      },
+    ],
+  });
+  h.pre.push(...reverseStmts(out, C));
+  return { kind: 'block-expr', stmts: h.pre, value: out };
+}
+
 export function splitOf(s0, sep0, C, maxsplit = null) {
   const h = holder(C);
   const s = h.keep(s0, 'sp_s');

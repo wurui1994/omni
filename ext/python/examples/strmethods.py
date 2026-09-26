@@ -103,3 +103,19 @@ def main():
 
 
 main()
+
+# ---- .zfill 的符号 / .rsplit / .casefold -------------------------------------
+# **`.zfill(w)` 不是 `rjust(w, "0")`**：开头那一格符号（`+` / `-`）要留在最前头。
+# 量出来的原话：`"-7".zfill(4)` 从前答 `00-7`，python 是 `-007`。
+print("7".zfill(3), "-7".zfill(4), "+7".zfill(4), "abc".zfill(5))
+print("-7".zfill(2), "".zfill(3), "-".zfill(3), "12345".zfill(3))
+
+# **`.rsplit(sep, n)` 不是"先 split 再挑后几段"**：maxsplit 是从右数那么多次，
+# 段数一样但分界不同。
+print("a-b-c".rsplit("-"), "a-b-c".rsplit("-", 1), "a-b-c".split("-", 1))
+print("a-b-c".rsplit("-", 0), "a-b-c".rsplit("-", 9), "abc".rsplit("-", 1))
+print("a--b".rsplit("-", 1), "-a-".rsplit("-", 1), "  x y  ".rsplit())
+
+# `.casefold()` —— **ASCII 那一档就是 `.lower()`**（真正的 casefold 与 lower 只在
+# 非 ASCII 上分家，而非 ASCII 的大小写这一层本来就明说没接）。
+print("Hello".casefold(), "Hello".casefold() == "Hello".lower(), "".casefold())
