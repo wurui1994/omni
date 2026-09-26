@@ -1072,6 +1072,9 @@ const NAMED_OK = new Map([
   ['sort', new Set(['decreasing', 'method', 'na.last'])],
   ['order', new Set(['method', 'decreasing'])],
   ['strtoi', new Set(['base'])],
+  /* `Reduce(f, x, accumulate = TRUE)` —— 出的是每一步的中间值（见 `reduceAcc`）。
+     `right =`（从右往左折）不在里头：那一档还没接，命名实参那道门会报。 */
+  ['Reduce', new Set(['accumulate'])],
   /* `log(x, base = b)` —— 照 R 自己的 `logbase()` 分三档（见 `callOf` 那一段）。 */
   ['log', new Set(['base'])],
   ['strsplit', new Set(['fixed'])],
@@ -1826,6 +1829,21 @@ function typeOfExpr(x, types) {
  * `sapply` / `lapply` / `vapply` / `Reduce` / `Filter` 回什么 —— 与 `applyOf` 摊开时
  * 用的是同一条推法：形参按"元素装什么"绑上，再问一遍函数体。
  */
+/**
+ * `Reduce(f, x, accumulate = TRUE)` 那格开关 —— **只认字面量**（与 `na.rm=` 同一条规矩：
+ * 运行期的旗子要两条路都发，那是另一件事）。`applyTy` 与 `applyOf` 都问这一处，
+ * 两边答得一样才不会"类型说标量、代码出向量"。
+ */
+function reduceAcc(x, fn) {
+  if (fn !== 'Reduce') return false;
+  const node = namedArg(x, 'accumulate');
+  if (node === undefined) return false;
+  const txt = tag(node) === 'num' ? String(leaf(kids(node)[0])) : null;
+  if (txt === 'TRUE' || txt === 'T') return true;
+  if (txt === 'FALSE' || txt === 'F') return false;
+  throw new Error('r->IR: Reduce() 的 accumulate= 只认字面量 TRUE / FALSE（给的是一格要算的值）');
+}
+
 function applyTy(fn, x, types) {
   const args = posArgs(x);
   const fnFirst = fn === 'Reduce' || fn === 'Filter' || fn === 'mapply';
@@ -1838,7 +1856,11 @@ function applyTy(fn, x, types) {
   for (const p of formalsOf(fnode)) child.set(p, strIn ? STR : REAL);
   const bt = typeOfExpr(kids(fnode)[1], child);
   if (fn === 'Filter') return strIn ? RSTRV : dt;
-  if (fn === 'Reduce') return bt.kind === 'string' ? STR : REAL;
+  if (fn === 'Reduce') {
+    /* `accumulate = TRUE` 出的是**一条向量**（每一步的中间值），不是一格标量。 */
+    if (reduceAcc(x, fn)) return bt.kind === 'string' ? RSTRV : RVEC;
+    return bt.kind === 'string' ? STR : REAL;
+  }
   /**
    * `mapply` 的两格数据各自可以是数值向量或**字符向量**（2026-09-26 接了），所以形参
    * 一格一格地绑；回的种类看函数体。**名字只从第一格数据来**（R 的 `USE.NAMES`：
@@ -3456,8 +3478,7 @@ function bodyPre(body, child) {
   return { pre, val: ks[ks.length - 1] };
 }
 
-function applyOf(fn, x, types) {
-  const args = posArgs(x);
+function applyOf(fn, x, types) {  const args = posArgs(x);
   const vr = (nm) => ({ kind: 'name', name: nm });
   const I = (v) => ({ kind: 'int', value: v });
   /* 哪一格是函数、哪一格是数据：`Reduce` / `Filter` 是函数在前，`sapply` 是数据在前。 */
@@ -3511,6 +3532,7 @@ function applyOf(fn, x, types) {
     const acc = fresh('acc');
     const { pre: rpre, val: rval } = bodyPre(body, child);
     const from = initNode === undefined ? I(1) : I(0);
+    const accNext = (v) => (accTy.kind === 'string' ? v : asReal(v, typeOfExpr(rval, child)));
     pre.push({
       kind: 'let',
       name: acc,
@@ -3519,6 +3541,40 @@ function applyOf(fn, x, types) {
         ? (accTy.kind === 'string' ? at(I(0)) : asReal(at(I(0)), elemTy))
         : (accTy.kind === 'string' ? exprOf(initNode, types) : asReal(exprOf(initNode, types), typeOfExpr(initNode, types))),
     });
+    /**
+     * `accumulate = TRUE` —— R 交的是**每一步的中间值**：第一格是初值（没给初值就是
+     * 数据的第一格），往后一格一格。长度因此是 `length(x)`（没初值）或 `length(x) + 1`。
+     * 折叠那条路一个字没动，只是每算一步就往出去那条向量里摆一格。
+     * `right = TRUE` 没接（从右往左折）—— 不在 `NAMED_OK` 里，命名实参那道门会报。
+     */
+    if (reduceAcc(x, fn)) {
+      const out = fresh('ra');
+      const total = initNode === undefined ? len : b('+', len, I(1));
+      const slot = b('+', b('-', vr(idx), from), I(1));
+      const stmts = [...pre];
+      if (accTy.kind === 'string') {
+        stmts.push({ kind: 'let', name: out, type: RSTRV, init: call1('anew', tyArg(RSTRV), total) },
+          { kind: 'assign', target: svGet(vr(out), I(0)), value: vr(acc) });
+      } else {
+        stmts.push(...vecNewAs(out, total), vecSet(vr(out), I(0), vr(acc)));
+      }
+      stmts.push({
+        kind: 'for',
+        init: { kind: 'let', name: idx, type: INT, init: from },
+        cond: b('<', vr(idx), len),
+        post: { kind: 'assign', target: vr(idx), value: b('+', vr(idx), I(1)) },
+        body: [
+          { kind: 'let', name: ps[0], type: accTy, init: vr(acc) },
+          { kind: 'let', name: ps[1], type: elemTy, init: at(vr(idx)) },
+          ...rpre,
+          { kind: 'assign', target: vr(acc), value: accNext(exprOf(rval, child)) },
+          accTy.kind === 'string'
+            ? { kind: 'assign', target: svGet(vr(out), slot), value: vr(acc) }
+            : vecSet(vr(out), slot, vr(acc)),
+        ],
+      });
+      return { kind: 'block-expr', stmts, value: vr(out) };
+    }
     return {
       kind: 'block-expr',
       stmts: [...pre, {

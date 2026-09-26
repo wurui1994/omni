@@ -134,3 +134,14 @@ cat(mapply(function(a, b) paste0(a, b), c("p", "q", "r"), c("1")), "\n")
 cat(names(mapply(function(a, b) paste0(a, b), c("x", "y"), c("1", "2"))), "\n")
 cat(length(mapply(function(a, b) a + b, c(1, 2, 3), c(1))), "\n")
 cat(mapply(function(a, b) toupper(paste0(a, b)), c("a"), c("b")), "\n")
+
+## Reduce(accumulate = TRUE)：每一步的中间值（有初值就多一格，头一格是初值）
+cat(Reduce(function(a, b) a + b, c(1, 2, 3, 4), accumulate = TRUE), "\n")
+print(Reduce(function(a, b) a + b, c(1, 2, 3, 4), accumulate = TRUE))
+cat(Reduce(function(a, b) a * b, c(1, 2, 3, 4), 10, accumulate = TRUE), "\n")
+cat(Reduce(function(a, b) paste0(a, b), c("x", "y", "z"), accumulate = TRUE), "\n")
+print(Reduce(function(a, b) paste0(a, b), c("x", "y", "z"), accumulate = TRUE))
+cat(Reduce(function(a, b) if (a > b) a else b, c(3, 9, 2), accumulate = TRUE), "\n")
+cat(length(Reduce(function(a, b) a + b, c(5), accumulate = TRUE)), "\n")
+## accumulate = FALSE 与不写是同一件事
+cat(Reduce(function(a, b) a + b, c(1, 2, 3), accumulate = FALSE), "\n")
