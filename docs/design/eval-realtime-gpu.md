@@ -3070,3 +3070,30 @@ otim = tim; do { tim = klock(); dtim = tim-otim; } while (dtim < 1/60);
 `glsettex(句柄)` 选的那张图还没接到批上；再往后是 `drawkv6`（KV6 体素精灵，27 份）与
 画布文字（`setfont`/`printf`，67 份）。这三格是 `.kc` 剩下的大头，明着记在这儿。
 
+### 34.9 `.kc` 的纹理：内建那对多一格**贴图版**（`batchprog(2)`）
+
+EvalDraw 没有着色器 —— `glsettex("brick.png")` 选一张图，接下来的多边形就该贴着它画
+（`evaldraw.txt:1627`）。而设备内建那对（`gl_prog == 0` 那条路）**压根没有 sampler**：
+纹理只有脚本自己写 `@v/@f` 那一档才采样。于是 `.kc` 的纹理面出来是**纯白**
+（`setcol(0xffffff)` × 没采样）。
+
+落法是给 `batchprog` 加**第三档**：
+
+    0  内建平色（顶点是裁剪空间）
+    1  脚本 `glsetshader` 挑的那格（顶点是物体坐标）
+    2  **内建那对的贴图版**（顶点照旧是裁剪空间，片元里 `v_col0 * texture(u_tex0, uv)`）
+
+三档设备各加一格：`omni_ev_gl.c` 的 `FS_TEX_SRC`（采样器固定 0 号单元，链一次就设好）、
+`studio/gfx-gl.js` 的 `VS_TEX`/`FS_TEX`（那一档顶点是屏幕坐标，所以顶点着色器也要一份）、
+CPU 备选**收下不管**（那一档没有纹理采样 —— 明写偏差，不是"脚本挑了 program"那种错）。
+语言那一侧：EvalDraw 的三档 `glsettex` 绑好纹理之后多发一句 `batchprog(2)`（`ev_texon`）。
+
+踩过的一格：**napi 那层把 `2` 压成了 `1`**（`omni_ev_gl_prog((int)num(...) != 0)`）——
+贴图版永远挑不上，图还是白的。三条路（napi / `omni_fmt.c` / `host/gfx-cpu.js`）都要按数递。
+
+判据：`tests/gl` 第八节拿**静态数组**当纹理（`glsettex(buf,2,2)`，不碰外部素材）——
+红蓝棋盘两色都采样到（1376/1376 格）；**24/24**。`.pss` 逐像素那一轴照旧 43/6/13。
+
+`demos/beer.kc` 现在砖墙与木地板都贴上了。还缺两族：`drawkv6`（那 99 个瓶子，27 份脚本）
+与画布文字（那句 `99 bottles` 眼下印在 stdout 上，67 份脚本）。
+

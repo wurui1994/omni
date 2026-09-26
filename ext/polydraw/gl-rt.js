@@ -521,12 +521,26 @@ function glShaderDecls() {
        与 PolyDraw 的差别只有两件：**没有槽号**（句柄是我们发的）、**要回句柄**。
        上传那两步直接借 PolyDraw 那两格（文件走 `gl_settexf3`、数组走 `gl_settex6`），
        所以设备那一面一个字都不用改。 */
+    /**
+     * **选了图之后的多边形就该贴着它画**（`evaldraw.txt:1627`）。
+     *
+     * 这门语言没有着色器，而设备内建那对里**原来没有 sampler** —— 于是那些面出来是
+     * 纯白（`setcol(0xffffff)` × 没采样）：`demos/beer.kc` 的砖墙就是这么白的。
+     * 设备现在多了一格**内建贴图版**（`omni_ev_gl.c` 的 `FS_TEX_SRC` /
+     * `studio/gfx-gl.js` 的 `FS_TEX`），按 `batchprog(2)` 挑 —— 所以这一族在绑好纹理
+     * 之后多发一句 `batchprog(2)`（`gl_bindtex` 已经断过批了）。
+     */
+    fn('ev_texon', [], [
+      ex(dev('batchprog', [num(2)])),
+      ret(num(0)),
+    ]),
     fn('ev_settexname', ['n'], [
       letR('h', nm('ev_texn')),
       set('ev_texn', bin('+', nm('ev_texn'), num(1))),
       ex(call('gl_settexf3', [nm('h'), nm('n'), num(32)])),
       set('ev_cur', nm('h')),
       ex(call('gl_bindtex', [nm('h')])),
+      ex(call('ev_texon', [])),
       ret(nm('h')),
     ]),
     /* `glsettex(句柄)`：设当前纹理并回它；**负数只问不改**（说明书那句
@@ -535,6 +549,7 @@ function glShaderDecls() {
       iff(bin('>=', nm('a'), num(0)), [
         set('ev_cur', nm('a')),
         ex(call('gl_bindtex', [nm('a')])),
+        ex(call('ev_texon', [])),
       ]),
       ret(nm('ev_cur')),
     ]),
@@ -547,6 +562,7 @@ function glShaderDecls() {
       ex(call('gl_settex6', [nm('h'), nm('px'), nm('xs'), nm('ys'), num(1), num(0)])),
       set('ev_cur', nm('h')),
       ex(call('gl_bindtex', [nm('h')])),
+      ex(call('ev_texon', [])),
       ret(nm('h')),
     ]),
     /* 句柄回收：这一版**只当收到了**（槽不复用，见 `EVALDRAW_TEX` 头注最后一段）。 */

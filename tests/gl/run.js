@@ -459,6 +459,48 @@ for (const [name, minFill, minColors] of [['04-shader.pss', 0.9, 1000],
   }
 }
 
+/* ── 第八节：**`.kc` 的纹理真贴上了**（`glsettex` + 内建那对的贴图版，2026-09-26）──
+ *
+ * EvalDraw 没有着色器：`glsettex(…)` 选一张图，接下来的多边形就该贴着它画
+ * （`evaldraw.txt:1627`）。而设备内建那对**原来没有 sampler** ⇒ 那些面出来是纯白。
+ * 现在多了一格内建贴图版（`batchprog(2)`）。
+ *
+ * 探针不碰外部素材：拿**静态数组**当纹理（`glsettex(buf,2,2)`，说明书那一档 ——
+ * 一格一个纹素、24 位 RGB），红/蓝两色的棋盘贴满一格四边形。判两条：
+ * 红蓝**都出现**（真采样了，不是平色），且没有第三种颜色（`GL_NEAREST` 那一档）。
+ */
+{
+  const probe = join(out, 'evtex.kc');
+  writeFileSync(probe, '()\n{\n   static buf[4] = {0xff0000, 0x0000ff, 0x0000ff, 0xff0000};\n'
+    + '   glsettex(buf,2,2);\n   setcol(0xffffff);\n   glBegin(GL_QUADS);\n'
+    + '   glTexCoord(0,0); glVertex(-1,-1,2);\n   glTexCoord(1,0); glVertex(1,-1,2);\n'
+    + '   glTexCoord(1,1); glVertex(1,1,2);\n   glTexCoord(0,1); glVertex(-1,1,2);\n'
+    + '   glEnd();\n}\n');
+  const pt = join(out, 'evtex.rgba');
+  const rt = spawnSync(process.execPath,
+    [join(ROOT, 'src/cli.js'), 'run', probe, '--backend', 'c', '-o', pt],
+    { encoding: 'utf8', cwd: ROOT, timeout: 180000,
+      env: { ...process.env, OMNI_GFX: 'gl', OMNI_GFX_MODE: 'render' } });
+  if (rt.status !== 0 || !existsSync(pt)) {
+    no('.kc 的纹理真贴上了（内建那对的贴图版）',
+      `${(rt.stdout ?? '').trim()} ${(rt.stderr ?? '').trim()}`.slice(0, 300));
+  } else {
+    const b = rgba(pt);
+    let red = 0;
+    let blue = 0;
+    for (let i = 0; i < b.length; i += 4) {
+      if (b[i] > 200 && b[i + 2] < 60) red++;
+      if (b[i + 2] > 200 && b[i] < 60) blue++;
+    }
+    if (red > 500 && blue > 500) {
+      ok('.kc 的纹理真贴上了（红蓝棋盘都采样到了）', `红 ${red} 格、蓝 ${blue} 格`);
+    } else {
+      no('.kc 的纹理真贴上了', `红 ${red} 格、蓝 ${blue} 格（都该有一大片 ——`
+        + ' 纯白说明内建那对还是平色那一份）');
+    }
+  }
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed（本机 OpenGL 设备）\n`);
 process.exit(fail === 0 ? 0 : 1);
 

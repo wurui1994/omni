@@ -1443,7 +1443,12 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
      可编程管线，所以 `batchprog` 非零是当场报（不静默按内建那对画）；那张 `u_mvp`
      与混合开关在这一档没有落点，收下记着不用。 */
   if (!strcmp(nm, "batchprog") && argc == 1) {
-    if (g_gl.on && g_gl.prog != NULL) { g_gl.prog((int)a0 != 0 ? 1 : 0); return 0.0; }
+    /* **三档按数递过去**（0 内建平色 / 1 脚本那格 / 2 内建那对的贴图版 ——
+       EvalDraw 的 `glsettex` 那条路，见 `omni_ev_gl.c` 的 `FS_TEX_SRC`）。 */
+    if (g_gl.on && g_gl.prog != NULL) { g_gl.prog((int)a0); return 0.0; }
+    /* **2 那一档（贴图版）在这一档收下不管**：CPU 备选没有纹理采样 —— 画出来是平色，
+       那是明写偏差，不是"脚本挑了自己那格 program"那种错。 */
+    if ((int64_t)a0 == 2) { return 0.0; }
     if ((int64_t)a0 != 0) {
       if (g_gl.on) {
         omni_errorf("本机 OpenGL：挂上的那份 libomnigl 里没有可编程管线那几格符号"

@@ -900,7 +900,13 @@ export function gfxCall(name, args) {
        **当场报**（不静默按内建那对画 —— 那就成了"图不对但没人知道"）；那张 `u_mvp`
        与混合开关在这一档没有落点，收下记着不用。 */
     case 'batchprog/1':
-      if (G.on) { G.m.prog(Math.trunc(a(0)) !== 0 ? 1 : 0); return 0; }
+      /* **三档**：0 内建平色、1 脚本那格着色器、**2 内建那对的贴图版**
+         （EvalDraw 的 `glsettex` 那条路 —— 那门语言没有着色器，见
+         `omni_ev_gl.c` 的 `FS_TEX_SRC`）。所以这一格**按数递过去**，别压成 0/1。 */
+      if (G.on) { G.m.prog(Math.trunc(a(0))); return 0; }
+      /* **2 那一档（贴图版）在这一档收下不管**：CPU 备选没有纹理采样（第 11 节），
+         画出来是平色 —— 那是明写偏差，不是"脚本挑了自己那格 program"那种错。 */
+      if (Math.trunc(a(0)) === 2) return 0;
       if (Math.trunc(a(0)) !== 0) {
         throw new Error('这格设备（CPU 备选）没有可编程管线 —— 脚本挑了自己那格'
           + ' program（glsetshader），顶点是**物体坐标**，这一档接不了；'

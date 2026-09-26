@@ -92,6 +92,32 @@ in vec3 v_col;
 out vec4 o_col;
 void main() { o_col = vec4(v_col, 1.0); }`;
 
+/* **内建那对的贴图版**（`batchprog(2)`）：EvalDraw 的 `glsettex` 那条路 ——
+   那门语言没有着色器，选了图之后的多边形就该贴着它画（`evaldraw.txt:1627`）。
+   顶点色**乘**纹素（固定管线的 `GL_MODULATE`）。**与 `runtime-gl/omni_ev_gl.c` 的
+   `FS_TEX_SRC` 逐句对应** —— 差的只有 `#version` 那一行与坐标空间那一格。 */
+const VS_TEX = `#version 300 es
+in vec4 a_pos;
+in vec4 a_col;
+in vec4 a_tex;
+uniform vec2 u_size;
+out vec3 v_col;
+out vec2 v_uv;
+void main() {
+  vec2 p = vec2(a_pos.x / u_size.x * 2.0 - 1.0, 1.0 - a_pos.y / u_size.y * 2.0);
+  gl_Position = vec4(p, clamp(a_pos.z, -1.0, 1.0), 1.0);
+  v_col = a_col.rgb;
+  v_uv = a_tex.xy;
+}`;
+
+const FS_TEX = `#version 300 es
+precision highp float;
+in vec3 v_col;
+in vec2 v_uv;
+uniform sampler2D u_tex0;
+out vec4 o_col;
+void main() { o_col = vec4(v_col, 1.0) * texture(u_tex0, v_uv); }`;
+
 function compile(gl, kind, src) {
   const s = gl.createShader(kind);
   gl.shaderSource(s, src);
@@ -115,9 +141,21 @@ function open(canvas, w, h) {
   if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
     throw new Error(`WebGL2 设备的 program 链不上：${gl.getProgramInfoLog(prog)}`);
   }
+  /* 贴图版那一格（`batchprog(2)`）：链不上就留 null，那时退回平色那对。 */
+  const ptex = gl.createProgram();
+  gl.attachShader(ptex, compile(gl, gl.VERTEX_SHADER, VS_TEX));
+  gl.attachShader(ptex, compile(gl, gl.FRAGMENT_SHADER, FS_TEX));
+  gl.linkProgram(ptex);
+  const texok = gl.getProgramParameter(ptex, gl.LINK_STATUS);
+  if (texok) {
+    gl.useProgram(ptex);
+    const sl = gl.getUniformLocation(ptex, 'u_tex0');
+    if (sl !== null) gl.uniform1i(sl, 0);
+  }
   D.canvas = canvas;
   D.gl = gl;
   D.prog = prog;
+  D.progtex = texok ? ptex : null;
   D.buf = gl.createBuffer();
   D.w = w;
   D.h = h;
@@ -196,15 +234,15 @@ const B = { prog: 0, mvp: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
  * `glsetshader` 挑的那格 —— 那时顶点位置递的是**物体坐标**，变换交给它的顶点着色器
  * （`u_mvp` 由语言那一侧发的四句 `batchmvp` 给，见 `docs/design/eval-realtime-gpu.md` 9.4）。
  */
-function batch(kind, prog = null, mvp = null) {
+function batch(kind, prog = null, mvp = null, tex = false) {
   const last = D.batches[D.batches.length - 1];
   if (last !== undefined && last.kind === kind && last.depth === G.depth
     && last.prog === prog && last.attrVer === G.attrVer
     && last.mvpVer === B.mvpVer && last.blend === B.blend
-    && last.cull === G.cull) return last;
+    && last.cull === G.cull && last.tex === tex) return last;
   const b = {
     kind, depth: G.depth, prog, mvp, attrVer: G.attrVer, mvpVer: B.mvpVer, blend: B.blend,
-    cull: G.cull, v: [],
+    cull: G.cull, tex, v: [],
   };
   D.batches.push(b);
   return b;
@@ -294,7 +332,8 @@ function flush() {
   const ST = 64;                    /* 一格顶点 16 个 float（位置/颜色/纹理坐标/法向） */
   for (const b of D.batches) {
     if (b.v.length === 0) continue;
-    const prog = b.prog === null ? D.prog : b.prog;
+    const bi = b.prog === null && b.tex === true && D.progtex !== null ? D.progtex : null;
+    const prog = b.prog === null ? (bi === null ? D.prog : bi) : b.prog;
     gl.useProgram(prog);
     if (b.prog === null) {
       gl.uniform2f(gl.getUniformLocation(prog, 'u_size'), D.w, D.h);
@@ -1045,7 +1084,9 @@ function reset() {
  *     语言那一侧发来的那张，见 `batchmvp`）。
  */
 function batchIn(kind, n, verts) {
-  const prog = B.prog === 0 ? null : SH.cur;
+  /* **三档**：0 内建平色、1 脚本那格、2 内建那对的贴图版（EvalDraw 的 `glsettex`）。
+     2 那一档位置照旧是裁剪空间 ⇒ 走下头 `null` 那条路，只是 flush 时挑另一格 program。 */
+  const prog = B.prog === 1 ? SH.cur : null;
   if (prog !== null) {
     const b = batch(kind === 0 ? 'line' : 'tri', prog, B.mvp.slice());
     b.mv = B.mv.slice();
@@ -1062,7 +1103,7 @@ function batchIn(kind, n, verts) {
   /* 点那一档：一格顶点摊成一个 1×1 的四边形（WebGL 里 `gl_PointSize` 不可靠 ——
      与 `setpix` 同一手）。"一个点多大"是设备的事，语言那一侧不知道像素。 */
   if (kind === 2) {
-    const b = batch('tri');
+    const b = batch('tri', null, null, B.prog === 2);
     for (let i = 0; i < n; i++) {
       const o = i * 16;
       const [x, y, z] = sx(o);
@@ -1074,7 +1115,7 @@ function batchIn(kind, n, verts) {
     }
     return n;
   }
-  const b = batch(kind === 0 ? 'line' : 'tri');
+  const b = batch(kind === 0 ? 'line' : 'tri', null, null, B.prog === 2);
   for (let i = 0; i < n; i++) {
     const o = i * 16;
     const [x, y, z] = sx(o);

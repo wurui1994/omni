@@ -56,6 +56,7 @@ static CGLContextObj g_ctx;
 static GLuint g_fbo, g_color, g_depth, g_vao;
 static GLuint g_vbo;
 static GLuint g_prog;            /* 内建那对着色器（位置已是裁剪空间） */
+static GLuint g_progtex;         /* 内建那对的**贴图版**（EvalDraw 的 glsettex 那条路） */
 static int g_w, g_h;
 /** 现在这格视口（抓屏那一族会用到，见 `omni_ev_gl_capbegin`）。 */
 static int g_vpw, g_vph;
@@ -147,6 +148,25 @@ static const char *FS_SRC =
   "out vec4 o_col;\n"
   "void main() { o_col = v_col0; }\n";
 
+/**
+ * 内建那对的**贴图版**（`batchprog(2)`）。
+ *
+ * 谁要它：**EvalDraw 的 `glBegin` 那一族**（`.kc`）。那门语言没有着色器 ——
+ * `glsettex("brick.png")` 选一张图，接下来的多边形就该贴着它画
+ * （`evaldraw.txt:1627`）。而内建那对压根没有 sampler，于是那些面出来是**纯白**
+ * （`setcol(0xffffff)` × 没采样）：`demos/beer.kc` 的砖墙就是这么白的。
+ *
+ * 顶点色**乘**纹素（GL 固定管线的 `GL_MODULATE`，也是原版那套软光栅的做法）。
+ * 采样器固定在 0 号单元 —— `glbindtexture(槽)` 绑的就是当前单元（默认 0）。
+ */
+static const char *FS_TEX_SRC =
+  "#version 410 core\n"
+  "in vec4 v_col0;\n"
+  "in vec4 v_tex0;\n"
+  "uniform sampler2D u_tex0;\n"
+  "out vec4 o_col;\n"
+  "void main() { o_col = v_col0 * texture(u_tex0, v_tex0.xy); }\n";
+
 static GLuint ev_compile(GLenum kind, const char *src) {
   GLuint s = glCreateShader(kind);
   glShaderSource(s, 1, &src, NULL);
@@ -202,6 +222,23 @@ static int ev_setup(int w, int h) {
   GLint ok = 0;
   glGetProgramiv(g_prog, GL_LINK_STATUS, &ok);
   if (!ok) { ev_err("内建 program 链不上", NULL); return 1; }
+  /* 贴图版那一格（`batchprog(2)`）：顶点着色器是同一份，片元换成带 sampler 的那份。
+     采样器只在这儿设一次（uniform 是按 program 存着的）。 */
+  GLuint fst = ev_compile(GL_FRAGMENT_SHADER, FS_TEX_SRC);
+  if (fst != 0) {
+    g_progtex = glCreateProgram();
+    glAttachShader(g_progtex, vs);
+    glAttachShader(g_progtex, fst);
+    glLinkProgram(g_progtex);
+    GLint okt = 0;
+    glGetProgramiv(g_progtex, GL_LINK_STATUS, &okt);
+    if (!okt) { g_progtex = 0; } else {
+      glUseProgram(g_progtex);
+      GLint sl = glGetUniformLocation(g_progtex, "u_tex0");
+      if (sl >= 0) glUniform1i(sl, 0);
+      glUseProgram(0);
+    }
+  }
 
   glGenBuffers(1, &g_vbo);
   glViewport(0, 0, w, h);
@@ -602,7 +639,9 @@ int omni_ev_gl_attr(double loc, const double *v) {
 }
 
 /** `batchprog` / `batchmvp 列 m0..m3` / `batchmv 列 m0..m3` / `batchblend`。 */
-void omni_ev_gl_prog(int on) { g_useprog = on ? 1 : 0; }
+/* `batchprog(n)`：0 = 内建那对、1 = 脚本 `glsetshader` 挑的那格、
+   **2 = 内建那对的贴图版**（EvalDraw 的 `glsettex` 那条路，见 `FS_TEX_SRC`）。 */
+void omni_ev_gl_prog(int on) { g_useprog = on; }
 
 void omni_ev_gl_mvp(int col, double m0, double m1, double m2, double m3) {
   if (col < 0 || col > 3) return;
@@ -1105,7 +1144,9 @@ void omni_ev_gl_batch(int kind, long n, const double *verts) {
   GLuint prog = g_prog;
   const float *m = I4;
   const float *mv = I4;
-  if (g_useprog && (g_cur != 0 || ev_need_prog())) { prog = g_cur; m = g_mvp; mv = g_mv; }
+  /* 2 = 内建那对的贴图版（位置照旧是裁剪空间 ⇒ `u_mvp` 还是单位）。链不上就退回平色那对。 */
+  if (g_useprog == 2 && g_progtex != 0) prog = g_progtex;
+  if (g_useprog == 1 && (g_cur != 0 || ev_need_prog())) { prog = g_cur; m = g_mvp; mv = g_mv; }
   if (prog != g_st_prog) { glUseProgram(prog); g_st_prog = prog; }
   int li = ev_loc_at(prog);
   /* 两张矩阵：**与上一段一样就不发**（uniform 是按 program 存着的，所以换了 program

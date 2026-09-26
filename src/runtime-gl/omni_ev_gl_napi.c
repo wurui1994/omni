@@ -331,7 +331,9 @@ static napi_value jsAttr(napi_env env, napi_callback_info info) {
 
 static napi_value jsProg(napi_env env, napi_callback_info info) {
   ARGS(1);
-  omni_ev_gl_prog((int)num(env, a[0]) != 0);
+  /* **三档按数递过去**（0 内建平色 / 1 脚本那格 / 2 内建那对的贴图版 —— EvalDraw 的
+     `glsettex` 那条路）。从前这儿写的是 `!= 0`，于是 2 被压成 1，贴图版永远挑不上。 */
+  omni_ev_gl_prog((int)num(env, a[0]));
   return mknum(env, 0);
 }
 
