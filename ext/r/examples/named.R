@@ -303,3 +303,29 @@ print(unname(ifelse(sc > 80, 1, 0)))
 grade <- ifelse(sc >= 80, 3, 2)
 print(grade)
 cat(sum(grade), names(which(grade == max(grade))), "\n")
+
+# **`v["名字"] <- 值`**（2026-09-26 接的）：名字在就写那一格，不在就**接长一格**并把
+# 名字也接上（R 的口径）。从前这一格发出来是 `(let r_ix int (str "c"))` —— 一路发到 `.sx`
+# 才撞上"是 int，初值是 string"，而那时已经过了换档那道门（退 1、什么都不印）。
+# 没名字的向量上 R 会**造出名字来**（`c(1,2)["a"] <- 3` 的 names 是 `"" "" "a"`），
+# 那一档当场报 —— 这一层名字那一条影子在编译期就定了。
+wnv <- c(a = 1, b = 2)
+wnv["c"] <- 3
+print(wnv)
+wnv <- c(a = 1, b = 2)
+wnv["b"] <- 9
+print(wnv)
+wnv <- c(a = 1, b = 2)
+wnv["a"] <- 0
+wnv["z"] <- 5
+print(wnv)
+wnv <- c(a = 1)
+wnv["b"] <- 2
+cat(wnv, names(wnv), length(wnv), "\n")
+wkey <- "b"
+wnv <- c(a = 1, b = 2)
+wnv[wkey] <- 7
+print(wnv)
+wnv <- c(a = 1, b = 2)
+wnv["c"] <- 3
+cat(sum(wnv), wnv[["c"]], "\n")

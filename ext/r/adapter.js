@@ -270,6 +270,7 @@ const FN_DEPS = new Map([
   ['r_pick_str', []],
   ['r_sat1', []],
   ['r_nm_pos', []],
+  ['r_nmfind', []],
   ['r_nm_pick', []],
   ['r_nm_keys', []],
   ['r_copy_str', []],
@@ -6717,6 +6718,8 @@ function assignOf(x, types) {
     if (isVecTy(ot)) {
       const kv = exprOf(keys[0], types);
       const kt = typeOfExpr(keys[0], types);
+      /* 写进去那一格值（几种下标形状都要它，所以摆在分岔之前）。 */
+      const val = asReal(exprOf(value, types), typeOfExpr(value, types));
       /**
        * **写那一侧的下标只接"一格数"**（2026-09-26 补的拦）。R 那儿这四种写法都合法，
        * 而这一层从前照发、一路发到 `.sx` 或者运行期才死 —— **那时已经过了换档那道门**：
@@ -6769,9 +6772,60 @@ function assignOf(x, types) {
           + ' 名字不在时要接长并把名字也接上，那是另一刀');
       }
       if (kt !== undefined && kt.kind === 'string') {
-        throw new Error('r->IR: `v["名字"] <- …` 还没接 —— 名字在的时候要写那一格、'
-          + '不在的时候要接长一格并把名字也接上（R 的口径），这一层写那一侧只接一格数。'
-          + '读那一侧（`v["a"]`）接了');
+        /**
+         * **`v["名字"] <- 值`**（2026-09-26 接的）：名字在就写那一格，不在就**接长一格**
+         * 并把名字也接上（R 的口径 —— `c(a=1,b=2)["c"] <- 3` 之后 names 是 `a b c`）。
+         * 名字与那格值都要读两遍，所以各存一格临时量。
+         *
+         * 没名字的向量上 R 会**造出名字来**（`c(1,2)["a"] <- 3` 的 names 是 `"" "" "a"`），
+         * 那要把一条没名字的向量在原地变成带名字的 —— 这一层的名字是跟着**变量**走的
+         * （影子变量在编译期就定了），所以那一档当场报。
+         */
+        if (tag(obj) !== 'sym') {
+          throw new Error('r->IR: `v["名字"] <- …` 只在左边是一个名字时接');
+        }
+        if (!isNamedTy(ot)) {
+          throw new Error('r->IR: `没名字的向量["名字"] <- …` 还没接 —— R 那儿会**造出名字来**'
+            + '（`c(1,2)["a"] <- 3` 的 names 是 `"" "" "a"`），而这一层名字那一条影子'
+            + '在编译期就定了，一条没名字的向量变不成带名字的');
+        }
+        const vn4 = mangle(nameOf(obj));
+        const vr4 = { kind: 'name', name: vn4 };
+        const nr4 = { kind: 'name', name: nmVar(vn4) };
+        const kNm = fresh('wk');
+        const pNm = fresh('wp');
+        const nNm = fresh('wn');
+        const kE = { kind: 'name', name: kNm };
+        const pE = { kind: 'name', name: pNm };
+        const nE = { kind: 'name', name: nNm };
+        const I1b = { kind: 'int', value: 1 };
+        return {
+          kind: 'block',
+          stmts: [
+            { kind: 'let', name: kNm, type: STR, init: kv },
+            { kind: 'let', name: nNm, type: INT, init: vecLen(vr4) },
+            { kind: 'let', name: pNm, type: INT, init: lglCall('r_nmfind', nr4, kE) },
+            {
+              kind: 'if',
+              cond: b('==', pE, { kind: 'int', value: 0 }),
+              then: [
+                {
+                  kind: 'assign',
+                  target: vr4,
+                  value: lglCall('r_ext', vr4, b('+', nE, I1b)),
+                },
+                {
+                  kind: 'assign',
+                  target: nr4,
+                  value: lglCall('r_ext_nm', nr4, b('+', nE, I1b)),
+                },
+                { kind: 'assign', target: svGet(nr4, nE), value: kE },
+                vecSet(vr4, nE, val),
+              ],
+              else_: [vecSet(vr4, b('-', pE, I1b), val)],
+            },
+          ],
+        };
       }
       if (isNegSub(keys[0])) {
         /* `v[-k] <- 值` —— 与读那一侧同一条：摆成长度 1 的下标向量交给 `r_wset`，
@@ -6793,7 +6847,6 @@ function assignOf(x, types) {
           value: lglCall('r_wset', vr3, lglCall('r_vec1', asReal(kv, kt)), valV2),
         };
       }
-      const val = asReal(exprOf(value, types), typeOfExpr(value, types));
       /* **越界就接长**（R 的口径：`x <- c(1,2); x[5] <- 9` 之后 `x` 是 `1 2 NA NA 9`）。
        *
        * 只在左边是**一个名字**的时候接：接长要换一格指针，而换指针就得重新绑到那个变量上，
@@ -7571,7 +7624,7 @@ function strFnDecl(name) {
 /** 这一批由 `strvFnDecl` 发（形状都是"一条 `(arr string)` 进"）。 */
 const STRV_FNS = new Set([
   'r_cat_str', 'r_print_str', 'r_join_str', 'r_rev_str', 'r_nchar_v', 'r_upper_v', 'r_lower_v',
-  'r_pick_str', 'r_mask_str', 'r_split', 'r_at_name', 'r_nm_at', 'r_sat1', 'r_nm_pos', 'r_nm_pick', 'r_nm_keys', 'r_copy_str', 'r_tab_nm', 'r_tab_nml',
+  'r_pick_str', 'r_mask_str', 'r_split', 'r_at_name', 'r_nm_at', 'r_sat1', 'r_nm_pos', 'r_nmfind', 'r_nm_pick', 'r_nm_keys', 'r_copy_str', 'r_tab_nm', 'r_tab_nml',
   'r_gsub', 'r_gsub_v', 'r_grepl_v', 'r_grep_i', 'r_grep_s', 'r_rep_str', 'r_ifelse_s',
   'r_substr_v', 'r_trim_v', 'r_starts_v', 'r_ends_v',
   /* base 那四条字符向量常量 + `strrep` 在字符向量上那一格。 */
@@ -8706,6 +8759,28 @@ function strvFnDecl(name) {
           ],
         },
         { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  if (name === 'r_nmfind') {
+    /* 名字那一条里"这个名字在第几格"（1 起，找不着回 0）—— 给 `v["名字"] <- 值` 用：
+       找着了写那一格，没找着接长一格并把名字也接上（R 的口径）。 */
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'ns', type: RSTRV }, { name: 'k', type: STR }],
+      ret: INT,
+      body: [
+        letI('n', svLen(nm('ns'))),
+        {
+          kind: 'for',
+          init: letI('i', I(0)),
+          cond: b('<', nm('i'), nm('n')),
+          post: set('i', b('+', nm('i'), I(1))),
+          body: [iff(b('==', svGet(nm('ns'), nm('i')), nm('k')),
+            [{ kind: 'return', values: [b('+', nm('i'), I(1))] }])],
+        },
+        { kind: 'return', values: [I(0)] },
       ],
     };
   }
