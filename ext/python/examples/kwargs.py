@@ -98,6 +98,22 @@ def main():
     print("no args after this:", end=" ")
     print()
 
+    # print(*xs) —— 要印的那几段先攒成一张串表，再用分隔符 join。
+    # **空表那一格不多摆一个分隔符**（`print("a", *[], "b")` 是 `a b`）——
+    # 表的长度是运行时才知道的，所以"有几段"只能在运行时数。
+    args = [1, 2]
+    print(*args)
+    print("a", *args, "b")
+    print(*args, sep="-")
+    names = ["p", "q"]
+    print(*names, sep="")
+    print("x", *names, "y", sep="|")
+    none2: list[int] = []
+    print("a", *none2, "b")
+    print(*none2)
+    print(*"ab")
+    print(*args, end="!\n")
+
     # 多目标赋值
     a, b = 1, 2
     print(a, b)

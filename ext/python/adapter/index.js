@@ -35,7 +35,7 @@ import {
 } from './expr.js';
 import {
   reverseStmts, clearStmts, extendStmts, insertStmts, dropAtStmts, indexOfList,
-  dictClearStmts, sortStmts, dictUpdateStmts, sliceAssignStmts,
+  dictClearStmts, sortStmts, dictUpdateStmts, sliceAssignStmts, joinOf, charsOf,
 } from './builtins.js';
 import { boxOf, unifyPy } from './dyn.js';
 
@@ -1206,23 +1206,77 @@ function printStmt(argToks, C) {
       if (k === 'sep') { sep = exprOf(kids(a)[1], C); continue; }
       throw new Error(`python->IR: \`print(${k}=…)\` 还没接（接了的是 end= 与 sep=）`);
     }
-    if (['star', 'starstar'].includes(tag(a))) {
-      throw new Error(`python->IR: \`print\` 的实参里有 \`${tag(a)}\` —— 还没接`);
+    if (tag(a) === 'starstar') {
+      throw new Error('python->IR: `print(**d)` 还没接');
     }
     pos.push(a);
   }
-  const parts = pos.map((a) => pyStr(exprOf(a, C), C));
   const gap = sep ?? { kind: 'string', value: ' ' };
-  let value = parts.length === 0 ? { kind: 'string', value: '' } : parts[0];
-  for (const p of parts.slice(1)) {
-    value = {
-      kind: 'binop', op: '+',
-      left: { kind: 'binop', op: '+', left: value, right: gap },
-      right: p,
-    };
+  const pre = [];
+  let value;
+  if (pos.some((a) => tag(a) === 'star')) {
+    /**
+     * **`print(*xs)`** —— 先把要印的那几段**攒成一张串表**，再用分隔符 join。
+     *
+     * 为什么不是"逐段拿 `+` 接起来"：展开的那张表可能是空的，而 python 那时**不多摆
+     * 一个分隔符**（`print("a", *[], "b")` 是 `a b`，不是 `a  b`）。表的长度是运行时
+     * 才知道的，所以"有几段"这件事只能在运行时数 —— 攒表再 join 正好是这个意思。
+     */
+    const st = arrOf(STR);
+    const pn = C.fresh('pr_ps');
+    C.bind(pn, st);
+    pre.push({
+      kind: 'let', name: pn, type: st,
+      init: { kind: 'builtin', name: 'anew', args: [{ kind: 'type', type: st }, { kind: 'int', value: 0 }] },
+    });
+    const ps = { kind: 'name', name: pn };
+    for (const a of pos) {
+      if (tag(a) !== 'star') {
+        pre.push({ kind: 'builtin-stmt', name: 'apush', args: [ps, pyStr(exprOf(a, C), C)] });
+        continue;
+      }
+      const box = exprOf(kids(a)[0], C);
+      const bt = typeOfIR(box, C);
+      const src = bt.kind === 'string' ? charsOf(box, C) : box;
+      const stt = typeOfIR(src, C);
+      if (stt.kind !== 'arr') {
+        throw new Error(`python->IR: \`print(*${bt.kind})\` 还没接（表与串接了）`);
+      }
+      const bn = C.fresh('pr_xs');
+      C.bind(bn, stt);
+      pre.push({ kind: 'let', name: bn, type: stt, init: src });
+      const xs = { kind: 'name', name: bn };
+      const iN = C.fresh('pr_i');
+      C.bind(iN, INT);
+      pre.push({ kind: 'let', name: iN, type: INT, init: { kind: 'int', value: 0 } });
+      const i = { kind: 'name', name: iN };
+      pre.push({
+        kind: 'while',
+        cond: { kind: 'binop', op: '<', left: i, right: { kind: 'builtin', name: 'alen', args: [xs] } },
+        body: [
+          {
+            kind: 'builtin-stmt',
+            name: 'apush',
+            args: [ps, pyStr({ kind: 'index', obj: xs, index: i }, C)],
+          },
+          { kind: 'assign', target: i, value: { kind: 'binop', op: '+', left: i, right: { kind: 'int', value: 1 } } },
+        ],
+      });
+    }
+    value = joinOf(gap, ps, C);
+  } else {
+    const parts = pos.map((a) => pyStr(exprOf(a, C), C));
+    value = parts.length === 0 ? { kind: 'string', value: '' } : parts[0];
+    for (const p of parts.slice(1)) {
+      value = {
+        kind: 'binop', op: '+',
+        left: { kind: 'binop', op: '+', left: value, right: gap },
+        right: p,
+      };
+    }
   }
-  if (end === null) return [{ kind: 'print', values: [value] }];
-  return [{ kind: 'write', values: [{ kind: 'binop', op: '+', left: value, right: end }] }];
+  if (end === null) return [...pre, { kind: 'print', values: [value] }];
+  return [...pre, { kind: 'write', values: [{ kind: 'binop', op: '+', left: value, right: end }] }];
 }
 
 /* ─── 赋值 ────────────────────────────────────────────────────────────────── */
