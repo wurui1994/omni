@@ -5870,9 +5870,80 @@ function callOf(x, types, extra, want, stmtPos) {
         const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
         const wantInt = fn === 'as.integer';
         if (t.kind === 'string' || isStrVec(t)) {
-          throw new Error(`r->IR: ${fn}() 把**串**转成数还没接 —— 核心方言里没有"串 → 数"`
-            + '那一格算子，而自己写一圈按位累加在 15 位有效数字之外与 `strtod` 的舍入对不上'
-            + '（那是静默差最后几位）。见 ext/r/SPEC.md 第四节');
+          if (isStrVec(t)) {
+            throw new Error(`r->IR: ${fn}() 收的是一条**字符向量** —— 一格串那一档接了`
+              + '（见下头那段账），逐元素那一档还没接');
+          }
+          /**
+           * **一格串 → 数**（2026-09-26 接了）。R 的 `as.numeric` 走它自己的 `R_strtod5`
+           * （`src/main/util.c`）：按位累加再乘/除 10 的幂（long double），**不是正确舍入**。
+           * 量出来的（每档随机输入、指数 10^±12 之内）：
+           *
+           *   <= 11 位有效数字：R 与正确舍入**一个 bit 都不差**（1..11 位各 4000 个全中）
+           *   12 位起分叉：12 位 106/4000、15 位 232/4000、17 位 1265/4000
+           *
+           * 所以这一档**只在答得准的那一段答**：数位由 `omni_r_numdigits` 数
+           * （`ext/r/rt/omni_rna.c`，我们自己的代码），<= 11 位走 C 的 `strtod`
+           * （正确舍入，与 R 逐 bit 相同）；超过 11 位、或者十六进制那一档（R 认 `0x10`，
+           * 走的是另一条累加）在**运行期停下来** —— 报得晚，不是静默差最后一位。
+           * 不是数（`"abc"` / `"3.5x"`）照 R 出 `NA`（R 那边另带一句警告，这一层没有警告）。
+           */
+          for (const sym of ['omni_r_numdigits', 'omni_r_str2d']) {
+            cabiUsed.add(sym);
+            rmathSig(sym);
+          }
+          const sN = fresh('cs');
+          const dN = fresh('cd');
+          const sE = { kind: 'name', name: sN };
+          const dE = { kind: 'name', name: dN };
+          const val = {
+            kind: 'ternary',
+            cond: b('<', dE, { kind: 'int', value: 0 }),
+            /* `NA` 走**生成出来的** `r_na()`（它按指针写，见 `NA_FNS` 那段账）——
+               直接 `(ccall "omni_r_na")` 按值回的话，1954 那个载荷过 JS 那条腿的
+               N-API 边界会被 V8 规范化掉，于是 `cat(as.numeric("abc"))` 印 `NaN`
+               而 R 印 `NA`（量出来的，就差这一处）。 */
+            then: { kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] },
+            else_: { kind: 'ccall', sym: 'omni_r_str2d', args: [sE] },
+          };
+          const fail = (msg) => ({ kind: 'builtin-stmt', name: 'fail', args: [{ kind: 'string', value: msg }] });
+          const guard = {
+            kind: 'if',
+            cond: b('==', dE, { kind: 'int', value: -2 }),
+            then: [fail(`${fn}(串)：十六进制那一档（\`"0x10"\`，R 认）还没接 ——`
+              + ' R 走的是另一条按 16 累加的路（`R_strtod5`），不是这儿这条')],
+            else_: [{
+              kind: 'if',
+              cond: b('>', dE, { kind: 'int', value: 11 }),
+              then: [fail(`${fn}(串)：这一档只认 11 位以内的有效数字 —— R 的 R_strtod5`
+                + ' 是按位累加、不是正确舍入，量出来 12 位起就与正确舍入分叉'
+                + '（见 ext/r/rt/omni_rna.h 那段账）')],
+              else_: null,
+            }],
+          };
+          const stmts = [
+            { kind: 'let', name: sN, type: STR, init: ev(0) },
+            { kind: 'let', name: dN, type: INT, init: { kind: 'ccall', sym: 'omni_r_numdigits', args: [sE] } },
+            guard,
+          ];
+          /* `as.integer("abc")` 在 R 里是 `NA_integer_`，而这一档没有带缺失的整数
+             （第四节第 11 条）—— 所以整数那一侧"不是数"也停下来，不静默出一格垃圾
+             （`toint(NaN)` 出什么由方言定，那正是"静默答错"）。 */
+          if (wantInt) {
+            stmts.push({
+              kind: 'if',
+              cond: b('==', dE, { kind: 'int', value: -1 }),
+              then: [fail('as.integer(串)：这串不是一个数 —— R 那儿答 NA_integer_，'
+                + '而这一档没有带缺失的整数（见 ext/r/SPEC.md 第四节第 11 条）。'
+                + '要数就写 as.numeric(…)')],
+              else_: null,
+            });
+          }
+          return {
+            kind: 'block-expr',
+            stmts,
+            value: wantInt ? call1('toint', { kind: 'ccall', sym: 'omni_r_str2d', args: [sE] }) : val,
+          };
         }
         if (t.kind === 'map') throw new Error(`r->IR: ${fn}() 的实参是一张 list`);
         if (isVecTy(t)) {

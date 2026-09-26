@@ -1,6 +1,7 @@
 /* ext/r/rt/omni_rna.c —— 见 omni_rna.h 文件头那段账（这一份是我们自己的代码，不是 R 的）。 */
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 #include "omni_rna.h"
 
@@ -53,3 +54,49 @@ int omni_r_is_infinite(double x) { return isinf(x) ? 1 : 0; }
 void omni_r_na_into(double *p) { *p = omni_r_na(); }
 int omni_r_is_na_p(const double *p) { return omni_r_is_na(*p); }
 int omni_r_is_nan_p(const double *p) { return omni_r_is_nan(*p); }
+
+/* ---- 串 → 数（见头文件里那段量出来的账） ---- */
+
+static int omni_r_isspace(char c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+int omni_r_numdigits(const char *s)
+{
+    const char *p = s;
+    int nd = 0;          /* 数出来的有效数字 */
+    int seen = 0;        /* 见过至少一个数字 */
+    int lead = 1;        /* 还在前导零里 */
+    while (omni_r_isspace(*p)) p++;
+    if (*p == '+' || *p == '-') p++;
+    /* 十六进制那一档 R 走的是另一条路（按 16 累加），这儿不接 —— 单独一个回值，
+       让上头报得清楚，而不是混进"这不是一个数"。 */
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) return -2;
+    for (; *p >= '0' && *p <= '9'; p++) {
+        seen = 1;
+        if (*p != '0') lead = 0;
+        if (!lead) nd++;
+    }
+    if (*p == '.') {
+        p++;
+        for (; *p >= '0' && *p <= '9'; p++) {
+            seen = 1;
+            if (lead && *p == '0') continue;   /* `0.00123` 的那两个零不算 */
+            lead = 0;
+            nd++;
+        }
+    }
+    if (!seen) return -1;
+    if (*p == 'e' || *p == 'E') {
+        p++;
+        if (*p == '+' || *p == '-') p++;
+        if (!(*p >= '0' && *p <= '9')) return -1;
+        while (*p >= '0' && *p <= '9') p++;
+    }
+    while (omni_r_isspace(*p)) p++;
+    if (*p != '\0') return -1;   /* 后面还挂着别的字 —— R 那边出 NA 并警告 */
+    return nd;                   /* 全是零时 0 位，那一格准确无疑 */
+}
+
+double omni_r_str2d(const char *s) { return strtod(s, (char **)0); }
