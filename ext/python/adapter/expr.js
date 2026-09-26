@@ -625,6 +625,14 @@ function tyOfCall(x, C) {
     if (t === null || t === undefined) return null;
     /* `sorted(串)` / `list(串)` 交的是一张字符表（`reversed` 只收表）。 */
     if (t.kind === 'string' && nm !== 'reversed') return arrOf(STR);
+    /* `list(元组)` —— 逐格合成一格当元素。 */
+    if (nm === 'list') {
+      const tup = tupleOf(C.recOf(t));
+      if (tup !== null) {
+        const et = unify(tup);
+        return et === null ? null : arrOf(et);
+      }
+    }
     return t.kind === 'arr' ? t : null;
   }
   if (nm === 'zip' && argTys.length === 2) {
@@ -1149,9 +1157,72 @@ function sortedPy(xsE, C, desc) {
   return sortedOf(src, C, desc, (x, y) => cmpOne('<', x, y, C));
 }
 
+/**
+ * **元组当序列用**：逐格摆进一张新表（`for v in t` / `list(t)` / `x in t` 走它）。
+ * 逐格类型要能合成一格；合不成就当场报（异质的退到 `(arr dyn)`，逐格装箱）。
+ */
+export function tupleToList(box0, C) {
+  const t = ty(box0, C);
+  const tup = tupleOf(C.recOf(t));
+  if (tup === null) throw new Error(`python->IR: \`${t.kind}\` 不是元组，摆不成表`);
+  const et = unify(tup);
+  if (et === null) {
+    throw new Error(`python->IR: 这格元组里装着 ${[...new Set(tup.map((f) => f.kind))].join(' / ')}`
+      + ' —— 合不成一张表（装不进 dyn 那格箱子的那几档，见 `dyn.js`）');
+  }
+  const at = arrOf(et);
+  const pre = [];
+  let b = box0;
+  if (!isPure(box0)) {
+    const bn = C.fresh('tl_t');
+    C.bind(bn, t);
+    pre.push({ kind: 'let', name: bn, type: t, init: box0 });
+    b = { kind: 'name', name: bn };
+  }
+  const n = C.fresh('tl_o');
+  C.bind(n, at);
+  pre.push({
+    kind: 'let', name: n, type: at,
+    init: { kind: 'builtin', name: 'anew', args: [{ kind: 'type', type: at }, { kind: 'int', value: 0 }] },
+  });
+  const out = { kind: 'name', name: n };
+  tup.forEach((ft, i) => {
+    let v = { kind: 'field', obj: b, name: `_${i}` };
+    if (isDyn(et) && !isDyn(ft)) v = boxOf(v, C);
+    pre.push({ kind: 'builtin-stmt', name: 'apush', args: [out, v] });
+  });
+  return { kind: 'block-expr', stmts: pre, value: out };
+}
+
 /** `x in 容器` —— 字典是"有这个键"、串是"找得到这一段"、表是走一遍。 */
 function containsOf(box, needle, C) {
   const t = ty(box, C);
+  /* 元组：**编译期逐格展开**成一串 `==`（元组的格数与逐格类型都是编译期定的）。
+     类型对不上的那一格在 python 里恒 False —— 跳过它，别发一格比不了的 `==`。 */
+  const tup = tupleOf(C.recOf(t));
+  if (tup !== null) {
+    const nt = ty(needle, C);
+    const pre = [];
+    const pin = (e, et, p) => {
+      if (isPure(e)) return e;
+      const n = C.fresh(p);
+      C.bind(n, et);
+      pre.push({ kind: 'let', name: n, type: et, init: e });
+      return { kind: 'name', name: n };
+    };
+    const b = pin(box, t, 'ti_t');
+    const v = pin(needle, nt, 'ti_v');
+    let out = null;
+    tup.forEach((ft, i) => {
+      const cmpable = isDyn(ft) || isDyn(nt) || sameType(ft, nt)
+        || (['int', 'real'].includes(ft.kind) && ['int', 'real'].includes(nt.kind));
+      if (!cmpable) return;
+      const one = cmpOne('==', v, { kind: 'field', obj: b, name: `_${i}` }, C);
+      out = out === null ? one : { kind: 'binop', op: '||', left: out, right: one };
+    });
+    if (out === null) out = { kind: 'bool', value: false };
+    return pre.length === 0 ? out : { kind: 'block-expr', stmts: pre, value: out };
+  }
   if (t.kind === 'map') return { kind: 'builtin', name: 'dhas', args: [box, needle] };
   if (t.kind === 'string') {
     return {
@@ -1444,6 +1515,9 @@ function compElem(it, C) {
   if (t.kind === 'arr') return t.elem;
   if (t.kind === 'string') return STR;
   if (t.kind === 'map') return t.key;
+  /* 元组：逐格合成一格（`for v in (1, 2, 3)` 与 `[e for v in t]` 同一条）。 */
+  const tup = tupleOf(C.recOf(t));
+  if (tup !== null) return unify(tup);
   return null;
 }
 
@@ -1539,7 +1613,9 @@ function compBind(gs, C) {
 function compIter(it, C) {
   if (tag(it) === 'call' && tag(kids(it)[0]) === 'n'
     && String(nameOf(kids(it)[0])) === 'range') return rangeListOf(it, C);
-  return exprOf(it, C);
+  const e = exprOf(it, C);
+  /* 元组：逐格摆进一张表再走（与 `for` 语句那一侧同一条）。 */
+  return tupleOf(C.recOf(ty(e, C))) !== null ? tupleToList(e, C) : e;
 }
 
 /**
@@ -2827,7 +2903,9 @@ function builtinOf(nm, args, argToks, C) {
       if (t.kind === 'arr') return copyList(args[0], C);
       if (t.kind === 'string') return charsOf(args[0], C);
       if (t.kind === 'map') return { kind: 'builtin', name: 'dkeys', args: [args[0]] };
-      throw new Error(`python->IR: \`list(${t.kind})\` 还没接（表 / 串 / 字典 / range 接了）`);
+      /* 元组：逐格摆进一张新表（格数与逐格类型都是编译期定的）。 */
+      if (tupleOf(C.recOf(t)) !== null) return tupleToList(args[0], C);
+      throw new Error(`python->IR: \`list(${t.kind})\` 还没接（表 / 串 / 字典 / 元组 / range 接了）`);
     }
     /* `dict(pairs)` —— 一串两格的元组造一格字典。`dict(a=1)` 那种命名实参没接。 */
     case 'dict': {

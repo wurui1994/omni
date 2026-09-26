@@ -31,7 +31,7 @@ import { INT, STR, BOOL, DYN, arrOf, sameType, typeOf, named } from '../../../sr
 import { typeToSx } from '../../../src/core/lower/ty.js';
 import {
   exprOf, condOf, nameOf, typeOfAnnot, tyOfCst, tyArg, pyStr, pyRepr, lenOf, hasFields, fstringParts, cmpEq,
-  kwOrder, tupleOf, cmpLt, needOrd,
+  kwOrder, tupleOf, cmpLt, needOrd, tupleToList,
 } from './expr.js';
 import {
   reverseStmts, clearStmts, extendStmts, insertStmts, dropAtStmts, indexOfList,
@@ -695,7 +695,7 @@ function scanOne(s, C, rets) {
         bindTarget(kids(kids(s)[0])[0], pair.t0, C);
         bindTarget(kids(kids(s)[0])[1], pair.t1, C);
       } else {
-        bindTarget(kids(s)[0], elemOf(tyOfCst(iterTok, C), iterTok), C);
+        bindTarget(kids(s)[0], elemOf(tyOfCst(iterTok, C), iterTok, C), C);
       }
       scanBinds(part(s, 'body'), C, rets);
       for (const e of kids(s).filter((y) => tag(y) === 'else')) scanBinds(e, C, rets);
@@ -870,7 +870,8 @@ function pairFor(x, pair, once, pre, C) {
   };
 }
 
-/** 一格可迭代的东西装的元素是什么（`range(…)` 出 int，表出它的元素，串出串）。 */function elemOf(it, node) {
+/** 一格可迭代的东西装的元素是什么（`range(…)` 出 int，表出它的元素，串出串）。 */
+function elemOf(it, node, C) {
   if (node !== undefined && tag(node) === 'call' && tag(kids(node)[0]) === 'n'
     && String(nameOf(kids(node)[0])) === 'range') return INT;
   if (it === null) return null;
@@ -878,6 +879,11 @@ function pairFor(x, pair, once, pre, C) {
   if (it.kind === 'string') return STR;
   /* `for k in d:` —— python 走的是键（不是值，也不是键值对）。 */
   if (it.kind === 'map') return it.key;
+  /* 元组：逐格合成一格（`for v in (1, 2, 3)`）。 */
+  if (C !== undefined) {
+    const tup = tupleOf(C.recOf(it));
+    if (tup !== null) return unifyPy(tup);
+  }
   return null;
 }
 
@@ -1529,6 +1535,17 @@ function forStmt(x, C) {
   const box = once(iter, 'iter');
   let src = box;
   let bt = typeOfIR(box, C);
+  /* `for v in t:` —— **元组逐格摆进一张表再走**（格数与逐格类型都是编译期定的，
+     所以这一趟是展开，不是循环）。异质的那格元组摆出来是 `(arr dyn)`。 */
+  if (tupleOf(C.recOf(bt)) !== null) {
+    const lst = tupleToList(box, C);
+    const lt = typeOfIR(lst, C);
+    const tn = C.fresh('for_tl');
+    C.bind(tn, lt);
+    pre.push({ kind: 'let', name: tn, type: lt, init: lst });
+    src = { kind: 'name', name: tn };
+    bt = lt;
+  }
   /* `for k in d:` —— python 走的是**键**。`(dkeys d)` 交一格 `(arr K)`（插入序），
      于是这一格落成"键表 + 下标循环"，与走一遍表逐字同一条路。 */
   if (bt.kind === 'map') {

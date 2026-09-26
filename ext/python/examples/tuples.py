@@ -107,6 +107,16 @@ def main():
     print((1, "a", 2.5)[1:], (1, "a", 2.5)[:2])
     print(t3[0:99], t3[-99:], len(t3[0:2]), t3[1:][0])
 
+    # 元组当序列用：`in` 编译期展开成一串 `==`，走一遍先摆进一张表
+    print(1 in t3, 5 in t3, 1 not in t3)
+    print("a" in (1, "a"), 9 in (1, "a"))
+    for v in t3:
+        print(v)
+    for s in ("p", "q"):
+        print(s)
+    print(list(t3), list(("a", "b")), [v * 2 for v in t3])
+    print(sum(list(t3)), max(list(t3)), sorted(list((3, 1, 2))))
+
     # 嵌套
     nested = (1, (2, 3))
     print(nested, nested[1][0])
