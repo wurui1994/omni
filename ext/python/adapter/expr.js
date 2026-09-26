@@ -1378,7 +1378,7 @@ function keyListOf(src, keyTok, C) {
 export function sortByKeyPy(box, keyTok, C, desc) {
   const got = keyListOf(box, keyTok, C);
   needOrd(ty(got.keys, C).elem, C, '.sort(key=…)');
-  return [...got.pre, ...sortByKeyStmts(box, got.keys, C, desc)];
+  return [...got.pre, ...sortByKeyStmts(box, got.keys, C, desc, (x, y) => cmpOne('<', x, y, C))];
 }
 
 /**
@@ -1505,7 +1505,7 @@ function sortedPy(xsE, C, desc, keyTok = null) {
   const got = keyListOf(out, keyTok, C);
   pre.push(...got.pre);
   needOrd(ty(got.keys, C).elem, C, 'sorted(key=…)');
-  pre.push(...sortByKeyStmts(out, got.keys, C, desc));
+  pre.push(...sortByKeyStmts(out, got.keys, C, desc, (x, y) => cmpOne('<', x, y, C)));
   return { kind: 'block-expr', stmts: pre, value: out };
 }
 
@@ -3102,7 +3102,8 @@ export function callOf(x, C) {
     const got = keyListOf(box0, keyTok, C);
     pre.push(...got.pre);
     needOrd(ty(got.keys, C).elem, C, `${nm0}(key=…)`);
-    const picked = pickByKeyOf(box0, got.keys, nm0 === 'min' ? '<' : '>', nm0, C);
+    const picked = pickByKeyOf(box0, got.keys, nm0 === 'min' ? '<' : '>', nm0, C,
+      (x, y) => cmpOne('<', x, y, C));
     return { kind: 'block-expr', stmts: pre, value: picked };
   }
   /* `sorted(xs, reverse=True)` / `sorted(xs, key=lambda v: …)` —— 要在**算实参之前**拦

@@ -104,5 +104,18 @@ def main():
     best = max(ws, key=lambda w: len(w))
     print(best.upper(), len(best))
 
+    # **键本身是一格元组**（"先按这个、再按那个"，真代码里到处是这个写法）。
+    # 从前这一格**静静地排错**：键是元组，而按键比大小落成了方言的 `<` —— 也就是
+    # **比句柄**。元组的比法是逐格比，所以"怎么比"要从外头递进按键排那一处去。
+    tk = ["bb", "a", "ccc", "dd", "b"]
+    print(sorted(tk, key=lambda s: (len(s), s)))
+    print(sorted(tk, key=lambda s: (len(s), s), reverse=True))
+    tk.sort(key=lambda s: (-len(s), s))
+    print(tk)
+    cnt = {"a": 3, "b": 12, "c": 12}
+    print(sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0])))
+    print(max(cnt.items(), key=lambda kv: (kv[1], kv[0])))
+    print(min(cnt.items(), key=lambda kv: (-kv[1], kv[0])))
+
 
 main()

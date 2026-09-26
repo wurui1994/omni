@@ -1622,11 +1622,16 @@ export function splitLinesOf(s0, C) {
  * `sorted(xs, key=…)` / `xs.sort(key=…)` —— **按另一张表排**：`keys[i]` 是 `xs[i]` 的键，
  * 两张表**一起挪**，比的只看键。python 的 sort 是稳定的，插入排序也是。
  *
- * 为什么不是"递一格比较器进来"：比较要落在 `while` 的条件上，而键那一段算出来常常带
- * 几格临时量（`block-expr`）—— 摆进条件里每转一圈都要重算，还容易在条件位置上炸。
- * 先把键**算一遍摆成一张表**，之后就只是两个标量比大小。
+ * 为什么先把键算成一张表、而不是"递一格比较器进来算一遍键"：键那一段算出来常常带几格
+ * 临时量（`block-expr`），每比一次都重算一遍不划算，还容易落在不该算的位置上。
+ *
+ * **键怎么比要从外头递进来**（`less`）：键本身可以是一格元组（`key=lambda kv: (-kv[1],
+ * kv[0])` —— "先按次数降、再按名字升"那种写法在真代码里到处都是），而元组的"怎么比"是
+ * 逐格比，落成方言的 `<` 就成了**比句柄**，静静地排错。不给就退到方言的 `<`（标量那档）。
+ * 与 `sortStmts` 一样，**比较摆在体里、靠一格"还往前挪吗"的标记**：元组那一档的比较
+ * 自带几格 `let`，摆进 `while` 的条件里那几句会被提到循环外头、每圈读的还是头一圈那两个值。
  */
-export function sortByKeyStmts(xs, keys, C, desc = false) {
+export function sortByKeyStmts(xs, keys, C, desc = false, less = null) {
   const h = holder(C);
   const t = C.tyOfIR(xs);
   const kt = C.tyOfIR(keys);
@@ -1646,6 +1651,8 @@ export function sortByKeyStmts(xs, keys, C, desc = false) {
       value: { kind: 'index', obj: keys, index: src0 },
     },
   ];
+  const lt = (x, y) => (less === null ? bin('<', x, y) : less(x, y));
+  const go = h.decl('sk_g', BOOL, { kind: 'bool', value: true });
   h.pre.push({
     kind: 'while',
     cond: bin('<', j, call1('alen', [xs])),
@@ -1653,13 +1660,22 @@ export function sortByKeyStmts(xs, keys, C, desc = false) {
       { kind: 'assign', target: cur, value: { kind: 'index', obj: xs, index: j } },
       { kind: 'assign', target: ck, value: { kind: 'index', obj: keys, index: j } },
       { kind: 'assign', target: k, value: bin('-', j, int(1)) },
+      { kind: 'assign', target: go, value: { kind: 'bool', value: true } },
       {
         kind: 'while',
-        cond: bin('&&', bin('>=', k, int(0)),
-          bin(desc ? '<' : '>', { kind: 'index', obj: keys, index: k }, ck)),
+        cond: bin('&&', bin('>=', k, int(0)), go),
         body: [
-          ...move(bin('+', k, int(1)), k),
-          { kind: 'assign', target: k, value: bin('-', k, int(1)) },
+          {
+            kind: 'if',
+            /* 严格小于，所以键一样的两格不动 —— python 的 sort 是稳定的。 */
+            cond: desc ? lt({ kind: 'index', obj: keys, index: k }, ck)
+              : lt(ck, { kind: 'index', obj: keys, index: k }),
+            then: [
+              ...move(bin('+', k, int(1)), k),
+              { kind: 'assign', target: k, value: bin('-', k, int(1)) },
+            ],
+            else_: [{ kind: 'assign', target: go, value: { kind: 'bool', value: false } }],
+          },
         ],
       },
       { kind: 'assign', target: { kind: 'index', obj: xs, index: bin('+', k, int(1)) }, value: cur },
@@ -1674,7 +1690,7 @@ export function sortByKeyStmts(xs, keys, C, desc = false) {
  * `min(xs, key=…)` / `max(xs, key=…)` —— 键表算一遍，挑**键**最小/最大的那一格的下标，
  * 交回去的是**元素**（不是键）。并列时留靠前那格（严格比较），与 python 一条。
  */
-export function pickByKeyOf(xs, keys, op, name, C) {
+export function pickByKeyOf(xs, keys, op, name, C, less = null) {
   const h = holder(C);
   h.pre.push({
     kind: 'if',
@@ -1684,13 +1700,19 @@ export function pickByKeyOf(xs, keys, op, name, C) {
   });
   const at = h.decl('pk_at', INT, int(0));
   const i = h.decl('pk_ki', INT, int(1));
+  /* **键怎么比从外头递进来**（元组键落成方言的 `<` 就是比句柄 —— 见 `sortByKeyStmts`）。
+     两边都用**严格**的比：键一样时留先出现的那一格，与 python 的 min / max 一致。 */
+  const ki = { kind: 'index', obj: keys, index: i };
+  const kat = { kind: 'index', obj: keys, index: at };
+  const cond = less === null ? bin(op, ki, kat)
+    : (op === '<' ? less(ki, kat) : less(kat, ki));
   h.pre.push({
     kind: 'while',
     cond: bin('<', i, call1('alen', [keys])),
     body: [
       {
         kind: 'if',
-        cond: bin(op, { kind: 'index', obj: keys, index: i }, { kind: 'index', obj: keys, index: at }),
+        cond,
         then: [{ kind: 'assign', target: at, value: i }],
         else_: null,
       },
