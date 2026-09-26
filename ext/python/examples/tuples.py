@@ -1,0 +1,86 @@
+# ext/python/examples/tuples.py —— 元组
+#
+# 元组**按形状生成一格记录**：`(1, "a")` 的类型是 `Tup2_int_string`，字段 `_0` / `_1`。
+# 为什么不给标准 IR 加一档"元组"：元组就是**定长、逐格各有自己类型**的东西，那正是记录 ——
+# 而记录这一档从声明、字段读写到四条腿早就通了。引用语义（`cnew`）：python 的元组
+# 不可改，"是不是同一份存储"观察不到。
+#
+# 字段名是 `_0` / `_1`，而方言的字段是**名字**不是下标 —— 所以 `t[0]` 里那个下标
+# **要写成字面量**（python 代码里几乎总是；负的也行，编译期折过去）。
+#
+# 落地时量出来的两条：
+#   1. `inferFields` 会把元组那几格记录的字段**抹成空**（它是从标注与 `__init__` 认字段的，
+#      而元组两样都没有）—— 先报"类 Tup2_int_string 至少要有一个字段"，接着字段读回来的
+#      类型也跟着错。所以那一趟要跳过元组。
+#   2. 元组的声明是**建 IR 的时候**才登记的，所以 `pyToIR` 里"先摆声明再建体"的次序
+#      得反过来 —— 不然声明表看不见它们。
+#
+# 明说的不足：空元组 `()` 不收（记录至少要一格字段）；元组上的 `<` / `>`（字典序）没接；
+# 切元组没接；`sorted()` 排元组没接（都要"逐格比到第一处不同"那一层）；
+# 下标不是字面量的 `t[i]` 不收（逐格类型不同，是哪一格得在编译期知道）。
+
+
+def pair() -> tuple[int, str]:
+    return 7, "seven"
+
+
+def divmod2(a: int, b: int) -> tuple[int, int]:
+    return a // b, a % b
+
+
+def main():
+    # 字面量、下标、一格的那种
+    t = (1, "a")
+    print(t, t[0], t[1], t[-1], t[-2])
+    u = (2.5,)
+    print(u, u[0], len(u))
+    print((1, 2.5, "s", True))
+
+    # 交出去、拆回来
+    print(pair())
+    x, y = pair()
+    print(x, y)
+    q, r = divmod2(17, 5)
+    print(q, r)
+    a, b = t
+    print(a, b)
+
+    # 逐格比（比的是内容，不是"同一个句柄"）
+    print((1, 2) == (1, 2), (1, 2) == (1, 3), (1, 2) != (1, 2))
+    print(("x", 1) == ("x", 1), ("x", 1) == ("y", 1))
+    print(t == (1, "a"))
+
+    # 长度在编译期就定了；非空的元组恒真
+    print(len(t), len((1, 2, 3)))
+    if t:
+        print("truthy")
+
+    # 一串元组
+    ts = [(1, "a"), (2, "b")]
+    print(ts, ts[1][1])
+    for i, s in ts:
+        print(i, s)
+
+    # zip / enumerate / d.items() 当值用 —— 交一张元组的表
+    d = {"x": 1, "y": 2}
+    print(list(d.items()))
+    print(list(zip([1, 2], ["a", "b"])))
+    print(list(zip([1, 2, 3], ["a", "b"])))
+    print(list(enumerate(["p", "q"])), list(enumerate(["p", "q"], 1)))
+    print(list(zip("ab", [1, 2])))
+    for k, v in d.items():
+        print(k, "=", v)
+
+    # 推导式里也走得通
+    print([(i, v) for i, v in enumerate([10, 20])])
+    print([p[0] for p in ts])
+    print([m + n for m, n in zip([1, 2], [10, 20])])
+    print({v: k for k, v in d.items()})
+
+    # 嵌套
+    nested = (1, (2, 3))
+    print(nested, nested[1][0])
+    print(((1, 2), "z")[0][1])
+
+
+main()

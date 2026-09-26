@@ -31,7 +31,7 @@ import { INT, STR, BOOL, DYN, arrOf, sameType, typeOf, named } from '../../../sr
 import { typeToSx } from '../../../src/core/lower/ty.js';
 import {
   exprOf, condOf, nameOf, typeOfAnnot, tyOfCst, tyArg, pyStr, pyRepr, lenOf, hasFields, fstringParts, cmpEq,
-  kwOrder,
+  kwOrder, tupleOf,
 } from './expr.js';
 import {
   reverseStmts, clearStmts, extendStmts, insertStmts, dropAtStmts, indexOfList,
@@ -70,14 +70,13 @@ export function pyToIR(tree, ctx = {}) {
   infer(C, tree, scriptStmts);
 
   /* ---- 发射 ------------------------------------------------------------------ */
-  const decls = [];
-  /* 记录的声明要**排在函数前面**（方言那一层先收类型再收签名）。 */
-  for (const [, rec] of C.records) {
-    decls.push({ kind: 'class', name: rec.type.name, fields: rec.fields });
-  }
-  for (const [name, ty] of C.globals) decls.push({ kind: 'global', name: C.ref(name), type: ty });
+  /* **先建函数体与顶层那一段，再摆声明**。次序反过来（原先那样）的后果是：
+     元组那一族的形状是在**建 IR 的时候**才登记进 `C.records` 的（`(1, 2)` 走到
+     `tupleRec` 那一下），排在前面的声明表就看不见它们。
+     摆的时候记录要在函数前面 —— 方言那一层先收类型再收签名。 */
+  const fns = [];
   for (const [nm, insts] of C.insts) {
-    for (const inst of insts) decls.push(fnDecl(nm, inst, C));
+    for (const inst of insts) fns.push(fnDecl(nm, inst, C));
   }
 
   C.push();
@@ -86,6 +85,13 @@ export function pyToIR(tree, ctx = {}) {
     ...scriptStmts.flatMap((s) => stmtsOf(s, C)),
   ];
   C.pop();
+
+  const decls = [];
+  for (const [, rec] of C.records) {
+    decls.push({ kind: 'class', name: rec.type.name, fields: rec.fields });
+  }
+  for (const [name, ty] of C.globals) decls.push({ kind: 'global', name: C.ref(name), type: ty });
+  decls.push(...fns);
   decls.push({ kind: 'main', body });
   return { kind: 'module', decls };
 }
@@ -441,8 +447,12 @@ function infer(C, tree, scriptStmts) {
 
   for (let round = 0; round < 3; round += 1) {
     for (const [nm, sh] of shells) collectInsts(nm, sh, tree, C);
-    /* 字段要在方法体扫 `return` 之前算好（`self.x` 的类型靠它）。 */
-    for (const [, rec] of C.records) inferFields(rec, C);
+    /* 字段要在方法体扫 `return` 之前算好（`self.x` 的类型靠它）。
+       元组那几格记录的字段是**按形状直接摆好的**（`tupleRec`），不从标注与 `__init__` 认 ——
+       让 `inferFields` 走一遍会把它们抹成空。量到的原话：先报"类 'Tup2_int_string'
+       至少要有一个字段"，接着字段读回来的类型也跟着错（`a, b = t` 报"b 先装 string
+       后装 int"）。 */
+    for (const [, rec] of C.records) if (rec.tuple === undefined) inferFields(rec, C);
     for (const [nm, list] of C.insts) {
       const { retAnnot } = shells.get(nm);
       for (const inst of list) {
@@ -597,6 +607,14 @@ function scanOne(s, C, rets) {
           kids(one).forEach((tt, i) => bindTarget(tt, tyOfCst(kids(v)[i], C), C));
           continue;
         }
+        /* **`a, b = t`**（右边是一格元组的值）—— 逐格字段的类型对着绑。 */
+        if (tag(one) === 'tuple') {
+          const tup = tupleOf(C.recOf(t));
+          if (tup !== null && tup.length === kids(one).length) {
+            kids(one).forEach((tt, i) => bindTarget(tt, tup[i], C));
+            continue;
+          }
+        }
         bindTarget(one, t, C);
       }
       return;
@@ -680,6 +698,15 @@ function pairIter(target, iterTok, C) {
   if (target === undefined || tag(target) !== 'tuple') return null;
   const ts = kids(target);
   if (ts.length !== 2 || ts.some((t) => tag(t) !== 'n')) return null;
+  /* `for a, b in ts`（ts 装的是一串**两格的元组**）—— 与下面那三种一样落成一趟下标循环，
+     体开头把两格字段取出来。`list(d.items())` 那种写法就走这一条。 */
+  const et = tyOfCst(iterTok, C);
+  if (et !== null && et !== undefined && et.kind === 'arr') {
+    const tup = tupleOf(C.recOf(et.elem));
+    if (tup !== null && tup.length === 2) {
+      return { fn: 'tuples', args: [iterTok], t0: tup[0], t1: tup[1] };
+    }
+  }
   if (iterTok === undefined || tag(iterTok) !== 'call') return null;
   const callee = kids(iterTok)[0];
   const as = kids(part(iterTok, 'args') ?? { kind: 'list', items: [] });
@@ -736,6 +763,13 @@ function pairFor(x, pair, once, pre, C) {
       ? idx
       : { kind: 'binop', op: '+', left: idx, right: start };
     second = at(box);
+  } else if (pair.fn === 'tuples') {
+    /* 一串两格的元组：逐格取 `_0` / `_1`。 */
+    const box = once(pair.args[0], 'iter');
+    cond = { kind: 'binop', op: '<', left: idx, right: lenOf(box, C) };
+    const at = { kind: 'index', obj: box, index: idx };
+    first = { kind: 'field', obj: at, name: '_0' };
+    second = { kind: 'field', obj: at, name: '_1' };
   } else if (pair.fn === 'items') {
     /* `d.items()` —— 键表落一格临时量（`(dkeys d)` 是抄的一份，循环里 `dget` 取值）。 */
     const d = once(pair.args[0], 'items_d');
@@ -1118,10 +1152,28 @@ function assignStmt(x, C) {
 /** 一格目标 ← 一格**还没算过**的右边（拆包要看右边的形状，所以收的是记号）。 */
 function assignTo(t, valueTok, C) {
   if (tag(t) === 'tuple') {
-    if (tag(valueTok) !== 'tuple') {
-      throw new Error('python->IR: 拆包赋值的右边要也是个元组（`a, b = f()` 还没接）');
-    }
     const ts = kids(t);
+    /* **右边是一格元组的值**（`a, b = f()` / `a, b = t`）—— 逐格字段拆出来。
+       先落一格临时量：右边只算一遍。 */
+    if (tag(valueTok) !== 'tuple') {
+      const v = exprOf(valueTok, C);
+      const vt = typeOfIR(v, C);
+      const tup = tupleOf(C.recOf(vt));
+      if (tup === null) {
+        throw new Error(`python->IR: 拆包赋值的右边装的是 ${vt.kind} —— `
+          + '要么写成一格元组（`a, b = x, y`），要么交一格元组');
+      }
+      if (tup.length !== ts.length) {
+        throw new Error(`python->IR: 拆包赋值两边格数不一样（左 ${ts.length}、右 ${tup.length}）`);
+      }
+      const tmp = C.fresh('unpack');
+      C.bind(tmp, vt);
+      const out = [{ kind: 'let', name: tmp, type: vt, init: v }];
+      ts.forEach((tt, i) => out.push(...writeTo(
+        tt, { kind: 'field', obj: { kind: 'name', name: tmp }, name: `_${i}` }, C,
+      )));
+      return out;
+    }
     const vs = kids(valueTok);
     if (ts.length !== vs.length) {
       throw new Error(`python->IR: 拆包赋值两边格数不一样（左 ${ts.length}、右 ${vs.length}）`);

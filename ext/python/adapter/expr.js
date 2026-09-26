@@ -18,7 +18,7 @@ import {
   tag, kids, leaf, part,
 } from '../../../src/core/lower/cst.js';
 import {
-  INT, REAL, STR, BOOL, DYN, arrOf, dictOf, typeOf, sameType,
+  INT, REAL, STR, BOOL, DYN, arrOf, dictOf, typeOf, sameType, named,
 } from '../../../src/core/lower/ty-of.js';
 import {
   isDyn, boxOf, unify, dynText, dynTruthy, dynBin, noneOf, isNoneOf,
@@ -249,7 +249,7 @@ const BUILTIN_RET = new Map([
 ]);
 
 /** 方法交出来的类型（按接收者装的东西分）。 */
-function methodType(recvTy, name, argTys) {
+function methodType(recvTy, name, argTys, C) {
   if (recvTy === null) return null;
   if (recvTy.kind === 'arr') {
     if (['append', 'clear', 'extend', 'reverse', 'insert', 'remove', 'sort'].includes(name)) return { kind: 'void' };
@@ -281,6 +281,7 @@ function methodType(recvTy, name, argTys) {
       return unify([recvTy.value, argTys[1]]);
     }
     if (name === 'setdefault') return recvTy.value;
+    if (name === 'items') return arrOf(tupleRec([recvTy.key, recvTy.value], C).type);
     if (name === 'clear' || name === 'update') return { kind: 'void' };
     return null;
   }
@@ -352,10 +353,27 @@ export function tyOfCst(x, C) {
         C.pop();
       }
     }
+    /* 元组：按形状生成的那一格记录（`tupleRec`）。 */
+    case 'tuple': {
+      const items = kids(x);
+      if (items.length === 0) return null;
+      const ts = items.map((it) => tyOfCst(it, C));
+      if (ts.some((t) => t === null || t === undefined)) return null;
+      return tupleRec(ts, C).type;
+    }
     case 'index': {
       const base = tyOfCst(kids(x)[0], C);
       if (base === null) return null;
       const first = kids(part(x, 'subs') ?? { kind: 'list', items: [] })[0];
+      /* 元组的那一格：下标是字面量，答的是那一格字段的类型。 */
+      const tup = tupleOf(C.recOf(base));
+      if (tup !== null) {
+        if (first === undefined || tag(first) !== 'num') return null;
+        let at = Number(numValue(leaf(kids(first)[0])).value ?? NaN);
+        if (Number.isNaN(at)) return null;
+        if (at < 0) at += tup.length;
+        return at >= 0 && at < tup.length ? tup[at] : null;
+      }
       if (first !== undefined && tag(first) === 'slice') return base;   // 切一段：同型
       if (base.kind === 'arr') return base.elem;
       if (base.kind === 'map') return base.value;
@@ -427,7 +445,7 @@ function tyOfCall(x, C) {
       const inst = C.resolveMethod(rec.name, String(leaf(kids(fn)[1])), [recvTy, ...argTys]);
       return inst === null ? null : inst.ret;
     }
-    return methodType(recvTy, String(leaf(kids(fn)[1])), argTys);
+    return methodType(recvTy, String(leaf(kids(fn)[1])), argTys, C);
   }
   if (tag(fn) !== 'n') return null;
   const nm = String(nameOf(fn));
@@ -453,6 +471,20 @@ function tyOfCall(x, C) {
   if (nm === 'list' || nm === 'sorted' || nm === 'reversed') {
     const t = argTys[0];
     return t === null || t === undefined ? null : (t.kind === 'arr' ? t : null);
+  }
+  if (nm === 'zip' && argTys.length === 2) {
+    const a = argTys[0];
+    const b = argTys[1];
+    if (a == null || b == null) return null;
+    const ea = a.kind === 'arr' ? a.elem : (a.kind === 'string' ? STR : null);
+    const eb = b.kind === 'arr' ? b.elem : (b.kind === 'string' ? STR : null);
+    return ea === null || eb === null ? null : arrOf(tupleRec([ea, eb], C).type);
+  }
+  if (nm === 'enumerate' && argTys.length >= 1) {
+    const a = argTys[0];
+    if (a == null) return null;
+    const ea = a.kind === 'arr' ? a.elem : (a.kind === 'string' ? STR : null);
+    return ea === null ? null : arrOf(tupleRec([INT, ea], C).type);
   }
   if (nm === 'range') return arrOf(INT);
   const inst = C.resolveFn(nm, argTys);
@@ -516,6 +548,29 @@ export function pyRepr(e, C) {
   }
   if (t.kind === 'arr') return listRepr(e, t, C);
   if (t.kind === 'map') return dictRepr(e, t, C);
+  /* 元组：`(1, 'a')`。一格的那个带尾随逗号（`(1,)`）—— python 就是这么印的。
+     逐格是字面上的几段，所以不必发循环（记录的字段个数在编译期就定了）。 */
+  const tup = tupleOf(C.recOf(t));
+  if (tup !== null) {
+    /* 逐格要读它好几遍，所以先钉住（不纯的话重复发一遍会把里头那几句也发几遍）。 */
+    const pre = [];
+    let v = e;
+    if (!isPure(e)) {
+      const n = C.fresh('tp_r');
+      C.bind(n, t);
+      pre.push({ kind: 'let', name: n, type: t, init: e });
+      v = { kind: 'name', name: n };
+    }
+    const cat = (l, r) => ({ kind: 'binop', op: '+', left: l, right: r });
+    let out = { kind: 'string', value: '(' };
+    tup.forEach((_, i) => {
+      if (i > 0) out = cat(out, { kind: 'string', value: ', ' });
+      out = cat(out, pyRepr({ kind: 'field', obj: v, name: `_${i}` }, C));
+    });
+    if (tup.length === 1) out = cat(out, { kind: 'string', value: ',' });
+    const value = cat(out, { kind: 'string', value: ')' });
+    return pre.length === 0 ? value : { kind: 'block-expr', stmts: pre, value };
+  }
   throw new Error(`python->IR: ${t.kind} 转串还没接`);
 }
 
@@ -728,6 +783,8 @@ export function exprOf(x, C) {
       };
     }
     case 'list': return listOf(kids(x), C);
+    /* `(a, b)` —— 按形状生成一格记录（见 `tupleRec`）。 */
+    case 'tuple': return tupleLit(x, C);
     /* 推导式那三格 —— 现场发一趟循环（见 `compOf`）。生成器表达式当"立刻算完的一张表"。 */
     case 'listcomp': case 'genexp': return compOf(x, C, 'list');
     case 'dictcomp': return compOf(x, C, 'dict');
@@ -799,6 +856,40 @@ function cmpOne(o, a, b, C) {
   const tb = ty(b, C);
   /* 有一边是箱子：标签一样才比值，不一样 `==` 是 False（python 的 `1 == "1"`）。 */
   if (isDyn(ta) || isDyn(tb)) return dynBin(op, a, b, C);
+  /* **元组逐格比**（python 的元组比的是内容）。不这么办的话落成"是不是同一个句柄"，
+     `(1, 2) == (1, 2)` 会静默答 False —— 量到过。
+     `<` / `>` 那几格（字典序）还没接：那要"第一处不同的那一格说了算"，得逐格发分支。 */
+  const tupA = tupleOf(C.recOf(ta));
+  if (tupA !== null) {
+    if (op !== '==' && op !== '!=') {
+      throw new Error(`python->IR: 元组上的 \`${o}\` 还没接（只接了 == 与 !=）`);
+    }
+    const tupB = tupleOf(C.recOf(tb));
+    if (tupB === null || tupB.length !== tupA.length
+      || !tupA.every((t, i) => sameType(t, tupB[i]))) {
+      /* 形状不一样的两格元组在 python 里 `==` 恒 False（长度或元素类型不同）。 */
+      return { kind: 'bool', value: op === '!=' };
+    }
+    const pre = [];
+    const pin = (e, t, p) => {
+      if (isPure(e)) return e;
+      const n = C.fresh(p);
+      C.bind(n, t);
+      pre.push({ kind: 'let', name: n, type: t, init: e });
+      return { kind: 'name', name: n };
+    };
+    const l = pin(a, ta, 'tq_a');
+    const r = pin(b, tb, 'tq_b');
+    let out = null;
+    tupA.forEach((_, i) => {
+      const one = cmpOne(op === '==' ? '==' : '!=',
+        { kind: 'field', obj: l, name: `_${i}` },
+        { kind: 'field', obj: r, name: `_${i}` }, C);
+      out = out === null ? one
+        : { kind: 'binop', op: op === '==' ? '&&' : '||', left: out, right: one };
+    });
+    return pre.length === 0 ? out : { kind: 'block-expr', stmts: pre, value: out };
+  }
   let l = a;
   let r = b;
   if (ta.kind === 'real' && tb.kind === 'int') r = toReal(b, C);
@@ -1442,6 +1533,9 @@ export function lenOf(box, C) {
   if (t.kind === 'arr') return { kind: 'builtin', name: 'alen', args: [box] };
   if (t.kind === 'string') return { kind: 'builtin', name: 'slen', args: [box] };
   if (t.kind === 'map') return { kind: 'builtin', name: 'dlen', args: [box] };
+  /* 元组：格数在**编译期**就定了（形状的一部分），所以这是一格常量。 */
+  const tup = tupleOf(C.recOf(t));
+  if (tup !== null) return { kind: 'int', value: tup.length };
   throw new Error(`python->IR: \`len()\` 作用在 ${t.kind} 上没有这一格`);
 }
 
@@ -1474,12 +1568,92 @@ function wrapIndex(box, i, C) {
   return pre.length === 0 ? value : { kind: 'block-expr', stmts: pre, value };
 }
 
+/* ─── 元组 ────────────────────────────────────────────────────────────────── */
+
+/** 一格类型的短名字（元组按形状生成记录，名字里要有它）。 */
+function shapeKey(t) {
+  switch (t.kind) {
+    case 'arr': return `a${shapeKey(t.elem)}`;
+    case 'map': return `m${shapeKey(t.key)}${shapeKey(t.value)}`;
+    case 'named': return `n${t.name}`;
+    default: return t.kind;
+  }
+}
+
+/**
+ * 元组：**按形状生成一格记录**（`Tup2_int_string`，字段 `_0` / `_1`）。
+ *
+ * 为什么落成记录而不给标准 IR 加一档"元组"：元组就是**定长、逐格各有自己类型**的东西，
+ * 那正是记录 —— 而记录这一档从声明、字段读写到四条腿都早就通了。
+ *
+ * 字段名用 `_0` / `_1`：方言的字段是**名字**不是下标，所以 `t[0]` 里那个下标
+ * **要写成字面量**（python 代码里几乎总是）。
+ *
+ * 引用语义（`cnew`）而不是值语义：python 的元组不可改，"是不是同一份存储"观察不到；
+ * 而引用那一档 adapter 里已经有整套（类走的就是它）。
+ */
+export function tupleRec(elems, C) {
+  const nm = `Tup${elems.length}_${elems.map(shapeKey).join('_')}`;
+  if (!C.records.has(nm)) {
+    C.records.set(nm, {
+      name: nm,
+      type: named(C.ref(nm), true),
+      fields: elems.map((t, i) => ({ name: `_${i}`, type: t })),
+      methods: new Map(),
+      annots: [],
+      tuple: elems,
+    });
+  }
+  return C.records.get(nm);
+}
+
+/** 这一格记录是元组生成出来的吗（`print` 那一侧要按元组印）。 */
+export const tupleOf = (rec) => (rec !== null && rec.tuple !== undefined ? rec.tuple : null);
+
+/** `(a, b)` —— 造一格那个形状的记录，字段逐格填上。 */
+function tupleLit(x, C) {
+  const items = kids(x);
+  if (items.length === 0) {
+    throw new Error('python->IR: 空元组 `()` 还没接（记录得有至少一格字段）');
+  }
+  for (const it of items) {
+    if (tag(it) === 'star') throw new Error('python->IR: 元组里的 `*` 展开还没接');
+  }
+  const vals = items.map((it) => exprOf(it, C));
+  const rec = tupleRec(vals.map((v) => ty(v, C)), C);
+  return {
+    kind: 'new-record', type: rec.type, ref: true,
+    fields: vals.map((v, i) => ({ name: `_${i}`, value: v })),
+  };
+}
+
+/** `t[0]` —— 元组的下标**要写成字面量**（字段是名字，编译期就得知道是哪一格）。 */
+function tupleAt(box, idxTok, rec, C) {
+  const n = rec.tuple.length;
+  const v = exprOf(idxTok, C);
+  if (v.kind !== 'int') {
+    throw new Error('python->IR: 元组的下标要写成一格整数字面量 —— '
+      + '元组逐格各有自己的类型，是哪一格得在编译期知道');
+  }
+  let at = Number(v.value);
+  if (at < 0) at += n;
+  if (at < 0 || at >= n) {
+    throw new Error(`python->IR: 元组只有 ${n} 格，下标 ${v.value} 越界`);
+  }
+  return { kind: 'field', obj: box, name: `_${at}` };
+}
+
 /** `xs[i]` / `d[k]` / `s[i]` / `xs[a:b]` / `s[a:b]`。 */
 function indexOf(x, C) {
   const box = exprOf(kids(x)[0], C);
   const subs = kids(part(x, 'subs') ?? { kind: 'list', items: [] });
   if (subs.length !== 1) throw new Error('python->IR: 多维下标（`a[i, j]`）还没接');
   const t = ty(box, C);
+  const tup = tupleOf(C.recOf(t));
+  if (tup !== null) {
+    if (tag(subs[0]) === 'slice') throw new Error('python->IR: 切元组还没接');
+    return tupleAt(box, subs[0], C.recOf(t), C);
+  }
   if (tag(subs[0]) === 'slice') return sliceOf(box, subs[0], C);
   const key = exprOf(subs[0], C);
   if (t.kind === 'map') return { kind: 'builtin', name: 'dget', args: [box, key] };
@@ -1743,6 +1917,106 @@ function isinstanceOf(valTok, tyTok, C) {
   return pre.length === 0 ? value : { kind: 'block-expr', stmts: pre, value };
 }
 
+/**
+ * `zip(a, b)` / `enumerate(xs[, start])` / `d.items()` **当值用** —— 交一张
+ * `(arr Tup2_…)`。走一趟循环，每一圈造一格元组。
+ *
+ * `for a, b in …` 那一侧不走这儿（那边落成一趟下标循环，中间不造元组）——
+ * 这一格是给 `list(zip(a, b))` / `sorted(d.items())` 那种"真要一张表"的写法的。
+ * `zip` 走到**短的那一张**为止（python 的规矩）。
+ */
+function pairsList(kind, args, C) {
+  const pre = [];
+  const pin = (e, p) => {
+    const t = ty(e, C);
+    if (isPure(e)) return { v: e, t };
+    const n = C.fresh(p);
+    C.bind(n, t);
+    pre.push({ kind: 'let', name: n, type: t, init: e });
+    return { v: { kind: 'name', name: n }, t };
+  };
+  const i = C.fresh('pl_i');
+  C.bind(i, INT);
+  const iv = { kind: 'name', name: i };
+  const at = (s) => (s.t.kind === 'string'
+    ? { kind: 'builtin', name: 'ssub', args: [s.v, iv, { kind: 'int', value: 1 }] }
+    : { kind: 'index', obj: s.v, index: iv });
+  let cond;
+  let first;
+  let second;
+  if (kind === 'zip') {
+    const a = pin(args[0], 'pl_a');
+    const b = pin(args[1], 'pl_b');
+    const la = lenOf(a.v, C);
+    const lb = lenOf(b.v, C);
+    cond = {
+      kind: 'binop', op: '<', left: iv,
+      right: {
+        kind: 'ternary', type: INT,
+        cond: { kind: 'binop', op: '<', left: la, right: lb }, then: la, else_: lb,
+      },
+    };
+    first = at(a);
+    second = at(b);
+  } else if (kind === 'enumerate') {
+    const xs = pin(args[0], 'pl_x');
+    const start = args.length === 2 ? args[1] : { kind: 'int', value: 0 };
+    cond = { kind: 'binop', op: '<', left: iv, right: lenOf(xs.v, C) };
+    first = start.kind === 'int' && Number(start.value) === 0
+      ? iv
+      : { kind: 'binop', op: '+', left: iv, right: start };
+    second = at(xs);
+  } else {
+    const d = pin(args[0], 'pl_d');
+    const ks = C.fresh('pl_ks');
+    const kt = arrOf(d.t.key);
+    C.bind(ks, kt);
+    pre.push({
+      kind: 'let', name: ks, type: kt,
+      init: { kind: 'builtin', name: 'dkeys', args: [d.v] },
+    });
+    const ksv = { kind: 'name', name: ks };
+    cond = {
+      kind: 'binop', op: '<', left: iv,
+      right: { kind: 'builtin', name: 'alen', args: [ksv] },
+    };
+    first = { kind: 'index', obj: ksv, index: iv };
+    second = { kind: 'builtin', name: 'dget', args: [d.v, first] };
+  }
+  const rec = tupleRec([ty(first, C), ty(second, C)], C);
+  const outT = arrOf(rec.type);
+  const on = C.fresh('pl_o');
+  C.bind(on, outT);
+  const out = { kind: 'name', name: on };
+  return {
+    kind: 'block-expr',
+    stmts: [
+      ...pre,
+      {
+        kind: 'let', name: on, type: outT,
+        init: { kind: 'builtin', name: 'anew', args: [tyArg(outT), { kind: 'int', value: 0 }] },
+      },
+      {
+        kind: 'for',
+        init: { kind: 'let', name: i, type: INT, init: { kind: 'int', value: 0 } },
+        cond,
+        post: {
+          kind: 'assign', target: iv,
+          value: { kind: 'binop', op: '+', left: iv, right: { kind: 'int', value: 1 } },
+        },
+        body: [{
+          kind: 'builtin-stmt', name: 'apush',
+          args: [out, {
+            kind: 'new-record', type: rec.type, ref: true,
+            fields: [{ name: '_0', value: first }, { name: '_1', value: second }],
+          }],
+        }],
+      },
+    ],
+    value: out,
+  };
+}
+
 /** 一格调用：内建、`math.*`、方法、用户函数。 */
 export function callOf(x, C) {
   const [fn, argsTok] = kids(x);
@@ -1948,6 +2222,17 @@ function builtinOf(nm, args, argToks, C) {
     case 'any': case 'all': {
       if (args.length !== 1) throw new Error(`python->IR: \`${nm}()\` 收一格表`);
       return anyAllOf(args[0], nm === 'all', C, condOfExpr);
+    }
+    /* `zip(a, b)` / `enumerate(xs[, start])` **当值用** —— 交一张元组的表。 */
+    case 'zip': {
+      if (args.length !== 2) throw new Error('python->IR: `zip()` 收两格（三格以上还没接）');
+      return pairsList('zip', args, C);
+    }
+    case 'enumerate': {
+      if (args.length !== 1 && args.length !== 2) {
+        throw new Error('python->IR: `enumerate()` 收一格或两格实参');
+      }
+      return pairsList('enumerate', args, C);
     }
     case 'sorted': {
       if (args.length !== 1) throw new Error('python->IR: `sorted(xs, key=…)` 那几格还没接');
@@ -2174,6 +2459,8 @@ function methodOf(recvTok, name, args, C) {
         C,
       );
     }
+    /* `d.items()` 当值用 —— 交一张元组的表（`for k, v in d.items()` 那一侧不走这儿）。 */
+    if (name === 'items' && args.length === 0) return pairsList('items', [recv], C);
     if (name === 'clear' || name === 'update') {
       throw new Error(`python->IR: \`d.${name}()\` 交 None，所以只当语句用（单独一行）`);
     }
@@ -2200,7 +2487,8 @@ export function condOfExpr(e, C) {
   if (t.kind === 'arr' || t.kind === 'string' || t.kind === 'map') {
     return { kind: 'binop', op: '!=', left: lenOf(e, C), right: { kind: 'int', value: 0 } };
   }
-  /* 一格对象默认是真（python 的规矩：没有 `__bool__` / `__len__` 就真）。 */
+  /* 一格对象默认是真（python 的规矩：没有 `__bool__` / `__len__` 就真）。
+     元组也落这一格：非空的元组恒真，而空元组 `()` 这一层压根不收。 */
   if (t.kind === 'named') return { kind: 'bool', value: true };
   /* 一格箱子：按标签分派（`dyn.js` 的 `dynTruthy`）。 */
   if (t.kind === 'dyn') return dynTruthy(e, C);
