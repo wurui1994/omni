@@ -24,6 +24,7 @@ import {
   isDyn, boxOf, unify, dynText, dynTruthy, dynBin, noneOf, isNoneOf,
 } from './dyn.js';
 import { splitFString } from './fstring.js';
+import { splitPercent, percentArity } from './percent.js';
 import {
   sumOf, pickList, anyAllOf, sortedOf, rangeList,
   joinOf, splitOf, stripOf, replaceOf, startsEndsOf,
@@ -736,10 +737,135 @@ const DYN_ARITH = (C) => ({
   },
 });
 
+/**
+ * 老式的 `%` 格式化（`"%d 个" % n`）。
+ *
+ * python 这一族照的是 C 的 printf，而方言里那几格串算子本来就是 C 的那几个转换 ——
+ * 所以这儿不自己算数字的文本，只管挑算子、补符号、补宽度（切格式串在 `percent.js`）。
+ * **格式串要是编译期的字面量**：转换字母决定发哪一格算子。
+ */
+function percentOf(aTok, bTok, C) {
+  if (tag(aTok) !== 'str' || hasFields(aTok)) {
+    throw new Error('python->IR: `%` 格式化的左边要是一格串字面量'
+      + '（运行期的格式串要一台运行期的格式化机器 —— 那是 CPython 的 `unicodeobject.c`）');
+  }
+  const parts = splitPercent(strValue(aTok));
+  const need = percentArity(parts);
+  const argToks = tag(bTok) === 'tuple' ? kids(bTok) : [bTok];
+  if (argToks.length !== need) {
+    throw new Error(`python->IR: \`%\` 格式化要 ${need} 格实参，给了 ${argToks.length}`);
+  }
+  const pieces = [];
+  let k = 0;
+  for (const p of parts) {
+    if (p.lit !== undefined) { pieces.push({ kind: 'string', value: p.lit }); continue; }
+    pieces.push(convPiece(p, exprOf(argToks[k], C), C));
+    k += 1;
+  }
+  if (pieces.length === 0) return { kind: 'string', value: '' };
+  let out = pieces[0];
+  for (let i = 1; i < pieces.length; i += 1) out = { kind: 'binop', op: '+', left: out, right: pieces[i] };
+  return out;
+}
+
+/** 一格转换：算出文本，再按标志补符号与宽度。 */
+function convPiece(p, v, C) {
+  const pre = [];
+  const keep = (e, tag0) => {
+    if (isPure(e)) return e;
+    const n = C.fresh(tag0);
+    const t = ty(e, C);
+    C.bind(n, t);
+    pre.push({ kind: 'let', name: n, type: t, init: e });
+    return { kind: 'name', name: n };
+  };
+  const num = ['d', 'i', 'f', 'e', 'g', 'x', 'X', 'o'].includes(p.conv);
+  const val = num || p.flags.plus ? keep(v, 'pc_v') : v;
+  let s = rawConv(p, val, C);
+  /* `+` —— 非负数前面补一个加号（python 的 `"%+d" % 5` 是 `+5`）。 */
+  if (p.flags.plus && num) {
+    s = {
+      kind: 'ternary', type: STR,
+      cond: { kind: 'binop', op: '>=', left: val, right: ty(val, C).kind === 'real' ? { kind: 'real', value: 0 } : { kind: 'int', value: 0 } },
+      then: { kind: 'binop', op: '+', left: { kind: 'string', value: '+' }, right: s },
+      else_: s,
+    };
+  }
+  if (p.width !== null) s = padTo(keep(s, 'pc_s'), p.width, p.flags, C);
+  return pre.length === 0 ? s : { kind: 'block-expr', stmts: pre, value: s };
+}
+
+/** 转换字母 → 那一格算子（宽度与符号不在这儿）。 */
+function rawConv(p, v, C) {
+  const t = ty(v, C);
+  const prec = p.prec;
+  switch (p.conv) {
+    case 's': {
+      const s = pyStr(v, C);
+      /* `%.3s` —— 截到前 N 个字符。 */
+      if (prec === null) return s;
+      const n = { kind: 'int', value: prec };
+      const l = { kind: 'builtin', name: 'slen', args: [s] };
+      return {
+        kind: 'builtin', name: 'ssub',
+        args: [s, { kind: 'int', value: 0 }, {
+          kind: 'ternary', type: INT, cond: { kind: 'binop', op: '<', left: l, right: n }, then: l, else_: n,
+        }],
+      };
+    }
+    case 'r': return pyRepr(v, C);
+    case 'd': case 'i':
+      /* `"%d" % 2.7` 是 `2` —— 向零取整，正是方言的 `toint`。 */
+      return { kind: 'builtin', name: 'tostr', args: [t.kind === 'real' ? { kind: 'builtin', name: 'toint', args: [v] } : v] };
+    case 'f': return { kind: 'builtin', name: 'sfix', args: [toReal(v, C), { kind: 'int', value: prec ?? 6 }] };
+    case 'e': return { kind: 'builtin', name: 'ssci', args: [toReal(v, C), { kind: 'int', value: prec ?? 6 }] };
+    case 'g': return { kind: 'builtin', name: 'sgen', args: [toReal(v, C), { kind: 'int', value: prec ?? 6 }] };
+    case 'x': case 'X': case 'o': {
+      if (t.kind !== 'int') throw new Error(`python->IR: \`%${p.conv}\` 的实参要是 int（这里是 ${t.kind}）`);
+      const b = { kind: 'builtin', name: 'sbase', args: [v, { kind: 'int', value: p.conv === 'o' ? 8 : 16 }] };
+      return p.conv === 'X' ? { kind: 'builtin', name: 'supper', args: [b] } : b;
+    }
+    default: throw new Error(`python->IR: \`%${p.conv}\` 还没接`);
+  }
+}
+
+/**
+ * 补到 `width` 宽。`-` 永远补空格补在右边（python 里 `-` 压过 `0`）；
+ * `0` 补零而且**补在符号后头**（`"%05d" % -12` 是 `-0012`，不是 `00-12`）。
+ */
+function padTo(s, width, flags, C) {
+  const n = {
+    kind: 'binop', op: '-', left: { kind: 'int', value: width },
+    right: { kind: 'builtin', name: 'slen', args: [s] },
+  };
+  /* `(srep S N)` 在 N <= 0 时交空串 —— 正好是"不用补"那一档。 */
+  const fill = (ch) => ({ kind: 'builtin', name: 'srep', args: [{ kind: 'string', value: ch }, n] });
+  if (flags.left) return { kind: 'binop', op: '+', left: s, right: fill(' ') };
+  if (!flags.zero) return { kind: 'binop', op: '+', left: fill(' '), right: s };
+  const head = { kind: 'builtin', name: 'ssub', args: [s, { kind: 'int', value: 0 }, { kind: 'int', value: 1 }] };
+  const tail = {
+    kind: 'builtin', name: 'ssub',
+    args: [s, { kind: 'int', value: 1 }, { kind: 'binop', op: '-', left: { kind: 'builtin', name: 'slen', args: [s] }, right: { kind: 'int', value: 1 } }],
+  };
+  return {
+    kind: 'ternary', type: STR,
+    cond: { kind: 'binop', op: '==', left: head, right: { kind: 'string', value: '-' } },
+    then: {
+      kind: 'binop', op: '+',
+      left: { kind: 'binop', op: '+', left: { kind: 'string', value: '-' }, right: fill('0') },
+      right: tail,
+    },
+    else_: { kind: 'binop', op: '+', left: fill('0'), right: s },
+  };
+}
+
 /** 二元算术与位运算 —— python 的四处规矩都在这儿（见文件头 1~4）。 */
 function binOf(x, C) {
   const [opTok, aTok, bTok] = kids(x);
   const o = String(leaf(opTok));
+  /* **串上的 `%` 要在算右边之前拦**：`"%s=%s" % (a, b)` 的右边是一格元组，
+     而这一层没有元组这一档 —— 算它会当场报"这一格表达式还没接：tuple"。 */
+  if (o === '%' && tag(aTok) === 'str') return percentOf(aTok, bTok, C);
   const a = exprOf(aTok, C);
   const b = exprOf(bTok, C);
   const ta = ty(a, C);
@@ -753,9 +879,9 @@ function binOf(x, C) {
   if (o === '/') return { kind: 'binop', op: '/', left: toReal(a, C), right: toReal(b, C) };
   /* 2. `//` 向下取整。 */
   if (o === '//') return floorDiv(a, b, isInt(ta) && isInt(tb), C);
-  /* 3. `%` 符号跟着除数；串上的 `%` 是老式格式化（没接）。 */
+  /* 3. `%` 符号跟着除数；串上的 `%` 是老式格式化。 */
   if (o === '%') {
-    if (ta.kind === 'string') throw new Error('python->IR: 串上的 `%` 格式化还没接');
+    if (ta.kind === 'string') return percentOf(aTok, bTok, C);
     return pyMod(a, b, isInt(ta) && isInt(tb), C);
   }
   if (o === '**') {
