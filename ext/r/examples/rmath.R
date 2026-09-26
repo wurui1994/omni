@@ -64,3 +64,18 @@ cat(0 ^ -1, 0 ^ 2, Inf ^ 0, 0 ^ Inf, "\n")
 cat(c(NA, 2) ^ 2, 2 ^ c(1, NA), c(0, 1) ^ NA, "\n")
 cat(is.na(0 ^ NA), is.nan(0 ^ NaN), "\n")
 print(c(NA, 2) ^ 2)
+
+## log2 与 log(x, base=)：底 2 / 底 10 走 R 自己那两个特例（logbase()），别的走 log/log
+cat(log2(8), log2(1024), log2(0.25), log2(2 ^ 53), "\n")
+cat(log2(10), log2(NA), log2(0), "\n")
+cat(log(8, base = 2), log(1000, base = 10), log(8, 2), log(100, 5), "\n")
+lgb <- 3
+cat(log(27, lgb), log(81, lgb), "\n")
+lgb <- 2
+cat(log(1024, lgb), "\n")
+print(log2(c(1, 2, 4, 8)))
+print(log(c(1, 2, 4, 8), base = 2))
+print(log(c(1, 4, 16), 4))
+## 底 2 那一档与"自己除一遍"**不是同一个答案** —— 末位差一格，所以照 R 分档
+cat(sprintf("%.17g %.17g", log(10, 2), log(10) / log(2)), "\n")
+cat(log(10, 2) == log(10) / log(2), "\n")

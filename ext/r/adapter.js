@@ -1072,6 +1072,8 @@ const NAMED_OK = new Map([
   ['sort', new Set(['decreasing', 'method', 'na.last'])],
   ['order', new Set(['method', 'decreasing'])],
   ['strtoi', new Set(['base'])],
+  /* `log(x, base = b)` —— 照 R 自己的 `logbase()` 分三档（见 `callOf` 那一段）。 */
+  ['log', new Set(['base'])],
   ['strsplit', new Set(['fixed'])],
   ['grepl', new Set(['fixed'])], ['sub', new Set(['fixed'])], ['gsub', new Set(['fixed'])],
   ['grep', new Set(['fixed', 'value'])],
@@ -4946,27 +4948,65 @@ function callOf(x, types, extra, want, stmtPos) {
       case 'sin': case 'cos': case 'tan': case 'asin': case 'acos': case 'atan':
       case 'sinh': case 'cosh': case 'tanh': {
         /**
-         * **`log2` 这一格接不住**（量出来 2026-09-26）：方言的 `rmath` 那张名单
-         * （`src/core/sexpr/lower.js` 的 `RMATH`，"C99 math.h ∩ ECMA-262 Math"）里
-         * 没有 `log2` —— 两边其实都有这个函数，是那张表漏了。
+         * `log(x, base)` —— **照 R 自己的 `logbase()` 分三档**（`arithmetic.c`）：
          *
-         * 从前这儿照旧发 `(rmath "log2" …)`，于是 `print(log2(8))` 一路走到 `.sx` 才撞上
-         * `(rmath) 不认识 'log2'` —— 那是**方言**的话，对着写 R 的人毫无用处，而且那时
-         * 已经过了换档那道门，libR 那一档接不上，用户一个答案都拿不到。
+         *     base == 10 -> log10(x)
+         *     base == 2  -> log2(x)
+         *     else       -> log(x) / log(base)
          *
-         * 所以在这儿就报：换档那道门看见 `r->IR:` 会退到 libR，答案**是对的**。
-         * 真接它要改方言那张表（五条腿都得动），那是另一刀。
+         * 那两个特例不是"优化"，是**答案不一样**：量过 20300 个输入，`log(x) / log(2)`
+         * 与 `log2(x)` 有 4925 个末位不同（`log2(10)` 就是一格：3.3219280948873622 与
+         * 3.3219280948873626），所以照它那么分档才对得上。底是字面量 2 / 10 时在编译期
+         * 就定下来；别的（运行期才知道的底）发一串三元，把那三档原样摆出来。
+         *
+         * 底只接一格标量：R 那边 `log(x, base)` 两边都回收（`math2`），而这一档要么
+         * 明写接了、要么当场报 —— 回收那一档是另一刀。
          */
-        if (fn === 'log2') {
-          throw new Error('r->IR: log2() 还没接 —— 方言的 `rmath` 名单里没有 log2'
-            + '（C99 与 Math.* 都有，是那张表漏了，接它要动五条腿）。'
-            + '这一层里写 `log(x) / log(2)` 能算，只是末位可能与 R 的 log2 差一个 ulp');
-        }
-        if (n !== 1) {
+        const baseNode = fn === 'log'
+          ? (namedArg(x, 'base') ?? (n === 2 ? all[1] : undefined))
+          : undefined;
+        if (fn !== 'log' && n !== 1) {
           throw new Error(`r->IR: ${fn}() 这一批只接一格实参（给了 ${n}）——`
-            + ' 两格那一档（`log(x, base)`）要我们替它算，而"替它算"与"照它算"是两件事');
+            + ' 两格那一档只有 `log(x, base)` 有');
+        }
+        if (fn === 'log' && baseNode === undefined && n !== 1) {
+          throw new Error(`r->IR: log() 收了 ${n} 格实参 —— 只认 log(x) 与 log(x, base)`);
         }
         const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        const rm = (name, e) => call1('rmath', { kind: 'strlit', value: name }, e);
+        if (baseNode !== undefined) {
+          const bt = typeOfExpr(baseNode, types);
+          if (isVecTy(bt) || isStrVec(bt) || bt.kind === 'string') {
+            throw new Error('r->IR: log() 的底只接一格标量（R 那边两边都回收，这一档没接）');
+          }
+          const lit = tag(baseNode) === 'num' ? String(leaf(kids(baseNode)[0])) : null;
+          const one = (e) => {
+            if (lit === '10' || lit === '10L') return rm('log10', e);
+            if (lit === '2' || lit === '2L') return rm('log2', e);
+            const bv = asReal(exprOf(baseNode, types), bt);
+            /* 运行期的底：三档照 `logbase()` 摆着。`bs` 要先落地成一格局部，
+               不然三个分支各算一遍那个表达式。 */
+            const bn = fresh('lb');
+            const be = { kind: 'name', name: bn };
+            return {
+              kind: 'block-expr',
+              stmts: [{ kind: 'let', name: bn, type: REAL, init: bv }],
+              value: {
+                kind: 'ternary',
+                cond: b('==', be, { kind: 'real', value: 10 }),
+                then: rm('log10', e),
+                else_: {
+                  kind: 'ternary',
+                  cond: b('==', be, { kind: 'real', value: 2 }),
+                  then: rm('log2', e),
+                  else_: b('/', rm('log', e), rm('log', be)),
+                },
+              },
+            };
+          };
+          if (isVecTy(t)) return vecMap1(ev(0), one);
+          return one(asReal(ev(0), t));
+        }
         const sym = { kind: 'strlit', value: LIBM.get(fn) };
         if (isVecTy(t)) return vecMap1(ev(0), (e) => call1('rmath', sym, e));
         return call1('rmath', sym, asReal(ev(0), t));

@@ -103,16 +103,27 @@ r-source/src/nmath/*.c  ──ext/r/build.js（我们那份纯 JS 的 ninja）�
 `dnorm`/`pnorm`/`qnorm` 与 `dbinom`/`pbinom`/`dpois`/`ppois`/`dgamma`/`pgamma`/`dbeta`/
 `pbeta`/`dt`/`pt`/`dchisq`/`pchisq`、`besselI`/`besselJ`/`besselK`/`besselY`。
 
-libm 那一族（`sqrt` `exp` `log` `log10` `floor` `ceiling` 与三角/双曲）落方言的
-`rmath` —— R 自己这几个也是直接调 libm，不在 nmath 里。`log(x, base)` 那种两格的**当场报**：
-那一档要我们替它算（`log(x)/log(b)`），而"替它算"与"照它算"是两件事。
+libm 那一族（`sqrt` `exp` `log` `log2` `log10` `floor` `ceiling` 与三角/双曲）落方言的
+`rmath` —— R 自己这几个也是直接调 libm，不在 nmath 里。
 
-**`log2` 接不住**（量出来 2026-09-26）：方言的 `rmath` 名单（`src/core/sexpr/lower.js` 的
-`RMATH`，"C99 math.h ∩ ECMA-262 Math"）里没有 `log2` —— C 与 JS 其实都有这个函数，是那张表
-漏了；补它要动五条腿，是另一刀。从前这儿照旧发 `(rmath "log2" …)`，于是 `print(log2(8))`
-一路走到 `.sx` 才撞上 `(rmath) 不认识 'log2'`：那是**方言**的话（对着写 R 的人没用），
-而且那时已经过了换档那道门，libR 接不上，用户一个答案都拿不到。现在在 adapter 里就报，
-于是退到 libR，答案是对的。
+**`log2` 与 `log(x, base=)` 2026-09-26 接了。** 先补的是方言：`(rmath …)` 那张白名单
+（`src/core/sexpr/lower.js` 的 `RMATH`，"C99 math.h ∩ ECMA-262 Math"）从前漏了 `log2`
+（C 有、`Math.log2` 也有），五条腿一起补齐，尺子在 `tests/sexpr/cases/01-core.sx`。
+
+两格那一档**照 R 自己的 `logbase()`（`arithmetic.c`）分三档**，不是一句 `log(x)/log(b)`：
+
+```
+base == 10 -> log10(x)
+base == 2  -> log2(x)
+else       -> log(x) / log(base)
+```
+
+那两个特例不是优化，是**答案不一样** —— 量过 20300 个输入，`log(x)/log(2)` 与 `log2(x)`
+有 4925 格末位不同（`log(10, 2)` 就是一格：`3.3219280948873622` 对 `3.3219280948873626`），
+所以 `log(10, 2) == log(10)/log(2)` 在 R 里是 `FALSE`，这一条钉在 `ext/r/examples/rmath.R`。
+底是字面量 `2` / `10` 时编译期就选定分支，运行期才知道的底发一串三元把三档摆出来
+（底先落一格局部，不重算）。**底只接一格标量**：R 那边 `log(x, base)` 两边都回收
+（`math2`），回收那一档还没接，给一条向量当场报。
 
 `NaN` / `Inf` / `-Inf` 三格真值由**我们自己那份** `rt/omni_rna.c` 给（R 那边它们在解释器里）；
 `is.finite` 用 R 自己的 `R_finite`。印法照 R 的三处特例（`NaN` / `Inf` / `-Inf`），
