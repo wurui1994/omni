@@ -4079,6 +4079,20 @@ function exprOf(x, types, want, stmtPos) {
         }
         throw new Error(`r->IR: \`${op}\` 还没接`);
       }
+      /**
+       * **剩下的算符只认这十个**。上头每一格 R 的算符都自己拿走了，掉到这儿来的就只该是
+       * 算术与比较那十个；别的（`%o%` / `%*%` / `%+%` 这种自定义中缀）从前**原样发给方言**，
+       * 于是一路走到 `.sx` 才撞上"不认识的二元算符 '%o%'" —— 那是方言的话，而且已经过了
+       * 换档那道门：libR 接不上，用户一个答案都拿不到（量出来 2026-09-26）。
+       *
+       * 所以在这儿就报：`r->IR:` 让换档那道门退到 libR，答案是对的。
+       */
+      if (!PLAIN_BIN.has(op)) {
+        throw new Error(`r->IR: \`${op}\` 这个中缀算符还没接 —— 编译器这一档认的是`
+          + ' 算术与比较那十个、`^` / `%%` / `%/%` / `:` / `%in%` / `$` 与逻辑那四格。'
+          + '`%o%` / `%*%` 那些（外积与矩阵乘）要先有多维数组，自己用 `%名字%` 定的中缀'
+          + '也在这儿 —— 那一档是 libR（见 ext/r/SPEC.md 第五节）');
+      }
       /* **向量化**：一边是向量就逐元素算（R 里这是常态，不是特例）。 */
       {
         const vt = vecBin(op, l, r, types);
@@ -4138,6 +4152,14 @@ function exprOf(x, types, want, stmtPos) {
  * （长向量那一档在新版 R 里是个错误），逐元素的那一对就是 `&` / `|`。
  */
 const VEC_OPS = new Set(['+', '-', '*', '/', '<', '<=', '>', '>=', '==', '!=', '^', '**', '%%', '%/%', '&', '|', 'xor']);
+
+/**
+ * **掉到 `bin` 那一段末尾的算符只该是这十个** —— 算术四格、比较六格。`^` / `%%` / `%/%` /
+ * `:` / `%in%` / `$` 与逻辑那四格在上头各自拿走了，剩下认不出来的（`%o%` / `%*%` /
+ * 自己用 `%名字%` 定的中缀）当场报，不原样发给方言（见那一处的账）。
+ */
+const PLAIN_BIN = new Set(['+', '-', '*', '/', '<', '<=', '>', '>=', '==', '!=']);
+
 /** 逐元素的逻辑那几格（结果是逻辑向量，每一格按三态表算）。`xor` 是函数，不是算符。 */
 const LGL_OPS = new Set(['&', '|', 'xor']);
 
@@ -4913,6 +4935,28 @@ function callOf(x, types, extra, want, stmtPos) {
         const stmts = [{ kind: 'let', name: tmp, type: vt, init: call1('dnew', tyArg(vt)) }];
         for (const a of named) {
           const at = typeOfExpr(a.value, types);
+          /**
+           * **一张表里的值得是同一种** —— 这一层的表是 `dict<string, T>`，T 只有一格。
+           * `list(a = 1, b = "x")` 在 R 里是两种类型的元素（异质表），从前这儿照旧发
+           * `(dset … (real 1))` 进一张 `dict<string,string>`，一路走到 `.sx` 才撞上
+           * "dset 的值要是 string，这里是 real" —— 那是方言的话，而且已经过了换档那道门：
+           * libR 接不上，用户一个答案都拿不到（量出来 2026-09-26，五种形状都这样）。
+           *
+           * 所以在这儿就报。能过的只有"全是数"（`int` 与 `real` 混着算同一种，`int` 提到
+           * `real`）与"全是串"两档；逻辑、向量、嵌套的表都当场报 —— 那几档要 R 的
+           * 异质表，是另一刀。
+           */
+          const vk = vt.value === undefined ? 'int' : vt.value.kind;
+          const numOk = (k) => k === 'int' || k === 'real';
+          const fits = at.kind === 'string' ? vk === 'string' : (numOk(at.kind) && numOk(vk));
+          if (!fits) {
+            const what = at.kind === 'ptr' ? '一条向量' : at.kind === 'map' ? '又一张表'
+              : at.kind === 'bool' ? '一格逻辑值' : `一格 ${at.kind}`;
+            throw new Error(`r->IR: \`list(${a.name} = …)\` 这一格是${what}，`
+              + `而这张表的值是 ${vk} —— 这一层的表是"一种值"的表（\`dict<string, T>\`），`
+              + 'R 的异质表（每格各是一种类型）还没接。能过的是"全是数"与"全是串"两档'
+              + '（见 ext/r/SPEC.md 第四节第 4 条）');
+          }
           const v = vt.value !== undefined && vt.value.kind === 'real' && at.kind === 'int'
             ? asReal(exprOf(a.value, types), at)
             : exprOf(a.value, types);
