@@ -359,13 +359,18 @@ PolyDraw 与 EvalDraw 各带一整棵例子树（`polydraw/{examples,ken,tigrou}
 `launcherText`；asy 那条腿的驱动是 `cli.js` 的 `asyModsBuild`，它问的是
 `cap('asy.unitTexts')`，并且**一目录只写一份 `omni_rt.js`**）。
 
-欠的那一刀（下一步）：
+欠的那一刀（下一步，名字与落点都查过了）：
 
-1. 给 EVAL 出一格 `eval.unitTexts`：回两份单元 —— `ev_rt`（`gl-rt` / `gfx3-rt` / `gfx-rt` /
-   `graph-rt` 那一层的 sx，**内容与脚本无关**，键只跟我们自己那几份 rt 源码有关）与
-   脚本自己那一份（`deps: ['ev_rt']`）；
-2. 驱动那一格按语言参数化（`asyModsBuild` 现在只认 asy 的 capability 名字）；
-3. serve 把那一目录当静态文件发，页面 `import` 入口那份启动器 —— `ev_rt.js` 与
+1. **打包那一格是现成的、而且与语言无关**：`src/core/frontend-asy/link.js:94` 的
+   `asyUnitModules(sections, nameOf, tail)` —— 它只认**核心方言的顶层形式**
+   （`formsOf` 扫签名、按名字把跨单元引用解析成 needs/deps），不认识 asy。
+   EVAL 这边要交出两格 `sections`：`ev_rt`（`gl-rt` / `gfx3-rt` / `gfx-rt` / `graph-rt`
+   那一层的 sx，**内容与脚本无关**）与脚本自己那一份（入口，id 0）。
+2. 出一格 `eval.unitTexts`（照 `src/core/lang/asy.js:363` 的 `asyUnitTexts` 抄形状：
+   回 `{units, reused}`，每份带 `key` / `deps` / `iface`）。
+3. 驱动按语言参数化：`cli.js` 的 `asyModsBuild` 现在写死问 `cap('asy.unitTexts')`，
+   别的都已经是公共的（一目录只写一份 `omni_rt.js`）。
+4. serve 把那一目录当静态文件发，页面 `import` 入口那份启动器 —— `ev_rt.js` 与
    `omni_rt.js` 由**浏览器按 URL 缓存**，每跑一趟只有入口那几 KB 是新的。
 
 判据：一趟改一行重跑，"新编 1 份 / 复用 N 份"（与 asy 那条腿同一个口径）+ 过网字节数。
