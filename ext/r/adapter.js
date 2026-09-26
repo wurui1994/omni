@@ -644,6 +644,12 @@ const isTblTy = (t) => t !== undefined && t !== null && t.kind === 'ptr' && t.tb
  * 从前没有它，于是 `print(which(x > 5))` 印的是 `numeric(0)` —— 静默与 R 差一行字。
  */
 const RIVEC = { kind: 'ptr', inner: REAL, ivec: true };
+/**
+ * **带名字的整数向量**：`which(c(a=1,b=3) > 1)` 就是这一格 —— R 的 `which` 回的是
+ * integer，而名字跟着被选中的那几格走。两个记号都要：零长那一档 R 印
+ * `named integer(0)`（只有 `named` 的话印成 `named numeric(0)`，差一个词 —— 量出来的）。
+ */
+const RNIVEC = { kind: 'ptr', inner: REAL, ivec: true, named: true };
 const isIvecTy = (t) => t !== undefined && t !== null && t.kind === 'ptr' && t.ivec === true;
 /** 零长时印的那个类型名（`formatReal` 之外的一行字，见 `RIVEC`）。 */
 const zeroName = (t) => (isIvecTy(t) ? 'integer(0)' : 'numeric(0)');
@@ -744,7 +750,7 @@ const NAME_KEEP_NUM = new Set([
 /* `NAME_KEEP` 只管那道门（`callOf` 里"名字跟不住就报"那一句）：这几格的名字跟得住。
    `c` 也在里头 —— 它的名字是**接起来**而不是原样跟着（见 `namesExprOf` 的 `c` 那一格）。 */
 const NAME_KEEP = new Set([...NAME_KEEP_LGL, ...NAME_KEEP_NUM,
-  'rev', 'head', 'tail', 'sort', 'c', 'diff', 'which.max', 'which.min', 'append']);
+  'rev', 'head', 'tail', 'sort', 'c', 'diff', 'which.max', 'which.min', 'append', 'which']);
 /** 第 i 格（0 起）。方言的 `{kind:'index'}` 落成 `(aget …)`，赋值那侧落 `(aset …)`。 */
 const svGet = (v, i) => ({ kind: 'index', obj: v, index: i });
 const svLen = (v) => call1('alen', v);
@@ -1411,6 +1417,20 @@ function namesExprOf(x, types) {
     return { kind: 'call', fn: { kind: 'name', name: h }, args: [ns, cnt] };
   }
   /**
+   * `which(掩码)` —— 回的是**位置**，而 R 把被选中那几格的名字一起带回来
+   * （量出来 `which(c(a=1,b=3,c=2) > 1)` 印 `b c` 一行、`2 3` 一行）。
+   * `which(x > 2)` 在真 R 代码里很常见，所以这一格接住：名字那一条就是"按位置挑"
+   * （`r_nm_pick` 收的正是"1 起的下标向量"），挑的下标就是值那一侧算出来的那条。
+   * 掩码因此**算两遍**（值那侧一遍、名字那侧一遍）—— 与 `c(…)` / `append` 同一条账。
+   */
+  if (fn === 'which') {
+    const as = posArgs(x);
+    if (as.length < 1) return null;
+    const ns = namesExprOf(as[0], types);
+    if (ns === null) return null;
+    return lglCall('r_nm_pick', ns, lglCall('r_which', exprOf(as[0], types)));
+  }
+  /**
    * `append(x, values, after = k)` —— 插进去那几格在 R 里**名字是空串**
    * （量出来 `append(c(a=1,bb=2), 9)` 的名字是 `"a" "bb" ""`，印出来最后那一列是空的）。
    * 所以名字那一条也照值那一侧插一遍，插的是 `length(values)` 格空串（见 `r_app_str`）。
@@ -1897,7 +1917,14 @@ function applyTy(fn, x, types) {
       if (isStrVec(t)) return RSTRV;
       return isVecTy(t) ? t : RVEC;
     }
-    case 'seq_along': case 'which': case 'seq_len': return RIVEC;
+    case 'seq_along': case 'seq_len': return RIVEC;
+    /* `which` 回的是位置；带名字的向量上 R 连被选中那几格的名字一起回
+       （量出来 `which(c(a=1,b=3) > 1)` 印 `b` 一行、`2` 一行）。 */
+    case 'which': {
+      const t0 = args.length > 0 ? typeOfExpr(args[0], types) : RLGL;
+      return isNamedTy(t0) ? RNIVEC : RIVEC;
+    }
+
     /* `sort` / `head` / `tail` / `rep` 出来的**元素类型跟着进去的那条走**
        （逻辑向量排完还是逻辑、整数向量排完还是整数）；`range` / `seq` 一律数值，
        而 `cumsum` / `diff` 在 R 里**整数进整数出**（零长时印 `integer(0)`）。 */

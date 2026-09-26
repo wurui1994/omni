@@ -271,3 +271,20 @@ print(as.vector(table(nums)))
 print(as.vector(c("a", "b")))
 print(sum(as.vector(avn)))
 print(as.vector(avn) * 2)
+
+# **`which(掩码)` 把被选中那几格的名字一起带回来**（`which(x > 2)` 在真 R 代码里很常见）。
+# 名字那一条就是"按位置挑"（`r_nm_pick` 收的正是 1 起的下标向量），挑的下标就是值那一侧
+# 算出来的那条 —— 掩码因此算两遍，与 `c(…)` / `append` 同一条账。
+# 零长那一档要的是 **`named integer(0)`**：R 的 `which` 回的是 integer，光有 `named`
+# 会印成 `named numeric(0)`，差一个词。所以那一格是 `RNIVEC`（两个记号都要）。
+wv <- c(a = 1, b = 3, c = 2)
+print(which(wv > 1))
+print(which(c(a = TRUE, b = FALSE, c = TRUE)))
+print(which(wv > 9))
+cat(which(wv > 1), "\n")
+cat(names(which(wv > 1)), "\n")
+wna <- c(a = 1, b = NA, c = 3)
+print(which(wna > 2))
+print(which(unname(wv) > 1))
+cat(length(which(wv > 1)), sum(which(wv > 1)), "\n")
+print(which(wv >= 1))
