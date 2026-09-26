@@ -420,6 +420,58 @@ if (only.length === 0 || only.some((x) => 'gfx'.includes(x))) {
   rmSync(away, { recursive: true, force: true });
 }
 
+/* ── KV6 解码器（`src/core/host/kv6.js`）：**x/y 要靠两张游程表数出来** ───────────
+ *
+ * 体素记录里只有 z 与颜色；x 来自 `xlen[]`、y 来自 `ylen[][]`。所以这一格判的正是
+ * "数对了没有"：现造一份 2×2×… 的模型（四根柱子、各 0/1/2/1 格体素），把每一格的
+ * x,y,z 与颜色都对一遍。语料那 11 份资源不在仓库里，判据不许靠它们。
+ */
+if (only.length === 0 || only.some((x) => 'kv6'.includes(x))) {
+  const { decodeKv6 } = await import('../../src/core/host/kv6.js');
+  /* xsiz=2, ysiz=2；ylen = [[0,1],[2,1]] ⇒ 一共 4 格体素，次序是 x 大类、y 小类。 */
+  const vox = [
+    /* (x=0,y=1) */ [10, 20, 30, 128, 5],
+    /* (x=1,y=0) */ [1, 2, 3, 128, 7], [4, 5, 6, 128, 8],
+    /* (x=1,y=1) */ [9, 9, 9, 128, 1],
+  ];
+  const b = [];
+  const i32 = (v) => { b.push(v & 255, (v >> 8) & 255, (v >> 16) & 255, (v >> 24) & 255); };
+  const u16 = (v) => { b.push(v & 255, (v >> 8) & 255); };
+  const f32 = (v) => {
+    const t = new DataView(new ArrayBuffer(4));
+    t.setFloat32(0, v, true);
+    for (let i = 0; i < 4; i++) b.push(t.getUint8(i));
+  };
+  b.push(0x4b, 0x76, 0x78, 0x6c);                 /* "Kvxl" */
+  i32(2); i32(2); i32(16);                        /* xsiz, ysiz, zsiz */
+  f32(0.5); f32(1); f32(2);                       /* 支点 */
+  i32(vox.length);
+  for (const [bb, g, r, al, z] of vox) { b.push(bb, g, r, al); u16(z); b.push(0, 0); }
+  i32(1); i32(3);                                 /* xlen[0]=1, xlen[1]=3 */
+  u16(0); u16(1); u16(2); u16(1);                 /* ylen[0][*], ylen[1][*] */
+  const m = decodeKv6(new Uint8Array(b));
+  const want = [
+    [0 - 0.5, 1 - 1, 5 - 2, (30 << 16) | (20 << 8) | 10],
+    [1 - 0.5, 0 - 1, 7 - 2, (3 << 16) | (2 << 8) | 1],
+    [1 - 0.5, 0 - 1, 8 - 2, (6 << 16) | (5 << 8) | 4],
+    [1 - 0.5, 1 - 1, 1 - 2, (9 << 16) | (9 << 8) | 9],
+  ];
+  if (m === null) no('KV6 解码', '解不开现造的那一份');
+  else if (m.n !== want.length) no('KV6 解码', `体素个数 ${m.n} != ${want.length}`);
+  else {
+    let bad = '';
+    for (let i = 0; i < want.length && bad === ''; i++) {
+      for (let c = 0; c < 4; c++) {
+        if (m.vox[i * 4 + c] !== want[i][c]) {
+          bad = `第 ${i} 格第 ${c} 个数：${m.vox[i * 4 + c]} != ${want[i][c]}`;
+        }
+      }
+    }
+    if (bad !== '') no('KV6 解码', bad);
+    else ok(`KV6 解码：4 格体素的 x/y（游程表数出来的）/z/颜色都对`);
+  }
+}
+
 /* ── **一页里连着跑两份脚本**：换程序要清那张"具名函数当值用"的单件表 ──────────────
  *
  * `$fnOnes` 按**名字**记，记的是**闭着上一个程序那份模块作用域**的薄适配器；而运行时

@@ -492,12 +492,30 @@ export function startServer(opts) {
           '.gif': 'image/gif',
           '.bmp': 'image/bmp',
           '.webp': 'image/webp',
+          /* **KV6 体素模型**：不是图，但同一条路（脚本旁边的资源）。页面那一档拿不到
+             文件系统，而**解码器只该有一份**（`src/core/host/kv6.js`）—— 所以这一格
+             直接发**解开之后**的那张表（一格体素四个 float64：x,y,z,颜色），
+             浏览器那侧一个字节都不用解析。 */
+          '.kv6': 'application/octet-stream',
         };
         if (rel.includes('..') || MIME[ext] === undefined) {
-          return json(res, 400, { error: '这一格只发图（png/jpg/gif/bmp/webp）' });
+          return json(res, 400, { error: '这一格只发图与 .kv6（png/jpg/gif/bmp/webp/kv6）' });
         }
         const abs = mountPath(rel, Object.keys(MIME)) ?? safePath(root, rel);
         if (abs === null || !exists(abs)) return json(res, 404, { error: 'not found' });
+        if (ext === '.kv6') {
+          const { decodeKv6 } = await import('./host/kv6.js');
+          const s = readBinary(abs);
+          const m = decodeKv6(Uint8Array.from(s, (ch) => ch.charCodeAt(0) & 255));
+          if (m === null) return json(res, 415, { error: 'kv6: 解不开' });
+          res.writeHead(200, {
+            'content-type': MIME[ext],
+            'x-kv6-voxels': String(m.n),
+            'cache-control': 'no-cache',
+          });
+          res.end(Buffer.from(m.vox.buffer, 0, m.n * 32));
+          return undefined;
+        }
         res.writeHead(200, {
           'content-type': MIME[ext],
           /* 图是源文件不是产物（名字里没有内容哈希）—— 所以要问一句，别 immutable。 */

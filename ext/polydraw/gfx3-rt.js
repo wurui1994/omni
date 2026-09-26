@@ -46,6 +46,8 @@ export const GFX3_GLOBALS = [
   'g3_glz',
   /* `pic` 那一族缓存着的那张图：名字下标 +1（0 = 还没读过）、宽、高。 */
   'g3_picn', 'g3_picw', 'g3_picy',
+  /* KV6 那一族缓存着的那个模型：名字下标 +1（0 = 还没读过）、几格体素。 */
+  'g3_kvn', 'g3_kvc',
   /* EvalDraw 的 GL 子集：那张投影矩阵要不要重算（相机动过就置 1，见 `g3_glbegin`）。 */
   'g3_pdirty',
 ];
@@ -53,8 +55,9 @@ export const GFX3_GLOBALS = [
 
 
 export function gfx3GlobalDecls() {
-  /* `g3_picb` 是 `pic` 那一族缓存着的那一整张图（一格一个 0xRRGGBB）—— 一格 `(arr real)`。 */
-  return [...GFX3_GLOBALS.map((n) => glob(n)), glob('g3_picb', ARR)];
+  /* `g3_picb` 是 `pic` 那一族缓存着的那一整张图（一格一个 0xRRGGBB）—— 一格 `(arr real)`。
+     `g3_kvb` 是 KV6 那一族缓存着的那份模型（一格体素四个数：x,y,z,颜色）。 */
+  return [...GFX3_GLOBALS.map((n) => glob(n)), glob('g3_picb', ARR), glob('g3_kvb', ARR)];
 }
 
 /**
@@ -116,6 +119,10 @@ export const EVALDRAW_3D = new Map([
      名字带 `gl` 是给 adapter 看的（那条规则按 `g3_gl` 前缀把 GL 那摊运行时也带上）。 */
   ['drawspr/4', 'g3_glspr4'],
   ['drawspr/5', 'g3_glspr5'],
+  /* **KV6 体素模型**（见 `g3_kv67` 的头注）：`drawspr` 七参那一档是它的别名
+     （`evaldraw.txt:544`："same as drawkv6()"）。 */
+  ['drawkv6/7', 'g3_kv67'],
+  ['drawspr/7', 'g3_kv67'],
 ]);
 
 /* ─── 生成出来的那一摊 ────────────────────────────────────────────────── */
@@ -149,6 +156,8 @@ export function d2(host) {
     getcol: () => (host ? dev('getcol', []) : nm('gfx_col')),
     /* `pic` 那一族：**只有宿主设备那一档有解码器**（生成出来那一份回 -1 = 没这张图）。 */
     picsiz: (ni) => (host ? dev('picsiz', [ni]) : num(-1)),
+    /* KV6 那一族同理（解码器在 `src/core/host/kv6.js`，两台宿主设备各自取字节）。 */
+    kv6siz: (ni) => (host ? dev('kv6siz', [ni]) : num(-1)),
   };
 }
 
@@ -463,6 +472,69 @@ export function gfx3FnDecls(host = false, withGL = false) {
        —— 我们抄过来的那一份本来就是 24 位 RGB。 */
     fn('g3_pic4', ['ni', 'x', 'y', 'fl'], [
       ret(call('g3_pic3', [nm('ni'), nm('x'), nm('y')])),
+    ]),
+    /**
+     * **KV6 体素模型那一族**（`drawkv6("cow.kv6",scale,x,y,z,hang,vang)`，
+     * `evaldraw.txt:921`；`drawspr` 七参那一档是它的别名，说明书原话是
+     * "same as drawkv6()"）。语料里 23 份 `.kc` 用它。
+     *
+     * 分工与 `pic` 那一族**一模一样**：模型文件由设备解码（`kv6siz` 问几格体素、
+     * `kv6read` 一次抄过来），**画**在语言这一侧 —— 于是三台设备一次全有。
+     * 抄过来的一格体素四个数：`x,y,z`（已经减掉模型支点）与 `0xRRGGBB`。
+     *
+     * **两处明写偏差**（EvalDraw 没有源码，这两格没有正本可抄）：
+     *
+     * 1. **一格体素画成一个球，不是立方体**。正本是"每个 cube 带完整边界"
+     *    （`evaldraw.txt:142`）。画立方体要每格 6 个四边形 ⇒ 一份 8575 格的模型
+     *    每帧 20 万个顶点走语言层，那是另一个量级；而这一族的形状在"一团带颜色的
+     *    体素"这一步就读得出来。
+     * 2. **没有深度排序**：这一层没有 z 缓冲（`clz` 收下不用），画的次序就是文件里的
+     *    次序（x 大类、y 小类）。所以从某些角度看背面的体素会盖住正面的。
+     *    真要修得先有 z 缓冲或者每帧按深度排一趟 —— 都是另一件活。
+     *
+     * 旋转：`hang` 在 x-y 平面转（偏航）、`vang` 再在(转过之后的) x-z 平面转（俯仰），
+     * 两个都是**弧度**（与 `setcam` 五参那一档同一口径）。这也是我们定的 —— 说明书
+     * 只说了"hang/vang"两个名字。
+     */
+    fn('g3_kv6need', ['ni'], [
+      iff(bin('==', nm('g3_kvn'), bin('+', nm('ni'), num(1))), [ret(num(0))]),
+      letR('v', D.kv6siz(nm('ni'))),
+      iff(bin('<=', nm('v'), num(0)), [set('g3_kvn', num(0)), set('g3_kvc', num(0)), ret(num(0))]),
+      set('g3_kvc', nm('v')),
+      set('g3_kvb', anew(bin('*', nm('v'), num(4)))),
+      ex(bi('gfxarr', [str('kv6read'), num(0), num(0), num(0), num(0), nm('g3_kvb')])),
+      /* 真抄到了才进缓存（与 `g3_picneed` 同一条：页面那一档取文件是异步的）。 */
+      set('g3_kvn', bin('+', nm('ni'), num(1))),
+      ret(num(0)),
+    ]),
+    fn('g3_kv67', ['ni', 'sc', 'x', 'y', 'z', 'ha', 'va'], [
+      ex(call('g3_kv6need', [nm('ni')])),
+      iff(bin('<=', nm('g3_kvc'), num(0)), [ret(num(0))]),
+      letR('ch', rm('cos', [nm('ha')])), letR('sh', rm('sin', [nm('ha')])),
+      letR('cv', rm('cos', [nm('va')])), letR('sv', rm('sin', [nm('va')])),
+      /* 一格体素的半径：半个体素乘上缩放（相邻两格正好挨上）。 */
+      letR('r', bin('*', rm('fabs', [nm('sc')]), num(0.5))),
+      letR('i', num(0)),
+      whil(bin('<', nm('i'), nm('g3_kvc')), [
+        letR('o', bin('*', nm('i'), num(4))),
+        letR('vx', aget('g3_kvb', nm('o'))),
+        letR('vy', aget('g3_kvb', bin('+', nm('o'), num(1)))),
+        letR('vz', aget('g3_kvb', bin('+', nm('o'), num(2)))),
+        /* 偏航（x-y）再俯仰（x-z）。 */
+        letR('ax', bin('-', bin('*', nm('vx'), nm('ch')), bin('*', nm('vy'), nm('sh')))),
+        letR('ay', bin('+', bin('*', nm('vx'), nm('sh')), bin('*', nm('vy'), nm('ch')))),
+        letR('bx', bin('-', bin('*', nm('ax'), nm('cv')), bin('*', nm('vz'), nm('sv')))),
+        letR('bz', bin('+', bin('*', nm('ax'), nm('sv')), bin('*', nm('vz'), nm('cv')))),
+        ex(D.setcol1(aget('g3_kvb', bin('+', nm('o'), num(3))))),
+        ex(call('g3_sph', [
+          bin('+', nm('x'), bin('*', nm('sc'), nm('bx'))),
+          bin('+', nm('y'), bin('*', nm('sc'), nm('ay'))),
+          bin('+', nm('z'), bin('*', nm('sc'), nm('bz'))),
+          nm('r'),
+        ])),
+        set('i', bin('+', nm('i'), num(1))),
+      ]),
+      ret(num(0)),
     ]),
     /**
      * `getrgb(col,&r,&g,&b)`（`evaldraw.txt:1478`）：把一格打包好的颜色拆成三格 0..255，

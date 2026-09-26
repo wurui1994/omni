@@ -19,7 +19,8 @@
 // **像素算法与 `ext/polydraw/gfx-rt.js` 逐句相同**（Bresenham、中点画圆、沿线铺圆）——
 // 那是有意的：换路之后同一份例子的表面要**逐字节相同**，这条才是"搬家不改语义"的判据。
 
-import { writeBinary, mkdirAll, stdout, stderr, env, nowMs, localStamp } from './native.js';
+import { writeBinary, readBinary, mkdirAll, stdout, stderr, env, nowMs, localStamp } from './native.js';
+import { decodeKv6 } from './kv6.js';
 import { pngFromRgba, surfaceKind } from './png.js';
 import { dlopenAddon } from './ffi_host.js';
 
@@ -888,6 +889,18 @@ export function gfxCall(name, args) {
       if (p === null) return -1;
       return G.m.picload(p);
     }
+    /**
+     * **KV6 那一族的头一句**（`drawkv6("cow.kv6",…)`，`evaldraw.txt:921`）：
+     * `kv6siz(名字下标)` -> 体素个数（读不到/解不开回 -1），顺手解码并缓存一份。
+     * 第二句是 `(gfxarr "kv6read" …)` —— 把那一张表抄给语言那一侧（见 `KV6` 的注）。
+     *
+     * 解码器在 `src/core/host/kv6.js`，**两台 JS 宿主设备共用一份**（页面那一档的字节
+     * 过网取，见 `studio/gfx-gl.js`）。这一档不用 GL 插件也不用 ImageIO：KV6 是纯字节。
+     */
+    case 'kv6siz/1': {
+      const p = texPath(Math.trunc(a(0)));
+      return kv6Need(p);
+    }
     case 'glactivetexture/1': {
       need(320, 240);
       if (!G.on) break;
@@ -1355,6 +1368,16 @@ function gfxArr(name, args, blk) {
     for (let i = 0; i < got; i++) blk[i] = ab[i];
     return got;
   }
+  /* **KV6 那一族的第二句**（`kv6read`）：把缓存那份模型抄进来 —— 一格体素四个数
+     `[x, y, z, 0xRRGGBB]`，坐标已经减掉支点（见 `host/kv6.js` 的头注）。
+     回抄了多少**格体素**（不是多少个 double）。 */
+  if (nm === 'kv6read') {
+    const m = KV6.cur;
+    if (m === null || n === 0) return 0;
+    const cnt = Math.min(m.n, Math.trunc(n / 4));
+    for (let i = 0; i < cnt * 4; i++) blk[i] = m.vox[i];
+    return cnt;
+  }
   /* **一整张矩阵一句**（`batchmvp16` / `batchmv16`，列主序 16 个数）：与四句
      `batchmvp`/`batchmv` **逐字等价**，只是少 7 句宿主调用（见 `ext/polydraw/gl-rt.js`
      里那段话）。数组短于 16 格就当没发（不该发生，这一层不猜）。 */
@@ -1413,6 +1436,48 @@ function gfxDef(kind, name, text) {
  * 判据从仓库根跑，所以这儿按 `OMNI_GFX_DIR`（cli 在 `--gfx` 那一摊里摆上的脚本目录）拼。
  * 绝对路径原样用；反斜杠（语料里有 `..\hei\brick_green.png` 这种）换成正斜杠。
  */
+/* ── KV6 那一族的缓存（一份，按路径）───────────────────────────────────────────
+ *
+ * 语言那一侧每帧都会问一句 `kv6siz`（它拿名字下标当缓存键，见 `gfx3-rt.js` 的
+ * `g3_kv6need`）—— 所以这一层按**路径**记住上一份解开的模型，重复问不再读盘。
+ * 读不到/解不开也记住（记成 `null`），不然每帧都去敲一次不存在的文件。
+ */
+const KV6 = { path: '', cur: null, seen: new Map() };
+
+function kv6Need(p) {
+  if (p === null) return -1;
+  if (KV6.path === p) return KV6.cur === null ? -1 : KV6.cur.n;
+  KV6.path = p;
+  if (KV6.seen.has(p)) {
+    KV6.cur = KV6.seen.get(p);
+    return KV6.cur === null ? -1 : KV6.cur.n;
+  }
+  /* **落点试两处**：脚本旁边，再 `<脚本目录>/../data/`。为什么有第二处：EvalDraw 自己
+     把模型放在跟着程序走的 `data/` 里（`demos/beer.kc` 写的是 `drawkv6("rpg.kv6",…)`
+     而文件在 `evaldraw/data/rpg.kv6`）—— 脚本里那个名字是"模型名"，不是相对路径。 */
+  const cut = p.lastIndexOf('/');
+  const dir = cut < 0 ? '' : p.slice(0, cut);
+  const base = cut < 0 ? p : p.slice(cut + 1);
+  const cands = [p];
+  if (dir !== '') cands.push(`${dir}/../data/${base}`, `${dir}/data/${base}`);
+  let m = null;
+  for (const c of cands) {
+    try {
+      /* `readBinary` 回的是**一个字符一个字节的 latin1 串**（`host/native.js` 的注：
+         C 那条腿的 `FILE` 是字节流）—— 所以这儿按字符码摊成字节，不能直接
+         `new Uint8Array(串)`（那样得到的是空数组，解码器看见的就是"长度不够"）。 */
+      const s = readBinary(c);
+      m = typeof s !== 'string' ? null
+        : decodeKv6(Uint8Array.from(s, (ch) => ch.charCodeAt(0) & 255));
+    } catch { m = null; }
+    if (m !== null) break;
+  }
+  KV6.seen.set(p, m);
+  KV6.cur = m;
+  if (m === null) stderr(`#gfx KV6 读不开：${p}（也试过 ../data/ 与 data/）\n`);
+  return m === null ? -1 : m.n;
+}
+
 function texPath(idx) {
   const nm = G.names[idx];
   if (nm === undefined || nm === null) return null;

@@ -1037,6 +1037,69 @@ function getPix(x, y) {
   return (RP.px[o] << 16) | (RP.px[o + 1] << 8) | RP.px[o + 2];
 }
 
+/* ---------------------------------------------------------------- KV6 体素模型
+ *
+ * `drawkv6("cow.kv6",…)`（`evaldraw.txt:921`）：与 `pic` 那一族同一个分工 ——
+ * 设备把模型解开、语言那一侧一次抄过来自己画（见 `ext/polydraw/gfx3-rt.js`
+ * 的 `g3_kv67`）。两句话：`kv6siz(名字下标)` 问几格体素（还没到手回 -1），
+ * `(gfxarr "kv6read" …)` 把那张表抄走。
+ *
+ * **解码不在这一层**：`/api/asset?path=…` 认 `.kv6`，服务端用那份唯一的解码器
+ * （`src/core/host/kv6.js`）解开，发过来的已经是**一格体素四个 float64**
+ * （x,y,z 减过支点 + 0xRRGGBB）。于是浏览器这侧一个字节都不用解析，
+ * 也不必把那份解码器搬进页面（单体那一档的打包不受影响）。
+ *
+ * 取文件是异步的，所以与 `PIC` 一样：第一趟开始取并回 -1，到手之后再回个数。
+ * **落点试两处**（脚本旁边、再 `<语料树根>/data/`）：EvalDraw 自己把模型放在跟着
+ * 程序走的 `data/` 里，脚本里那个名字是"模型名"不是相对路径。
+ */
+const KV = { m: new Map(), cur: null };
+
+function kv6Load(name) {
+  const e = { st: 'load', n: 0, vox: null };
+  KV.m.set(name, e);
+  const root = FT.base.split('/')[0] ?? '';
+  const urls = [assetUrl(assetPath(name))];
+  if (root !== '' && root !== FT.base) urls.push(assetUrl(assetPath(`data/${name}`, root)));
+  let i = 0;
+  const step = () => {
+    if (i >= urls.length) {
+      e.st = 'err';
+      // eslint-disable-next-line no-console
+      console.warn(`#gfx KV6 没上来：'${name}'（脚本旁边与 '${root}/data/' 两处都取不到）`);
+      return;
+    }
+    const u = urls[i];
+    i += 1;
+    fetch(u).then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error('404'))))
+      .then((ab) => {
+        e.vox = new Float64Array(ab);
+        e.n = Math.trunc(e.vox.length / 4);
+        e.st = e.n > 0 ? 'ok' : 'err';
+      })
+      .catch(step);
+  };
+  step();
+  return e;
+}
+
+function kv6Siz(nameIdx) {
+  const name = SH.names.get(String(Math.trunc(nameIdx)));
+  if (typeof name !== 'string' || name === '') return -1;
+  let e = KV.m.get(name);
+  if (e === undefined) e = kv6Load(name);
+  KV.cur = e.st === 'ok' ? e : null;
+  return e.st === 'ok' ? e.n : -1;
+}
+
+function kv6Read(out) {
+  const e = KV.cur;
+  if (e === null || e.vox === null) return 0;
+  const cnt = Math.min(e.n, Math.trunc(out.length / 4));
+  for (let i = 0; i < cnt * 4; i++) out[i] = e.vox[i];
+  return cnt;
+}
+
 /* ---------------------------------------------------------------- 那张名字表 */
 
 /**
@@ -1222,6 +1285,8 @@ function call(name, args) {
       return texFile(Math.trunc(a(0)), SH.names.get(String(Math.trunc(a(1)))), Math.trunc(a(2)));
     /* **`pic` 那一族的头一句**（见 `PIC` 的头注）：宽高，还没取到回 -1。 */
     case 'picsiz/1': return picSiz(a(0));
+    /* **KV6 那一族的头一句**（见 `KV` 的头注）：几格体素，还没取到回 -1。 */
+    case 'kv6siz/1': return kv6Siz(a(0));
     /* **抓屏那一族**（见 `CAP` 的头注）。 */
     case 'glcapture/1': return capBegin();
     case 'glcaptureend/1': return capEnd(Math.trunc(a(0)));
@@ -1444,6 +1509,9 @@ function reset() {
   CAP.h = 0;
   /* 读回那一份缓存跟着作废（下一份脚本的第一笔 `getpix` 要真读一趟）。 */
   RP.seq = -1;
+  /* KV6 那几份模型也清（换脚本就重取一趟 —— 与文件纹理同一条）。 */
+  KV.m.clear();
+  KV.cur = null;
   /* **没接住的那本账也清**：它是"这一趟这份脚本缺哪几格"的账 —— 不清的话下一份脚本
      背着上一份的债（踩过一次：`drawsph.pss` 的账里挂着上一份的 `drawspr/4`，
      而它压根没调过 `drawspr`）。 */
@@ -1727,6 +1795,8 @@ function arrIn(name, args, blk) {
   }
   /* **`pic` 那一族的第二句**（见 `PIC` 的头注）：把整张图抄给脚本。 */
   if (nm === 'picread') return picRead(blk);
+  /* **KV6 那一族的第二句**（见 `KV` 的头注）：把那张体素表抄给脚本。 */
+  if (nm === 'kv6read') return kv6Read(blk);
   /* **把纹理读回来**（`glgettex(槽,&数组,宽,高,格)`，见 `texGet` 的头注）。 */
   if (nm === 'glgettex') {
     return texGet(Math.trunc(Number(args[0])), Math.trunc(Number(args[1])),

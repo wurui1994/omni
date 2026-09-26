@@ -183,6 +183,10 @@ const SHADER_FNS = new Map([
      带 `&r,&g,&b` 那一档（`pic/6`）还没接：那要"串 + 三格块"同时配对。 */
   ['pic/3', [0]],
   ['pic/4', [0]],
+  /* **KV6 体素模型**（`drawkv6("cow.kv6",scale,x,y,z,hang,vang)`，`evaldraw.txt:921`）：
+     第 0 格是串。`drawspr` 七参那一档是它的别名（说明书原话 "same as drawkv6()"）。 */
+  ['drawkv6/7', [0]],
+  ['drawspr/7', [0]],
   ['glgetattribloc/1', [0]],
   ['glvertexattrib1f/2', []],
   ['glvertexattrib2f/3', []],
