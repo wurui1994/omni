@@ -207,5 +207,31 @@ def main():
             again[w] = 1
     print(again)
 
+    # 两层配置（字典的值也是一张字典）——`cfg[sec][key] = v`。方言那一侧与"值是一张表"
+    # 同一档：格子里躺一个句柄。**一个标注都不写也认得出来**：`cfg = {}` 与
+    # `cfg["db"] = {}` 两句自己都答不出，答案在**再下一句** `cfg["db"]["port"] = 5432`
+    # 里 —— 绑那一趟把"值是 (dict str int)"往外推一层再问一遍。
+    cfg = {}
+    cfg["db"] = {}
+    cfg["db"]["port"] = 5432
+    cfg["db"]["pool"] = 8
+    cfg["web"] = {}
+    cfg["web"]["port"] = 80
+    print(len(cfg), sorted(cfg), cfg)
+    print(cfg["db"]["port"], len(cfg["db"]), sorted(cfg["db"]))
+    for sec in sorted(cfg):
+        for ck in sorted(cfg[sec]):
+            print(sec, ck, cfg[sec][ck])
+    ctot = 0
+    for sec in cfg:
+        for ck in cfg[sec]:
+            ctot += cfg[sec][ck]
+    print(ctot, "db" in cfg, "nope" in cfg, "port" in cfg["db"])
+    # 带标注的那一档（写清楚也一样走）
+    cfg2: dict[str, dict[str, str]] = {}
+    cfg2["a"] = {}
+    cfg2["a"]["k"] = "v"
+    print(cfg2, len(cfg2["a"]))
+
 
 main()

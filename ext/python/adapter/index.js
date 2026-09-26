@@ -1144,15 +1144,23 @@ function looseTy(v, C) {
 
 function bindEmptyDict(target, vt, C) {
   if (vt === null || vt === undefined) return;
-  const base = kids(target)[0];
-  if (tag(base) !== 'n') return;
-  const n = String(nameOf(base));
-  const local = C.inScope() && !C.isDeclGlobal(n);
-  if ((local ? C.lookupHere(n) : C.lookup(n)) !== null) return;
   const subs = kids(part(target, 'subs') ?? { kind: 'list', items: [] });
   if (subs.length !== 1) return;
   const kt = tyOfCst(subs[0], C);
   if (kt === null || !['int', 'string'].includes(kt.kind)) return;
+  const base = kids(target)[0];
+  /* **两层**：`cfg[sec][key] = v` —— 外层那一格装的是"里层那张字典"，所以把
+     "值是 `(dict kt vt)`"往外推一层再问一遍。`cfg = {}` 之后 `cfg["db"] = {}`、
+     再 `cfg["db"]["port"] = 5432` 那种**一个标注都不写**的两层配置就是这个形状：
+     中间那一句自己答不出（右边是空字典），答案在**再下一句**里。 */
+  if (tag(base) === 'index') {
+    bindEmptyDict(base, dictOf(vt, kt), C);
+    return;
+  }
+  if (tag(base) !== 'n') return;
+  const n = String(nameOf(base));
+  const local = C.inScope() && !C.isDeclGlobal(n);
+  if ((local ? C.lookupHere(n) : C.lookup(n)) !== null) return;
   C.bind(C.ref(n), dictOf(vt, kt));
 }
 

@@ -168,6 +168,11 @@ const CANT = {
       + '这一格是"表的元素是一张字典"，还叠上 50-arrstruct 那一条'
       + '（聚合元素走按字节的 blob 路，它没接）',
   },
+  '64-dict-dict': {
+    legs: ['run-llvm'],
+    why: '同 44-dicts：LLVM 后端不支持聚合容器（dict / list / set），主语言也一样 —— '
+      + '这一格是"字典的值也是一张字典"，挡住它的还是那一条既有缺口',
+  },
   'dyn-asfn-wrong-tag': {
     legs: ['run-llvm'],
     why: '同 48-dyn：LLVM 后端连一格 dyn 的槽位都落不下去，报的不是这份用例要钉的那句',

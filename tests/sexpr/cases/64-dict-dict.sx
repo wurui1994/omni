@@ -1,0 +1,50 @@
+;; 字典的值也是一张字典。这一份的存在理由是 python 里**两层配置**那种写法：
+;; `cfg[sec][key] = v`（从 JSON / ini 读出来的东西几乎都是这个形状）。
+;;
+;; 与"值是一张表"（60-dict-arr）**同一档**：格子里躺一个句柄（字典是引用语义），
+;; 运行时那份表的步长不用动，OIR 一个新节点都不加。零值也是同一条：**空句柄**
+;; （谁要哪一格谁先造），所以这一份一律先 `dnew` 一张再 `dset` 进去，不读没写过的键。
+;;
+;; 判据的要点还是**引用语义**：装进去之后改源头那张里层字典，外层那一格要跟着变；
+;; 反过来直接往外层那一格上写，源头也看得见。
+(module
+  (main
+    (let outer (dict string (dict string int)) (dnew (dict string (dict string int))))
+    (let inner (dict string int) (dnew (dict string int)))
+    (dset (var inner) (str "x") (int 1))
+    (dset (var outer) (str "a") (var inner))
+    (print (dlen (var outer)))
+    (print (dlen (dget (var outer) (str "a"))))
+    (print (dget (dget (var outer) (str "a")) (str "x")))
+
+    ;; 引用语义：改源头那张里层字典，外层那一格跟着变
+    (dset (var inner) (str "y") (int 2))
+    (print (dlen (dget (var outer) (str "a"))))
+
+    ;; 反过来：直接往外层那一格上写，源头也看得见
+    (dset (dget (var outer) (str "a")) (str "z") (int 3))
+    (print (dlen (var inner)))
+    (print (dget (var inner) (str "z")))
+
+    ;; 再摆一格：两格各是各的
+    (let two (dict string int) (dnew (dict string int)))
+    (dset (var two) (str "p") (int 9))
+    (dset (var outer) (str "b") (var two))
+    (print (dlen (var outer)))
+    (print (dlen (dget (var outer) (str "b"))))
+    (print (dhas (var outer) (str "c")))
+
+    ;; 另一种键（int 外、string 内）—— C 那条腿要为它另生成两份容器
+    (let t (dict int (dict string real)) (dnew (dict int (dict string real))))
+    (let u (dict string real) (dnew (dict string real)))
+    (dset (var u) (str "pi") (real 1.5))
+    (dset (var t) (int 7) (var u))
+    (print (dget (dget (var t) (int 7)) (str "pi")))
+    (print (dlen (var t)))
+
+    ;; 三层也走得通（值是"值是字典的字典"）
+    (let deep (dict string (dict string (dict string int)))
+      (dnew (dict string (dict string (dict string int)))))
+    (dset (var deep) (str "a") (var outer))
+    (print (dlen (dget (var deep) (str "a"))))
+    (print (dget (dget (dget (var deep) (str "a")) (str "a")) (str "x")))))

@@ -317,8 +317,11 @@ class CoreLowerer {
          一个句柄（`(arr …)` 是引用语义），所以运行时那份表的步长不用动。
          python 的"字典装一串表"那种分组写法（`d[k] = []` 之后 `d[k].append(v)`）卡的就是
          这一格。注意值那一格从前是**按原子读的** —— 嵌套的类型形根本写不出来。
-         `(dict K (dict …))` 还不收：那一档的零值要新造一张空字典，不只是个空句柄。 */
-      if (v === undefined && isList(vNode) && head(vNode) === 'arr') {
+         **值是一张字典**（`(dict string (dict string int))`）走同一条：python 的
+         "配置分两层"那种写法（`cfg[sec][key] = v`）落在这一格。零值与 `(arr …)` 那一档
+         一样是**空句柄**（谁要哪一格谁先造）—— 读一格没写过的键会当场报 null reference，
+         与 `(arr …)` 值那一档一个规矩，不另编。 */
+      if (v === undefined && isList(vNode) && ['arr', 'dict'].includes(head(vNode))) {
         const inner = this.ty(vNode, what);
         if (inner === null) return null;
         v = inner;
@@ -327,7 +330,7 @@ class CoreLowerer {
         return this.err(node, `${what}：(dict K V) 的键只能是 int 或 string`);
       }
       if (v === undefined || v === VOID) {
-        return this.err(node, `${what}：(dict K V) 的值只能是 int / real / bool / string / 类名 / (arr …)`);
+        return this.err(node, `${what}：(dict K V) 的值只能是 int / real / bool / string / 类名 / (arr …) / (dict …)`);
       }
       const t = dictType(k, v);
       this.useContainer(t);
