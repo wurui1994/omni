@@ -31,7 +31,7 @@ import {
   containsList, indexOfList, countList, valuesList, dictPopOf, dictSetDefaultOf,
   concatList, repeatList, reversedList, stepSlice, bankRound,
   caseMapOf, charClassOf, rfindOf, copyList, copyDict, charsOf, dictOfPairs,
-  sortByKeyStmts,
+  sortByKeyStmts, pickByKeyOf,
   listEqOf, listCmpOf, dictEqOf, intOfStr, ordOf, expandTabsOf, splitLinesOf,
 } from './builtins.js';
 
@@ -610,7 +610,9 @@ function tyOfCall(x, C) {
     if (t === null || t === undefined) return null;
     /* 一格实参那是一格表（`min(xs)` 交元素）；串也算（`min("abc")` 交一格串）。
        两格以上逐个挑（交的还是同一档）。 */
-    if (args.length !== 1) return t;
+    /* **`key=` 不算一格实参** —— 它只管怎么比，交出来的还是元素（不看这一条会把
+       `min(xs, key=…)` 的类型答成那张表）。 */
+    if (args.filter((a) => tag(a) !== 'kw').length !== 1) return t;
     if (t.kind === 'arr') return t.elem;
     return t.kind === 'string' ? STR : null;
   }
@@ -2747,6 +2749,32 @@ export function callOf(x, C) {
   if (tag(fn) === 'n' && String(nameOf(fn)) === 'isinstance') {
     if (argToks.length !== 2) throw new Error('python->IR: `isinstance(x, T)` 收两格实参');
     return isinstanceOf(argToks[0], argToks[1], C);
+  }
+  /* `min(xs, key=…)` / `max(xs, key=…)` —— 与 `sorted(key=…)` 同一条：键表算一遍，
+     挑键最小/最大的那一格，**交回去的是元素**。也要在算实参之前拦。 */
+  if (tag(fn) === 'n' && ['min', 'max'].includes(String(nameOf(fn)))
+    && argToks.some((a) => tag(a) === 'kw')) {
+    const nm0 = String(nameOf(fn));
+    const pos = argToks.filter((a) => tag(a) !== 'kw');
+    if (pos.length !== 1) throw new Error(`python->IR: \`${nm0}(xs, key=…)\` 的 xs 收一格表`);
+    let keyTok = null;
+    for (const a of argToks.filter((y) => tag(y) === 'kw')) {
+      const k = String(leaf(kids(a)[0]));
+      if (k !== 'key') throw new Error(`python->IR: \`${nm0}(${k}=…)\` 还没接（接了的是 key=）`);
+      keyTok = kids(a)[1];
+    }
+    const xs0 = exprOf(pos[0], C);
+    const pre = [];
+    const bn = C.fresh('pk_xs');
+    const bt0 = ty(xs0, C);
+    C.bind(bn, bt0);
+    pre.push({ kind: 'let', name: bn, type: bt0, init: xs0 });
+    const box0 = { kind: 'name', name: bn };
+    const got = keyListOf(box0, keyTok, C);
+    pre.push(...got.pre);
+    needOrd(ty(got.keys, C).elem, C, `${nm0}(key=…)`);
+    const picked = pickByKeyOf(box0, got.keys, nm0 === 'min' ? '<' : '>', nm0, C);
+    return { kind: 'block-expr', stmts: pre, value: picked };
   }
   /* `sorted(xs, reverse=True)` / `sorted(xs, key=lambda v: …)` —— 要在**算实参之前**拦
      （下面那一圈见了 `kw` 就报）。`reverse` 只收布尔字面量：两种比法是两条循环，得在

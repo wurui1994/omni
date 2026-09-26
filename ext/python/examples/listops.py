@@ -98,5 +98,11 @@ def main():
     zs.sort(key=lambda v: v)
     print(zs, v)
 
+    # min / max 的 key= 同一条：挑键最小/最大的那一格，**交回去的是元素**
+    print(min(ws, key=lambda w: len(w)), max(ws, key=lambda w: len(w)))
+    print(min(xs, key=lambda n: -n), max(xs, key=lambda n: -n))
+    best = max(ws, key=lambda w: len(w))
+    print(best.upper(), len(best))
+
 
 main()

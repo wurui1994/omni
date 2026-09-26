@@ -1536,6 +1536,36 @@ export function sortByKeyStmts(xs, keys, C, desc = false) {
   return h.pre;
 }
 
+/**
+ * `min(xs, key=…)` / `max(xs, key=…)` —— 键表算一遍，挑**键**最小/最大的那一格的下标，
+ * 交回去的是**元素**（不是键）。并列时留靠前那格（严格比较），与 python 一条。
+ */
+export function pickByKeyOf(xs, keys, op, name, C) {
+  const h = holder(C);
+  h.pre.push({
+    kind: 'if',
+    cond: bin('==', call1('alen', [xs]), int(0)),
+    then: [{ kind: 'builtin-stmt', name: 'fail', args: [str(`${name}() arg is an empty sequence`)] }],
+    else_: null,
+  });
+  const at = h.decl('pk_at', INT, int(0));
+  const i = h.decl('pk_ki', INT, int(1));
+  h.pre.push({
+    kind: 'while',
+    cond: bin('<', i, call1('alen', [keys])),
+    body: [
+      {
+        kind: 'if',
+        cond: bin(op, { kind: 'index', obj: keys, index: i }, { kind: 'index', obj: keys, index: at }),
+        then: [{ kind: 'assign', target: at, value: i }],
+        else_: null,
+      },
+      inc(i),
+    ],
+  });
+  return h.wrap({ kind: 'index', obj: xs, index: at });
+}
+
 /** `s.startswith(p)` / `s.endswith(p)` —— 比一段（方言里没有这一格算子）。 */
 export function startsEndsOf(s0, p0, atStart, C) {
   const h = holder(C);
