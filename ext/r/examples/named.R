@@ -244,3 +244,30 @@ bump <- function(x) {
 }
 bump(fv)
 print(fv)
+
+# `table(…)` 的**表头那一行**（2026-09-26 接了）：R 的 `deparse.level = 1` ——
+# 实参是一个**裸符号**时印那个符号的名字、别的（`c(1,1,2)` / `v == 1` / `sort(v)`）印空行。
+# 那一行跟着**值**走（`tb <- table(nums); print(tb)` 印的还是 `nums`），所以与名字那一条
+# 同一个办法：一格影子变量 `tb__hd`。从前一律印空行 —— 静默差一行。
+nums <- c(1, 1, 2)
+print(table(nums))
+print(table(c(1, 1, 2)))
+tlg <- c(TRUE, FALSE, TRUE)
+print(table(tlg))
+print(table(nums == 1))
+print(table(sort(nums)))
+htb <- table(nums)
+print(htb)
+print(names(htb))
+cat(sum(htb), length(htb), "\n")
+print(htb[1])
+
+# `as.vector(x)`（缺省 `mode = "any"`）在一条原子向量上就是**把属性全扒掉** ——
+# 名字也是属性，所以它与 `unname` 同解（量出来 `as.vector(c(a=1,b=2))` 是 `[1] 1 2`）。
+avn <- c(a = 1, bb = 2, ccc = 3)
+print(as.vector(avn))
+print(as.vector(c(1, 2)))
+print(as.vector(table(nums)))
+print(as.vector(c("a", "b")))
+print(sum(as.vector(avn)))
+print(as.vector(avn) * 2)

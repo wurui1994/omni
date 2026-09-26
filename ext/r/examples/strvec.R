@@ -214,3 +214,26 @@ print(sort(c("ab", "a"), method = "radix"))
 print(sort(c("b", "a", "b"), method = "radix"))
 print(sort(c("b", "a"), decreasing = TRUE, method = "radix"))
 print(order(c("b", "a", "b"), method = "radix"))
+
+# **字符向量上的 `==` / `!=`**（2026-09-26 接了）：逐元素比，出一条逻辑向量。
+# 这一格不碰 locale —— `==` 比的是串本身，而 `<` / `>` 才要那套排序规则（所以还没接）。
+# 长度不一样时短的那条从头再来（R 的回收规矩），有一条零长时结果零长。
+# 从前这儿一格都不认：`v == "a"` 落成一格裸的 `(bin "==" (arr string) (str "a"))`，
+# 发到公共层才报"两边要同型" —— 那时已经过了换档那道门。
+eqw <- c("a", "b", "a", "c")
+print(eqw == "a")
+print(eqw != "a")
+print("a" == eqw)
+print(sum(eqw == "a"))
+print(which(eqw == "b"))
+print(eqw[eqw == "a"])
+print(c("a", "b") == c("a", "c"))
+print(c("a", "b", "c", "d") == c("a", "b"))
+print(character(0) == "a")
+print(c("x") == character(0))
+print(any(eqw == "z"))
+print(all(eqw == "a"))
+print(!(eqw == "a"))
+print(ifelse(eqw == "a", "yes", "no"))
+print(eqw == "")
+print(c("", "a") == "")

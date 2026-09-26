@@ -255,3 +255,30 @@ ez <- c(1, 2)
 print(min(ez[ez > 5]))
 print(max(ez[ez > 5]))
 cat(min(numeric(0)), max(numeric(0)), "\n")
+
+# `sort(x, na.last = TRUE / FALSE)`（2026-09-26 接了）：缺失的那几格不丢了，**接在两头**、
+# **原样原序**（`NA` 与 `NaN` 分得开，所以不能"数几个补几个 NA"）。`decreasing = TRUE`
+# 也只倒排好的那一半 —— 缺失那几格照旧跟在同一头。缺省是 `na.last = NA`，也就是丢掉。
+snx <- c(3, NA, 1, NaN, 2)
+print(sort(snx))
+print(sort(snx, na.last = TRUE))
+print(sort(snx, na.last = FALSE))
+print(sort(snx, decreasing = TRUE, na.last = TRUE))
+print(sort(snx, decreasing = TRUE, na.last = FALSE))
+print(sort(c(NA, NA), na.last = TRUE))
+print(sort(numeric(0), na.last = TRUE))
+print(length(sort(snx, na.last = TRUE)))
+print(sort(c(2, 1), na.last = TRUE))
+
+# `rep(TRUE, n)` 出的是一条**逻辑**向量（R 也是），那个记号要留住 —— 丢了它
+# `which(rep(TRUE, n))` 会当场报"实参要是逻辑向量"，而那正是素数筛最常见的头一句。
+ok <- rep(TRUE, 5)
+print(ok)
+print(which(ok))
+ok[2] <- FALSE
+print(ok)
+print(which(ok))
+print(!ok)
+print(sum(ok))
+print(rep(FALSE, 2))
+print(rep(c(TRUE, FALSE), 2))

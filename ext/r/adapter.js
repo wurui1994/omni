@@ -274,6 +274,8 @@ const FN_DEPS = new Map([
   ['r_at_keys', ['r_na']],
   ['r_mask_str', ['r_is_na']],
   ['r_drop_na', ['r_is_na']],
+  /* `sort(x, na.last =)` 要"缺失的那几格，原样原序"（`NA` 与 `NaN` 分得开）。 */
+  ['r_na_pick', ['r_is_na']],
   /* 集合与位置那一族（`match` / `%in%` / `unique` / `order`…）。"两格值算不算同一格"
      单独一个函数（`r_same`）—— R 里 `NA` 与 `NA` 算同一格、`NaN` 与 `NaN` 算同一格，
      而按 `==` 比这两对都是假（浮点的规矩），所以那一问不能摊在调用点上写。 */
@@ -319,6 +321,11 @@ const FN_DEPS = new Map([
   ['r_lgl_s', ['r_na']],
   ['r_as_lgl_v', ['r_lgl']],
   ['r_as_lgl_sv', ['r_lgl_s']],
+  /* `字符向量 == 串` / `== 字符向量`（逐元素，出逻辑向量）—— `==` 与 locale 无关。 */
+  ['r_eq_sv', []],
+  ['r_ne_sv', []],
+  ['r_eq_svv', []],
+  ['r_ne_svv', []],
   ['r_and', ['r_is_na', 'r_na']],
   ['r_or', ['r_is_na', 'r_na']],
   ['r_xor', ['r_is_na', 'r_na']],
@@ -622,6 +629,17 @@ const isNamedTy = (t) => t !== undefined && t !== null && t.kind === 'ptr' && t.
 /** 那个影子变量的名字（`v` 的名字在 `v__nm` 里）。 */
 const nmVar = (v) => `${v}__nm`;
 /**
+ * `table(…)` 那一格**表头**的影子变量（`tb` 的表头在 `tb__hd` 里）。
+ *
+ * R 的 `table` 把 `deparse.level = 1` 那一条烤进了 dimnames 的**名字**上：实参是一个
+ * **裸符号**时用那个符号的名字、别的（`c(1,1,2)` / `v == 1` / `sort(v)`）是空串。
+ * `print.table` 把它印在第一行 —— 于是 `print(table(nums))` 头一行是 `nums`，而
+ * `print(table(c(1,1,2)))` 头一行是空的（量出来的，2026-09-26）。
+ * 那一行跟着**值**走（`tb <- table(nums); print(tb)` 印的还是 `nums`），所以与名字
+ * 那一条同一个办法：一格影子变量。
+ */
+const hdVar = (v) => `${v}__hd`;
+/**
  * **名字丢得掉的那几格** —— R 自己也丢，所以这一档丢了不差字节。量出来的（`Rscript`，
  * 2026-09-25）：`range` / `unique` / `seq_along` / `as.character` / `paste` 都回没名字的，
  * 而 `sort` / `rev` / `head` / `cumsum` / `abs` / `sqrt` / `round` / `is.na` / `c(v, 4)`
@@ -629,7 +647,7 @@ const nmVar = (v) => `${v}__nm`;
  * `print` 少印一行（两行版式变成 `[1] …`），而那是最难查的一种错。
  */
 const NAME_DROP_OK = new Set([
-  'names', 'setNames', 'unname', 'print', 'invisible', 'cat',
+  'names', 'setNames', 'unname', 'as.vector', 'print', 'invisible', 'cat',
   'paste', 'paste0', 'sprintf', 'length', 'sum', 'mean', 'max', 'min', 'prod',
   'var', 'sd', 'range', 'any', 'all', 'unique', 'seq_along', 'seq_len',
   /* `duplicated` 量出来 R 自己也丢名字（2026-09-26）—— 从前这张表外，于是带名字的向量上报。 */
@@ -936,7 +954,7 @@ const NAMED_OK = new Map([
   ['head', new Set(['n'])], ['tail', new Set(['n'])],
   ['rep', new Set(['times', 'each'])],
   ['seq', new Set(['by', 'length.out'])],
-  ['sort', new Set(['decreasing', 'method'])],
+  ['sort', new Set(['decreasing', 'method', 'na.last'])],
   ['order', new Set(['method'])],
   ['strsplit', new Set(['fixed'])],
   ['grepl', new Set(['fixed'])], ['sub', new Set(['fixed'])], ['gsub', new Set(['fixed'])],
@@ -1003,8 +1021,9 @@ const BUILTINS = new Set([
   'switch',
   /* 造一条"空的/零的"向量：`numeric(n)` 那一族与不带实参的 `c()`。`character(n)` 是字符向量。 */
   'numeric', 'double', 'integer', 'logical', 'character',
-  /* 名字那一族（见 `RNVEC`）：`names(v)` 读、`names(v) <- ns` 写、`setNames` / `unname`。 */
-  'names', 'setNames', 'unname',
+  /* 名字那一族（见 `RNVEC`）：`names(v)` 读、`names(v) <- ns` 写、`setNames` / `unname`。
+     `as.vector(x)` 在一条原子向量上与 `unname` 同解（属性全扒掉，名字也是属性）。 */
+  'names', 'setNames', 'unname', 'as.vector',
   /* 随机数那一族（发生器是 R 自己那一条，见 `RRAND`）。 */
   'set.seed', 'sample', ...RRAND.keys(),
   /* libm 那一族：R 自己这几个也是直接调 libm（不在 nmath 里），所以落方言的 `rmath`。
@@ -1060,6 +1079,27 @@ const isListCall = (node) => isList(node) && tag(node) === 'call'
  *   `(…)`                  往里看
  *   `v * 2` 那种逐元素      名字跟着带名字的那一边走（R 也是这么传的）
  */
+/**
+ * `table(…)` 那一格的**表头**表达式（`print.table` 的第一行）—— 见 `hdVar` 上那段账。
+ *
+ * 三档：`table(裸符号)` 是那个符号的**R 名字**（不是 mangle 之后的）、`table(别的)`
+ * 是空串、一格 `RTBL` 的变量读它的影子变量。剩下的（表达式里算出来的表）给空串。
+ */
+function hdrExprOf(x, types) {
+  const S = (value) => ({ kind: 'string', value });
+  if (tag(x) === 'paren') return hdrExprOf(kids(x)[0], types);
+  if (tag(x) === 'call' && tag(kids(x)[0]) === 'sym' && nameOf(kids(x)[0]) === 'table') {
+    const as = posArgs(x);
+    return as.length === 1 && tag(as[0]) === 'sym' ? S(nameOf(as[0])) : S('');
+  }
+  if (tag(x) === 'sym') {
+    const n = mangle(nameOf(x));
+    const t = types === undefined ? undefined : (types.get(n) ?? globalTys.get(n));
+    if (isTblTy(t)) return { kind: 'name', name: hdVar(n) };
+  }
+  return S('');
+}
+
 function namesExprOf(x, types) {
   if (!isList(x)) return null;
   if (tag(x) === 'paren') return namesExprOf(kids(x)[0], types);
@@ -1465,6 +1505,9 @@ function typeOfExpr(x, types) {
       if (CMP_FNS.has(op)) {
         const a = typeOfExpr(kids(x)[1], types);
         const c2 = typeOfExpr(kids(x)[2], types);
+        /* **字符向量上的 `==` / `!=` 出的是一条逻辑向量**（`c("a","b") == "a"` 是
+           `TRUE FALSE`）—— 这一问要摆在"有一边是串就回 bool"前头。 */
+        if ((isStrVec(a) || isStrVec(c2)) && (op === '==' || op === '!=')) return RLGL;
         if (a.kind === 'string' || c2.kind === 'string') return BOOL;
         return a.kind === 'real' || c2.kind === 'real' ? RLGL1 : BOOL;
       }
@@ -1674,6 +1717,10 @@ function applyTy(fn, x, types) {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
       /* `rep` 在串上也接了（`rep("ab", 3)` 出一条字符向量）。 */
       if (isStrVec(t) || (fn === 'rep' && t.kind === 'string')) return RSTRV;
+      /* `rep(TRUE, n)` 出的是一条**逻辑**向量（R 也是），所以那个记号要留住 ——
+         丢了它 `which(rep(TRUE, n))` 会当场报"实参要是逻辑向量"，而 `ok <- rep(TRUE, n)`
+         正是素数筛最常见的头一句（量出来的，2026-09-26）。 */
+      if (fn === 'rep' && (t.kind === 'bool' || isLgl1(t))) return RLGL;
       return isVecTy(t) ? t : RVEC;
     }
     case 'cumsum': case 'diff': case 'cumprod': case 'cummax': case 'cummin': {
@@ -1807,6 +1854,20 @@ function applyTy(fn, x, types) {
       const t0 = args.length === 0 ? RVEC : typeOfExpr(args[0], types);
       if (isStrVec(t0)) return t0;
       return isLglTy(t0) ? RLGL : RVEC;
+    }
+    /**
+     * `as.vector(x)`（缺省 `mode = "any"`）在一条原子向量上**就是把属性全扒掉**
+     * —— 名字也是属性，所以它与 `unname` 同解（R 的文档；量出来
+     * `as.vector(c(a=1,b=2))` 印的是 `[1] 1 2`）。`mode=` 那一格不在 `NAMED_OK` 里，
+     * 所以写了就当场报（`as.vector(x, "character")` 是另一件事）。
+     */
+    case 'as.vector': {
+      const t0 = args.length === 0 ? RVEC : typeOfExpr(args[0], types);
+      if (isStrVec(t0)) return t0;
+      if (t0.kind === 'map') return t0;
+      if (!isVecTy(t0)) return t0;
+      if (isLglTy(t0)) return RLGL;
+      return isIvecTy(t0) ? RIVEC : RVEC;
     }
     /* `list(a = 1, b = 2)` —— R 的 list 当**关联表**用那一档（文件头第 5 条）。
        值类型按那几格实参算（有一格是串就整张表装串）。 */
@@ -3523,6 +3584,31 @@ function vecBin(op, l, r, types) {
   if (!VEC_OPS.has(op)) return null;
   const lt = typeOfExpr(l, types);
   const rt = typeOfExpr(r, types);
+  /**
+   * **字符向量上的 `==` / `!=`** —— 逐元素比，出一条逻辑向量（`c("a","b") == "a"` 是
+   * `TRUE FALSE`）。这一格不碰 locale：`==` 比的是"是不是同一个串"，而 `<` / `>` 才要
+   * 那套排序规则（`Scollate`，见 `strvGap`）—— 所以只接这两个算符，别的当场报。
+   *
+   * 这一句是补的：从前字符向量在这儿一格都不认（`isVecTy` 对 `(arr string)` 是假），
+   * 于是 `words == "a"` 落成一格裸的 `(bin "==" (arr string) (str …))`，发到公共层才报
+   * `'==' 两边要同型` —— 那时**已经过了换档那道门**（量出来的，2026-09-26）。
+   */
+  if (isStrVec(lt) || isStrVec(rt)) {
+    if (op !== '==' && op !== '!=') {
+      throw new Error(`r->IR: \`${op}\` 在字符向量上还没接 —— 它要 R 那套按 locale 的`
+        + '排序规则（`Scollate`），这一层没有；`==` / `!=` 那两格接了（按串本身比，与 locale 无关）');
+    }
+    const eq = op === '==';
+    if (isStrVec(lt) && isStrVec(rt)) {
+      return lglCall(eq ? 'r_eq_svv' : 'r_ne_svv', exprOf(l, types), exprOf(r, types));
+    }
+    /* 一边是一格串：摆成"向量 + 标量"那一档（哪边是向量都行，`==` 是对称的）。 */
+    const [vec, sc, st] = isStrVec(lt) ? [l, r, rt] : [r, l, lt];
+    if (st.kind !== 'string') {
+      throw new Error(`r->IR: \`${op}\` 的一边是字符向量、另一边是 ${st.kind} —— 这一格还没接`);
+    }
+    return lglCall(eq ? 'r_eq_sv' : 'r_ne_sv', exprOf(vec, types), exprOf(sc, types));
+  }
   if (!isVecTy(lt) && !isVecTy(rt)) return null;
   if (lt.kind === 'string' || rt.kind === 'string') {
     throw new Error(`r->IR: \`${op}\` 的一边是向量、另一边是串 —— 这一格还没接`);
@@ -3793,6 +3879,16 @@ function callOf(x, types, extra, want, stmtPos) {
       }
       case 'unname': {
         if (n !== 1 || all[0] === null) throw new Error('r->IR: unname() 要一格实参（管道位上还没接）');
+        return ev(0);
+      }
+      case 'as.vector': {
+        /* 与 `unname` 同一格落法：值那一条原样，名字那一条这一层本来就跟着变量走。 */
+        if (n !== 1 || all[0] === null) throw new Error('r->IR: as.vector() 要一格实参（管道位上还没接）');
+        const t0 = typeOfExpr(all[0], types);
+        if (t0.kind === 'map') {
+          throw new Error('r->IR: as.vector() 在一张 list 上还没接 —— R 那儿它出的还是一张'
+            + ' list（`mode = "any"`），而这一层的表没有"摘掉属性"这一步');
+        }
         return ev(0);
       }
       case 'setNames': {
@@ -4161,6 +4257,39 @@ function callOf(x, types, extra, want, stmtPos) {
           src = numCatOf(pre, parts);
         }
         const got = lglCall(`r_${fn}`, dropNa(src));
+        /**
+         * `sort(x, na.last = TRUE / FALSE)` —— 缺失的那几格不丢了，**接在两头**。
+         *
+         * R 的口径量出来（2026-09-26）：`sort(c(3,NA,1,NaN,2), na.last = TRUE)` 是
+         * `1 2 3 NA NaN` —— 缺失那几格**原样原序**跟在后头，`decreasing = TRUE` 也不跟着
+         * 倒（`3 2 1 NA NaN`）。所以只倒"排好的那一半"，再拿 `r_na_pick` 把缺失那几格
+         * 原序接上（补 NA 会把 `NaN` 印成 `NA`，那是静默差一格）。
+         *
+         * 只认字面量 `TRUE` / `FALSE`（与 `na.rm` 同一条口径）；缺省是 `NA`，也就是
+         * 现在这一档"丢掉"。那格数据摆进临时量，**不求值两遍**。
+         */
+        if (fn === 'sort') {
+          const nl = namedArg(x, 'na.last');
+          if (nl !== undefined) {
+            const lit = tag(nl) === 'num' ? String(leaf(kids(nl)[0])) : null;
+            if (lit !== 'TRUE' && lit !== 'FALSE') {
+              throw new Error('r->IR: sort() 的 `na.last=` 只认字面量 `TRUE` / `FALSE`'
+                + '（运行期的旗子要两条路都发，那是另一件事）');
+            }
+            const tmp = fresh('sn');
+            const tv = { kind: 'name', name: tmp };
+            let half = lglCall('r_sort', dropNa(tv));
+            if (trueFlag(x, 'decreasing')) half = lglCall('r_rev', half);
+            const nas = lglCall('r_na_pick', tv);
+            return {
+              kind: 'block-expr',
+              stmts: [{ kind: 'let', name: tmp, type: RVEC, init: src }],
+              value: lit === 'TRUE'
+                ? lglCall('r_append_e', half, nas)
+                : lglCall('r_append_e', nas, half),
+            };
+          }
+        }
         /* `sort(x, decreasing = TRUE)` —— 升着排完倒过来。相等的那几格分不出来
            （double 上全排序的结果是唯一的），所以与 R 逐字节一致。 */
         if (fn === 'sort' && trueFlag(x, 'decreasing')) return lglCall('r_rev', got);
@@ -5071,7 +5200,7 @@ function printValStmt(node, types) {
     /* `table(v)` 那一格：版式与带名字的数值向量同形，只是前头多空一行、零长那一档印
        `< table of extent 0 >`（见 `r_print_tbl`）。 */
     if (isTblTy(t) && ns !== null) {
-      return { kind: 'expr-stmt', expr: lglCall('r_print_tbl', exprOf(node, types), ns) };
+      return { kind: 'expr-stmt', expr: lglCall('r_print_tbl', exprOf(node, types), ns, hdrExprOf(node, types)) };
     }
     if (ns === null) {
       throw new Error('r->IR: print() 这一格带名字的向量印不出名字来 —— 名字那一条跟丢了'
@@ -5261,10 +5390,16 @@ function assignOf(x, types) {
     if (isNamedTy(want ?? globalTys.get(name))) {
       const ns = namesExprOf(value, types)
         ?? call1('anew', tyArg(RSTRV), { kind: 'int', value: 0 });
-      return {
-        kind: 'block',
-        stmts: [asg, { kind: 'assign', target: { kind: 'name', name: nmVar(name) }, value: ns }],
-      };
+      const more = [{ kind: 'assign', target: { kind: 'name', name: nmVar(name) }, value: ns }];
+      /* `table(…)` 那一格的**表头**也跟着走（见 `hdVar`）。 */
+      if (isTblTy(want ?? globalTys.get(name))) {
+        more.push({
+          kind: 'assign',
+          target: { kind: 'name', name: hdVar(name) },
+          value: hdrExprOf(value, types),
+        });
+      }
+      return { kind: 'block', stmts: [asg, ...more] };
     }
     return asg;
   }
@@ -5967,7 +6102,7 @@ const STRV_FNS = new Set([
   'r_substr_v', 'r_trim_v', 'r_starts_v', 'r_ends_v',
   /* base 那四条字符向量常量 + `strrep` 在字符向量上那一格。 */
   'r_sv_letters', 'r_sv_upper', 'r_sv_month', 'r_sv_mabb', 'r_strrep_v', 'r_chartr_v',
-  'r_as_str_v', 'r_as_str_lv', 'r_as_lgl_sv',
+  'r_as_str_v', 'r_as_str_lv', 'r_as_lgl_sv', 'r_eq_sv', 'r_ne_sv', 'r_eq_svv', 'r_ne_svv',
   'r_sv1', 'r_sort_str', 'r_order_str', 'r_any_dup_str', 'r_uniq_str', 'r_dup_str', 'r_match_str', 'r_in_str', 'r_in1_str',
   'r_union_str', 'r_isect_str', 'r_sdiff_str', 'r_head_str', 'r_tail_str',
   'r_app_str', 'r_app_str_e',
@@ -7423,6 +7558,51 @@ function strvFnDecl(name) {
       ],
     };
   }
+  if (name === 'r_eq_sv' || name === 'r_ne_sv') {
+    /* `字符向量 == 一格串` —— 逐元素比，出一条**逻辑**向量（两种存法之间过一趟）。
+       `==` 比的是串本身，与 locale 无关（那一套是 `<` / `>` 才要的）。 */
+    const eq = name === 'r_eq_sv';
+    const one = b(eq ? '==' : '!=', svGet(v, i), nm('s'));
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RSTRV }, { name: 's', type: STR }],
+      ret: RLGL,
+      body: [
+        letI('n', svLen(v)),
+        ...vecNewAs('o', nm('n')),
+        loop([vecSet(nm('o'), i, { kind: 'ternary', cond: one, then: { kind: 'real', value: 1 }, else_: { kind: 'real', value: 0 } })], nm('n')),
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  if (name === 'r_eq_svv' || name === 'r_ne_svv') {
+    /**
+     * 两条字符向量逐元素比。长度不一样时**短的那条从头再来**（R 的回收规矩），
+     * 结果长度取大的那一条 —— 与数值那一侧 `vecBin` 同一条口径。
+     * 两条都零长时结果也零长（`alen` 为 0 时下头那个取模不会跑到）。
+     */
+    const eq = name === 'r_eq_svv';
+    const na = nm('na');
+    const nb = nm('nb');
+    const at = (arr, len) => svGet(arr, b('%', i, len));
+    const one = b(eq ? '==' : '!=', at(v, na), at(nm('w'), nb));
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RSTRV }, { name: 'w', type: RSTRV }],
+      ret: RLGL,
+      body: [
+        letI('na', svLen(v)),
+        letI('nb', svLen(nm('w'))),
+        letI('n', { kind: 'ternary', cond: b('>=', na, nb), then: na, else_: nb }),
+        iff(b('||', b('==', na, I(0)), b('==', nb, I(0))), [set('n', I(0))]),
+        ...vecNewAs('o', nm('n')),
+        loop([vecSet(nm('o'), i, { kind: 'ternary', cond: one, then: { kind: 'real', value: 1 }, else_: { kind: 'real', value: 0 } })], nm('n')),
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
   if (name === 'r_as_lgl_sv') {
     /* `as.logical(字符向量)` —— 逐元素走 `r_lgl_s`（八种写法之外是 `NA`），
        出来的是一条**逻辑向量**（两种存法之间过一趟，与 `r_nchar_v` 同形）。 */
@@ -8066,7 +8246,7 @@ function printFnDecl(name) {
     return {
       kind: 'fn',
       name,
-      params: [{ name: 'v', type: RVEC }, { name: 'ns', type: RSTRV }],
+      params: [{ name: 'v', type: RVEC }, { name: 'ns', type: RSTRV }, { name: 'hd', type: STR }],
       ret: { kind: 'void' },
       body: [
         letI('n', vecLen(v)),
@@ -8074,6 +8254,7 @@ function printFnDecl(name) {
           wr(S('< table of extent 0 >\n')),
           { kind: 'return', values: [] },
         ]),
+        wr(nm('hd')),
         wr(S('\n')),
         {
           kind: 'expr-stmt',
@@ -9036,6 +9217,42 @@ function vecFnDecl(name) {
         loop([{
           kind: 'if',
           cond: keep,
+          then: [
+            vecSet(out, kk, elem),
+            { kind: 'assign', target: kk, value: b('+', kk, { kind: 'int', value: 1 }) },
+          ],
+          else_: null,
+        }], 0),
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_na_pick') {
+    /**
+     * `v` 里**缺失的那几格**，按原来的次序（`sort(x, na.last =)` 要它）。
+     *
+     * 为什么不是"数出几个再补几个 NA"：R 把 `NA` 与 `NaN` 分得开，而
+     * `sort(c(NA, NaN), na.last = TRUE)` 印的是 `NA NaN` —— 原样原序。
+     * 补 NA 会把那个 `NaN` 印成 `NA`（静默差一格，量出来的）。
+     */
+    const out = { kind: 'name', name: 'o' };
+    const kk = { kind: 'name', name: 'k' };
+    return {
+      kind: 'fn',
+      name,
+      params: P,
+      ret: RVEC,
+      body: [
+        declLen(),
+        { kind: 'let', name: 'k', type: INT, init: { kind: 'int', value: 0 } },
+        loop([{
+          kind: 'if', cond: naQ(elem), then: [{ kind: 'assign', target: kk, value: b('+', kk, { kind: 'int', value: 1 }) }], else_: null,
+        }], 0),
+        ...vecNewAs('o', kk),
+        { kind: 'assign', target: kk, value: { kind: 'int', value: 0 } },
+        loop([{
+          kind: 'if',
+          cond: naQ(elem),
           then: [
             vecSet(out, kk, elem),
             { kind: 'assign', target: kk, value: b('+', kk, { kind: 'int', value: 1 }) },
@@ -10552,9 +10769,13 @@ function fnDecl(name, node, types) {
     if (params.includes(n)) continue;
     decls.push({ kind: 'let', name: n, type: t, init: zeroInit(t) });
     decls.push(...zeroStmts(n, t));
-    /* 带名字的向量：名字那一条摆在影子变量里（见 `RNVEC`），跟着这格 `let` 一起声明。 */
+    /* 带名字的向量：名字那一条摆在影子变量里（见 `RNVEC`），跟着这格 `let` 一起声明。
+       `table(…)` 那一格还多一条**表头**（见 `hdVar`）。 */
     if (isNamedTy(t)) {
       decls.push({ kind: 'let', name: nmVar(n), type: RSTRV, init: zeroInit(RSTRV) });
+    }
+    if (isTblTy(t)) {
+      decls.push({ kind: 'let', name: hdVar(n), type: STR, init: { kind: 'string', value: '' } });
     }
   }
   /**
@@ -10736,19 +10957,28 @@ export function rToIR(tree) {
           kind: 'assign', target: { kind: 'name', name: nmVar(n) }, value: zeroInit(RSTRV),
         });
       }
+      if (isTblTy(t)) {
+        lets.push({
+          kind: 'assign', target: { kind: 'name', name: hdVar(n) }, value: { kind: 'string', value: '' },
+        });
+      }
       continue;
     }
     lets.push({ kind: 'let', name: n, type: t, init: zeroInit(t) });
     lets.push(...zeroStmts(n, t));
-    /* 名字那一条的影子变量（见 `RNVEC`）。 */
+    /* 名字那一条的影子变量（见 `RNVEC`）；`table(…)` 那一格还多一条表头（见 `hdVar`）。 */
     if (isNamedTy(t)) {
       lets.push({ kind: 'let', name: nmVar(n), type: RSTRV, init: zeroInit(RSTRV) });
+    }
+    if (isTblTy(t)) {
+      lets.push({ kind: 'let', name: hdVar(n), type: STR, init: { kind: 'string', value: '' } });
     }
   }
   decls.push({ kind: 'main', body: [...lets, ...stmts] });
   /* 模块级变量的声明摆在最前（函数体与 `main` 都可能提到它们）。 */
   for (const [n, t] of [...globalTys].sort((p, q) => (p[0] < q[0] ? -1 : 1)).reverse()) {
     const gt = types.get(n) ?? t;
+    if (isTblTy(gt)) decls.unshift({ kind: 'global', name: hdVar(n), type: STR });
     if (isNamedTy(gt)) decls.unshift({ kind: 'global', name: nmVar(n), type: RSTRV });
     decls.unshift({ kind: 'global', name: n, type: gt });
   }

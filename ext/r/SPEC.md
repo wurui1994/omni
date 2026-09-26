@@ -227,6 +227,18 @@ R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不�
 `r_sort` 顺手把缺失丢了，排完就看不出原来有没有缺失，而 R 在 `na.rm = FALSE`（默认）时
 答的是 `NA`。零长也是 `NA`（量出来 `median(numeric(0))` 是 `NA`）。
 
+**`sort(x, na.last = TRUE / FALSE)` 接了**（2026-09-26，判据 `ext/r/examples/vecfn.R`
+末尾）：缺失那几格不丢了，按 `na.last` 接在后头或前头，而且**原样原序** ——
+`sort(c(3,NA,1,NaN,2), na.last = TRUE)` 是 `1 2 3 NA NaN`（不是补两个 `NA`：R 把 `NA`
+与 `NaN` 分得开，补 NA 会把那个 `NaN` 印成 `NA`，静默差一格）。`decreasing = TRUE` 只倒
+**排好的那一半**（`3 2 1 NA NaN`）。落法：`r_na_pick` 把缺失那几格原序挑出来，再拿
+`r_append_e` 接上；那格数据摆进临时量，不求值两遍。只认字面量 `TRUE` / `FALSE`
+（与 `na.rm` 同一条口径），缺省 `NA` 就是现在这一档"丢掉"。
+
+**`rep(TRUE, n)` 出的是一条逻辑向量**（R 也是）—— 那个记号从前丢在 `typeOfCall` 里，
+于是 `which(rep(TRUE, n))` 当场报"实参要是逻辑向量"，而那正是素数筛最常见的头一句
+（量出来的，2026-09-26）。
+
 `quantile(x, probs, names = FALSE)` 接了（2026-09-26）：R 的默认 **type 7**（与 `median`
 同一条）。抄 `quantile.default` 时两处**不改写**：`(1-h)*a + h*b`（不是 `a + h*(b-a)` ——
 那两种写法最后一位会分家）与 `x[hi] != qs` 那道闸门（相等时一个字不动）。三格口径：
@@ -377,6 +389,14 @@ var(c(1/3, 2/7, 3/11, 4/13, 5/17, 6/19, 7/23))
 找与换那一族（`grepl` / `grep` / `sub` / `gsub`，见那一小节）、
 `ifelse(test, "y", "n")`（两支是串时出一条字符向量；`test` 里有 `NA` 时**当场停下来** ——
 R 那儿挑出的是 `NA_character_`，这一档没有那种值，与 `v[掩码]` 同一条）。
+
+**`==` / `!=` 逐元素**（2026-09-26 接了，`r_eq_sv` / `r_ne_sv` / `r_eq_svv` / `r_ne_svv`）：
+`c("a","b") == "a"` 出一条逻辑向量 `TRUE FALSE`，两条字符向量之间也接（短的那条**从头
+再来**，与数值那一侧同一条回收规矩；有一条零长时结果零长）。这一格**不碰 locale** ——
+`==` 比的是串本身，而 `<` / `>` 才要那套排序规则（`Scollate`），所以那四个照旧当场报。
+从前字符向量在 `vecBin` 里一格都不认（`isVecTy` 对 `(arr string)` 是假），于是
+`w == "a"` 落成一格裸的 `(bin "==" (arr string) (str "a"))`，发到公共层才报
+"两边要同型" —— 那时已经过了换档那道门（量出来的）。
 
 `print` 与数值那一侧差三处，都是 R 自己的规矩：元素**带引号**、宽度按"最长那格 + 两个
 引号"取、而且**左对齐**（数值右对齐）—— 所以 R 印出来的**行尾真的有空格**，逐字节对
@@ -621,10 +641,22 @@ adapter 自己消化五件事（`ext/r/adapter.js` 文件头有账）：
 `factor(v)` = `sort(unique(v))`，所以 `NA` 跟着 `sort` 一起丢（R 缺省 `useNA = "no"`，
 量出来 `table(c(1,NA,1))` 只有 `1` 那一格）。
 
-印法只与带名字的向量差两处（量出来的）：**前头多空一行**（那是 dimnames 的名字那一行，
-没名字就是空的），零长那一档印 `< table of extent 0 >` 而不是 `named numeric(0)` ——
-所以类型上多带一个记号 `RTBL`（`adapter.js`），它**只在 `print` 那一处分岔**：
-`sum` / `length` / `names` / `[` 都当普通带名字的向量走。
+印法只与带名字的向量差两处（量出来的）：**前头多一行表头**、零长那一档印
+`< table of extent 0 >` 而不是 `named numeric(0)` —— 所以类型上多带一个记号 `RTBL`
+（`adapter.js`），它**只在 `print` 那一处分岔**：`sum` / `length` / `names` / `[`
+都当普通带名字的向量走。
+
+那行表头是 R 的 **`deparse.level = 1`**（2026-09-26 补的）：实参是一个**裸符号**时印那个
+符号的名字、别的（`c(1,1,2)` / `v == 1` / `sort(v)`）印**空行**。量出来的：
+`print(table(nums))` 头一行是 `nums`、`print(table(c(1,1,2)))` 头一行是空的、
+而 `f <- function(v) table(v); f(nums)` 印的是 **`v`**（`substitute` 看的是被调方那侧
+的表达式，不是调用点的）。那一行跟着**值**走（`tb <- table(nums); print(tb)` 还是 `nums`），
+所以与名字那一条同一个办法：一格影子变量 `tb__hd`（见 `hdVar`）。从前一律印空行 ——
+静默差一行。
+
+`as.vector(x)`（缺省 `mode = "any"`）在一条原子向量上与 `unname` **同解** ——
+R 那儿它把属性全扒掉，而名字也是属性（量出来 `as.vector(c(a=1,b=2))` 是 `[1] 1 2`）。
+`as.vector(table(v))` 因此就是那条计数向量。`mode=` 不在 `NAMED_OK` 里，写了当场报。
 
 没接的两格：**字符向量**上的 `table`（R 的 levels 要按 locale collation 排，见第四节
 第 12 条 —— 只有按字节那一种的话是静默答错）、**两条以上实参**的交叉表（要二维那一层）。
