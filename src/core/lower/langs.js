@@ -29,6 +29,10 @@ import { GO_RT } from '../../../ext/go/go-rt.js';
 import { awkToIR, AWK_HOOKS } from '../../../ext/awk/adapter.js';
 import { polydrawToIR } from '../../../ext/polydraw/adapter.js';
 import { preprocess } from '../../../ext/polydraw/pre.js';
+/* **按单元产物那条路**（EVAL 两门：运行时那一层是所有脚本共用的一格，只编一次只发一次）——
+   登记在这张表里的 `units` 上，于是 `cli.js` 不必 import `ext/`（见
+   `docs/design/omni-serve-studio.md` §9.3/§9.4）。 */
+import { evalUnitsBuild } from '../../../ext/polydraw/units.js';
 import { evaldrawToIR } from '../../../ext/evaldraw/adapter.js';
 import { chezToIR } from '../../../ext/chez/adapter/index.js';
 import { sbclToIR } from '../../../ext/sbcl/adapter/index.js';
@@ -130,6 +134,7 @@ export const LANGS = new Map([
      `pre` 是**预处理**那一格（`#define` / `#if` 那一族，语料里真在用）—— 词法之前跑。 */
   ['polydraw', {
     grammar: 'ext/polydraw/polydraw.grammar', toIR: polydrawToIR, pre: preprocess, exts: ['pss'],
+    units: evalUnitsBuild,
     asi: true,
   }],
   /* EvalDraw（Ken 的另一个程序，**同一门语言**）—— 指的就是上面那份语法：
@@ -137,6 +142,7 @@ export const LANGS = new Map([
      那棵树里**没有源码**（只有 .exe），所以口径是 `evaldraw.txt` / `evaldraw_ref.md`。 */
   ['evaldraw', {
     grammar: 'ext/polydraw/polydraw.grammar', toIR: evaldrawToIR, pre: preprocess, exts: ['kc'],
+    units: evalUnitsBuild,
     asi: true,
   }],
 ]);

@@ -475,6 +475,8 @@ uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开
         F_NO_TRIM,
         { name: '--chunk', arity: 0,
           brief: '（js）只发「按源码长起来的那一段」—— 运行时那份大家共用，另外取一次' },
+        { name: '--units', arity: 0,
+          brief: '（js · EVAL 两门）落成一目录按单元产物：运行时那一层只编一次只发一次' },
         { name: '--bytes', arity: 0, brief: '（mir）印大小与每个函数的内容哈希' },
         /* `--gfx`：**哪一档设备是编译期的事**（画图落成 `(gfxcall …)` 还是生成出来的
            光栅器），所以 `emit` 也要认它 —— Studio 在 serve 那一档就是

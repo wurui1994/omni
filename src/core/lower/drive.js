@@ -179,6 +179,18 @@ export function sxTextOf(path, argv = [], out = null) {
   }
 }
 
+/**
+ * 这份源码那门语言的**按单元产物**那一格（登记处那张表上的 `units`；没有就 null）。
+ *
+ * 为什么由这儿给：`cli.js` 的 `pickLang` 问的是**插件那张表**（`registerLang`），借来的
+ * 那十几门不在里头（那正是"借来的语言先降成核心方言"那条判断的依据）。登记处这张表才是
+ * 它们的家 —— 于是 `cli.js` 不必 import `ext/`（见 `docs/design/omni-serve-studio.md` §9.4）。
+ */
+export function unitsBuilderOf(path, argv = []) {
+  const l = pickLang(path, cliArg(argv, '--lang'));
+  return l !== null && l !== undefined && typeof l.units === 'function' ? l.units : null;
+}
+
 /** 一格 `--flag VALUE`（不认 `--flag=VALUE` —— 整条链一条规矩）。 */
 function cliArg(argv, name) {
   const i = argv.indexOf(name);

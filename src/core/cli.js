@@ -67,7 +67,7 @@ import { Diagnostics, OmniError, SourceFile } from './source/diag.js';
  * 静态 import 是有代价的（十一份 adapter 一起进核心），可它们都是纯 JS、小、没有别的依赖；
  * 哪天核心大小要紧了，正解是把它登记成 lang / plugin，不是在这儿加一句 `await import`
  * （这份文件里那几十个 import 全是静态的，只有一套规矩）。 */
-import { coreSxText, borrowedExts } from './lower/drive.js';
+import { coreSxText, borrowedExts, unitsBuilderOf } from './lower/drive.js';
 /* 构建引擎（`omni ninja`）：依赖图 + 脏判定 + 调度，不认识语言 —— 设计见
  * `docs/design/build-system.md`，模型照 ninja 复刻。 */
 import { ninjaCmd } from './build/cli.js';
@@ -2040,6 +2040,36 @@ function stampSame(a, b) {
  * 当前目录）已经在**单元名**里（名字带源文件路径的哈希），内建面那一档进**每一行的键**
  * （见 rowOf 的 `extras`）—— 两样都不该变成目录名里的一串十六进制。
  */
+/**
+ * `emit js --units`：落成一目录**按单元产物**（EVAL 两门 —— 运行时那一层是所有脚本共用的
+ * 一格，只编一次只发一次）。印一行 JSON：启动器在哪儿、这一趟新编/复用几份。
+ *
+ * 胶水在公共层（`build/modules.js` 的 `buildUnits`），切法登记在语言那张表上（`units`）。
+ */
+function emitUnits(path, rest) {
+  const units = unitsBuilderOf(path, rest);
+  if (units === null) {
+    throw new OmniError(`emit js --units：${path} 这门语言没有按单元产物那条路`);
+  }
+  const dir = moduleDir(cacheRoot(), 'js-eval');
+  mkdirAll(dir);
+  const r = units({
+    path,
+    dir,
+    argv: rest,
+    tool: srcStamp(),
+    textToMod: cap('sx.textToMod'),
+    emitEsm: (m) => target('js').emit(m, { esm: true }),
+    runtimeText: cap('jsgen.runtimeModule')(),
+  });
+  if (r === null) return 1;
+  vStep(`eval units     新编 ${r.made} 份、复用 ${r.kept} 份  -> ${dir}`);
+  stdout(`${JSON.stringify({
+    dir, main: r.mainPath, made: r.made, kept: r.kept, names: r.names,
+  })}\n`);
+  return 0;
+}
+
 function jsModulesDir() {
   return moduleDir(cacheRoot(), 'js');
 }
@@ -5983,6 +6013,13 @@ function main(argv) {
    * 量到过：不加这条判断，`glr` 与 `sexpr` 两套判据整套翻红。
    *
    */
+  /* **`emit js --units` 要在这儿截住**：底下那一步把 `path` 换成核心方言那份中间文本
+     （`SRC_SX`），而按单元产物那条路要的是**源码本身**（它自己会降一趟，并把顶层项按
+     `rtNames` 切成两格单元）。见 `docs/design/omni-serve-studio.md` §9.3。 */
+  if (path !== undefined && path !== null && node.key === 'emit'
+      && rest.includes('--units') && borrowedExts().some((e) => path.endsWith(e))) {
+    return emitUnits(path, rest);
+  }
   if (path !== undefined && path !== null
       && ['run', 'build', 'emit', 'check'].includes(node.key)
       && lang(path) === null && borrowedExts().some((e) => path.endsWith(e))) {
@@ -6728,6 +6765,10 @@ function main(argv) {
         stdout(target('js').emit(mod, { chunk: true }));
         return 0;
       }
+      /* **`--units`：落成一目录按单元产物**（EVAL 两门用它 —— 运行时那一层是所有脚本
+         共用的一格，只编一次只发一次）。印一行 JSON：启动器在哪儿、这一趟新编/复用几份。
+         胶水在公共层（`build/modules.js` 的 `buildUnits`），切法在
+         `ext/polydraw/units.js`（`docs/design/omni-serve-studio.md` §9.3/§9.4）。 */
       stdout(target('js').emit(mod, { trim: !NO_TRIM }));
       return 0;
     }
