@@ -832,7 +832,7 @@ function scanOne(s, C, rets) {
             continue;
           }
         }
-        if (tag(one) === 'index') bindEmptyDict(one, t, C);
+        if (tag(one) === 'index') bindEmptyDict(one, t ?? looseTy(v, C), C);
         bindTarget(one, t, C);
       }
       return;
@@ -1084,6 +1084,25 @@ function elemOf(it, node, C) {
  * `xs.append(v)` 那一格同一条办法：赋值那一句先不绑，等走到用它的那一句）。
  * 键只认 int 与 str（方言的字典键就这两档）。
  */
+/**
+ * **`+` / `-` 两边同型，所以哪一边答得出来都算** —— 绑空容器那一趟的兜底。
+ *
+ * 量到的原话：`counts = {}` 之后 `counts[w] = counts.get(w, 0) + 1` 报"空字典 `{}` 的
+ * 键值类型推不出来"。绕回来了：右边要先知道 `counts` 装什么（`.get` 问的是它），
+ * 而 `counts` 装什么正要从右边认。可那一句里 `1` 就摆在那儿 —— 方言的 `+` 要两边同型，
+ * 于是**答得出来的那一边就是答案**。`counts[w] = counts[w] + 1` 是同一条。
+ * 只对 `+` / `-` 这么办：`/` 在 python 里 int/int 交 real，`*` 还有"串重复"那一档，
+ * 两边不必同型。
+ */
+function looseTy(v, C) {
+  const t = tyOfCst(v, C);
+  if (t !== null && t !== undefined) return t;
+  if (tag(v) !== 'bin') return null;
+  const [opTok, aTok, bTok] = kids(v);
+  if (!['+', '-'].includes(String(leaf(opTok)))) return null;
+  return looseTy(aTok, C) ?? looseTy(bTok, C) ?? null;
+}
+
 function bindEmptyDict(target, vt, C) {
   if (vt === null || vt === undefined) return;
   const base = kids(target)[0];

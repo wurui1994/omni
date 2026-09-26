@@ -190,5 +190,22 @@ def main():
     bag["even"].sort()
     print(bag["even"], sum(bag["even"]), max(bag["odd"]))
 
+    # `d[k] = d.get(k, 0) + 1` —— 数一遍那种写法。**这一句绕回来了**：右边要先知道 `tally`
+    # 装什么（`.get` 问的是它），而 `tally` 装什么正要从右边认。可 `1` 就摆在那儿 ——
+    # 方言的 `+` 要两边同型，于是**答得出来的那一边就是答案**（`looseTy`）。
+    # `tally[w] = tally[w] + 1` 是同一条。
+    tally = {}
+    for w in "b a c b a b".split():
+        tally[w] = tally.get(w, 0) + 1
+    print(tally, len(tally), tally["b"])
+    print(sorted(tally.items()))
+    again = {}
+    for w in "x y x".split():
+        if w in again:
+            again[w] = again[w] + 1
+        else:
+            again[w] = 1
+    print(again)
+
 
 main()
