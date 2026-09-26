@@ -124,3 +124,28 @@ print(ins1)
 ins0: list[int] = []
 ins0.insert(-3, 1)
 print(ins0)
+
+# **空容器装什么，答案在下一句里**（`xs = []` / `d = {}` 自己答不出）。
+# 从前只认 `.append(v)` 与 `d[k] = v` 两种写法，于是下面这几种一样常见的开头
+# 全撞在"空表 / 空字典的类型推不出来"上。收的都只是"当场答得出类型"的那一格实参。
+f_xs = []
+f_xs.extend([1, 2])
+f_xs.append(3)
+print(f_xs, len(f_xs))
+f_ys = []
+f_ys.insert(0, "b")
+f_ys.insert(0, "a")
+print(f_ys)
+f_zs = []
+f_zs += [1.5, 2.5]
+print(f_zs, sum(f_zs))
+f_d = {}
+f_d.setdefault("a", 0)
+f_d["a"] += 1
+f_d.setdefault("a", 9)
+f_d.setdefault("b", 7)
+print(sorted(f_d.items()), len(f_d))
+f_e = {}
+f_e.update({"x": 1})
+f_e["y"] = 2
+print(sorted(f_e.items()))

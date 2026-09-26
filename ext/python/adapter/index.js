@@ -944,29 +944,33 @@ function scanOne(s, C, rets) {
      * 于是赋值那一句先不绑，等走到这一句时按 `arr<那个值的类型>` 绑上。
      * 语句是按次序扫的，所以 `parts = []` 在前、`parts.append(…)` 在后就够了；
      * 反过来（先 append 再赋空表）python 自己也不成立。
+     *
+     * `.append` 只是这一族里最常见的一格 —— "往里放东西"的那几种写法都说得出它装什么
+     * （`.insert` / `.extend` / `.setdefault` / `.update`，见 `fillTyOf`）。
      */
     case 'expr': {
       const e = kids(s)[0];
       if (tag(e) !== 'call') return;
       const fn = kids(e)[0];
-      if (tag(fn) !== 'attr' || String(leaf(kids(fn)[1])) !== 'append') return;
+      if (tag(fn) !== 'attr') return;
+      const m = String(leaf(kids(fn)[1]));
       const box = kids(fn)[0];
+      const as = kids(part(e, 'args') ?? { kind: 'list', items: [] });
       /**
        * **`d = {}` 之后 `d[k].append(v)`** —— "字典装一串表"那种分组写法（python 里到处
        * 都是）。空字典那一句认不出类型，`d[k] = []` 那一句也认不出（右边是空表），
        * 唯一说得清的就是这一句：键的类型从下标来、元素的类型从 append 的那个值来。
        */
-      if (tag(box) === 'index') {
+      if (m === 'append' && tag(box) === 'index') {
         const base = kids(box)[0];
         if (tag(base) !== 'n') return;
         const bn = String(nameOf(base));
         const blocal = C.inScope() && !C.isDeclGlobal(bn);
         if ((blocal ? C.lookupHere(bn) : C.lookup(bn)) !== null) return;
         const subs0 = kids(part(box, 'subs') ?? { kind: 'list', items: [] });
-        const as0 = kids(part(e, 'args') ?? { kind: 'list', items: [] });
-        if (subs0.length !== 1 || as0.length !== 1) return;
+        if (subs0.length !== 1 || as.length !== 1) return;
         const kt0 = tyOfCst(subs0[0], C);
-        const vt0 = tyOfCst(as0[0], C);
+        const vt0 = tyOfCst(as[0], C);
         if (kt0 === null || vt0 === null || !['int', 'string'].includes(kt0.kind)) return;
         C.bind(C.ref(bn), dictOf(arrOf(vt0), kt0));
         return;
@@ -975,14 +979,62 @@ function scanOne(s, C, rets) {
       const n = String(nameOf(box));
       const local = C.inScope() && !C.isDeclGlobal(n);
       if ((local ? C.lookupHere(n) : C.lookup(n)) !== null) return;
-      const as = kids(part(e, 'args') ?? { kind: 'list', items: [] });
-      if (as.length !== 1) return;
-      const et = tyOfCst(as[0], C);
-      if (et !== null) C.bind(C.ref(n), arrOf(et));
+      const ft = fillTyOf(m, as, C);
+      if (ft !== null) C.bind(C.ref(n), ft);
+      return;
+    }
+    /** **`xs = []` 之后 `xs += ys`** —— 与 `.extend(ys)` 是同一件事，写法不同。 */
+    case 'augassign': {
+      const [opTok, target, value] = kids(s);
+      if (String(leaf(opTok)) !== '+=' || tag(target) !== 'n') return;
+      const n = String(nameOf(target));
+      const local = C.inScope() && !C.isDeclGlobal(n);
+      if ((local ? C.lookupHere(n) : C.lookup(n)) !== null) return;
+      const t = tyOfCst(value, C);
+      if (t !== null && t.kind === 'arr') C.bind(C.ref(n), t);
       return;
     }
     default:
   }
+}
+
+/**
+ * **"往那格空容器里放东西"的那一句说得出它装什么**。
+ *
+ * `xs = []` / `d = {}` 自己答不出（空的），答案在**下一句**里。从前只认 `.append(v)`
+ * 一格，于是 `xs.extend(…)`、`d.setdefault(k, 0)`、`d.update(…)` 开头的那几种写法
+ * （真的 python 代码里同样常见）一律撞在"空表 / 空字典的类型推不出来"上。
+ * 收的这几种都只认**当场答得出类型**的实参，答不出就交 null（照旧报那一句，别猜）：
+ *   `xs.append(v)` / `xs.insert(i, v)` → `arr<v>`
+ *   `xs.extend(ys)`                    → ys 那个类型（得真是一张表）
+ *   `d.setdefault(k, v)`               → `dict<k, v>`
+ *   `d.update(other)`                  → other 那个类型（得真是一张字典）
+ */
+function fillTyOf(m, as, C) {
+  const ty = (i) => (as.length > i ? tyOfCst(as[i], C) : null);
+  if (m === 'append' && as.length === 1) {
+    const t = ty(0);
+    return t === null ? null : arrOf(t);
+  }
+  if (m === 'insert' && as.length === 2) {
+    const t = ty(1);
+    return t === null ? null : arrOf(t);
+  }
+  if (m === 'extend' && as.length === 1) {
+    const t = ty(0);
+    return t !== null && t.kind === 'arr' ? t : null;
+  }
+  if (m === 'update' && as.length === 1) {
+    const t = ty(0);
+    return t !== null && t.kind === 'map' ? t : null;
+  }
+  if (m === 'setdefault' && as.length === 2) {
+    const kt = ty(0);
+    const vt = ty(1);
+    if (kt === null || vt === null || !['int', 'string'].includes(kt.kind)) return null;
+    return dictOf(vt, kt);
+  }
+  return null;
 }
 
 /**
