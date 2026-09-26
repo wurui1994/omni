@@ -409,3 +409,15 @@ PolyDraw 与 EvalDraw 各带一整棵例子树（`polydraw/{examples,ken,tigrou}
 每句缩进四格），而 `sxForms` 切出来的 `(main (do …))` 是整项。所以还欠一格
 "把 `(do …)` 拆成语句"的拆法（与 `sxForms` 同一个深度计数的写法，放在
 `build/modules.js` 里一起）—— 别在 EVAL 那边另写一份。
+
+### 9.4 驱动那一格怎么公用（定下来的做法）
+
+`cli.js` 的 `asyModsBuild` 里与 asy 有关的只有四处：`cap(asy.unitTexts)`（单元从哪儿来）、
+`cap(asy.jsUnitSym)`（单元名 -> 初始化符号）、`cap(asy.deps)`（js 缓存那一格）与几句
+`vStep("asy units …")`。其余那三十行是**公共的胶水**：比印记 -> 只编该编的 -> `declWrite`
+出接口 -> `launcherText` 写启动器 -> 索引里入口那一行记 `needs`。
+
+所以把那三十行抽进 `build/modules.js`（`buildUnits({dir, units, reused, entry, tool,
+emitJs, unitSym, runtimeText, prelude, tail, log})`），**两个调用方**：asy 与 EVAL。
+EVAL 这边先接（秒级判据：`ext/polydraw/units.js` + `tests/lower`），asy 那边的移植单独一刀
+—— 它的判据是分钟级的（`tests/asy` 十分钟），不该与这一刀混在一起红。
