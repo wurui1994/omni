@@ -149,7 +149,7 @@ const CMP_FNS = new Map([
 ]);
 /** 这一批由 `lglFnDecl` 发（形状都是"几格 real 进、一格 real 出"）。 */
 const LGL_FNS = new Set([
-  'r_lgl', 'r_and', 'r_or', 'r_xor', 'r_not', 'r_cond', 'r_lgl_str',
+  'r_lgl', 'r_and', 'r_or', 'r_xor', 'r_not', 'r_cond', 'r_lgl_str', 'r_lgl_s',
   'r_is_true', 'r_is_false', 'r_ifelse1', ...CMP_FNS.values(),
 ]);
 
@@ -315,6 +315,10 @@ const FN_DEPS = new Map([
      因为"两边各读两遍"要临时量，而临时量在**条件位**上没地方摆（`while` 的条件被降级到
      循环外头，摊开的 `let` 会变成"只算一次"）。一次函数调用是纯表达式，哪儿都放得下。 */
   ['r_lgl', ['r_is_na', 'r_na']],
+  /* `as.logical(串)` 只认八种写法，别的是 NA（见 `r_lgl_s`）。 */
+  ['r_lgl_s', ['r_na']],
+  ['r_as_lgl_v', ['r_lgl']],
+  ['r_as_lgl_sv', ['r_lgl_s']],
   ['r_and', ['r_is_na', 'r_na']],
   ['r_or', ['r_is_na', 'r_na']],
   ['r_xor', ['r_is_na', 'r_na']],
@@ -630,7 +634,7 @@ const NAME_DROP_OK = new Set([
   'var', 'sd', 'range', 'any', 'all', 'unique', 'seq_along', 'seq_len',
   /* `duplicated` 量出来 R 自己也丢名字（2026-09-26）—— 从前这张表外，于是带名字的向量上报。 */
   'duplicated',
-  'as.character', 'as.numeric', 'as.integer',
+  'as.character', 'as.numeric', 'as.integer', 'as.logical',
   'is.numeric', 'is.character', 'is.logical', 'stop', 'stopifnot',
 ]);
 /**
@@ -962,7 +966,7 @@ const BYTEWISE = new Set(['nchar', 'substr', 'substring', 'toupper', 'tolower', 
  */
 const BUILTINS = new Set([
   'cat', 'paste', 'paste0', 'c', 'list', 'length', 'nchar', 'return', 'is.null',
-  'as.integer', 'as.numeric', 'as.character', 'abs', 'seq_len', 'is.na', 'is.nan',
+  'as.integer', 'as.numeric', 'as.character', 'as.logical', 'abs', 'seq_len', 'is.na', 'is.nan',
   'sum', 'mean', 'max', 'min', 'rev', 'seq_along', 'which', 'any', 'all',
   'print', 'invisible', 'xor', 'isTRUE', 'isFALSE', 'ifelse',
   /* base 里"向量进向量出"那一族 + 两格统计量。`seq` 与 `rep` 是造向量的。 */
@@ -1627,6 +1631,12 @@ function applyTy(fn, x, types) {
     case 'as.numeric': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : REAL;
       return isVecTy(t) ? RVEC : REAL;
+    }
+    /* `as.logical` 出的是**三态**：向量那一侧一条逻辑向量、一格进一格三态标量
+       （`as.logical("yes")` 是 `NA`，所以不能回 bool）。 */
+    case 'as.logical': {
+      const t = args.length > 0 ? typeOfExpr(args[0], types) : REAL;
+      return isVecTy(t) || isStrVec(t) ? RLGL : RLGL1;
     }
     case 'is.null': return BOOL;
     case 'sum': case 'mean': case 'max': case 'min': return REAL;
@@ -4642,8 +4652,7 @@ function callOf(x, types, extra, want, stmtPos) {
        * 之间转），而自己写一圈按位累加，在 15 位有效数字或者 10^±22 之外与 `strtod` 的舍入
        * 对不上 —— 那是静默差最后几位，比当场报难查得多。
        */
-      case 'as.integer': case 'as.numeric': {
-        if (n !== 1) throw new Error(`r->IR: ${fn}() 要一格实参（给了 ${n}）`);
+      case 'as.integer': case 'as.numeric': {        if (n !== 1) throw new Error(`r->IR: ${fn}() 要一格实参（给了 ${n}）`);
         const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
         const wantInt = fn === 'as.integer';
         if (t.kind === 'string' || isStrVec(t)) {
@@ -4672,6 +4681,21 @@ function callOf(x, types, extra, want, stmtPos) {
         }
         if (wantInt) return t.kind === 'int' ? ev(0) : call1('toint', ev(0));
         return t.kind === 'real' ? ev(0) : call1('toreal', ev(0));
+      }
+      case 'as.logical': {
+        /**
+         * `as.logical(x)` —— 出的是**三态**（`as.logical("yes")` 是 `NA`）。
+         *
+         * 数那一侧 0 假、非零真、缺失 `NA`（`r_lgl` 本来就在，`&&` / `||` 那一族用它）；
+         * 串那一侧只认八种写法（见 `r_lgl_s`）。向量与字符向量各走一格逐元素的辅助函数。
+         */
+        if (n !== 1) throw new Error(`r->IR: as.logical() 要一格实参（给了 ${n}）`);
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        if (t.kind === 'map') throw new Error('r->IR: as.logical() 的实参是一张 list');
+        if (isStrVec(t)) return lglCall('r_as_lgl_sv', ev(0));
+        if (isVecTy(t)) return lglCall('r_as_lgl_v', ev(0));
+        if (t.kind === 'string') return lglCall('r_lgl_s', ev(0));
+        return lglCall('r_lgl', asReal(ev(0), t));
       }
       /* `as.character(x)` 与 `cat(x)` 是**两套位数**：前者 15 位有效数字
          （`0.333333333333333`），后者 7 位（`0.3333333`）。所以这一格走 `asStr(…, 15)`，
@@ -5943,7 +5967,7 @@ const STRV_FNS = new Set([
   'r_substr_v', 'r_trim_v', 'r_starts_v', 'r_ends_v',
   /* base 那四条字符向量常量 + `strrep` 在字符向量上那一格。 */
   'r_sv_letters', 'r_sv_upper', 'r_sv_month', 'r_sv_mabb', 'r_strrep_v', 'r_chartr_v',
-  'r_as_str_v', 'r_as_str_lv',
+  'r_as_str_v', 'r_as_str_lv', 'r_as_lgl_sv',
   'r_sv1', 'r_sort_str', 'r_order_str', 'r_any_dup_str', 'r_uniq_str', 'r_dup_str', 'r_match_str', 'r_in_str', 'r_in1_str',
   'r_union_str', 'r_isect_str', 'r_sdiff_str', 'r_head_str', 'r_tail_str',
   'r_app_str', 'r_app_str_e',
@@ -7399,6 +7423,22 @@ function strvFnDecl(name) {
       ],
     };
   }
+  if (name === 'r_as_lgl_sv') {
+    /* `as.logical(字符向量)` —— 逐元素走 `r_lgl_s`（八种写法之外是 `NA`），
+       出来的是一条**逻辑向量**（两种存法之间过一趟，与 `r_nchar_v` 同形）。 */
+    return {
+      kind: 'fn',
+      name,
+      params: P,
+      ret: RLGL,
+      body: [
+        letI('n', svLen(v)),
+        ...vecNewAs('o', nm('n')),
+        loop([vecSet(nm('o'), i, lglCall('r_lgl_s', svGet(v, i)))], nm('n')),
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
   if (name === 'r_nchar_v') {
     /* `nchar(字符向量)` —— 逐元素出一条**数值**向量（两种存法之间过一趟）。 */
     return {
@@ -8368,6 +8408,29 @@ function lglFnDecl(name) {
       ret(b('!=', x, F)),
     ]);
   }
+  if (name === 'r_lgl_s') {
+    /**
+     * `as.logical(一格串)` —— R 只认**八种写法**（`util.c` 的 `StringTrue` / `StringFalse`
+     * 那两张表）：`TRUE` / `true` / `True` / `T` 是真、`FALSE` / `false` / `False` / `F`
+     * 是假，**别的一律 `NA`**。量出来的（2026-09-26）：小写单字母 `"t"` / `"f"` 是 `NA`，
+     * `"yes"` / `"1"` / `""` 也是 `NA` —— 所以不能顺手写成"非空就真"。
+     */
+    const s = { kind: 'name', name: 's' };
+    const anyOf = (lits) => lits
+      .map((lit) => b('==', s, { kind: 'string', value: lit }))
+      .reduce((a, c) => b('||', a, c));
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 's', type: STR }],
+      ret: REAL,
+      body: [
+        { kind: 'if', cond: anyOf(['TRUE', 'true', 'True', 'T']), then: [ret(T)], else_: null },
+        { kind: 'if', cond: anyOf(['FALSE', 'false', 'False', 'F']), then: [ret(F)], else_: null },
+        ret(na()),
+      ],
+    };
+  }
   if (name === 'r_lgl_str') {
     return fn1(STR, [
       { kind: 'if', cond: isNa(x), then: [ret({ kind: 'string', value: 'NA' })], else_: null },
@@ -8414,6 +8477,22 @@ function vecFnDecl(name) {
   });
   const P = [{ name: 'v', type: RVEC }];
 
+  if (name === 'r_as_lgl_v') {
+    /* `as.logical(数值向量)` —— 逐元素走 `r_lgl`（0 假、非零真、缺失 NA）。 */
+    const out = { kind: 'name', name: 'o' };
+    return {
+      kind: 'fn',
+      name,
+      params: P,
+      ret: RLGL,
+      body: [
+        declLen(),
+        ...vecNewAs('o', len),
+        loop([vecSet(out, i, lglCall('r_lgl', elem))], 0),
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
   if (name === 'r_as_int_v') {
     /* `as.integer(向量)` —— 逐元素**朝零截**（R 的口径：`as.integer(-2.7)` 是 `-2`）。
        缺失原样留着：这一档的"整数向量"底下还是 double（见 `RIVEC`），所以 `NA` 跟得住，
