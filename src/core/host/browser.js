@@ -199,7 +199,26 @@ export function setArgs(a) { ARGS = [...a]; return undefined; }
 export function args() { return [...ARGS]; }
 export function cwd() { return ''; }
 export function env(name) { return ENV.get(name); }
-export function setEnv(name, value) { ENV.set(name, value); return undefined; }
+/**
+ * 写环境量。**两处都要写**：我们自己这张表，以及——只在**我们那格 `process` 没装上**的时候
+ * ——真的 `process.env`。
+ *
+ * 为什么有第二处：`omni run` 最后一步是 `evalJs(发射出来的那份 JS)`，而那份产物读环境量走的
+ * 是 `process.env`（prelude 的 `$js_env`）。判据那一趟（`tests/studio`）拿 node 当壳子跑这条
+ * 腿，`globalThis.process` 已经在，于是下头那句 `installProcessShim()` 被跳过 —— 编译器这一侧
+ * `setEnv('OMNI_GFX_OUT_DEFAULT', …)` 只落进 `ENV`，产物一格都看不见，图就落回老名字
+ * `frame.png`（撞过一次：两门 `.js` 在这条腿上与 node 那侧差一个文件名）。
+ *
+ * `SHIMMED` 那一格是防自递归：装上的那份 `process.env` 是个 Proxy，它的 `set` 回头调这儿。
+ */
+export function setEnv(name, value) {
+  ENV.set(name, value);
+  if (!SHIMMED && typeof process !== 'undefined' && process !== null
+    && typeof process.env === 'object' && process.env !== null) {
+    process.env[name] = value;
+  }
+  return undefined;
+}
 
 /* ---- 输出：两格可换的收集器 ----
  * 页面上"输出区"与"shell"是同一份数据的两种印法，所以这儿只收一份，怎么印是 UI 的事。
@@ -301,6 +320,8 @@ const NODE_FACADE = {
   'node:os': { tmpdir: () => tmpDir() },
 };
 
+let SHIMMED = false;
+
 function installProcessShim() {
   const shim = {
     stdout: { write(s) { stdout(typeof s === 'string' ? s : String(s)); return true; } },
@@ -334,6 +355,7 @@ function installProcessShim() {
   Object.defineProperty(shim, 'argv', { get: () => ['omni', installDir(), ...args()] });
   Object.defineProperty(shim, 'exitCode', { get: () => exitCode(), set: (n) => setExitCode(n) });
   globalThis.process = shim;
+  SHIMMED = true;
 }
 
 if (typeof globalThis.process === 'undefined') installProcessShim();
