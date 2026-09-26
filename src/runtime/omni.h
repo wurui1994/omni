@@ -470,6 +470,7 @@ double omni_r_atanh(double x);
 double omni_r_exp(double x);
 double omni_r_expm1(double x);
 double omni_r_log(double x);
+double omni_r_log2(double x);
 double omni_r_log10(double x);
 double omni_r_log1p(double x);
 double omni_r_cbrt(double x);

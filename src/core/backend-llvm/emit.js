@@ -182,6 +182,7 @@ const RT_OPS = new Map([
   ['rmath_exp.real', { sym: 'omni_r_exp', ret: 'double', params: ['double'] }],
   ['rmath_expm1.real', { sym: 'omni_r_expm1', ret: 'double', params: ['double'] }],
   ['rmath_log.real', { sym: 'omni_r_log', ret: 'double', params: ['double'] }],
+  ['rmath_log2.real', { sym: 'omni_r_log2', ret: 'double', params: ['double'] }],
   ['rmath_log10.real', { sym: 'omni_r_log10', ret: 'double', params: ['double'] }],
   ['rmath_log1p.real', { sym: 'omni_r_log1p', ret: 'double', params: ['double'] }],
   ['rmath_cbrt.real', { sym: 'omni_r_cbrt', ret: 'double', params: ['double'] }],

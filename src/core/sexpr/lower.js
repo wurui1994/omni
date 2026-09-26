@@ -155,7 +155,7 @@ const RMATH = new Map([
   ['sin', 1], ['cos', 1], ['tan', 1], ['asin', 1], ['acos', 1], ['atan', 1],
   ['atan2', 2], ['sinh', 1], ['cosh', 1], ['tanh', 1],
   ['asinh', 1], ['acosh', 1], ['atanh', 1],
-  ['exp', 1], ['expm1', 1], ['log', 1], ['log10', 1], ['log1p', 1],
+  ['exp', 1], ['expm1', 1], ['log', 1], ['log2', 1], ['log10', 1], ['log1p', 1],
   ['cbrt', 1], ['hypot', 2],
   /* **这一条是那个交集的例外**（ADR-0019 路 2）：`nextafter` 在 C99 math.h 里有，
    * 在 `Math.*` 里**没有** —— 所以 JS 那侧是手写的（`$js_math` 的 'W'：把 f64 的位模式

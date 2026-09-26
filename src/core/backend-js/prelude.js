@@ -5395,6 +5395,7 @@ const $r_atanh = (x) => $js_math("L", x, 0);
 const $r_exp = (x) => $js_math("E", x, 0);
 const $r_expm1 = (x) => $js_math("X", x, 0);
 const $r_log = (x) => $js_math("O", x, 0);
+const $r_log2 = (x) => $js_math("w", x, 0);
 const $r_log10 = (x) => $js_math("Q", x, 0);
 const $r_log1p = (x) => $js_math("P", x, 0);
 const $r_cbrt = (x) => $js_math("B", x, 0);

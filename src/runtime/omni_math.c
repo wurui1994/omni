@@ -46,6 +46,7 @@ double omni_r_atanh(double x) { return atanh(x); }
 double omni_r_exp(double x) { return exp(x); }
 double omni_r_expm1(double x) { return expm1(x); }
 double omni_r_log(double x) { return log(x); }
+double omni_r_log2(double x) { return log2(x); }
 double omni_r_log10(double x) { return log10(x); }
 double omni_r_log1p(double x) { return log1p(x); }
 double omni_r_cbrt(double x) { return cbrt(x); }

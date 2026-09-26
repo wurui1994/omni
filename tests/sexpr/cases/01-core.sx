@@ -92,4 +92,18 @@
     ;; 两个新算子互相印证：位模式加一 == 往 +inf 挪一格。这一条比各自单独测有用得多，
     ;; 因为它把「手写的 nextafter」与「位重解释」拴在了一起 —— 只错一个就红。
     (print (bin "==" (bitsreal (bin "+" (realbits (real 1.0)) (int 1)))
-      (rmath "nextafter" (real 1.0) (real 2.0))))))
+      (rmath "nextafter" (real 1.0) (real 2.0))))
+    ;; log2 —— 2026-09-26 补进白名单的。它本来就在「C99 math.h ∩ Math.*」里（C 有 log2、
+    ;; JS 有 Math.log2），是那张表漏了一格；R 的 `log2()` 与 `log(x, base = 2)` 撞的就是它。
+    ;;
+    ;; 它是超越函数，所以**不声称**最后一位在五条腿上一致（见 runtime/omni_math.c 那段账）。
+    ;; 这几条压的是另一件事：**2 的整数次幂上答案是整数**。那几格的真值本身就是可精确表示的
+    ;; 整数，任何实现都该原样给出 —— 而"偷偷写成 log(x) / log(2)"就会在这儿露出来
+    ;; （量过：`log(1e300) / log(2)` 的最后一位与 log2 分叉）。
+    (print (rmath "log2" (real 8.0)))
+    (print (rmath "log2" (real 1024.0)))
+    (print (rmath "log2" (real 0.25)))
+    ;; 2^53 那一格：指数走到 double 整数的边界上，答案还得是整数 53
+    (print (rmath "log2" (real 9007199254740992.0)))
+    ;; 非整数那一格只印 6 位有效数字 —— 这一条不压最后一位，只压"确实是以 2 为底"
+    (print (rmath "log2" (real 10.0)))))

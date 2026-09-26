@@ -1048,7 +1048,8 @@ const RMATH_OP = new Map([
   ['rmath_sinh', 'H'], ['rmath_cosh', 'D'], ['rmath_tanh', 'G'],
   ['rmath_asinh', 'J'], ['rmath_acosh', 'K'], ['rmath_atanh', 'L'],
   ['rmath_exp', 'E'], ['rmath_expm1', 'X'], ['rmath_log', 'O'],
-  ['rmath_log10', 'Q'], ['rmath_log1p', 'P'], ['rmath_cbrt', 'B'], ['rmath_hypot', 'Y'],
+  ['rmath_log2', 'w'], ['rmath_log10', 'Q'], ['rmath_log1p', 'P'],
+  ['rmath_cbrt', 'B'], ['rmath_hypot', 'Y'],
   /* 那个「C99 ∩ Math.*」交集的例外（ADR-0019 路 2）：'W' 那一支在 prelude 里是手写的。 */
   ['rmath_nextafter', 'W'],
 ]);
