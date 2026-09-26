@@ -137,3 +137,23 @@ def main():
 
 
 main()
+
+# ---- 排一串元组：**比较不许摆进 while 的条件里** ------------------------------
+# 元组那一档的"怎么比"要把两边各钉一格临时量（逐格比要读好几遍），而**摆进 while 的条件里
+# 那几格 let 会被提到 while 外头** —— 于是每转一圈读的还是头一圈那两个值，插入排序的内层
+# 循环该停的时候不停。症状：**五格以上**的元组表 sorted() 出来是乱的（四格以下碰巧对，
+# 所以先前没露）。现在比较摆在循环体里、用一格 "还往前挪吗" 的标记控制内层循环。
+ps = [("the", 3), ("quick", 1), ("brown", 1), ("fox", 1), ("jumps", 1),
+      ("over", 1), ("lazy", 1), ("dog", 1), ("end", 1)]
+print(sorted(ps))
+print(sorted(ps, reverse=True))
+rs = [(3, "c"), (1, "a"), (2, "b"), (5, "e"), (4, "d")]
+print(sorted(rs))
+rs.sort()
+print(rs)
+rs.sort(reverse=True)
+print(rs)
+# 第一格相同时看第二格（字典序）
+qs = [(1, "b"), (1, "a"), (0, "z"), (1, "c"), (0, "y"), (2, "a")]
+print(sorted(qs))
+print(min(qs), max(qs))

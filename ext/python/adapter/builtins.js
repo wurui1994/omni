@@ -161,24 +161,39 @@ export function sortedOf(xs0, C, desc = false, less = null) {
   const j = h.decl('st_j', INT, int(1));
   const k = h.decl('st_k', INT, int(0));
   const cur = h.decl('st_c', t.elem, { kind: 'index', obj: out, index: int(0) });
+  /* **"还往前挪吗"那一格标记** —— 见下面那段账：比较不许摆进 while 的条件里。 */
+  const go = h.decl('st_g', BOOL, { kind: 'bool', value: true });
   h.pre.push({
     kind: 'while',
     cond: bin('<', j, call1('alen', [out])),
     body: [
       { kind: 'assign', target: cur, value: { kind: 'index', obj: out, index: j } },
       { kind: 'assign', target: k, value: bin('-', j, int(1)) },
+      { kind: 'assign', target: go, value: { kind: 'bool', value: true } },
       {
         kind: 'while',
-        cond: bin('&&', bin('>=', k, int(0)),
-          desc ? lt({ kind: 'index', obj: out, index: k }, cur)
-            : lt(cur, { kind: 'index', obj: out, index: k })),
+        cond: bin('&&', bin('>=', k, int(0)), go),
         body: [
+          /* **比较摆在体里，不摆进条件里**（量出来的，一处会答错的）：元组那一档的
+             "怎么比"要把两边各钉一格临时量（逐格比要读好几遍），而**摆进 while 的条件里
+             那几格 `let` 会被提到 while 外头** —— 于是每转一圈读的还是头一圈那两个值，
+             内层循环该停的时候不停、该挪的时候不挪。症状：五格以上的元组表 `sorted()`
+             出来是乱的（四格以下碰巧对，所以先前没露）。
+             摆在体里那几格 `let` 就落在循环体这一层，每圈重算一遍。 */
           {
-            kind: 'assign',
-            target: { kind: 'index', obj: out, index: bin('+', k, int(1)) },
-            value: { kind: 'index', obj: out, index: k },
+            kind: 'if',
+            cond: desc ? lt({ kind: 'index', obj: out, index: k }, cur)
+              : lt(cur, { kind: 'index', obj: out, index: k }),
+            then: [
+              {
+                kind: 'assign',
+                target: { kind: 'index', obj: out, index: bin('+', k, int(1)) },
+                value: { kind: 'index', obj: out, index: k },
+              },
+              { kind: 'assign', target: k, value: bin('-', k, int(1)) },
+            ],
+            else_: [{ kind: 'assign', target: go, value: { kind: 'bool', value: false } }],
           },
-          { kind: 'assign', target: k, value: bin('-', k, int(1)) },
         ],
       },
       { kind: 'assign', target: { kind: 'index', obj: out, index: bin('+', k, int(1)) }, value: cur },
@@ -468,24 +483,39 @@ export function sortStmts(xs, C, desc = false, less = null) {
   const j = h.decl('so_j', INT, int(1));
   const k = h.decl('so_k', INT, int(0));
   const cur = h.decl('so_c', t.elem, { kind: 'index', obj: xs, index: int(0) });
+  /* **"还往前挪吗"那一格标记** —— 见下面那段账：比较不许摆进 while 的条件里。 */
+  const go = h.decl('so_g', BOOL, { kind: 'bool', value: true });
   h.pre.push({
     kind: 'while',
     cond: bin('<', j, call1('alen', [xs])),
     body: [
       { kind: 'assign', target: cur, value: { kind: 'index', obj: xs, index: j } },
       { kind: 'assign', target: k, value: bin('-', j, int(1)) },
+      { kind: 'assign', target: go, value: { kind: 'bool', value: true } },
       {
         kind: 'while',
-        cond: bin('&&', bin('>=', k, int(0)),
-          desc ? lt({ kind: 'index', obj: xs, index: k }, cur)
-            : lt(cur, { kind: 'index', obj: xs, index: k })),
+        cond: bin('&&', bin('>=', k, int(0)), go),
         body: [
+          /* **比较摆在体里，不摆进条件里**（量出来的，一处会答错的）：元组那一档的
+             "怎么比"要把两边各钉一格临时量（逐格比要读好几遍），而**摆进 while 的条件里
+             那几格 `let` 会被提到 while 外头** —— 于是每转一圈读的还是头一圈那两个值，
+             内层循环该停的时候不停、该挪的时候不挪。症状：五格以上的元组表 `sorted()`
+             出来是乱的（四格以下碰巧对，所以先前没露）。
+             摆在体里那几格 `let` 就落在循环体这一层，每圈重算一遍。 */
           {
-            kind: 'assign',
-            target: { kind: 'index', obj: xs, index: bin('+', k, int(1)) },
-            value: { kind: 'index', obj: xs, index: k },
+            kind: 'if',
+            cond: desc ? lt({ kind: 'index', obj: xs, index: k }, cur)
+              : lt(cur, { kind: 'index', obj: xs, index: k }),
+            then: [
+              {
+                kind: 'assign',
+                target: { kind: 'index', obj: xs, index: bin('+', k, int(1)) },
+                value: { kind: 'index', obj: xs, index: k },
+              },
+              { kind: 'assign', target: k, value: bin('-', k, int(1)) },
+            ],
+            else_: [{ kind: 'assign', target: go, value: { kind: 'bool', value: false } }],
           },
-          { kind: 'assign', target: k, value: bin('-', k, int(1)) },
         ],
       },
       { kind: 'assign', target: { kind: 'index', obj: xs, index: bin('+', k, int(1)) }, value: cur },
