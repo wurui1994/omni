@@ -647,8 +647,10 @@ function texParams(fmt, tar = 0) {
     : (wrap === 0 ? gl.REPEAT : gl.CLAMP_TO_EDGE);
   gl.texParameteri(t, gl.TEXTURE_WRAP_S, w);
   gl.texParameteri(t, gl.TEXTURE_WRAP_T, w);
-  /* 3D 那一档还有第三根轴（`ken/texture3d.pss` 按 >1 的 z 采样）。 */
-  if (t === gl.TEXTURE_3D) gl.texParameteri(t, gl.TEXTURE_WRAP_R, w);
+  /* 3D 与立方体那两档还有第三根轴（`ken/texture3d.pss` 按 >1 的 z 采样）。 */
+  if (t === gl.TEXTURE_3D || t === gl.TEXTURE_CUBE_MAP) {
+    gl.texParameteri(t, gl.TEXTURE_WRAP_R, w);
+  }
   return mip;
 }
 
@@ -857,15 +859,42 @@ function texFile(slot, name, fmt) {
     const g2 = D.gl;
     if (g2 === null) return;
     FT.st.set(key, 'ok');
-    /* **一竖条 6 格那一档是立方体贴图**（`polydraw.c:1338`）：WebGL2 这边要
-       `TEXTURE_CUBE_MAP` + `samplerCube`，还没接 —— 记一笔账，图按 2D 贴上去。 */
-    if (im.naturalWidth > 0 && im.naturalWidth * 6 === im.naturalHeight) {
-      miss(`glsettexfile:cube/${name}`);
+    /* **一竖条 6 格那一档是立方体贴图**（`polydraw.c:1338`）：口径照本机那一档
+       （`omni_ev_gl_texfile`）—— 哪一格是哪一面照原版那张 `cubemapindex`
+       （`polydraw.c:1093` = `{1,3,4,5,0,2}`，**不是顺着来的**）。
+       WebGL 这边没法从图里取子矩形，所以过一格 2D 画布把每一面裁出来再传。 */
+    const cube = im.naturalWidth > 0 && im.naturalWidth * 6 === im.naturalHeight;
+    const tar = cube ? g2.TEXTURE_CUBE_MAP : g2.TEXTURE_2D;
+    /* 头一句占位的白是按 2D 传的，而纹理对象的目标一绑就定死 —— 换目标要换对象。 */
+    if (t.tar !== tar && t.w !== 0) {
+      g2.deleteTexture(t.id);
+      t.id = g2.createTexture();
     }
+    t.tar = tar;
     g2.activeTexture(g2.TEXTURE0 + TX.unit);
-    g2.bindTexture(g2.TEXTURE_2D, t.id);
-    g2.texImage2D(g2.TEXTURE_2D, 0, g2.RGBA, g2.RGBA, g2.UNSIGNED_BYTE, im);
-    if (texParams(fmt)) g2.generateMipmap(g2.TEXTURE_2D);
+    g2.bindTexture(tar, t.id);
+    if (cube) {
+      const faces = [
+        g2.TEXTURE_CUBE_MAP_POSITIVE_X, g2.TEXTURE_CUBE_MAP_NEGATIVE_X,
+        g2.TEXTURE_CUBE_MAP_POSITIVE_Y, g2.TEXTURE_CUBE_MAP_NEGATIVE_Y,
+        g2.TEXTURE_CUBE_MAP_POSITIVE_Z, g2.TEXTURE_CUBE_MAP_NEGATIVE_Z,
+      ];
+      const order = [1, 3, 4, 5, 0, 2];
+      const fw = im.naturalWidth;
+      const fh = im.naturalHeight / 6;
+      const cut = document.createElement('canvas');
+      cut.width = fw;
+      cut.height = fh;
+      const c2 = cut.getContext('2d');
+      for (let f = 0; f < 6; f++) {
+        c2.clearRect(0, 0, fw, fh);
+        c2.drawImage(im, 0, fh * order[f], fw, fh, 0, 0, fw, fh);
+        g2.texImage2D(faces[f], 0, g2.RGBA, g2.RGBA, g2.UNSIGNED_BYTE, cut);
+      }
+    } else {
+      g2.texImage2D(g2.TEXTURE_2D, 0, g2.RGBA, g2.RGBA, g2.UNSIGNED_BYTE, im);
+    }
+    if (texParams(fmt, tar)) g2.generateMipmap(tar);
     t.w = im.naturalWidth;
     t.h = im.naturalHeight;
   };
