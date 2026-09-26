@@ -1156,6 +1156,26 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
     三格都加一道溢出判，而那会让每一格整数算术都多一次分支 —— 还没做，明写在这儿。
     不带 `L` 的字面量现在都是 double（第三节第 4 条），所以真踩到它要**特意写 `L`**。
 
+16. **`names(list)` 还没接**（2026-09-26 试过一次，量清楚了卡在哪儿，回退了）。
+    `for (k in names(tally))` 这一族在真 R 代码里很常见，现在整份退到 libR（答案对）。
+
+    先说不卡在哪儿：**键的次序不是问题**。两条腿的表本来就按**插入序**存
+    （C 那侧 `src/runtime/omni_container.h` 里 `NAME##_keys` 顺着 `keys` 线性走、
+    删过也保序，那段注自己就写着"迭代与 `_keys` 的输出逐字节相同"；JS 那侧是 `Map`
+    本来的次序），与 R 的 `names(list)` 同解。`keys` 这个内建**三条腿都已经有了**
+    （`backend-js/emit.js`、`interp/builtin.js`、`backend-c/emit.js` 各一处）。
+
+    真卡的是**类型**：`keys` 交的是 HIR 的 `list<T>`，而方言的数组是 HIR 的 `arr<T>`，
+    两者在 C 那侧是两套东西 —— `cTypeName` 里 `list<string>` 是逐形状生成的
+    `omni_list_string`，`arr<string>` 是运行时单态好的 `omni_arr_str`。于是给方言加一格
+    `(dkeys d)` 之后，`.sx` 那一层立刻报 `'r_cat_str' 的第 1 个形参是 arr<string>，
+    给的是 list<string>` / `alen 的实参要是数组，这里是 list<string>`。
+
+    要接得先在核心那一层架一座桥（`list<T>` → `arr<T>`），三条腿都要：C 那侧还得在
+    `omni_container.h` 里多一格按键型生成的 `_keys_arr`。那是**核心方言**的一刀，
+    会碰到所有语言（`tests/lower` 165 格、`tests/mir`、`check:self`），所以单独做，
+    不夹在 R 的刀里。
+
 ## 五、另一档：libR（ADR-0046）
 
 上面四节说的是**编译器那一档**：R 的源码 → 我们的 IR → JS / 原生。它快（`bench/r/run.js`
