@@ -378,3 +378,15 @@ PolyDraw 与 EvalDraw 各带一整棵例子树（`polydraw/{examples,ken,tigrou}
 现在的基线（`polydraw/ken/balls.pss`，`omni serve` 的热工人，2026-09-26 量）：
 每趟 `emit js --gfx host` 头一趟 380ms、之后 **130 / 97ms**；过网 **247KB**
 （`--chunk` 80KB）。切开之后该是"入口那一份几 KB + `ev_rt.js`/`omni_rt.js` 命中浏览器缓存"。
+
+`asyUnitModules` 要的 `sections`（照 `link.js` 里的用法记下来，省下一趟翻代码）：
+
+    ids      单元号，**0 是入口**
+    secs     Map<id, 顶层项的 sx 文本[]>   —— 一项一条（`(fn …)` / `(global …)` …）
+    keys     Map<id, {file, imps?}>        —— `nameOf(keys.get(id))` 决定产物名
+    main     入口 `(main …)` 里的那几句
+    skipped? Map<id, {sigs}>               —— 这一趟不降正文、产物留着的那几份
+    extra?   [{name, key, sigs}]           —— 只剩产物、连单元都不存在的那几份
+
+于是 EVAL 这边是 `ids = [0, 1]`：1 是 `ev_rt`（键固定 —— 只跟我们那几份 rt 源码有关，
+所以换脚本它一定命中），0 是脚本。欠一格"按 decl 印 sx"的印法（asy 那侧对应 `u.parts`）。
