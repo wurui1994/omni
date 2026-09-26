@@ -43,3 +43,30 @@ cat(is.null(cfg$zz), is.null(cfg$n), "\n")
 who$city <- "sf"
 cat(who$name, "搬到", who$city, "\n")
 cat(cfg[["n"]] + cfg$tol, "\n")
+
+# **表上的 `names()`**：键那一条摆在影子变量里（`d__ks`，与带名字的向量的 `v__nm` 同一个
+# 办法），每写一格新键就 `apush` 一次 —— 于是次序是**插入序**，与 R 同解。
+# 空表那一格 R 交的是 `NULL`（"没有 names 属性"就是 NULL），所以 `print` 那儿单独印 NULL。
+cat(names(cfg), "\n")
+print(names(cfg))
+cat(length(names(cfg)), "\n")
+for (k in names(cfg)) cat(k, cfg[[k]], "\n")
+cfg[["zz"]] <- 7
+cat(names(cfg), "\n")
+cfg[["zz"]] <- 8
+cat(names(cfg), length(names(cfg)), "\n")
+cat("tol" %in% names(cfg), "zzz" %in% names(cfg), "\n")
+cat(nchar(names(cfg)), "\n")
+cat(rev(names(cfg)), "\n")
+cat(sort(names(cfg), method = "radix"), "\n")
+cat(names(who), "\n")
+tally <- list()
+for (w in c("b", "a", "b", "c", "a")) {
+  if (is.null(tally[[w]])) tally[[w]] <- 0
+  tally[[w]] <- tally[[w]] + 1
+}
+for (k in names(tally)) cat(k, tally[[k]], "\n")
+cat(length(names(tally)), "\n")
+blank <- list()
+cat(length(names(blank)), "\n")
+print(names(blank))

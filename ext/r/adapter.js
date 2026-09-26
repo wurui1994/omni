@@ -656,6 +656,44 @@ const nmVar = (v) => `${v}__nm`;
  */
 const hdVar = (v) => `${v}__hd`;
 /**
+ * **`names(list)` 的"键那一条"影子变量**（`d` 的键在 `d__ks` 里，2026-09-26）。
+ *
+ * 为什么是影子变量而不是方言加一格"列出键"：那一格试过，卡在类型上 ——
+ * 核心里 `keys` 内建交的是 `list<T>`，而方言的数组是 `arr<T>`（C 那侧
+ * `omni_list_string` 对 `omni_arr_str` 是两套东西），要接得先在核心架一座桥，
+ * 那一刀碰所有语言（见 SPEC 第四节第 16 条）。
+ *
+ * 影子变量这条路是**这份 adapter 里已经有的办法**（带名字的向量的 `v__nm`、
+ * `table` 的 `v__hd` 都是它）：每写一格键就往 `d__ks` 里 `apush` 一次（先 `dhas`
+ * 问一声，已经在里头的不重复追加）—— 于是次序就是**插入序**，与 R 的 `names(list)`
+ * 同解（R 那儿键也是按加进去的次序摆的）。
+ *
+ * 只给**真被 `names()` 问过**的那几个名字开影子（`KEYS_VARS`）：没问过的一格都不花。
+ */
+const keysVar = (v) => `${v}__ks`;
+/**
+ * 哪些名字被 `names(<裸符号>)` 问过 —— 发之前先扫一趟整棵树。
+ * 记多了不要紧（多一条 `(arr string)`），记少了才要紧（那时 `names()` 当场报，不静默）。
+ */
+const KEYS_VARS = new Set();
+function collectKeysVars(node) {
+  if (node === null || node === undefined || !isList(node)) return;
+  if (tag(node) === 'call' && isList(kids(node)[0]) && tag(kids(node)[0]) === 'sym'
+      && nameOf(kids(node)[0]) === 'names') {
+    const a0 = argsOf(node)[0];
+    if (a0 !== undefined && a0.value !== null && isList(a0.value) && tag(a0.value) === 'sym') {
+      KEYS_VARS.add(mangle(nameOf(a0.value)));
+    }
+  }
+  for (const k of kids(node)) collectKeysVars(k);
+}
+/** 这个名字要不要那条影子：被 `names()` 问过 + 类型是**键是串**的表（`table` 不算）。 */
+function wantsKeys(nm, t) {
+  if (!KEYS_VARS.has(nm)) return false;
+  if (t === undefined || t === null || t.kind !== 'map' || t.tbl === true) return false;
+  return t.key === undefined || t.key === null || t.key.kind === 'string';
+}
+/**
  * **名字丢得掉的那几格** —— R 自己也丢，所以这一档丢了不差字节。量出来的（`Rscript`，
  * 2026-09-25）：`range` / `unique` / `seq_along` / `as.character` / `paste` 都回没名字的，
  * 而 `sort` / `rev` / `head` / `cumsum` / `abs` / `sqrt` / `round` / `is.na` / `c(v, 4)`
@@ -4117,9 +4155,19 @@ function callOf(x, types, extra, want, stmtPos) {
         }
         const ns = namesExprOf(all[0], types);
         if (ns === null) {
-          throw new Error('r->IR: names() 只在**带名字的向量**上接（`c(a = 1, …)` / `setNames`）'
-            + ' —— 这一格推不出名字来。list 上的 names() 要方言能枚举表里的键，'
-            + '那一格还没有（见 ext/r/SPEC.md 第四节）');
+          /* **表上的 `names()`**：键那一条摆在影子变量里（见 `keysVar`）—— 次序是插入序，
+             与 R 同解。只认"这一格实参是个裸符号"：影子是跟着**名字**走的。 */
+          const t0 = typeOfExpr(all[0], types);
+          if (isList(all[0]) && tag(all[0]) === 'sym'
+              && wantsKeys(mangle(nameOf(all[0])), t0)) {
+            return { kind: 'name', name: keysVar(mangle(nameOf(all[0]))) };
+          }
+          if (t0 !== undefined && t0 !== null && t0.kind === 'map') {
+            throw new Error('r->IR: 表上的 `names()` 只接**一个裸名字**'
+              + '（键那一条影子是跟着名字走的，见 ext/r/SPEC.md 第四节第 16 条）');
+          }
+          throw new Error('r->IR: names() 只在**带名字的向量**与**表**上接'
+            + '（`c(a = 1, …)` / `setNames` / `list` + `d[["k"]] <- v`）—— 这一格推不出名字来');
         }
         return ns;
       }
@@ -5442,6 +5490,32 @@ function callOf(x, types, extra, want, stmtPos) {
 function printValStmt(node, types) {
   const t = typeOfExpr(node, types);
   const wr = (s) => ({ kind: 'builtin-stmt', name: 'write', args: [s] });
+  /**
+   * **`print(names(表))`：空表那一格 R 印的是 `NULL`**（量出来的，2026-09-26）。
+   *
+   * R 里"没有 names 属性"就是 `NULL`，而一张**空**表永远没有 —— 所以照字符向量印
+   * `character(0)` 是差一行字的静默错。这一层没有 `NULL`，可这一格的形状编译期就看得出来
+   * （`names(<一张表>)`），所以零长那一支单独印 `NULL`、非空那一支照字符向量走。
+   * 别处不受影响：`cat(names(d))` 两边都什么都不印、`length(names(d))` 两边都是 0、
+   * `for (k in names(d))` 两边都不转 —— R 的 `NULL` 在那几格上与零长同解。
+   */
+  if (isList(node) && tag(node) === 'call' && isList(kids(node)[0]) && tag(kids(node)[0]) === 'sym'
+      && nameOf(kids(node)[0]) === 'names') {
+    const a0 = argsOf(node)[0];
+    const at = a0 === undefined || a0.value === null ? undefined : typeOfExpr(a0.value, types);
+    if (at !== undefined && at !== null && at.kind === 'map') {
+      const ksE = exprOf(node, types);
+      return {
+        kind: 'if',
+        cond: b('==', call1('alen', ksE), { kind: 'int', value: 0 }),
+        then: [wr({ kind: 'string', value: 'NULL\n' })],
+        else_: [{
+          kind: 'expr-stmt',
+          expr: { kind: 'call', fn: { kind: 'name', name: useFn('r_print_str') }, args: [ksE] },
+        }],
+      };
+    }
+  }
   /* **带名字的向量**：名字一行、值一行，两行共用一个宽（见 `r_print_named`）。 */
   if (isNamedTy(t)) {
     const ns = namesExprOf(node, types);
@@ -5646,6 +5720,30 @@ function catOf(x, types) {
 
 /* ─── 语句 ─────────────────────────────────────────────────────────────── */
 
+/**
+ * 表上写一格：**键那一条影子也跟着长**（见 `keysVar`）。
+ *
+ * 先 `dhas` 问一声 —— R 的 `names` 里一个键只出现一次，而 `d[["k"]] <- v` 既可能是新加
+ * 也可能是改旧的。键要用两遍（问与追加），所以先落进一格 `let`：它可能是带副作用的表达式。
+ */
+function dsetWithKeys(vn, dE, kE, vE) {
+  const kt = fresh('key');
+  const kn = { kind: 'name', name: kt };
+  return {
+    kind: 'block',
+    stmts: [
+      { kind: 'let', name: kt, type: STR, init: kE },
+      {
+        kind: 'if',
+        cond: { kind: 'unop', op: '!', operand: call1('dhas', dE, kn) },
+        then: [{ kind: 'builtin-stmt', name: 'apush', args: [{ kind: 'name', name: keysVar(vn) }, kn] }],
+        else_: null,
+      },
+      { kind: 'builtin-stmt', name: 'dset', args: [dE, kn, vE] },
+    ],
+  };
+}
+
 /** 赋值的左边 → 一条语句（数组/表的下标写落 `aset` / `dset`，标量落 `assign`）。 */
 function assignOf(x, types) {
   const { target, value } = assignParts(x);
@@ -5682,6 +5780,32 @@ function assignOf(x, types) {
       }
       return { kind: 'block', stmts: [asg, ...more] };
     }
+    /**
+     * **表上的 `names()`：键那一条影子跟着重绑**（见 `keysVar`）。
+     *
+     * 右边只认就地写的 `list(…)`：那时键是**字面量**，照写的次序摆进影子就行。
+     * 别的右边（一格函数交出来的表、另一个名字）**当场报** —— 那时影子跟不住，
+     * 而 `names()` 静默少几个键是最难查的错。
+     */
+    if (wantsKeys(name, want ?? globalTys.get(name))) {
+      const isListCall = isList(value) && tag(value) === 'call'
+        && isList(kids(value)[0]) && tag(kids(value)[0]) === 'sym'
+        && nameOf(kids(value)[0]) === 'list';
+      if (!isListCall) {
+        throw new Error(`r->IR: \`${nameOf(target)}\` 被 \`names()\` 问过，而这一句给它赋的`
+          + '不是就地写的 `list(…)` —— 键那一条影子跟不住（见 ext/r/SPEC.md 第四节第 16 条）。'
+          + '这一档的 `names(表)` 只认"本段里 `list(…)` 造、`[[…]] <- ` 写"那种');
+      }
+      const ks = argsOf(value).filter((a) => a.name !== null).map((a) => a.name);
+      const kv = { kind: 'name', name: keysVar(name) };
+      const more = [{
+        kind: 'assign', target: kv, value: call1('anew', tyArg(RSTRV), { kind: 'int', value: 0 }),
+      }];
+      for (const k of ks) {
+        more.push({ kind: 'builtin-stmt', name: 'apush', args: [kv, { kind: 'string', value: k }] });
+      }
+      return { kind: 'block', stmts: [asg, ...more] };
+    }
     return asg;
   }
   /* `names(v) <- ns` —— R 的"替换函数"里我们只接这一格：写的是那个影子变量。 */
@@ -5712,10 +5836,14 @@ function assignOf(x, types) {
     const v3 = ot2.value !== undefined && ot2.value.kind === 'real' && vt3.kind === 'int'
       ? asReal(exprOf(value, types), vt3)
       : exprOf(value, types);
+    const k3 = { kind: 'string', value: dollarKey(target) };
+    if (tag(obj) === 'sym' && wantsKeys(mangle(nameOf(obj)), ot2)) {
+      return dsetWithKeys(mangle(nameOf(obj)), exprOf(obj, types), k3, v3);
+    }
     return {
       kind: 'builtin-stmt',
       name: 'dset',
-      args: [exprOf(obj, types), { kind: 'string', value: dollarKey(target) }, v3],
+      args: [exprOf(obj, types), k3, v3],
     };
   }
   if (t === 'sub1' || t === 'sub2') {
@@ -5732,7 +5860,11 @@ function assignOf(x, types) {
       const v2 = ot.value !== undefined && ot.value.kind === 'real' && vt2.kind === 'int'
         ? asReal(exprOf(value, types), vt2)
         : exprOf(value, types);
-      return { kind: 'builtin-stmt', name: 'dset', args: [o, exprOf(keys[0], types), v2] };
+      const k2 = exprOf(keys[0], types);
+      if (tag(obj) === 'sym' && wantsKeys(mangle(nameOf(obj)), ot)) {
+        return dsetWithKeys(mangle(nameOf(obj)), o, k2, v2);
+      }
+      return { kind: 'builtin-stmt', name: 'dset', args: [o, k2, v2] };
     }
     if (isVecTy(ot)) {
       const kv = exprOf(keys[0], types);
@@ -11136,6 +11268,10 @@ function fnDecl(name, node, types) {
     if (isTblTy(t)) {
       decls.push({ kind: 'let', name: hdVar(n), type: STR, init: { kind: 'string', value: '' } });
     }
+    /* 表上的 `names()`：键那一条也摆在影子变量里（见 `keysVar`）。 */
+    if (wantsKeys(n, t)) {
+      decls.push({ kind: 'let', name: keysVar(n), type: RSTRV, init: zeroInit(RSTRV) });
+    }
   }
   /**
    * **形参里"被写过元素"的那几格，一进来就抄一份**（R 的 copy-on-modify）。
@@ -11286,6 +11422,9 @@ export function rToIR(tree) {
      （`nchar` / `substr` / `sort` …）要靠它当场报，不然那一格是静默答错。 */
   NON_ASCII_VARS.clear();
   collectNonAscii(tree);
+  /* **哪些名字被 `names()` 问过** —— 只给它们开"键那一条"影子（见 `keysVar`）。 */
+  KEYS_VARS.clear();
+  collectKeysVars(tree);
   const items = kids(tree);
   const fns = [];
   const rest = [];
@@ -11333,6 +11472,11 @@ export function rToIR(tree) {
           kind: 'assign', target: { kind: 'name', name: hdVar(n) }, value: { kind: 'string', value: '' },
         });
       }
+      if (wantsKeys(n, t)) {
+        lets.push({
+          kind: 'assign', target: { kind: 'name', name: keysVar(n) }, value: zeroInit(RSTRV),
+        });
+      }
       continue;
     }
     lets.push({ kind: 'let', name: n, type: t, init: zeroInit(t) });
@@ -11344,6 +11488,9 @@ export function rToIR(tree) {
     if (isTblTy(t)) {
       lets.push({ kind: 'let', name: hdVar(n), type: STR, init: { kind: 'string', value: '' } });
     }
+    if (wantsKeys(n, t)) {
+      lets.push({ kind: 'let', name: keysVar(n), type: RSTRV, init: zeroInit(RSTRV) });
+    }
   }
   decls.push({ kind: 'main', body: [...lets, ...stmts] });
   /* 模块级变量的声明摆在最前（函数体与 `main` 都可能提到它们）。 */
@@ -11351,6 +11498,7 @@ export function rToIR(tree) {
     const gt = types.get(n) ?? t;
     if (isTblTy(gt)) decls.unshift({ kind: 'global', name: hdVar(n), type: STR });
     if (isNamedTy(gt) || isNamedStr(gt)) decls.unshift({ kind: 'global', name: nmVar(n), type: RSTRV });
+    if (wantsKeys(n, gt)) decls.unshift({ kind: 'global', name: keysVar(n), type: RSTRV });
     decls.unshift({ kind: 'global', name: n, type: gt });
   }
   /* 生成出来的辅助函数：**先按 `FN_DEPS` 闭包**，再一次发完（次序与"谁先被点到"无关）。

@@ -971,8 +971,9 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
    串里的引号与反斜杠**不转义**（R 印 `"a\"b"`，我们印 `"a"b"`），
    `list` 的 `print` 没接：R 印一张 list 要一行一行 `$名字` 地印，而这一层的表**问不出
    它有哪些键**（方言的字典只有 `dnew` / `dget` / `dset` / `dhas` / `dlen`，没有"列出键"
-   那一格）。`names(m)` 同理 —— 卡在哪儿量清楚了，见本节第 16 条。
-   （**向量**上的 `names` 接了，那一条不靠字典，见第二节。）
+   那一格）。`names(表)` 是另一条路 —— 键那一条摆在影子变量里，见本节第 16 条；
+   那条路只够 `names()` 用（它跟着**名字**走），`print(表)` 还要值那一侧逐格印，没接。
+   （**向量**上的 `names` 接了，那一条也不靠字典，见第二节。）
    **命名实参过一张白名单**（`adapter.js` 的 `NAMED_OK`）：认得的是 `cat` 的 `sep=`、
    `paste` 的 `sep=` / `collapse=`、聚合那一族的 `na.rm=`（`sum` / `prod` / `mean` /
    `max` / `min` / `range` / `var` / `sd` / `any` / `all`）、`head`/`tail` 的 `n=`、
@@ -1165,25 +1166,35 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
     三格都加一道溢出判，而那会让每一格整数算术都多一次分支 —— 还没做，明写在这儿。
     不带 `L` 的字面量现在都是 double（第三节第 4 条），所以真踩到它要**特意写 `L`**。
 
-16. **`names(list)` 还没接**（2026-09-26 试过一次，量清楚了卡在哪儿，回退了）。
-    `for (k in names(tally))` 这一族在真 R 代码里很常见，现在整份退到 libR（答案对）。
+16. **`names(表)` 接了**（2026-09-26，判据 `ext/r/examples/list.R` 末尾）。
+    `for (k in names(tally))` 这一族在真 R 代码里很常见。
 
-    先说不卡在哪儿：**键的次序不是问题**。两条腿的表本来就按**插入序**存
-    （C 那侧 `src/runtime/omni_container.h` 里 `NAME##_keys` 顺着 `keys` 线性走、
-    删过也保序，那段注自己就写着"迭代与 `_keys` 的输出逐字节相同"；JS 那侧是 `Map`
-    本来的次序），与 R 的 `names(list)` 同解。`keys` 这个内建**三条腿都已经有了**
-    （`backend-js/emit.js`、`interp/builtin.js`、`backend-c/emit.js` 各一处）。
+    办法不是给方言加"列出键"那一格，是**影子变量** —— 与带名字的向量的 `v__nm`、
+    `table` 的 `v__hd` 同一条路：`d` 的键那一条摆在 `d__ks`（`(arr string)`）里，每写一格
+    键就先 `dhas` 问一声、不在就 `apush` 一次。于是次序是**插入序**，与 R 同解（R 那儿键
+    也是按加进去的次序摆的）。只给**真被 `names()` 问过**的名字开影子（`KEYS_VARS`，
+    发之前扫一趟整棵树），没问过的一格都不花。
 
-    真卡的是**类型**：`keys` 交的是 HIR 的 `list<T>`，而方言的数组是 HIR 的 `arr<T>`，
-    两者在 C 那侧是两套东西 —— `cTypeName` 里 `list<string>` 是逐形状生成的
-    `omni_list_string`，`arr<string>` 是运行时单态好的 `omni_arr_str`。于是给方言加一格
-    `(dkeys d)` 之后，`.sx` 那一层立刻报 `'r_cat_str' 的第 1 个形参是 arr<string>，
-    给的是 list<string>` / `alen 的实参要是数组，这里是 list<string>`。
+    为什么不走方言：试过一次，卡在**类型**上。核心里 `keys` 这个内建三条腿都已经有了
+    （`backend-js/emit.js` / `interp/builtin.js` / `backend-c/emit.js` 各一处），键的次序也
+    不是问题（C 那侧 `omni_container.h` 的 `NAME##_keys` 顺着 `keys` 线性走、删过也保序，
+    那段注自己写着"迭代与 `_keys` 的输出逐字节相同"；JS 那侧是 `Map` 本来的次序）。
+    真卡的是 `keys` 交的是 HIR 的 `list<T>`，而方言的数组是 `arr<T>` —— C 那侧
+    `omni_list_string` 对 `omni_arr_str` 是两套东西（`cTypeName`）。加过 `(dkeys d)` 之后
+    `.sx` 那层立刻报 `'r_cat_str' 的第 1 个形参是 arr<string>，给的是 list<string>`。
+    要走那条路得先在核心架一座 `list<T>` → `arr<T>` 的桥（C 那侧还要一格按键型生成的
+    `_keys_arr`），那是**核心方言**的一刀、碰所有语言，单独做。
 
-    要接得先在核心那一层架一座桥（`list<T>` → `arr<T>`），三条腿都要：C 那侧还得在
-    `omni_container.h` 里多一格按键型生成的 `_keys_arr`。那是**核心方言**的一刀，
-    会碰到所有语言（`tests/lower` 165 格、`tests/mir`、`check:self`），所以单独做，
-    不夹在 R 的刀里。
+    这一格上**当场报**的两处（影子跟不住就报，不静默少键）：
+    * 给那个名字赋的不是**就地写的 `list(…)`**（一格函数交出来的表、另一个名字）——
+      那时键从哪儿来不知道；
+    * `names(…)` 的括号里不是一个**裸名字**（影子是跟着名字走的）。
+
+    **空表那一格 R 交的是 `NULL`**（"没有 names 属性"就是 NULL，量出来的）：所以
+    `print(names(空表))` 印 `NULL` 而不是 `character(0)` —— 这一层没有 `NULL`，可这一格的
+    形状编译期看得出来，所以 `print` 那儿零长单独印 `NULL`。别处不用管：`cat(names(d))`
+    两边都什么都不印、`length(names(d))` 两边都是 0、`for (k in names(d))` 两边都不转 ——
+    R 的 `NULL` 在那几格上与零长同解。
 
 17. **`ifelse(条件, 串, 串)` 里条件带 `NA` 还是报得太晚**（扫出来的，2026-09-26）。
     R 那儿 `ifelse(c(3, NA, 7) > 5, "大", "小")` 出 `"小" NA "大"` —— 缺失那一格是
