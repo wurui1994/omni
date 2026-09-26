@@ -255,6 +255,8 @@ async function runRequest(root, body, verb, extra, pool) {
      画图落成 `(gfxcall …)`，产物交给**页面**那台 WebGL2 设备去画（见
      `src/studio/eval-live.js` 的头注）。白名单同上：从网上进来的字符串要拼进 argv。 */
   if (typeof body.gfx === 'string' && RUN_GFX.has(body.gfx)) argv.push('--gfx', body.gfx);
+  /* **`--units`：落成一目录按单元产物**（`/api/units` 那一格用它 —— 运行时那一层只编一次）。 */
+  if (body.units === true) argv.push('--units', '--gfx', 'host');
   return runOmni(root, argv, body.timeout ?? 30, pool);
 }
 
@@ -420,6 +422,53 @@ export function startServer(opts) {
         if (m === null) return json(res, 400, { error: '这份表面没有 #rgba 头' });
         return json(res, 200, {
           kind: 'rgba', w: Number(m[1]), h: Number(m[2]), bytes: raw.slice(nl + 1),
+        });
+      }
+      /**
+       * **按单元产物那一目录**（`GET /api/mod/<名字>.js`）—— EVAL 两门在页面上跑的那几份
+       * （`docs/design/omni-serve-studio.md` §9.3）。
+       *
+       * 为什么单开一格而不是走 `/api/file`：这些是**产物**，不在 `TREE_ROOTS` 里；
+       * 而且它们要按 JS 模块发（`content-type` 得对，`import` 才认）。
+       *
+       * 缓存头分两档：`ev_rt_<内容哈希>.js` 这种**名字就是内容**的给 immutable
+       * （浏览器以后一次都不再问）；别的（入口、启动器、`omni_rt.js`）不缓存 ——
+       * 它们每改一行都要换。闸：只认这一个目录、只认 `.js`、名字里不许有斜杠与点点。
+       */
+      if (path.startsWith('/api/mod/')) {
+        const name = path.slice('/api/mod/'.length);
+        if (!/^[A-Za-z0-9_.$-]+\.js$/.test(name) || name.includes('..')) {
+          return json(res, 400, { error: '名字只许是 <单元>.js' });
+        }
+        const abs = join(root, '.omni-cache', 'modules', 'js-eval', name);
+        if (!exists(abs)) return json(res, 404, { error: 'not found' });
+        const immutable = /^ev_rt_[0-9a-f]+\.js$/.test(name);
+        res.writeHead(200, {
+          'content-type': 'text/javascript; charset=utf-8',
+          'cache-control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
+        });
+        res.end(readText(abs));
+        return undefined;
+      }
+      /**
+       * **EVAL 两门：编在服务端、跑在页面上**（`POST /api/units {path|text, lang}`）。
+       *
+       * 跑一趟 `emit js --units`（走热工人），回那一行 JSON 再把路径换成 URL：
+       * 页面拿 `main` 那一条 `import()` 就跑起来了 —— 运行时那两份（`ev_rt_*` 与
+       * `omni_rt.js`）是所有脚本共用的，浏览器按 URL 缓存，于是每跑一趟只有入口那几 KB 是新的。
+       */
+      if (path === '/api/units' && req.method === 'POST') {
+        const body = JSON.parse(await readBody(req));
+        const r = await runRequest(root, { ...body, format: 'js', units: true }, 'emit', 'js', pool);
+        if (r.code !== 0) return json(res, 200, { ...r, main: null });
+        let acc = null;
+        try { acc = JSON.parse((r.stdout ?? '').trim().split('\n').pop()); } catch { acc = null; }
+        if (acc === null) return json(res, 200, { ...r, main: null, error: '没拿到那一行账' });
+        const url2 = (p) => `/api/mod/${p.slice(p.lastIndexOf('/') + 1)}`;
+        return json(res, 200, {
+          stdout: '', stderr: r.stderr ?? '', code: 0, via: r.via,
+          main: url2(acc.main), made: acc.made, kept: acc.kept,
+          names: (acc.names ?? []).map((n) => `/api/mod/${n}.js`),
         });
       }
       if (path === '/api/run' && req.method === 'POST') {
