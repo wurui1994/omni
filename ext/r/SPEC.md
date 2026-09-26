@@ -1038,11 +1038,28 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
 所以那一档走的是**真的 libR**，由我们自己从 r-source 的 C 编出来：
 
 ```
-node ext/r/build-libR.js      # 405 条边：libR.dylib + R.bin + 12 个基础包 + Meta + 验一趟
+node ext/r/build-libR.js      # 403 条边：libR.dylib + R.bin + 11 个基础包 + Meta + 转 lazyload + 验一趟
 node ext/r/install-cran.js    # 从 CRAN 下 tarball、按拓扑序装（默认那一串是 ggplot2 的闭包）
 node ext/r/install-cran.js Rcpp
-node tests/r/libr.js          # 这一档的尺子：八格都真跑
+node tests/r/libr.js          # 这一档的尺子：九格都真跑
 ```
+
+**base 那十一个包的 R 代码要转成 lazyload 库**（`rt/lazyload.js`，2026-09-26 补的）。
+`loadNamespace()` 头一件事是 `sys.source(library/<pkg>/R/<pkg>)`
+（`base/R/namespace.R` 第 567 行）—— 那一份放源码就**每趟都重新求值一遍**。R 正经的构建
+不会停在这儿：`R/<pkg>` 会被换成 `share/R/nspackloader.R` 那个十行的桩，代码进 `<pkg>.rdb`。
+
+少了这一步，坏的是**退档那一档的 stdout**：`methods` 的 `.onLoad` 在源码里是引导版
+`...onLoad`（`methods/R/zzz.R` 第 32 行 `cat("initializing class and method definitions ...")`），
+它本该"装好之后只跑一次"、跑完把 `.onLoad` 换成安静的那版并存进 .rdb —— 而源码形态下那次
+保存**没人读**，于是每一趟都走引导版、**每份退了档的程序 stdout 都多一行**。退出码是 0、
+要的那几行也都在，所以 `libr.js` 前八格一格都发现不了 —— 第 9 格（逐字节对 `Rscript`）
+就是为它立的。顺带：`library(stats); library(grid)` 从 **1.51s 降到 0.59s**（量出来的）。
+
+三格特例都照 R 自己的 makefile（账在 `rt/lazyload.js` 文件头）：`tools` 不能用
+`tools:::makeLazyLoading`（那要先加载 tools 的命名空间，而 `code2LazyLoadDB` 的第一句就是
+"不许已经加载"）、`methods` 要**整整加载一趟**（`partial=TRUE` 在跑 `.onLoad` 之前就返回了）、
+`stats4` 要带着 `methods,graphics,stats` 加载。
 
 **base 装成源码那一格少掉的那一半要补回来。** R 正经的构建里 `library/base/R/base` 装的是
 `baseloader.R`（懒加载那条路），我们装的是 `all.R`（`mkRbase` 那条），于是 `baseloader.R`

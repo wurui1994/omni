@@ -502,6 +502,24 @@ b.rule('sysdata', {
 });
 b.build(SYSDATA, 'sysdata', [META]);
 
+/**
+ * **R 代码转 lazyload 库**（账在 `rt/lazyload.js` 文件头：为什么必须有它、三格特例）。
+ * 一句话：`R/<pkg>` 放源码的话每趟都重新求值一遍，而 `methods` 那一版引导代码会往
+ * **stdout** 印一行 —— libR 是编译器那一档的退路，它的 stdout 就是用户要的输出。
+ *
+ * 这一步**改写** `library/<pkg>/R/<pkg>`（换成十行的桩），而那一份正是 `mkpkgR` 的产物、
+ * 也是 `META` 的一格输入。这一版的图每趟都整个重来（`Rversion.h` 那一格一动全动），
+ * 所以看不出来；真做成增量的那天，`META` 会因为"输入比我新"再跑一遍、把这一条链带上 ——
+ * 无害（这一步认得出桩、跳过），只是白花几秒。
+ */
+const LAZY = join(OUT, 'lazyload.ok');
+b.rule('lazyload', {
+  command: `node ${join(HERE, 'rt/lazyload.js')} --src ${RSRC} --home ${HOME} `
+    + `--pkgs ${PKGS.join(',')} > ${join(OUT, 'lazyload.txt')} 2>&1 && date > $out`,
+  description: 'R 代码 -> lazyload 库（桩 + .rdb）',
+});
+b.build(LAZY, 'lazyload', [SYSDATA], { implicit: [join(HERE, 'rt/lazyload.js')] });
+
 const STAMP = join(OUT, 'smoke.ok');
 const SMOKE_LOG = join(OUT, 'smoke.txt');
 b.rule('smoke', {
@@ -512,7 +530,7 @@ b.rule('smoke', {
     + `> ${SMOKE_LOG} 2>&1 && grep -qx "55 1.290994 1.05 3 " ${SMOKE_LOG} && date > $out`,
   description: '起一趟我们自己的 R（stats / grid / methods / LAPACK），对答案',
 });
-b.build(STAMP, 'smoke', [SYSDATA]);
+b.build(STAMP, 'smoke', [LAZY]);
 
 b.default(STAMP);
 b.run(process.argv.slice(2));

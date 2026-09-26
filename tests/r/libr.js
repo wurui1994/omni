@@ -10,6 +10,7 @@
 //   6. Rcpp：`cppFunction` 现场编一段 C++ 并算对（走 `R CMD SHLIB` + 我们生成的 Makeconf）
 //   7. quartz：R 自己那份 Cocoa 设备出一张 PNG（`capabilities("aqua")` 为真）
 //   8. `omni run x.R` 一句换档，而且 R 自己的编译器全关
+//   9. **换档之后 stdout 与 `Rscript` 逐字节相同**（"退了档也要答对"的真判据）
 //
 // **每一格都还判"输出里一行 Error 都没有"** —— 出过那种"图照样出得来、但 stderr 里四行
 // Error"的情形（见第 2 格的账），只看退出码与要的那一行是发现不了的。
@@ -52,8 +53,10 @@ const run = (code, ms = 300000) => {
   return { out: `${r.stdout ?? ''}${r.stderr ?? ''}`, code: r.status ?? 1 };
 };
 /** 判据统一成"输出里有一行正好是这个"。
-    为什么不比"最后一行"：S4 初始化会往**前面**印一行，而 `geom_smooth()` 会往**后面**
-    印一行 `using formula = 'y ~ x'` —— 两头都有噪声，所以判"有这一行"，不判位置。
+    为什么不比"最后一行"：`geom_smooth()` 会往**后面**印一行 `using formula = 'y ~ x'`，
+    所以判"有这一行"，不判位置。（从前前面还有一行 S4 初始化的噪声 —— 那是
+    `methods` 的 R 代码没转成 lazyload 库，2026-09-26 补上了那一步，见
+    `ext/r/rt/lazyload.js`；第 9 格就是为它守着。）
 
     **顺带判"一行 Error 都没有"**：`library(ggplot2)` 出过那种"图照样出得来、但 stderr
     里四行 Error"的情形（`cli` 的 `.onLoad` 挂了，见 base 那一格的账）。退出码是 0、
@@ -146,6 +149,42 @@ else if (badRun.length > 0) no('omni run/换过去之后一行 Error 都没有',
 else if (!out.split('\n').map((l) => l.trim()).includes('JIT 0 call {')) {
   no('omni run/R 自己的编译器一格都不用', `想要有一行是 "JIT 0 call {"，得到：${out.trim()}`);
 } else ok('omni run/一句换到 libR 那一档，R 的编译器全关', 'JIT 0 call {');
+
+/**
+ * **换档之后 stdout 与 `Rscript` 逐字节相同** —— 这一格是"退了档也要答对"的真判据。
+ *
+ * 为什么单列一格：`omni run` 接不住时退到 libR，而 libR 的 stdout **就是用户要的输出**。
+ * 出过这样的事（量出来的，2026-09-26）：`library/methods/R/methods` 装的是源码而不是
+ * lazyload 的桩，于是每一趟都走 `methods` 那一版引导 `.onLoad`，它
+ * `cat("initializing class and method definitions ...")` —— **每份退了档的程序 stdout 都
+ * 多一行**。退出码是 0、要的那几行也都在，上面那几格一格都发现不了。所以这儿比字节。
+ *
+ * 用的程序必须是编译器那一档**接不住**的（`as.numeric(串)` 与 S4），不然就走不到 libR。
+ */
+const RSCRIPT_OK = spawnSync('which', ['Rscript'], { encoding: 'utf8' }).status === 0;
+if (!RSCRIPT_OK) {
+  skip('换档之后对 Rscript 逐字节（本机没有 Rscript）');
+} else {
+  const f = join(ART, 'test-fallback.R');
+  writeFileSync(f, 'cat(as.numeric("3.14") + 1, "\\n")\n'
+    + 'setClass("Q", representation(n = "numeric"))\n'
+    + 'q <- new("Q", n = 2)\n'
+    + 'cat(q@n * 3, "\\n")\n'
+    + 'print(summary(c(1, 2, 3, 4)))\n');
+  const mine = spawnSync(process.execPath, [join(ROOT, 'src/cli.js'), 'run', f], {
+    encoding: 'utf8', timeout: 300000, cwd: ROOT,
+  });
+  const theirs = spawnSync('Rscript', ['--vanilla', f], { encoding: 'utf8', timeout: 300000, cwd: ROOT });
+  rmSync(f, { force: true });
+  const got = mine.stdout ?? '';
+  const exp = theirs.stdout ?? '';
+  if (theirs.status !== 0) no('换档之后对 Rscript 逐字节', `Rscript 自己就没跑过：${theirs.stderr}`);
+  else if (!(mine.stderr ?? '').includes('换 libR 那一档')) {
+    no('换档之后对 Rscript 逐字节', `这份程序没换档（编译器那一档接住了？）：${mine.stderr}`);
+  } else if (got !== exp) {
+    no('换档之后对 Rscript 逐字节', `stdout 不一样\n       Rscript: ${JSON.stringify(exp)}\n       omni   : ${JSON.stringify(got)}`);
+  } else ok('换档之后 stdout 与 Rscript 逐字节相同', `${exp.length} 字节`);
+}
 
 process.stdout.write(`\n${pass} passed, ${fail} failed（libR：我们自己编的那个 R）\n`);
 process.exit(fail === 0 ? 0 : 1);
