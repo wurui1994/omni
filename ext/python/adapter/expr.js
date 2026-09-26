@@ -320,9 +320,33 @@ export function tyOfCst(x, C) {
       const v = unify(items.map((it) => tyOfCst(kids(it)[1], C)));
       return k === null || v === null ? null : dictOf(v, k);
     }
-    case 'listcomp': {
-      const e = tyOfCst(kids(x)[0], C);
-      return e === null ? null : arrOf(e);
+    /* 推导式：目标先绑上（不然元素表达式里那个 `x` 问不出类型），问完指回去。
+       与 `compOf` 同一条：**自己一层作用域**（理由见那儿）。 */
+    case 'listcomp': case 'genexp': case 'dictcomp': {
+      const nvals = tag(x) === 'dictcomp' ? 2 : 1;
+      const ks = kids(x);
+      let gs;
+      try {
+        gs = compGroups(ks.slice(nvals));
+      } catch {
+        return null;
+      }
+      C.push();
+      let back;
+      try {
+        back = compBind(gs, C);
+      } catch {
+        C.pop();
+        return null;
+      }
+      try {
+        const vs = ks.slice(0, nvals).map((v) => tyOfCst(v, C));
+        if (vs.some((v) => v === null)) return null;
+        return nvals === 2 ? dictOf(vs[1], vs[0]) : arrOf(vs[0]);
+      } finally {
+        back();
+        C.pop();
+      }
     }
     case 'index': {
       const base = tyOfCst(kids(x)[0], C);
@@ -696,6 +720,11 @@ export function exprOf(x, C) {
       };
     }
     case 'list': return listOf(kids(x), C);
+    /* 推导式那三格 —— 现场发一趟循环（见 `compOf`）。生成器表达式当"立刻算完的一张表"。 */
+    case 'listcomp': case 'genexp': return compOf(x, C, 'list');
+    case 'dictcomp': return compOf(x, C, 'dict');
+    case 'setcomp':
+      throw new Error('python->IR: 集合推导式还没接（方言里 `set` 那一族没开口）');
     case 'dict': return dictLit(x, C);
     case 'index': return indexOf(x, C);
     /* `p.x` —— 记录的字段。 */
@@ -995,6 +1024,320 @@ function binOf(x, C) {
   return { kind: 'binop', op: o, left: l, right: r };
 }
 
+/* ─── 推导式 ──────────────────────────────────────────────────────────────── */
+
+/**
+ * 推导式的从句拆成几组：每一格 `for` 带上**跟在它后头**的那几个 `if`。
+ * `[e for x in xs if p for y in ys if q]` → `[{x, xs, [p]}, {y, ys, [q]}]`。
+ */
+function compGroups(clauses) {
+  if (clauses.length === 0 || tag(clauses[0]) !== 'for') {
+    throw new Error('python->IR: 推导式的第一条从句要是 `for`');
+  }
+  const gs = [];
+  for (const c of clauses) {
+    if (tag(c) === 'afor') throw new Error('python->IR: 推导式里的 `async for` 还没接');
+    if (tag(c) === 'for') gs.push({ target: kids(c)[0], iter: kids(c)[1], ifs: [] });
+    else gs[gs.length - 1].ifs.push(kids(c)[0]);
+  }
+  return gs;
+}
+
+/** 推导式里一格可迭代交出来的元素类型（`range(…)` 出 int，表出元素，串出串，字典出键）。 */
+function compElem(it, C) {
+  if (tag(it) === 'call' && tag(kids(it)[0]) === 'n'
+    && String(nameOf(kids(it)[0])) === 'range') return INT;
+  const t = tyOfCst(it, C);
+  if (t === null) return null;
+  if (t.kind === 'arr') return t.elem;
+  if (t.kind === 'string') return STR;
+  if (t.kind === 'map') return t.key;
+  return null;
+}
+
+/**
+ * 推导式里 `for a, b in …` 那一格：只认 `enumerate(xs[, start])` / `zip(a, b)` /
+ * `d.items()` 三种 —— 与 `for` 语句那一侧（`index.js` 的 `pairIter`）同一份名单。
+ *
+ * 为什么只认这三种：python 里它们交的是**一串元组**，而这一层没有元组那一档；
+ * 可这三种落下去都只是"一趟下标循环"，所以不必先有元组。
+ */
+function compPair(it, C) {
+  if (tag(it) !== 'call') return null;
+  const callee = kids(it)[0];
+  const as = kids(part(it, 'args') ?? { kind: 'list', items: [] });
+  if (tag(callee) === 'attr') {
+    if (String(nameOf(kids(callee)[1])) !== 'items' || as.length !== 0) return null;
+    const dt = tyOfCst(kids(callee)[0], C);
+    if (dt === null || dt.kind !== 'map') return null;
+    return { fn: 'items', args: [kids(callee)[0]], t0: dt.key, t1: dt.value };
+  }
+  if (tag(callee) !== 'n') return null;
+  const fn = String(nameOf(callee));
+  if (fn === 'enumerate' && (as.length === 1 || as.length === 2)) {
+    const et = compElem(as[0], C);
+    return et === null ? null : { fn, args: as, t0: INT, t1: et };
+  }
+  if (fn === 'zip' && as.length === 2) {
+    const a = compElem(as[0], C);
+    const b = compElem(as[1], C);
+    return a === null || b === null ? null : { fn, args: as, t0: a, t1: b };
+  }
+  return null;
+}
+
+/**
+ * 每一格目标**改名**成一格新名并登记类型；回的是"全指回去"那个函数。
+ *
+ * 为什么要改名：python 3 里推导式有自己的作用域 —— 里头那个 `x` 与外头同名的那一格
+ * 不是一件事，也不漏出去。改名之后这两条自然都对，`[x for x in xs]` 写在一个已经有
+ * `x` 的函数里也不会撞（那时同名的两格会被合成 dyn，是个真会答错的地方）。
+ *
+ * 次序要紧：后一格 `for` 的可迭代可能用到前一格的目标（`for row in grid for c in row`），
+ * 所以是"绑一格、再问下一格的类型"。
+ */
+function compBind(gs, C) {
+  const undo = [];
+  const back = () => { for (let i = undo.length - 1; i >= 0; i -= 1) undo[i](); };
+  const one = (tok, t) => {
+    const nm = C.fresh('cp_');
+    undo.push(C.alias(String(nameOf(tok)), nm));
+    C.bind(nm, t);
+    return nm;
+  };
+  try {
+    for (const g of gs) {
+      if (tag(g.target) === 'tuple') {
+        const ts = kids(g.target);
+        if (ts.length !== 2 || ts.some((t) => tag(t) !== 'n')) {
+          throw new Error('python->IR: 推导式的目标收一格名字或**两格名字**'
+            + '（`for a, b in enumerate(xs) / zip(a, b) / d.items()`）');
+        }
+        const p = compPair(g.iter, C);
+        if (p === null) {
+          throw new Error('python->IR: 推导式里 `for a, b in …` 只认 '
+            + '`enumerate(xs)` / `zip(a, b)` / `d.items()` 三种');
+        }
+        g.pair = p;
+        g.elemT = p.t0;
+        g.elemT1 = p.t1;
+        g.name = one(ts[0], p.t0);
+        g.name1 = one(ts[1], p.t1);
+        continue;
+      }
+      if (tag(g.target) !== 'n') {
+        throw new Error(`python->IR: 推导式的目标是 \`${tag(g.target)}\` —— 拆包还没接`);
+      }
+      const py = String(nameOf(g.target));
+      const et = compElem(g.iter, C);
+      if (et === null) {
+        throw new Error(`python->IR: 推导式里 \`for ${py} in …\` 的可迭代推不出元素类型`);
+      }
+      g.elemT = et;
+      g.name = one(g.target, et);
+    }
+  } catch (e) {
+    back();
+    throw e;
+  }
+  return back;
+}
+
+/** 推导式里那一格可迭代 —— `range(…)` 当值用没接，所以在这儿单拦一手。 */
+function compIter(it, C) {
+  if (tag(it) === 'call' && tag(kids(it)[0]) === 'n'
+    && String(nameOf(kids(it)[0])) === 'range') return rangeListOf(it, C);
+  return exprOf(it, C);
+}
+
+/**
+ * 一格 `for` 从句落成一趟下标循环，`body` 摆在体里。
+ *
+ * 可迭代先落一格临时量（python 只算一次）。**那一格 `let` 摆在语句里而不是提到函数头上**：
+ * 嵌套的时候里层那一格的初值用到外层的目标（`for c in row`），提出去就读到还没赋的值。
+ * 字典先转键表（`dkeys`）—— 与 `for k in d` 同一条。
+ */
+function compLoop(g, body, C) {
+  if (g.pair !== undefined) return compPairLoop(g, body, C);
+  const it = compIter(g.iter, C);
+  const t0 = ty(it, C);
+  const init = t0.kind === 'map' ? { kind: 'builtin', name: 'dkeys', args: [it] } : it;
+  const st = t0.kind === 'map' ? arrOf(t0.key) : t0;
+  const src = C.fresh('cp_src');
+  const i = C.fresh('cp_i');
+  C.bind(src, st);
+  C.bind(i, INT);
+  const sv = { kind: 'name', name: src };
+  const iv = { kind: 'name', name: i };
+  const at = st.kind === 'string'
+    ? { kind: 'builtin', name: 'ssub', args: [sv, iv, { kind: 'int', value: 1 }] }
+    : { kind: 'index', obj: sv, index: iv };
+  return [
+    { kind: 'let', name: g.name, type: g.elemT, init: null },
+    { kind: 'let', name: src, type: st, init },
+    {
+      kind: 'for',
+      init: { kind: 'let', name: i, type: INT, init: { kind: 'int', value: 0 } },
+      cond: { kind: 'binop', op: '<', left: iv, right: lenOf(sv, C) },
+      post: {
+        kind: 'assign', target: iv,
+        value: { kind: 'binop', op: '+', left: iv, right: { kind: 'int', value: 1 } },
+      },
+      body: [{ kind: 'assign', target: { kind: 'name', name: g.name }, value: at }, ...body],
+    },
+  ];
+}
+
+/**
+ * `for a, b in enumerate(xs) / zip(a, b) / d.items()` 那一格 —— 同样是一趟下标循环，
+ * 体开头把两格目标各算一次。与 `index.js` 的 `pairFor` 同一条口径：
+ * `zip` 走到短的那一张为止，`enumerate(xs, start)` 的第一格是 `下标 + start`。
+ */
+function compPairLoop(g, body, C) {
+  const p = g.pair;
+  const i = C.fresh('cp_i');
+  C.bind(i, INT);
+  const iv = { kind: 'name', name: i };
+  const pre = [
+    { kind: 'let', name: g.name, type: g.elemT, init: null },
+    { kind: 'let', name: g.name1, type: g.elemT1, init: null },
+  ];
+  /** 一格可迭代落成临时量（只算一次），回 `{v, t}`。 */
+  const keep = (tok, prefix) => {
+    const e = compIter(tok, C);
+    const t = ty(e, C);
+    const n = C.fresh(prefix);
+    C.bind(n, t);
+    pre.push({ kind: 'let', name: n, type: t, init: e });
+    return { v: { kind: 'name', name: n }, t };
+  };
+  const at = (s) => (s.t.kind === 'string'
+    ? { kind: 'builtin', name: 'ssub', args: [s.v, iv, { kind: 'int', value: 1 }] }
+    : { kind: 'index', obj: s.v, index: iv });
+  let cond;
+  let first;
+  let second;
+  if (p.fn === 'enumerate') {
+    const s = keep(p.args[0], 'cp_src');
+    const start = p.args.length === 2 ? exprOf(p.args[1], C) : { kind: 'int', value: 0 };
+    cond = { kind: 'binop', op: '<', left: iv, right: lenOf(s.v, C) };
+    first = start.kind === 'int' && Number(start.value) === 0
+      ? iv
+      : { kind: 'binop', op: '+', left: iv, right: start };
+    second = at(s);
+  } else if (p.fn === 'zip') {
+    const a = keep(p.args[0], 'cp_za');
+    const b = keep(p.args[1], 'cp_zb');
+    const la = lenOf(a.v, C);
+    const lb = lenOf(b.v, C);
+    cond = {
+      kind: 'binop', op: '<', left: iv,
+      right: {
+        kind: 'ternary', type: INT,
+        cond: { kind: 'binop', op: '<', left: la, right: lb }, then: la, else_: lb,
+      },
+    };
+    first = at(a);
+    second = at(b);
+  } else {
+    const d = keep(p.args[0], 'cp_d');
+    const ksn = C.fresh('cp_ks');
+    const kt = arrOf(p.t0);
+    C.bind(ksn, kt);
+    pre.push({
+      kind: 'let', name: ksn, type: kt,
+      init: { kind: 'builtin', name: 'dkeys', args: [d.v] },
+    });
+    const ksv = { kind: 'name', name: ksn };
+    cond = {
+      kind: 'binop', op: '<', left: iv,
+      right: { kind: 'builtin', name: 'alen', args: [ksv] },
+    };
+    first = { kind: 'index', obj: ksv, index: iv };
+    second = { kind: 'builtin', name: 'dget', args: [d.v, first] };
+  }
+  return [...pre, {
+    kind: 'for',
+    init: { kind: 'let', name: i, type: INT, init: { kind: 'int', value: 0 } },
+    cond,
+    post: {
+      kind: 'assign', target: iv,
+      value: { kind: 'binop', op: '+', left: iv, right: { kind: 'int', value: 1 } },
+    },
+    body: [
+      { kind: 'assign', target: { kind: 'name', name: g.name }, value: first },
+      { kind: 'assign', target: { kind: 'name', name: g.name1 }, value: second },
+      ...body,
+    ],
+  }];
+}
+
+/**
+ * `[e for x in xs if p]`（listcomp）/ `(e for x in xs)`（genexp）/ `{k: v for …}`（dictcomp）
+ * —— **现场发一趟循环**，方言一格新算子都不加（`anew`/`apush`/`dnew`/`dset` 就够）。
+ * 与 `builtins.js` 里那几格同一条办法。
+ *
+ * **明说的不足**：生成器表达式当成"立刻算完的一张表"（python 是懒的）。差别只在两处
+ * 露头 —— 无穷的生成器（我们会挂住）与副作用的次序；`sum(x * x for x in xs)` 这类
+ * 用法两边一样。`[*i for i in xs]`（PEP 798）与集合推导式没接。
+ */
+function compOf(x, C, kind) {
+  const nvals = kind === 'dict' ? 2 : 1;
+  const ks = kids(x);
+  for (const v of ks.slice(0, nvals)) {
+    if (tag(v) === 'star' || tag(v) === 'starstar') {
+      throw new Error('python->IR: 推导式的元素位上的 `*` / `**` 展开还没接');
+    }
+  }
+  const gs = compGroups(ks.slice(nvals));
+  const on = C.fresh(kind === 'dict' ? 'cp_dout' : 'cp_lout');
+  const out = { kind: 'name', name: on };
+  let outT;
+  let body;
+  /* **推导式自己一层作用域**。不单开一层的症状（量出来的）：模块级那张表
+     `C.globals` 是按 **python 的名字**存的（`lookup` 的兜底那一句用的是原名），
+     而改名之后循环变量的名字只在 `ref` 里换了 —— 于是 `ys = [x * 2 for x in xs]`
+     写在模块级时 `x` 查不到，整条推导式的类型答 null，`ys` 那格全局就没声明。 */
+  C.push();
+  const back = compBind(gs, C);
+  try {
+    /* 元素表达式**只建一次**，摆到最里头那一层的体里（它自己的 `let` 跟着进那一层的
+       语句槽 —— `lowerStmt` 给每条语句各开一格槽，所以不会被提到循环外头去）。 */
+    const vals = ks.slice(0, nvals).map((v) => exprOf(v, C));
+    outT = kind === 'dict'
+      ? dictOf(ty(vals[1], C), ty(vals[0], C))
+      : arrOf(ty(vals[0], C));
+    body = kind === 'dict'
+      ? [{ kind: 'builtin-stmt', name: 'dset', args: [out, vals[0], vals[1]] }]
+      : [{ kind: 'builtin-stmt', name: 'apush', args: [out, vals[0]] }];
+    /* 从里往外包：那一格 `for` 的几个 `if` 包在它的体里头。 */
+    for (let gi = gs.length - 1; gi >= 0; gi -= 1) {
+      for (let j = gs[gi].ifs.length - 1; j >= 0; j -= 1) {
+        body = [{ kind: 'if', cond: condOf(gs[gi].ifs[j], C), then: body, else_: null }];
+      }
+      body = compLoop(gs[gi], body, C);
+    }
+  } finally {
+    back();
+    C.pop();
+  }
+  /* 交出来那一格要绑在**外层**：调用方（`writeTo` 那一族）接着还要问它的类型。 */
+  C.bind(on, outT);
+  return {
+    kind: 'block-expr',
+    stmts: [
+      {
+        kind: 'let', name: on, type: outT,
+        init: kind === 'dict'
+          ? { kind: 'builtin', name: 'dnew', args: [tyArg(outT)] }
+          : { kind: 'builtin', name: 'anew', args: [tyArg(outT), { kind: 'int', value: 0 }] },
+      },
+      ...body,
+    ],
+    value: out,
+  };
+}
+
 /**
  * `[a, b, c]` —— 方言里"造"与"填"是两件事，所以落成临时量 + 逐格 aset。
  *
@@ -1245,8 +1588,8 @@ export function callOf(x, C) {
   const [fn, argsTok] = kids(x);
   const argToks = argsTok === undefined ? [] : kids(argsTok);
   for (const a of argToks) {
-    if (['kw', 'star', 'starstar', 'genexp'].includes(tag(a))) {
-      throw new Error(`python->IR: 实参里的 \`${tag(a)}\` 还没接（命名实参 / 展开 / 生成器）`);
+    if (['kw', 'star', 'starstar'].includes(tag(a))) {
+      throw new Error(`python->IR: 实参里的 \`${tag(a)}\` 还没接（命名实参 / 展开）`);
     }
   }
   /* `list(range(…))` —— **要在算实参之前拦**（`range(…)` 当值用没接，算它就报了）。

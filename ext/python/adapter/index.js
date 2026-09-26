@@ -306,6 +306,18 @@ function makeCtx() {
       }
       return names.get(n);
     },
+    /**
+     * **推导式那一层的改名**：python 3 里推导式有自己的作用域 —— `[x for x in xs]`
+     * 里那个 `x` 与外头同名的那一格不是一件事，而且它**不漏到外头**。
+     *
+     * `ref` 是一张按整份模块的名字表（不分层），所以这儿的办法是把那个名字临时指到
+     * 一格新名上，推导式发完再指回去。回的是"指回去"那个函数。
+     */
+    alias: (n, to) => {
+      const had = names.has(n) ? names.get(n) : null;
+      names.set(n, to);
+      return () => { if (had === null) names.delete(n); else names.set(n, had); };
+    },
     push: () => { scopes.push(new Map()); gdecls.push(new Set()); },
     pop: () => { scopes.pop(); gdecls.pop(); },
     /** `global x` 说过的那几个名字（那时的赋值是写模块级那一格，不是造一格新的局部）。 */
