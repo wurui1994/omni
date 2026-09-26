@@ -1004,7 +1004,14 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
    `numeric(n)` 那一族的 `length=`、`sort` 与 `order` 的 `decreasing=`、
    找与换那一族的 `fixed=` / `value=`。
 
-   这两格是 2026-09-26 补的，都是扫一排单行量出来的：
+   这三格是 2026-09-26 补的，都是扫一排单行量出来的：
+   * **`substring(s, first, last)` 的起止可以是向量** —— R 把 `x` / `first` / `last`
+     三条**一起回收**，出来的长度是三者里最长的那个（量出来
+     `substring("abcdef", 1:3, 3:5)` 是 `abc bcd cde`、`substring("abcdef", 2, 3:5)` 是
+     `bc bcd bcde`）。只接 `x` 是**一格串**那一档。截断与"起点比终点大就出空串"那两条
+     不在这儿重写 —— 每一格照旧走标量那份（`r_substr`），于是一定同解。
+     **`substr` 不这么回收**（量出来 `substr("abcdef", 1:3, 3:5)` 只出 `abc`），
+     所以那一格照旧当场报。
    * **`order(x, decreasing = TRUE)`** —— 换一份比较（`r_ord_gt`），**只有值那两格反过来**，
      缺失照旧摆最后、同值照旧按**原下标**。要紧的是它**不是**"升着排完倒过来"：量出来
      `order(c(2,1,2,1), decreasing=TRUE)` 是 `1 3 2 4`，倒过来是 `3 1 4 2`。

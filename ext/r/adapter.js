@@ -1744,6 +1744,12 @@ function applyTy(fn, x, types) {
     /* 串那一族在字符向量上逐元素（出来还是一条字符向量 / 逻辑向量）。 */
     case 'substr': case 'substring': case 'trimws': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : STR;
+      /* `substring("abcdef", 1:3, 3:5)` —— 起止是向量时出的是一条**字符向量**
+         （三条一起回收，见 `callOf` 那一格）。只有 `substring` 这么回收。 */
+      if (fn === 'substring' && t.kind === 'string'
+          && [1, 2].some((k) => args[k] !== undefined && isVecTy(typeOfExpr(args[k], types)))) {
+        return RSTRV;
+      }
       return isStrVec(t) ? RSTRV : STR;
     }
     /* `strsplit(…)[[1]]` 在 `sub2` 那一格答；`unlist(strsplit(…))` 与它同解。 */
@@ -5386,6 +5392,81 @@ function callOf(x, types, extra, want, stmtPos) {
         /* `substring(s, first, last = 1000000L)` —— 与 `substr` 同一格函数，只是 `last`
            可以不给（R 的默认就是那个大数）。字符向量那一档也逐元素。 */
         if (n < 2 || n > 3) throw new Error(`r->IR: substring() 接两格或三格实参（给了 ${n}）`);
+        /**
+         * **起止是向量那一档接了**（2026-09-26，量出来的）：R 的 `substring` 把
+         * `x` / `first` / `last` 三条**一起回收**，出来的长度是三者里最长的那个 ——
+         * `substring("abcdef", 1:3, 3:5)` 出 `abc bcd cde`、`substring("abcdef", 2, 3:5)`
+         * 出 `bc bcd bcde`。任一条零长就出零长（`substring("abc", integer(0))` 是
+         * `character(0)`）。
+         *
+         * 这儿只接 `x` 是**一格串**那一档（`x` 也是向量时三条一起回收，那一格没接）。
+         * 截断与"起点比终点大就出空串"的规矩不在这儿重写 —— 每一格照旧走 `r_substr`，
+         * 于是与标量那一档一定同解。
+         *
+         * `substr` **不**这么回收（量出来 `substr("abcdef", 1:3, 3:5)` 只出 `abc`），
+         * 所以那一格照旧当场报。
+         */
+        const st0 = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        const pv = [1, 2].some((k) => all[k] !== undefined && all[k] !== null
+          && isVecTy(typeOfExpr(all[k], types)));
+        if (pv && st0.kind === 'string') {
+          const asVec = (k, dflt) => {
+            if (all[k] === undefined || all[k] === null) return lglCall('r_vec1', dflt);
+            const kt = typeOfExpr(all[k], types);
+            return isVecTy(kt) ? ev(k) : lglCall('r_vec1', asReal(ev(k), kt));
+          };
+          const sN = fresh('sbs');
+          const fN = fresh('sbf');
+          const lN = fresh('sbl');
+          const nfN = fresh('sbnf');
+          const nlN = fresh('sbnl');
+          const mN = fresh('sbm');
+          const oN = fresh('sbo');
+          const iN = fresh('sbi');
+          const vr2 = (nm2) => ({ kind: 'name', name: nm2 });
+          const I1 = (k) => ({ kind: 'int', value: k });
+          return {
+            kind: 'block-expr',
+            stmts: [
+              { kind: 'let', name: sN, type: STR, init: ev(0) },
+              { kind: 'let', name: fN, type: RVEC, init: asVec(1, { kind: 'real', value: 1 }) },
+              { kind: 'let', name: lN, type: RVEC, init: asVec(2, { kind: 'real', value: 1000000 }) },
+              { kind: 'let', name: nfN, type: INT, init: vecLen(vr2(fN)) },
+              { kind: 'let', name: nlN, type: INT, init: vecLen(vr2(lN)) },
+              {
+                kind: 'let',
+                name: mN,
+                type: INT,
+                init: {
+                  kind: 'ternary',
+                  cond: b('||', b('==', vr2(nfN), I1(0)), b('==', vr2(nlN), I1(0))),
+                  then: I1(0),
+                  else_: {
+                    kind: 'ternary',
+                    cond: b('>', vr2(nfN), vr2(nlN)),
+                    then: vr2(nfN),
+                    else_: vr2(nlN),
+                  },
+                },
+              },
+              { kind: 'let', name: oN, type: RSTRV, init: call1('anew', tyArg(RSTRV), vr2(mN)) },
+              {
+                kind: 'for',
+                init: { kind: 'let', name: iN, type: INT, init: I1(0) },
+                cond: b('<', vr2(iN), vr2(mN)),
+                post: { kind: 'assign', target: vr2(iN), value: b('+', vr2(iN), I1(1)) },
+                body: [{
+                  kind: 'assign',
+                  target: { kind: 'index', obj: vr2(oN), index: vr2(iN) },
+                  value: lglCall('r_substr', vr2(sN),
+                    call1('toint', vecGet(vr2(fN), b('%', vr2(iN), vr2(nfN)))),
+                    call1('toint', vecGet(vr2(lN), b('%', vr2(iN), vr2(nlN))))),
+                }],
+              },
+            ],
+            value: vr2(oN),
+          };
+        }
         substrScalarPos('substring', all, types);
         const last = n === 3
           ? asIntE(ev(2), typeOfExpr(all[2], types))

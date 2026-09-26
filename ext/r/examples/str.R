@@ -133,3 +133,18 @@ cat(sprintf("[%-*d]", 6, 42L), "\n")
 cat(sprintf("[%*.2f]", 9, 3.14159), "\n")
 cat(sprintf("[%0*d]", 5, 7L), "\n")
 cat(sprintf("%*d %*d", 3, 1L, 4, 22L), "\n")
+
+# **`substring(s, first, last)` 的起止可以是向量**：R 把三条**一起回收**，出来的长度是
+# 三者里最长的那个（量出来 `substring("abcdef", 1:3, 3:5)` 是 `abc bcd cde`）。
+# 截断与"起点比终点大就出空串"那两条不在这儿重写 —— 每一格照旧走标量那份，一定同解。
+# `substr` **不**这么回收（量出来 `substr("abcdef", 1:3, 3:5)` 只出 `abc`），所以那一格照旧报。
+cat(substring("abcdef", 1:3, 3:5), "\n")
+cat(substring("abcdef", 1:3), "\n")
+cat(substring("abcdef", 2, 3:5), "\n")
+cat(substring("abc", 1:5, 1:5), "|", "\n")
+cat(length(substring("abcdef", 1:3, 3:5)), "\n")
+cat(substring("abcdef", 4:2, 5), "\n")
+print(substring("abcdef", 1:3, 3:5))
+cat(nchar(substring("abcdef", 1:3, 3:5)), "\n")
+cat(rev(substring("abcdef", 1:3, 3:5)), "\n")
+cat(toupper(substring("abcdef", 1:2, 2:3)), "\n")
