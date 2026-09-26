@@ -906,6 +906,21 @@ R 那一门（ADR-0045/0046/0047，`r-lang` 分支）已经把这条路走通过
   `xs += […]` / `.extend` / `.clear` / `.copy` / `.remove` / `.count` / `.index` /
   `d.setdefault` / `d.update` / `d.popitem`。
 
+* **实参位置上的 `range`，与 `isinstance(x, (A, B))`**（一轮"推导式 + 走一遍"的探针挑出来的）。
+  - `range` 当值用本身**照旧不接**（python 印 `range(0, 3)`，铺成一张表就印错了），可
+    `list(range(3))` / `sorted(range(3))` / `reversed(range(4))` / `sum(range(5))` 这几种
+    写法只是"要一串数" —— 所以按**吃序列的那一格名单**（list / sorted / reversed / sum /
+    min / max / any / all / len / tuple / enumerate / zip）在**算实参之前**铺成表。
+    从前只有 `list(range(…))` 一格有专路。
+  - `isinstance(x, (A, B))`：一格元组就是"哪一格都算"，逐格问一遍再 `or` 起来。
+    那一格值要问好几遍，所以只收名字或字面量（带副作用的先落一格变量）。
+  判据：`comprehensions.py` 末尾两段三条腿与 python3 逐字节相同。
+  顺手量过、本来就对的一批：带条件的推导式 / 两层推导式 / 字典推导式 /
+  `for i, (k, v)` 之外的 `enumerate(d.items())` / 三路 `zip` / 循环里 `s += …` /
+  `assert` / 生成器当实参（`sum(x for x in xs if …)`）。
+  **明说的不足**：`for i, (k, v) in …` 那种**嵌套拆包**还没接（`for` 的目标只收名字与
+  一层元组）；集合推导式等 `set` 那一刀。
+
 ### 下一刀，按顺序
 
 1. **箱子里的函数拆出来调**（`(asfn …)` 那一格 —— 于是 `f = g` 之后 `f()` 走得通，

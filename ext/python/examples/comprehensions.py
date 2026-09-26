@@ -89,3 +89,20 @@ def main():
 
 
 main()
+
+# ---- 实参位置上的 range，以及 isinstance 收一格元组 ---------------------------
+# `range` 当值用本身没接（python 印 `range(0, 3)`，铺成一张表就印错了），可
+# `list(range(3))` / `sorted(range(3))` / `reversed(range(4))` / `sum(range(5))` 这几种
+# 写法只是"要一串数" —— 所以按**吃序列的那一格名单**放行（`print(range(3))` 照旧不接）。
+print(list(range(3)), list(reversed(range(4))), sum(range(5)))
+print(sorted(range(3)), max(range(1, 4)), min(range(2, 5)), len(list(range(6))))
+print(any(v > 1 for v in range(3)), all(v >= 0 for v in range(3)))
+print([v * 2 for v in range(4)], [v for v in reversed(range(3))])
+
+# `isinstance(x, (A, B))` —— 一格元组就是"哪一格都算"（逐格问一遍再 or 起来）。
+# 那一格值要问好几遍，所以只收名字或字面量。
+n = 7
+r = 1.5
+t = "s"
+print(isinstance(n, (int, float)), isinstance(r, (int, float)), isinstance(t, (int, float)))
+print(isinstance(t, (str, int)), isinstance(n, (str,)), isinstance(1, (int, float)))

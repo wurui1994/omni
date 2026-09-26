@@ -656,7 +656,10 @@ function tyOfCall(x, C) {
   const [fn, argsTok] = kids(x);
   /* 命名实参先排回位置上（不然单态化那一趟按次序挑实例会挑错 —— 量出来的）。 */
   const args = kwOrder(fn, argsTok === undefined ? [] : kids(argsTok), C);
-  const argTys = args.map((a) => tyOfCst(a, C));
+  /* 实参位置上的 `range(…)` 按一张 int 表算（发射那一侧也是铺成表，见 `callOf` 里
+     那格"吃序列的那几个内建"）。 */
+  const argTys = args.map((a) => (tag(a) === 'call' && tag(kids(a)[0]) === 'n'
+    && String(nameOf(kids(a)[0])) === 'range' ? arrOf(INT) : tyOfCst(a, C)));
   if (tag(fn) === 'attr') {
     /* `math.*` 先答 —— `math` 不是一格值，问它装什么会回 null。 */
     if (tag(kids(fn)[0]) === 'n' && String(nameOf(kids(fn)[0])) === 'math') {
@@ -2904,9 +2907,22 @@ const PY_TY_TAG = new Map([['int', 'int'], ['float', 'real'], ['str', 'string'],
  * **明说的不足**：第二格收元组（`isinstance(x, (int, str))`）没接 —— 元组本身还没那一档。
  */
 function isinstanceOf(valTok, tyTok, C) {
+  /* **`isinstance(x, (A, B))`** —— 一格元组就是"哪一格都算"：逐格问一遍再 `or` 起来。
+     值那一段会算好几遍，所以只收**纯的**那一档（名字 / 字面量）；带副作用的先落一格变量。
+     python 那边这两种写法一个意思，所以不必另编规矩。 */
+  if (tag(tyTok) === 'tuple') {
+    const ts = kids(tyTok);
+    if (ts.length === 0) return { kind: 'bool', value: false };
+    if (!['n', 'num', 'str'].includes(tag(valTok))) {
+      throw new Error('python->IR: `isinstance(x, (A, B))` 里的 x 要是一格名字或字面量'
+        + '（那一格要问好几遍，带副作用的先落一格变量）');
+    }
+    return ts.map((one) => isinstanceOf(valTok, one, C))
+      .reduce((l, r) => ({ kind: 'binop', op: '||', left: l, right: r }));
+  }
   if (tag(tyTok) !== 'n') {
     throw new Error('python->IR: `isinstance(x, T)` 的 T 要写成一格类型的名字'
-      + '（元组那一族还没接）');
+      + '（或者一格类型的元组）');
   }
   const nm = String(nameOf(tyTok));
   const v0 = exprOf(valTok, C);
@@ -3113,12 +3129,21 @@ export function callOf(x, C) {
       throw new Error(`python->IR: 实参里的 \`${tag(a)}\` 还没接（命名实参 / 展开）`);
     }
   }
-  /* `list(range(…))` —— **要在算实参之前拦**（`range(…)` 当值用没接，算它就报了）。
-     range 当值用最常见的去处就是这一处。 */
-  if (tag(fn) === 'n' && String(nameOf(fn)) === 'list' && argToks.length === 1
-    && tag(argToks[0]) === 'call' && tag(kids(argToks[0])[0]) === 'n'
-    && String(nameOf(kids(argToks[0])[0])) === 'range') {
-    return rangeListOf(argToks[0], C);
+  /* **吃序列的那几个内建：实参位置上的 `range(…)` 现场铺成一张表**。
+     `range` 当值用本身没接（python 印 `range(0, 3)`，铺成表就印错了），可
+     `list(range(3))` / `sorted(range(3))` / `reversed(range(4))` / `sum(range(5))` 这几种
+     写法只是"要一串数"，铺开就对 —— 所以按**吃序列的那一格名单**放行，别放行 `print`。
+     要在算实参**之前**拦：算它就报"range 当值用还没接"了。 */
+  const SEQ_ARG = new Set(['list', 'sorted', 'reversed', 'sum', 'min', 'max', 'any', 'all',
+    'len', 'tuple', 'enumerate', 'zip']);
+  const isRangeCall = (a) => a !== undefined && tag(a) === 'call' && tag(kids(a)[0]) === 'n'
+    && String(nameOf(kids(a)[0])) === 'range';
+  if (tag(fn) === 'n' && SEQ_ARG.has(String(nameOf(fn))) && argToks.some(isRangeCall)) {
+    const fixed = argToks.map((a) => (isRangeCall(a) ? { ...a, __rangeList: true } : a));
+    const args0 = fixed.map((a) => (a.__rangeList === true ? rangeListOf(a, C) : exprOf(a, C)));
+    const nm0 = String(nameOf(fn));
+    if (C.records.has(nm0)) return newRecord(C.records.get(nm0), args0, C);
+    return builtinOf(nm0, args0, argToks, C);
   }
   /* `map(f, xs)` / `filter(f, xs)` —— **也要在算实参之前拦**：第一格实参是个函数名，
      当值算它就报"把函数当值传要 `(asfn …)`"了。这两格是**编译期铺开**的（见 `mapPy`）。 */
