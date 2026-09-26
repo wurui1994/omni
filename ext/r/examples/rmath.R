@@ -79,3 +79,13 @@ print(log(c(1, 4, 16), 4))
 ## 底 2 那一档与"自己除一遍"**不是同一个答案** —— 末位差一格，所以照 R 分档
 cat(sprintf("%.17g %.17g", log(10, 2), log(10) / log(2)), "\n")
 cat(log(10, 2) == log(10) / log(2), "\n")
+
+## round(x, 负位数)：按"除"算（我们链的 nmath 是 4.7.0-devel，判据 Rscript 是 4.6.1，
+## 那一版 fround 在负位数上先乘 10 的负次幂，平局会翻边 —— 见 adapter 那段账）
+cat(round(1250, -2), round(1350, -2), round(2250, -2), round(350, -2), "\n")
+cat(round(1500, -3), round(2500, -3), round(-1250, -2), round(-1350, -2), "\n")
+cat(round(125, -1), round(135, -1), round(12.5), round(13.5), "\n")
+cat(round(c(1250, 1350, 149), -2), "\n")
+print(round(c(1250, 1350, 149), -2))
+cat(round(NA, -2), round(0, -2), "\n")
+rdg <- -2; cat(round(1250, rdg), round(1350, rdg), "\n")

@@ -4614,6 +4614,68 @@ function callOf(x, types, extra, want, stmtPos) {
     };
     return lglCall(fn === 'pmax' ? 'r_pmax' : 'r_pmin', asVec(0), asVec(1));
   }
+  /**
+   * **`round(x, 负位数)` 要按"除"来算，不能按"乘 10 的负次幂"。**（量出来 2026-09-26）
+   *
+   * 这一格从前直接交给 R 自己的 `fround`，可**我们链的那份 nmath 与判据那个 R 不是一个
+   * 版本**：参考树是 4.7.0-devel、本机 `Rscript` 是 4.6.1，而 4.7.0 那版 `fround` 在
+   * 负位数上先算 `pow10 = R_pow_di(10., dig)` —— `R_pow_di` 对负指数是"先 `x = 1/x` 再
+   * 反复平方"，于是 `10^-2` 落成 `0.010000000000000002`（差一个 ulp），两侧的除法跟着偏，
+   * **平局那一格就翻到另一边**。量出来的（拿 clang 直接调我们那份 libomniRmath）：
+   *
+   *   fround(1250, -2) = 1299.9999999999998   而 Rscript 的 round(1250, -2) = 1200
+   *   fround(2250, -2) = 2299.9999999999995   Rscript: 2200
+   *   fround(2500, -3) = 2999.9999999999991   Rscript: 2000
+   *   正位数与 0 位那几格两边**完全一样**（`fround(12.5, 0)` 都是 12、`fround(1.35, 1)` 同）
+   *
+   * 判据是 `Rscript`（所有尺子都对着它），所以负位数这一档按它的口径办：
+   * `p = 10^(-d)`（正指数，小 k 上精确），再 `fround(x / p, 0) * p` —— `fround(…, 0)`
+   * 就是 R 自己那句 `nearbyint`（半数向偶），两版 R 在这一格上一致。
+   * `NA` 单独一道门：JS 那条腿上一做算术，1954 那个载荷就没了（`NA/100` 会印成 `NaN`）。
+   */
+  if (fn === 'round' && n === 2) {
+    const dTy = all[1] === null ? REAL : typeOfExpr(all[1], types);
+    if (isVecTy(dTy)) {
+      throw new Error('r->IR: round() 的位数那一格也是向量 —— 多头回收还没接');
+    }
+    const xTy = all[0] === null ? REAL : typeOfExpr(all[0], types);
+    const dN = fresh('rd');
+    const pN = fresh('rp');
+    const dE = { kind: 'name', name: dN };
+    const pE = { kind: 'name', name: pN };
+    const pre = [
+      { kind: 'let', name: dN, type: REAL, init: asReal(ev(1), dTy) },
+      {
+        kind: 'let',
+        name: pN,
+        type: REAL,
+        init: call1('rmath', { kind: 'strlit', value: 'pow' }, { kind: 'real', value: 10 },
+          b('-', { kind: 'real', value: 0 }, dE)),
+      },
+    ];
+    const one = (el) => {
+      const eN = fresh('rx');
+      const eE = { kind: 'name', name: eN };
+      const down = b('*', rmathCall('round', RMATH.get('round'), [b('/', eE, pE), { kind: 'real', value: 0 }], [REAL, REAL]), pE);
+      return {
+        kind: 'block-expr',
+        stmts: [{ kind: 'let', name: eN, type: REAL, init: el }],
+        value: {
+          kind: 'ternary',
+          cond: { kind: 'call', fn: { kind: 'name', name: useFn('r_is_na') }, args: [eE] },
+          then: eE,
+          else_: {
+            kind: 'ternary',
+            cond: b('<', dE, { kind: 'real', value: 0 }),
+            then: down,
+            else_: rmathCall('round', RMATH.get('round'), [eE, dE], [REAL, REAL]),
+          },
+        },
+      };
+    };
+    if (isVecTy(xTy)) return vecMap1(ev(0), one, pre);
+    return { kind: 'block-expr', stmts: pre, value: one(asReal(ev(0), xTy)) };
+  }
   if (fn !== null && RMATH.has(fn)) {
     const tys = all.map((a) => (a === null ? REAL : typeOfExpr(a, types)));
     const args = all.map((a, i) => ev(i));
