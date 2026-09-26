@@ -76,6 +76,11 @@ export const EVALDRAW_3D = new Map([
      图片（解码器那一层还没有，见 11.3）⇒ **写回 0×0**，脚本自己判得出来。 */
   ['getpicsiz/2', 'g3_getpicsiz2'],
   ['getpicsiz/3', 'g3_getpicsiz3'],
+  /* **读像素那两格**（`evaldraw.txt:1478`/`:1490`）：`getrgb` 是纯算术（拆一格打包好的
+     颜色），`getpix` 多一步"问设备要那一格像素"。两个的 `&r,&g,&b` 都按 `BLOCK_ARGS`
+     配对着发（块 + 偏移）。 */
+  ['getrgb/4', 'g3_getrgb4'],
+  ['getpix/5', 'g3_getpix5'],
   /* 声音那一族：收下不响（见头注）。 */
   ['playsound/1', 'g3_nop1'], ['playsound/2', 'g3_nop2'], ['playsound/3', 'g3_nop3'],
   ['playsound/4', 'g3_nop4'], ['playsound/5', 'g3_nop5'],
@@ -279,5 +284,33 @@ export function gfx3FnDecls(host = false) {
       ex(call('g3_getpicsiz2', [nm('px'), nm('po'), nm('py'), nm('qo')])),
       ret(num(0)),
     ]),
+    /**
+     * `getrgb(col,&r,&g,&b)`（`evaldraw.txt:1478`）：把一格打包好的颜色拆成三格 0..255，
+     * **回值是 alpha**（`evaldraw.txt:93` 那条改动记录："Now returns alpha instead of 0"）。
+     * 纯算术 —— 一句设备调用都没有。
+     */
+    fnT('g3_getrgb4', [['col'], ['rb', ARR], ['ro'], ['gb', ARR], ['go'], ['bb', ARR], ['bo']], [
+      letR('u', rm('floor', [nm('col')])),
+      aset('bb', nm('bo'), rm('fmod', [nm('u'), num(256)])),
+      letR('v', rm('floor', [bin('/', nm('u'), num(256))])),
+      aset('gb', nm('go'), rm('fmod', [nm('v'), num(256)])),
+      letR('w', rm('floor', [bin('/', nm('v'), num(256))])),
+      aset('rb', nm('ro'), rm('fmod', [nm('w'), num(256)])),
+      ret(rm('fmod', [rm('floor', [bin('/', nm('w'), num(256))]), num(256)])),
+    ]),
+    /**
+     * `getpix(x,y,&r,&g,&b)`（`evaldraw.txt:1490`）：读一格像素的颜色，
+     * **回值是那一格的 Z 深度**。
+     *
+     * 两处明写偏差：`getpix` 那格宿主调用只在**宿主设备**那条路上有（生成出来那一份没做
+     * 读回，回 0）；而 z 深度这条腿上压根没有 z 缓冲（见头注第 2 条）⇒ **回 0**。
+     * 语料里用它的两份（`demos/plussing.kc` / `demos/glow.kc`）都只读颜色。
+     */
+    fnT('g3_getpix5',
+      [['x'], ['y'], ['rb', ARR], ['ro'], ['gb', ARR], ['go'], ['bb', ARR], ['bo']], [
+        ex(call('g3_getrgb4', [D.getpix(nm('x'), nm('y')),
+          nm('rb'), nm('ro'), nm('gb'), nm('go'), nm('bb'), nm('bo')])),
+        ret(num(0)),
+      ]),
   ];
 }

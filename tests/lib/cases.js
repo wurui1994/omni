@@ -730,6 +730,19 @@ export const EVTAIL = ['a=7'];
 export const EVTAILSEMI = ['semi=15', 'asg=20', 'blk=30', 'ctl=0'];
 
 /**
+ * **读像素那两格**（`ext/evaldraw/examples/readpix.kc`）。
+ *
+ * 口径照 `evaldraw.txt:1478`/`:1490`：`getrgb(col,&r,&g,&b)` 拆颜色、**回 alpha**；
+ * `getpix(x,y,&r,&g,&b)` 读一格像素、**回 Z 深度**（这条腿没有 z 缓冲 ⇒ 0，明写偏差）。
+ * 语料里 `demos/plussing.kc` 靠它读自己画的像素认数字（印 `5 + 8 = 13`）。
+ *
+ * 头一行是设备交图那句指针（要先画一格像素才读得到）—— 它顺带钉住"一帧图的默认落点是
+ * `<缓存根>/gfx/<脚本名>.png`"那条契约（判据在仓库根上跑，所以印的是相对路径）。
+ */
+export const EVREADPIX = ['#gfx png .omni-cache/gfx/readpix.png 320 240',
+  'pix=200,100,50 z=0', 'rgb=64,128,192 a=0'];
+
+/**
  * **`&a[i]` / `&p.x`：一格伴随的偏移形参**（`ext/evaldraw/examples/arrview.kc`）。
  *
  * 标准 IR 里没有"带偏移的视图"⇒ 收整块的形参后头跟一格 `名字$o`（口径在

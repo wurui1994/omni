@@ -265,6 +265,8 @@ const gfxDefIR = (kind, name, text) => ({
 const BLOCK_ARGS = new Map([
   ['sethlin/4', [2]], ['sethlin/5', [2]], ['gethlin/4', [2]],
   ['getpicsiz/2', [0, 1]], ['getpicsiz/3', [1, 2]],
+  /* 读像素那两格（`evaldraw.txt:1478`/`:1490`）：`&r,&g,&b` 三格都是块。 */
+  ['getrgb/4', [1, 2, 3]], ['getpix/5', [2, 3, 4]],
 ]);
 
 /** 宿主那边**无参的函数**（`KLOCK()`）。 */

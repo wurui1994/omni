@@ -1,0 +1,23 @@
+// ext/evaldraw/examples/readpix.kc —— **读像素那两格**（`getpix` / `getrgb`）
+//
+// 口径（`evaldraw.txt:1478`/`:1490`，照抄）：
+//
+//     getrgb(col,&r,&g,&b)    拆一格打包好的颜色成三格 0..255，**回值是 alpha**
+//     getpix(x,y,&r,&g,&b)    读一格像素的颜色，**回值是那一格的 Z 深度**
+//
+// 两处明写偏差：这条腿没有 z 缓冲 ⇒ `getpix` 回 0；`getpix` 那格宿主调用只在**宿主设备**
+// 那条路上有（生成出来那一份没做读回）。落点是 `ext/polydraw/gfx3-rt.js` 的
+// `g3_getpix5` / `g3_getrgb4`，`&r,&g,&b` 按 BLOCK_ARGS 配对着发（块 + 偏移）。
+//
+// 语料里靠这两格的是 `demos/plussing.kc`（读自己画的像素认数字）与 `demos/glow.kc`。
+
+()
+cls(0);
+setcol(200,100,50);
+setpix(10,10);
+r = 0; g = 0; b = 0;
+z = getpix(10,10,&r,&g,&b);
+printf("pix=%g,%g,%g z=%g\n", r, g, b, z);
+// 4227264 = 64*65536 + 128*256 + 192
+a = getrgb(4227264,&r,&g,&b);
+printf("rgb=%g,%g,%g a=%g\n", r, g, b, a);
