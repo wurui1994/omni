@@ -256,6 +256,7 @@ const FN_DEPS = new Map([
   ['r_rev_str', []],
   ['r_iota', []],
   ['r_nchar_v', []],
+  ['r_nchar_num', ['r_is_na', 'r_na', 'r_num_str']],
   ['r_str2num_v', ['r_na']],
   ['r_upper_v', []],
   ['r_lower_v', ['r_lower']],
@@ -2003,7 +2004,11 @@ function applyTy(fn, x, types) {
       return isVecTy(t) ? RIVEC : INT;
     }
     /* `nchar` / `tolower` / `toupper` 逐元素：字符向量进 → 出另一条向量。 */
-    case 'nchar': return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RIVEC : INT;
+    /* `nchar` 逐元素：字符向量与**数值向量**进 → 都出一条整数向量（见 `callOf`）。 */
+    case 'nchar': {
+      const t = args.length > 0 ? typeOfExpr(args[0], types) : STR;
+      return isStrVec(t) || isVecTy(t) ? RIVEC : INT;
+    }
     case 'tolower': return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RSTRV : STR;
     /* `casefold` 是 `toupper` / `tolower` 的别名（S 兼容），`strrep` 逐元素接起来。 */
     case 'casefold': case 'strrep':
@@ -4796,9 +4801,61 @@ function callOf(x, types, extra, want, stmtPos) {
          * 那是**方言**的话，而且已经过了换档那道门，libR 接不上，一个答案都拿不到。
          */
         const nt = all[0] === null ? STR : typeOfExpr(all[0], types);
+        /**
+         * **不是串的那几档 2026-09-26 接了**（照 R 的口径"先 `as.character` 再数字符"）：
+         *
+         *   * 数值向量（含逻辑向量）走 `r_nchar_num`：缺失那一格回 `NA` —— 量出来
+         *     `nchar(c(1, NA))` 是 `1 NA`，**不是** `1 2`（`as.character(NA)` 印的是 `NA`，
+         *     两个字符，可 `nchar` 不数它）；
+         *   * 一格数 / 一格两态逻辑就是 `slen(as.character(x))`；
+         *   * **一格可能是缺失的数**（`real`）多一道运行期的门：R 那儿答的是 `NA_integer_`，
+         *     而这一档的 `nchar` 回的是 `int`，装不下缺失 —— 所以当场停，不静默答 2。
+         *     向量那一侧不用这道门（`RIVEC` 底下是 double，缺失跟得住）。
+         *   * 三态逻辑标量（`x > 2` 那种）与 `NA` 字面量：同一条理由，当场报。
+         */
+        if (isVecTy(nt)) {
+          /* **逻辑向量那一档没接**：R 那儿 `as.character(TRUE)` 是 `"TRUE"`（4 个字符，
+             不是 `"1"`），而带缺失的那一格又要 `NA_character_` —— 两条合起来这一层答不准，
+             所以当场报（量出来 `nchar(c(TRUE, FALSE))` 是 `4 5`）。 */
+          if (isLglTy(nt)) {
+            throw new Error('r->IR: nchar() 收了一条**逻辑向量** —— R 会先 as.character，'
+              + '而那是 "TRUE" / "FALSE"（4 与 5 个字符）、缺失那一格要 NA_character_，'
+              + '这一层答不准（见 ext/r/SPEC.md 第四节第 11 条）');
+          }
+          return { kind: 'call', fn: { kind: 'name', name: useFn('r_nchar_num') }, args: [ev(0)] };
+        }
+        if (isLgl1(nt)) {
+          throw new Error('r->IR: nchar() 收了一格**三态逻辑**（`x > 2` / `NA` 那种）——'
+            + ' R 那儿缺失答的是 `NA_integer_`，而这一档的 nchar 回 int、装不下缺失'
+            + '（见 ext/r/SPEC.md 第四节第 11 条）');
+        }
         if (nt.kind !== 'string') {
-          throw new Error(`r->IR: nchar() 收的不是串（是 ${nt.kind}）—— R 会先 as.character`
-            + '（`nchar(NA)` 是 `NA`、`nchar(123)` 是 3），这一档还没接');
+          const asStr = callOf(cstCall('as.character', [all[0]]), types);
+          if (nt.kind !== 'real') return call1('slen', asStr);
+          /* `real` 那一格运行期才知道是不是缺失 —— 停在这儿报，不静默答 2。 */
+          const nvN = fresh('nc');
+          const nvE = { kind: 'name', name: nvN };
+          return {
+            kind: 'block-expr',
+            stmts: [
+              { kind: 'let', name: nvN, type: REAL, init: ev(0) },
+              {
+                kind: 'if',
+                cond: { kind: 'call', fn: { kind: 'name', name: useFn('r_is_na') }, args: [nvE] },
+                then: [{
+                  kind: 'builtin-stmt',
+                  name: 'fail',
+                  args: [{
+                    kind: 'string',
+                    value: 'nchar(缺失)：R 那儿答的是 NA_integer_，而这一档的 nchar 回整数、'
+                      + '装不下缺失（见 ext/r/SPEC.md 第四节第 11 条）—— 向量那一侧答得对',
+                  }],
+                }],
+                else_: null,
+              },
+            ],
+            value: call1('slen', callOf(cstCall('as.character', [all[0]]), types)),
+          };
         }
         return call1('slen', ev(0));
       }
@@ -10694,6 +10751,30 @@ function vecFnDecl(name) {
   });
   const P = [{ name: 'v', type: RVEC }];
 
+  if (name === 'r_nchar_num') {
+    /**
+     * `nchar(数值向量)` —— R 的口径是"**先 `as.character`、再数字符**"（`?nchar`），
+     * 而缺失那一格回的是 `NA`（量出来：`nchar(c(1, NA))` 是 `1 NA`，**不是** `1 2`；
+     * `nchar(NA_real_)` 也是 `NA`）。所以这儿一格一格问：缺失写 `NA`、别的数它那串的长度。
+     * 出来记成整数向量（底下还是 double，所以 `NA` 跟得住，见 `RIVEC`）。
+     */
+    const out = { kind: 'name', name: 'o' };
+    const isNa = { kind: 'call', fn: { kind: 'name', name: useFn('r_is_na') }, args: [elem] };
+    const na = { kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] };
+    const cnt = call1('toreal', call1('slen', { kind: 'call', fn: { kind: 'name', name: useFn(NUM_STR) }, args: [elem, { kind: 'int', value: 15 }] }));
+    return {
+      kind: 'fn',
+      name,
+      params: P,
+      ret: RIVEC,
+      body: [
+        declLen(),
+        ...vecNewAs('o', len),
+        loop([{ kind: 'if', cond: isNa, then: [vecSet(out, i, na)], else_: [vecSet(out, i, cnt)] }], 0),
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
   if (name === 'r_as_lgl_v') {
     /* `as.logical(数值向量)` —— 逐元素走 `r_lgl`（0 假、非零真、缺失 NA）。 */
     const out = { kind: 'name', name: 'o' };

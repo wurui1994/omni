@@ -187,3 +187,12 @@ cat(sum(as.numeric(c("10", "20", "30"))), mean(as.numeric(c("0.5", "1e2"))), "\n
 cat(as.numeric(c("1", "abc", "3")), "\n")
 print(is.na(as.numeric(c("1", "abc"))))
 cat(length(as.numeric(character(0))), "\n")
+## nchar(数)：R 先 as.character 再数字符；缺失那一格向量侧答 NA、标量侧当场报
+cat(nchar(123), nchar(1.5), nchar(TRUE), nchar(1L), nchar(1e10), "\n")
+cat(nchar(0.1 + 0.2), nchar(1/3), "\n")
+cat(nchar(c(1, 20, 300)), "\n")
+print(nchar(c(1, 20, 300)))
+cat(nchar(c(1, NA)), "\n")
+print(nchar(c(1, NA)))
+ncn <- 42; cat(nchar(ncn), nchar(ncn * 100), nchar(-5), "\n")
+cat(sum(nchar(c(1, 22, 333))), max(nchar(c(1, 22, 333))), "\n")

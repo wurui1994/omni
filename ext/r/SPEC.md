@@ -1267,6 +1267,14 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
     `as.double` 就是 `as.numeric` 的别名（R 的文档就这么写的），一条路两个名字。
     判据 `ext/r/examples/na.R` 末尾那十行。
 
+    **`nchar(数)` 2026-09-26 接了**（照 R 的口径"先 `as.character` 再数字符"）：
+    一格数走 `slen(as.character(x))`、数值向量走 `r_nchar_num`。缺失那一格量出来是
+    **`NA` 而不是 2**（`nchar(c(1, NA))` 是 `1 NA`，虽然 `as.character(NA)` 印的是两个字符
+    的 `NA`）—— 向量那一侧答得对（`RIVEC` 底下是 double，缺失跟得住），**一格数**那一侧
+    在运行期看一眼：是缺失就停下来（R 答 `NA_integer_`，而这一档的 `nchar` 回 int）。
+    **逻辑向量那一档当场报**：`as.character(TRUE)` 是 `"TRUE"`（4 个字符，不是 `"1"`），
+    而带缺失的那一格又要 `NA_character_`，两条合起来答不准。判据 `ext/r/examples/str.R`。
+
     **`typeof` / `class` / `vector(mode, length)` 2026-09-26 加的三格。** 前两格也是编译期
     常量，两张名字表不一样（量出来的）：`1` 是 `double` / `numeric`、`1L` 与 `1:3` 是
     `integer` / `integer`、`list(…)` 两问都是 `list`、逻辑与串各按自己那格。`class` 上
