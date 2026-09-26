@@ -62,7 +62,7 @@
 // 只跨空白，不跨注释：`operator /*x*/ +` 不认 —— 真实代码里没有，多出来的状态不值得。
 //
 // 项的词汇表：
-//   字符类：space nl digit alpha alnum hex any
+//   字符类：space nl digit alpha alnum hex any ualpha ualnum
 //   "字面量"           照原样比
 //   (set "abc")        属于这几个字符之一
 //   (not "abc")        不属于（但必须有一个字符）
@@ -83,7 +83,7 @@ import { span as mkSpan } from '../source/diag.js';
 /** 字面量终结符的内部名。grammar.js 也用这一个 —— 两边的口径必须是同一份代码，不是同一份约定 */
 export const litName = (s) => JSON.stringify(s);
 
-const CLASSES = new Set(['space', 'nl', 'digit', 'alpha', 'alnum', 'hex', 'any']);
+const CLASSES = new Set(['space', 'nl', 'digit', 'alpha', 'alnum', 'hex', 'any', 'ualpha', 'ualnum']);
 const REPEATS = new Set(['*', '+', '?']);
 
 /**
@@ -144,6 +144,16 @@ function inClass(name, cc) {
   if (name === 'alpha') return (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122);
   if (name === 'alnum') return (cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122);
   if (name === 'hex') return (cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 70) || (cc >= 97 && cc <= 102);
+  /* `ualpha` / `ualnum` —— 标识符里许 Unicode 的那一族（python 的 PEP 3131、js、go…）。
+     口径**照 CPython 自己的词法**（`Parser/lexer/lexer.c` 的 `is_potential_identifier_start`
+     与 `_char`）：ASCII 那一段照旧，**其余一律"码点 >= 128 就算"**。
+     不查 XID_Start / XID_Continue 那两张表：CPython 的词法自己也不查（它先按 >= 128 收下
+     整个词，再用 `PyUnicode_IsIdentifier` 验一遍）。这儿把"验"那一步留给语义层 ——
+     词法层要是自带一张 Unicode 表，那张表就得跟着 Unicode 版本走，而它不在封闭 ABI 里。 */
+  if (name === 'ualpha') return (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc >= 128;
+  if (name === 'ualnum') {
+    return (cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc >= 128;
+  }
   return false;
 }
 
