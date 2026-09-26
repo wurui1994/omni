@@ -748,7 +748,23 @@ export function pyRepr(e, C) {
     const value = cat(out, { kind: 'string', value: ')' });
     return pre.length === 0 ? value : { kind: 'block-expr', stmts: pre, value };
   }
+  /* **类上的 `__str__`** —— `str(p)` 与 `print(p)` 都走这儿（python 就是这条规矩）。
+     没定义 `__str__` 的类当场报：python 那时印 `<__main__.P object at 0x…>`，那串里有
+     地址，**逐字节比不了**，所以不装作有。 */
+  const rec = C.recOf(t);
+  if (rec !== null && rec.methods.has('__str__')) {
+    const inst = C.resolveMethod(rec.name, '__str__', [t]);
+    if (inst === null) {
+      throw new Error(`python->IR: \`${rec.name}.__str__\` 对不上那一格的形参（只该有 self）`);
+    }
+    return { kind: 'call', fn: { kind: 'name', name: inst.mangled }, args: [e] };
+  }
+  if (rec !== null) {
+    throw new Error(`python->IR: \`class ${rec.name}\` 没有 \`__str__\`，转串还没接`
+      + '（python 那时印的是 `<__main__.X object at 0x…>` —— 里头有地址，逐字节比不了）');
+  }
   throw new Error(`python->IR: ${t.kind} 转串还没接`);
+
 }
 
 /**
@@ -1217,7 +1233,11 @@ export function sortByKeyPy(box, keyTok, C, desc) {
 
 /** `sorted(xs)` —— 先问一声"元素怎么比"，再把比法递给那趟插入排序。串按一格一个字符排。 */
 function sortedPy(xsE, C, desc, keyTok = null) {
-  const src = ty(xsE, C).kind === 'string' ? charsOf(xsE, C) : xsE;
+  const t0 = ty(xsE, C);
+  /* `sorted(串)` 一格一个字符；**`sorted(字典)` 排的是键**（与 `for k in d` 一条）。 */
+  let src = xsE;
+  if (t0.kind === 'string') src = charsOf(xsE, C);
+  if (t0.kind === 'map') src = { kind: 'builtin', name: 'dkeys', args: [xsE] };
   const t = ty(src, C);
   if (keyTok === null) {
     if (t.kind === 'arr') needOrd(t.elem, C, 'sorted()');

@@ -58,3 +58,28 @@ class Vec2:
 
 v = Vec2(1.5, 2.5)
 print(v.x, v.y, v.len2())
+
+
+# `__str__` —— `str(p)` 与 `print(p)` 都走它（python 就是这条规矩）。
+# 没定义 `__str__` 的类当场报：python 那时印 `<__main__.X object at 0x…>`，里头有地址，
+# 逐字节比不了，所以不装作有。
+class Tagged:
+    def __init__(self, name, n=0):
+        self.name = name
+        self.n = n
+
+    def bump(self, by=1):
+        # `self.n += by` 落成 `self.n = self.n + by`（接收者要是一格名字）
+        self.n += by
+        return self.n
+
+    def __str__(self) -> str:
+        return self.name + ":" + str(self.n)
+
+
+tg = Tagged("hit")
+print(str(tg))
+print(tg)
+print(tg.bump(), tg.bump(5), tg.n)
+print(tg)
+print(Tagged("x", 9))

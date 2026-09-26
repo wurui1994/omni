@@ -742,6 +742,13 @@ function scanOne(s, C, rets) {
             kids(one).forEach((tt, i) => bindTarget(tt, tup[i], C));
             continue;
           }
+          /* **`a, b = s.split(",")`**（右边是一张表）—— 每一格都是**元素**的类型。
+             不看这一条的话 `bindTarget` 的元组那一支会把**整张表**按到每一格名字上，
+             到发射那一趟就报"'left' 先装 arr、后装 string"（量到过）。 */
+          if (t !== null && t !== undefined && t.kind === 'arr') {
+            kids(one).forEach((tt) => bindTarget(tt, t.elem, C));
+            continue;
+          }
         }
         if (tag(one) === 'index') bindEmptyDict(one, t, C);
         bindTarget(one, t, C);
@@ -1390,9 +1397,38 @@ function assignTo(t, valueTok, C) {
       const v = exprOf(valueTok, C);
       const vt = typeOfIR(v, C);
       const tup = tupleOf(C.recOf(vt));
+      /* **右边是一张表**（`a, b = s.split(",")`）—— 长度要跑起来才知道，所以
+         **发一句运行期的检查**（python 那儿是 ValueError），再按下标逐格取。
+         这是最常见的一种写法，不接的话 `.split()` 的结果就得自己按下标拆。 */
+      if (tup === null && vt.kind === 'arr') {
+        const tmp0 = C.fresh('unpack');
+        C.bind(tmp0, vt);
+        const box0 = { kind: 'name', name: tmp0 };
+        const out0 = [
+          { kind: 'let', name: tmp0, type: vt, init: v },
+          {
+            kind: 'if',
+            cond: {
+              kind: 'binop', op: '!=',
+              left: { kind: 'builtin', name: 'alen', args: [box0] },
+              right: { kind: 'int', value: ts.length },
+            },
+            then: [{
+              kind: 'builtin-stmt',
+              name: 'fail',
+              args: [{ kind: 'string', value: `expected ${ts.length} values to unpack` }],
+            }],
+            else_: null,
+          },
+        ];
+        ts.forEach((tt, i) => out0.push(...writeTo(
+          tt, { kind: 'index', obj: box0, index: { kind: 'int', value: i } }, C,
+        )));
+        return out0;
+      }
       if (tup === null) {
         throw new Error(`python->IR: 拆包赋值的右边装的是 ${vt.kind} —— `
-          + '要么写成一格元组（`a, b = x, y`），要么交一格元组');
+          + '要么写成一格元组（`a, b = x, y`），要么交一格元组或一张表');
       }
       if (tup.length !== ts.length) {
         throw new Error(`python->IR: 拆包赋值两边格数不一样（左 ${ts.length}、右 ${tup.length}）`);
@@ -1565,7 +1601,13 @@ const mkTok = (...items) => ({
 function augassignStmt(x, C) {
   const [opTok, target, value] = kids(x);
   const o = String(leaf(opTok)).slice(0, -1);      // `+=` -> `+`
-  if (tag(target) !== 'n' && tag(target) !== 'index') {
+  /* `o.f += v` —— 落成 `o.f = o.f + v`。**接收者要是一格名字**（`self.n += 1` 那种）：
+     这一手把它读一遍、写一遍，接收者不纯就会算两遍（python 只算一遍）。 */
+  if (tag(target) === 'attr' && tag(kids(target)[0]) !== 'n') {
+    throw new Error(`python->IR: \`${o}=\` 的左边是一格属性，而接收者不是名字`
+      + ' —— 还没接（那一手要把接收者算两遍，python 只算一遍）');
+  }
+  if (!['n', 'index', 'attr'].includes(tag(target))) {
     throw new Error(`python->IR: \`${o}=\` 的左边是 \`${tag(target)}\` —— 还没接`);
   }
   return writeTo(target, exprOf(mkTok('bin', o, target, value), C), C);

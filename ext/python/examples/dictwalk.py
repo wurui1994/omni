@@ -115,6 +115,8 @@ def main():
     counts = letters("abracadabra")
     print(counts)
     print(list(counts.keys()))
+    # `sorted(字典)` 排的是**键**（与 `for k in d` 一条）
+    print(sorted(counts), sorted(counts.keys()))
     print(letters2("abracadabra"), letters2("") == counts)
 
     # 空字典**不带标注**：键值类型从后面那句 `m[k] = v` 认

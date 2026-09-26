@@ -131,5 +131,14 @@ def main():
     i, j = j, i + j
     print(i, j)
 
+    # **右边是一张表**（`s.split(",")` 那种最常见）—— 长度要跑起来才知道，
+    # 所以发一句运行期的检查（python 那儿是 ValueError），再按下标逐格取
+    left, right = "a,b".split(",")
+    print(left, right)
+    one, two, three = [1, 2, 3]
+    print(one, two, three)
+    head, tail = "k=v".split("=", 1)
+    print(head, tail)
+
 
 main()
