@@ -117,7 +117,21 @@ for (const f of files) {
   const r = spawnSync('node', [CLI, 'run', ...legFlags, f,
     '--gfx', CFG.gfx, '--frame', CFG.frame, '--w', CFG.w, '--h', CFG.h, '--perf', '-o', png], {
     cwd: ROOT, encoding: 'utf8', timeout: CFG.timeout,
-    env: { ...process.env, OMNI_TIMEOUT: '0' },
+    /**
+     * **预算跟着这一扫的 `--timeout` 走，不能给 0**（2026-09-26 量出来的）。
+     *
+     * 从前这儿写的是 `OMNI_TIMEOUT: '0'`，本意是"超时由这一扫自己用 `spawnSync` 的
+     * `timeout` 管"。可 `spawnSync` 的 `timeout` 只杀得到**直接的孩子**（那个 `node`），
+     * 而真在画图的是**孙子**（`omni run` 编出来那个可执行文件）—— 孩子被杀之后孙子成了
+     * 孤儿，而 `OMNI_TIMEOUT=0` 把它自己那三层时限（SIGALRM + 外部看门狗）也一起关了，
+     * 于是谁都不管它。量出来的后果：`run-asteroids.sx/asteroids` 与 `run-box.sx/box`
+     * 两个孤儿各吃 85% CPU 活了 46 分钟，只能手动 `kill -9`。
+     *
+     * 这与 `studio/pool.js` 那一格是**同一个毛病**（见 fix(deadline) 那一笔）：
+     * 想说"别给我开枪"，写成了"一格预算都别留"。这儿连枪都不用关 —— 到点自己退 124，
+     * 这一扫照旧按退出码分类。
+     */
+    env: { ...process.env, OMNI_TIMEOUT: String(Math.ceil(CFG.timeout / 1000)) },
   });
   const ms = Number(/ total=([\d.]+)ms/.exec(r.stderr ?? '')?.[1] ?? NaN);
   const fps = Number(/ fps=([\d.]+)/.exec(r.stderr ?? '')?.[1] ?? NaN);
