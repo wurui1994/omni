@@ -693,6 +693,58 @@ function texIn(slot, w, h, d, fmt, px) {
   return 0;
 }
 
+/* ---------------------------------------------------------------- 抓屏那一族
+ *
+ * `glcapture()` / `glcaptureend(槽)`（§22）：中间画的那一摊**不上屏**，而是整帧
+ * 拷进一格纹理，随后当贴图再画一趟（后处理：`tigrou/clock.pss` 是 3.0*uv 采样、
+ * `funky`/`gears`/`tree` 是模糊、`ken/texture.pss` 是把画面贴到方块上）。
+ *
+ * 口径**照本机那一档**（`runtime-gl/omni_ev_gl.c:1052` 的头注：两份参考在这一格不是
+ * 一回事，跟的是 c_impl —— 整帧，视口与矩阵一格都不动，只把画布清成黑）。这一层与
+ * 本机那一档的唯一差别是**没有离屏帧缓冲**：页面这格设备一直画在画布上，所以
+ * "抓屏"就是从默认帧缓冲 `copyTexImage2D`。看得见的后果是抓屏那一趟会在画布上闪
+ * 一下（同一帧里随后那趟全屏贴图会盖掉它），换 FBO 才能免掉 —— 先不换，两层帧缓冲
+ * 是另一件活（本机那一档为此有一整套 `-1` 哨兵）。
+ *
+ * `siz` 收下不用：原版那个 `qglCapture(double dcaptexsiz)` 读的是一格根本没传的实参
+ * （`myext[]` 里是零参的 `GLCAPTURE()`），边长在正本里就是栈上的垃圾。
+ */
+const CAP = { w: 0, h: 0 };
+
+function capBegin() {
+  const gl = D.gl;
+  if (gl === null) return 0;
+  flush();
+  CAP.w = D.w;
+  CAP.h = D.h;
+  /* 从干净的黑底起（照 c_impl）：后处理按 >1 的坐标采样时，采到的只该是这一趟画的。 */
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  return 0;
+}
+
+function capEnd(slot) {
+  const gl = D.gl;
+  if (gl === null) return 0;
+  flush();
+  const w = CAP.w === 0 ? D.w : CAP.w;
+  const h = CAP.h === 0 ? D.h : CAP.h;
+  const t = texOf(slot);
+  gl.activeTexture(gl.TEXTURE0 + TX.unit);
+  gl.bindTexture(gl.TEXTURE_2D, t.id);
+  /* **内部格式要跟着读缓冲**：`alpha: false` 的画布是 RGB8，往 RGBA 拷是
+     INVALID_OPERATION（ES 3.0 要求目标的分量是读缓冲的子集）。正本那边也是没有
+     alpha 通道的窗口帧缓冲，所以采样时 alpha 是 1 —— 与 RGB 这一格同一个意思。 */
+  const rgba = gl.getContextAttributes().alpha === true;
+  gl.copyTexImage2D(gl.TEXTURE_2D, 0, rgba ? gl.RGBA : gl.RGB, 0, 0, w, h, 0);
+  /* 第 0 行是帧缓冲**最下面**那一行 —— 与 `glquad()` 的纹理坐标（t=0 在下）对得上。 */
+  texParams(0);
+  t.w = w;
+  t.h = h;
+  t.fmt = 0;
+  return 0;
+}
+
 /**
  * **文件纹理**（`glsettexfile 槽 名字下标 格`，§20 —— 脚本里写的是 `glsettex("earth.jpg",…)`）。
  *
@@ -1059,6 +1111,9 @@ function call(name, args) {
       return texFile(Math.trunc(a(0)), SH.names.get(String(Math.trunc(a(1)))), Math.trunc(a(2)));
     /* **`pic` 那一族的头一句**（见 `PIC` 的头注）：宽高，还没取到回 -1。 */
     case 'picsiz/1': return picSiz(a(0));
+    /* **抓屏那一族**（见 `CAP` 的头注）。 */
+    case 'glcapture/1': return capBegin();
+    case 'glcaptureend/1': return capEnd(Math.trunc(a(0)));
     /* 收下但不管的那几格（光照/混合/剔除/线宽）。 */
     case 'glnormal/3':
     case 'glcullface/1':
@@ -1274,6 +1329,8 @@ function reset() {
   TX.unit = 0;
   /* 文件纹理那几张的状态跟着槽走（槽都删了）—— 下一趟重新取一遍。 */
   FT.st.clear();
+  CAP.w = 0;
+  CAP.h = 0;
   /* **没接住的那本账也清**：它是"这一趟这份脚本缺哪几格"的账 —— 不清的话下一份脚本
      背着上一份的债（踩过一次：`drawsph.pss` 的账里挂着上一份的 `drawspr/4`，
      而它压根没调过 `drawspr`）。 */
