@@ -1258,6 +1258,15 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
     `strtoi("08")` 是 `NA`、`strtoi("011", 10L)` 才是 11。**还没接的两格**：`base` 不是
     整数字面量（运行期才知道的底数，当场报）、字符向量那一档（一格串接了）。
 
+    **`is.double` / `is.integer` / `as.double` 2026-09-26 加的三格。** 前两格答的是
+    编译期常量（这一层没有运行期的类型标签），分 double 与 integer 靠的就是 `int` / `real`
+    与 `ivec` 那个记号；**那个记号先量过才敢用**（上一次直接信它造出过一格静默答错，
+    见第 11 条那段账）：18 个对子与 R 一字不差 —— `1:3` / `which(…)` / `length(…)` /
+    `nchar(…)` / `as.integer(…)` 都是整数那一侧，`sqrt(2)` / `sum(…)` / `as.numeric(串)`
+    是 double 那一侧，逻辑向量两问都是 FALSE（R 的口径：逻辑既不是 double 也不是 integer）。
+    `as.double` 就是 `as.numeric` 的别名（R 的文档就这么写的），一条路两个名字。
+    判据 `ext/r/examples/na.R` 末尾那十行。
+
     **`as.logical` 接了**（2026-09-26，判据 `ext/r/examples/na.R` 末尾那一段）：它回的是
     **三态**（所以判据摆在 `na.R` 而不是 `str.R`）。数那一侧 0 假、非零真（`Inf` 也真）、
     缺失 `NA`（走现成的 `r_lgl`，`&&` / `||` 那一族本来就用它）；**串那一侧只认八种写法**

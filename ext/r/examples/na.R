@@ -149,3 +149,16 @@ cat(identical(which(c(TRUE, FALSE, TRUE)), c(1L, 3L)), "\n")
 cat(identical(nchar(c("ab", "c")), c(2L, 1L)), "\n")
 cat(identical(order(c(2, 1)), c(2L, 1L)), "\n")
 cat(length(c(1L, 2L)), sum(c(1L, 2L, 3L)), "\n")
+
+## is.double / is.integer：分的是 double 与 integer 两种存法（答案是编译期常量）
+cat(is.double(1), is.double(1L), is.double(TRUE), is.double("a"), "\n")
+cat(is.integer(1), is.integer(1L), is.integer(TRUE), is.integer("a"), "\n")
+cat(is.double(c(1, 2)), is.integer(c(1L, 2L)), "\n")
+cat(is.integer(1:3), is.double(1:3), "\n")
+cat(is.integer(as.integer(c(1.7, 2.7))), is.double(as.numeric(c("1", "2"))), "\n")
+cat(is.double(sqrt(2)), is.integer(nchar("ab")), "\n")
+cat(is.integer(length(c(1, 2))), is.double(sum(c(1, 2))), "\n")
+cat(is.integer(c(TRUE, FALSE)), is.double(c(TRUE, FALSE)), "\n")
+cat(is.integer(seq_len(3)), is.integer(which(c(TRUE, FALSE, TRUE))), "\n")
+## as.double 就是 as.numeric 的别名
+cat(as.double("3.5"), as.double(2L), as.double(c("1", "2")), "\n")

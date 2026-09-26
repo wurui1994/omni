@@ -726,8 +726,8 @@ const NAME_DROP_OK = new Set([
   'var', 'sd', 'range', 'any', 'all', 'unique', 'seq_along', 'seq_len',
   /* `duplicated` 量出来 R 自己也丢名字（2026-09-26）—— 从前这张表外，于是带名字的向量上报。 */
   'duplicated',
-  'as.character', 'as.numeric', 'as.integer', 'as.logical',
-  'is.numeric', 'is.character', 'is.logical', 'stop', 'stopifnot',
+  'as.character', 'as.numeric', 'as.double', 'as.integer', 'as.logical',
+  'is.numeric', 'is.character', 'is.logical', 'is.double', 'is.integer', 'stop', 'stopifnot',
 ]);
 /**
  * **名字跟得住的那几格** —— R 把名字带过去，这一档也带（见 `namesExprOf` 里同一批名字）。
@@ -1183,7 +1183,7 @@ function collectNonAscii(node) {
  */
 const BUILTINS = new Set([
   'cat', 'paste', 'paste0', 'c', 'list', 'length', 'nchar', 'return', 'is.null',
-  'as.integer', 'as.numeric', 'as.character', 'as.logical', 'abs', 'seq_len', 'is.na', 'is.nan',
+  'as.integer', 'as.numeric', 'as.double', 'as.character', 'as.logical', 'abs', 'seq_len', 'is.na', 'is.nan',
   'sum', 'mean', 'max', 'min', 'rev', 'seq_along', 'which', 'any', 'all',
   'print', 'invisible', 'xor', 'isTRUE', 'isFALSE', 'ifelse', 'identical', 'strtoi',
   /* base 里"向量进向量出"那一族 + 两格统计量。`seq` 与 `rep` 是造向量的。 */
@@ -1213,7 +1213,7 @@ const BUILTINS = new Set([
   /* 函数当实参那一族 —— **只接就地写的匿名函数**（见 `applyOf`）。 */
   'sapply', 'vapply', 'lapply', 'Reduce', 'Filter', 'mapply',
   /* "这是什么东西"那三问 —— 类型在这一层是**推出来的**，所以答案是编译期常量。 */
-  'is.character', 'is.numeric', 'is.logical',
+  'is.character', 'is.numeric', 'is.logical', 'is.double', 'is.integer',
   /* 停下来那一档（落方言的 `(fail …)`，只能摆在语句位上）。 */
   'stop', 'stopifnot',
   /* 分支那一格（落成一条 if 链，见 `switchOf`）。 */
@@ -1981,7 +1981,8 @@ function applyTy(fn, x, types) {
       const ps = posArgs(x);
       return ps.length > 2 && isStrVec(typeOfExpr(ps[2], types)) ? RSTRV : STR;
     }
-    case 'is.character': case 'is.numeric': case 'is.logical': return BOOL;
+    case 'is.character': case 'is.numeric': case 'is.logical':
+    case 'is.double': case 'is.integer': return BOOL;
     case 'toupper': return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RSTRV : STR;
     case 'startsWith': case 'endsWith': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : STR;
@@ -2015,7 +2016,7 @@ function applyTy(fn, x, types) {
       return args.length > 2 && isStrVec(typeOfExpr(args[2], types)) ? RSTRV : STR;
     /* `character(n)` —— 一条 n 格空串的字符向量。 */
     case 'character': return RSTRV;
-    case 'as.numeric': {
+    case 'as.numeric': case 'as.double': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : REAL;
       /* 字符向量进 → 一条数值向量出（`r_str2num_v`，见 `callOf` 那段账）。 */
       return isVecTy(t) || isStrVec(t) ? RVEC : REAL;
@@ -5868,7 +5869,7 @@ function callOf(x, types, extra, want, stmtPos) {
        * 之间转），而自己写一圈按位累加，在 15 位有效数字或者 10^±22 之外与 `strtod` 的舍入
        * 对不上 —— 那是静默差最后几位，比当场报难查得多。
        */
-      case 'as.integer': case 'as.numeric': {        if (n !== 1) throw new Error(`r->IR: ${fn}() 要一格实参（给了 ${n}）`);
+      case 'as.integer': case 'as.numeric': case 'as.double': {        if (n !== 1) throw new Error(`r->IR: ${fn}() 要一格实参（给了 ${n}）`);
         const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
         const wantInt = fn === 'as.integer';
         if (t.kind === 'string' || isStrVec(t)) {
@@ -6321,15 +6322,23 @@ function callOf(x, types, extra, want, stmtPos) {
       /* 找与换那一族（见 `findOf`）—— pattern 只认串字面量。 */
       case 'grepl': case 'grep': case 'sub': case 'gsub':
         return findOf(fn, x, types);
-      case 'is.character': case 'is.numeric': case 'is.logical': {
-        /* 类型在这一层是**推出来的**（方言那侧没有运行期的类型标签），所以这三问的答案是
-           编译期常量。R 的口径：`is.numeric(TRUE)` 是 FALSE、`is.numeric(1L)` 是 TRUE。 */
+      case 'is.character': case 'is.numeric': case 'is.logical':
+      case 'is.double': case 'is.integer': {
+        /* 类型在这一层是**推出来的**（方言那侧没有运行期的类型标签），所以这几问的答案是
+           编译期常量。R 的口径：`is.numeric(TRUE)` 是 FALSE、`is.numeric(1L)` 是 TRUE。
+           `is.double` / `is.integer` 2026-09-26 加的：它们分的是 double 与 integer 两种
+           存法，靠的就是 `int` / `real` 与 `ivec` 那个记号（`c(1L,2L)` / `as.integer(…)` /
+           `1:3` 都挂着它）—— **那个记号先量过才敢用**（见 SPEC 第四节第 11 条那段账）。 */
         if (n !== 1) throw new Error(`r->IR: ${fn}() 要一格实参（给了 ${n}）`);
         const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
         const lgl = t.kind === 'bool' || isLgl1(t) || isLglTy(t);
+        const intish = !lgl && (t.kind === 'int' || (isVecTy(t) && isIvecTy(t)));
+        const dblish = !lgl && (t.kind === 'real' || (isVecTy(t) && !isIvecTy(t)));
         const val = fn === 'is.character' ? (t.kind === 'string' || isStrVec(t))
           : (fn === 'is.logical' ? lgl
-            : (!lgl && (t.kind === 'int' || t.kind === 'real' || isVecTy(t))));
+            : (fn === 'is.integer' ? intish
+              : (fn === 'is.double' ? dblish
+                : (!lgl && (t.kind === 'int' || t.kind === 'real' || isVecTy(t))))));
         return { kind: 'bool', value: val };
       }
       case 'startsWith': case 'endsWith': {
