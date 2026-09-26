@@ -776,9 +776,12 @@ function attrSet(loc, val) {
 /* ---------------------------------------------------------------- 那张名字表 */
 
 /**
- * **一格宿主调用**（名字 + 一串 double，回一个 double）。认不出的名字**当场炸**，
- * 并说清这一格设备有哪些名字 —— 不许静默回 0（那是"图不对但没人知道"的来源）。
+ * **一格宿主调用**（名字 + 一串 double，回一个 double）。认不出的名字**记一笔账再当空操作**
+ * （见 `default`）—— 不许静默回 0：账在 `dev.misses()` 里，控制台也报一行。
  */
+/** **没接住的那几格的账**（名字/元数 -> 这一趟被调了几次）。见 `call` 的 `default`。 */
+const MISS = new Map();
+
 function call(name, args) {
   const gl = D.gl;
   const a = (i) => Number(args[i] ?? 0);
@@ -928,6 +931,37 @@ function call(name, args) {
     /* `gluniform(句柄, 值)` / `gluniform(句柄, 个数, 数组)`：说明书里是同一个名字两种元数。
        数组那一档要一格数组实参 —— 宿主面只收 double，所以**明着拒**。 */
     case 'gluniform/2': return uniSet(a(0), [a(1)]);
+    /* `klock(i)`：`0` 与 `klock()` 同；`|i|` 在 1..9 是**日期分量**（i>0 本地、i<0 UTC）——
+       口径照 `polydraw_src/polydraw.c:1662` 的 `myklock`，那张表与 `host/gfx-cpu.js` 的
+       `klockParts` 逐格相同：1 = YYYYMMDDHHMMSS.sss × .001，2 年 3 月 **4 星期（0 = 周日）**
+       5 日 6 时 7 分 8 秒 9 毫秒。缺这一格的样子是"帧函数抛了、帧循环停下"（`clock.pss`）。
+       这儿在真浏览器里跑，所以直接用 `Date`（`core/host/browser.js` 的 `localStamp` 同路）。 */
+    case 'klock/1': {
+      const i = Math.trunc(a(0));
+      if (i === 0) return (performance.now() - D.t0) / 1000;
+      const k = Math.abs(i);
+      if (k < 1 || k > 9) return 0;
+      const u = i < 0;
+      const d = new Date();
+      const y = u ? d.getUTCFullYear() : d.getFullYear();
+      const mo = (u ? d.getUTCMonth() : d.getMonth()) + 1;
+      const dd = u ? d.getUTCDate() : d.getDate();
+      const h = u ? d.getUTCHours() : d.getHours();
+      const mi = u ? d.getUTCMinutes() : d.getMinutes();
+      const s = u ? d.getUTCSeconds() : d.getSeconds();
+      const ms = u ? d.getUTCMilliseconds() : d.getMilliseconds();
+      if (k === 1) {
+        return ((((((y * 100 + mo) * 100 + dd) * 100 + h) * 100 + mi) * 100 + s) * 1000 + ms) * 0.001;
+      }
+      if (k === 2) return y;
+      if (k === 3) return mo;
+      if (k === 4) return u ? d.getUTCDay() : d.getDay();
+      if (k === 5) return dd;
+      if (k === 6) return h;
+      if (k === 7) return mi;
+      if (k === 8) return s;
+      return ms;
+    }
     /* `glgetattribloc(名字下标)` / `glvertexattrib{1,2,3,4}f(句柄, …)`：
        **常量属性**那一档（数组关着时 GL 用的就是当前值）。逐顶点变的那一档没接 ——
        我们这儿顶点是攒成一批画的，要逐顶点得给顶点布局再加一格，记在这儿。 */
@@ -937,14 +971,34 @@ function call(name, args) {
     case 'glvertexattrib3f/4': return attrSet(a(0), [a(1), a(2), a(3), 1]);
     case 'glvertexattrib4f/5': return attrSet(a(0), [a(1), a(2), a(3), a(4)]);
     default:
-      throw new Error(`这格设备（WebGL2）上没有 '${name}'（${args.length} 个实参）——`
-        + ' 2D 那一族是 cls/setcol/setpix/moveto/lineto/drawsph/drawcone/rgb/refresh，'
-        + ' 宿主量是 nextframe/numframes/klock/xres/yres/mousx/mousy/bstatus/keystatus，'
-        + ' 批与它的状态是 (gfxbatch …)/batchprog/batchmvp/batchblend/gldepth，'
-        + ' 可编程管线是 glsetshader/glgetuniformloc/gluniform*/glgetattribloc/glvertexattrib*，'
-        + ' 纹理是 (gfxtex …)/glbindtexture/glactivetexture（文件那一档还没接：glsettex("x.png")）；'
-        + ' **GL 立即模式与矩阵栈不在设备这一层**（在语言那一侧的 ext/polydraw/gl-rt.js，'
-        + '只有一个模型）');
+      /**
+       * **没接住的那一格：记一笔账 + 当空操作**，不掐死帧循环。
+       *
+       * 从前这儿直接抛：一份脚本用到一格还没接的 API（`setfont` 那一族画布文字、
+       * `glsettexfile` 文件纹理），**整个帧循环当场停**、页面上只剩一张残帧。
+       * 而这两族是**明知的欠账**（任务 #26 / #28），不是"写错了"。
+       *
+       * 所以改成：第一次在控制台报一行（谁缺、几个实参），之后静默；账记在
+       * `MISS` 里，`perf()` 与 `misses()` 都读得到 —— 判据靠它算"缺哪一格 × 几份"，
+       * **不是靠"跑通了"**（那就是"不许拿全黑对全黑白拿分"那条纪律的这一处落点）。
+       */
+    {
+      const miss = `${name}/${args.length}`;
+      if (!MISS.has(miss)) {
+        MISS.set(miss, 0);
+        // eslint-disable-next-line no-console
+        console.warn(`#gfx miss ${miss} —— 这格设备（WebGL2）还没接这一格，当空操作，`
+          + '账记在 dev.misses()。这一层有的是：'
+          + '2D cls/setcol/setpix/moveto/lineto/drawsph/drawcone/rgb/refresh，'
+          + '宿主量 nextframe/numframes/klock/xres/yres/mousx/mousy/bstatus/keystatus，'
+          + '批与状态 (gfxbatch …)/batchprog/batchmvp/batchblend/gldepth，'
+          + '可编程管线 glsetshader/glgetuniformloc/gluniform*/glgetattribloc/glvertexattrib*，'
+          + '纹理 (gfxtex …)/glbindtexture/glactivetexture；'
+          + '**GL 立即模式与矩阵栈不在设备这一层**（在语言那一侧的 ext/polydraw/gl-rt.js）');
+      }
+      MISS.set(miss, MISS.get(miss) + 1);
+      return 0;
+    }
   }
 }
 
@@ -1217,6 +1271,8 @@ export function installGlDevice(canvas, w = 320, h = 240) {
     arr: arrIn,
     present: flush,
     snapshot,
+    /** 这一趟**哪几格没接住、各被调了几次** —— 判据算"缺哪一格 × 几份"靠它。 */
+    misses: () => [...MISS.entries()].map(([k, n]) => ({ op: k, n })),
     setFrame,
     perf,
     frames: () => D.fno,
