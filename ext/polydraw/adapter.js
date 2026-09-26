@@ -965,6 +965,19 @@ function hostStore(ht, op, val, C) {
 }
 
 /**
+ * **`ir` 那一档（产物自带光栅器）把落点烧进产物里** —— 所以它只认"这份脚本的默认落点"
+ * （`OMNI_GFX_OUT_DEFAULT`，CLI 按脚本名 + 缓存根算的），**不认 `-o`**：
+ * 那一格是每趟都可能变的，烧进产物就与缓存的印记打架（产物按内容作键）。
+ * 要换落点就走宿主设备那条路（默认那条）。拿不到那格环境变量（`omni build` 出来的
+ * 独立产物）就还是那句老兜底。
+ */
+function irOutPath() {
+  const p = env('OMNI_GFX_OUT_DEFAULT');
+  return p === undefined || p === null || p === '' ? '.omni-cache/gfx/frame.png' : p;
+}
+
+
+/**
  * **`goto` / `label:`**（RScript 的关键字表里那两行）。标准 IR 里没有无条件跳转，
  * 所以这儿只接**往前跳**那一档，落法是一格**旗子**（经典的 goto 消除法）：
  *
@@ -3272,7 +3285,7 @@ export function evalToIR(cst, host, src = '') {
     const W = 320;
     const H = 240;
     decls.unshift(...gfxGlobalDecls());
-    decls.push(...gfxFnDecls(W, H), gfxPresentDecl('.omni-cache/gfx/frame.png'));
+    decls.push(...gfxFnDecls(W, H), gfxPresentDecl(irOutPath()));
     if (C.need3D) {
       decls.unshift(...gfx3GlobalDecls());
       decls.push(...gfx3FnDecls(false));

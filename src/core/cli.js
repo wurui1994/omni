@@ -3682,6 +3682,34 @@ function evGlAddon() {
 }
 
 /**
+ * **一帧图默认落哪儿**：`<缓存根>/gfx/<脚本名>.png`（落进 `OMNI_GFX_OUT_DEFAULT`）。
+ * `-o` 明说的照旧优先（那一格是 `OMNI_GFX_OUT`）。
+ *
+ * 从前是一句钉死的相对路径 `.omni-cache/gfx/frame.png`，两处都不对：
+ *
+ * * **相对 cwd** —— 在哪儿跑就在哪儿拉一坨 `.omni-cache/`，而编译那一摊缓存落的是
+ *   真缓存根（`cacheRoot()`：`OMNI_CACHE_DIR` > 按标志文件往上找的仓库根 > cwd）。
+ *   同一个名字两个地方，用户在 `~/Downloads/evaldraw/demos` 里跑一趟就多一个空壳目录；
+ * * **名字钉死** —— `frame.png` 是"把一帧图递给浏览器"那会儿图省事留下的旧契约：
+ *   跑两份脚本互相覆盖，谁都不知道那张图是谁的。现在跟着脚本名走。
+ *
+ * 独立产物（`omni build` 出来的那份、没有 CLI 摆这格环境变量）照旧有兜底，
+ * 见 `host/gfx-cpu.js` 的 `outPath` 与 `runtime/omni_fmt.c` 的 `gfx_present`。
+ */
+function setGfxDefaultOut(path) {
+  const base = basename(path);
+  const cut = base.lastIndexOf('.');
+  const stem = cut > 0 ? base.slice(0, cut) : base;
+  const abs = join(cacheRoot(), 'gfx', `${stem}.png`);
+  /* **就在 cwd 底下的话印相对的**（`.omni-cache/gfx/beer.png`）：人看得懂，而且
+     `omni serve` 那一格 `/api/gfx` 的闸认的就是 `.omni-cache/gfx/` 开头的相对路径
+     （Studio 是在仓库根上跑的）。不在 cwd 底下就老老实实印绝对路径 ——
+     **不数 `../../..`**（那种路径两条腿算出来的根不一样，踩过）。 */
+  const here = `${cwd()}/`;
+  setEnv('OMNI_GFX_OUT_DEFAULT', abs.startsWith(here) ? abs.slice(here.length) : abs);
+}
+
+/**
  * **把本机 GL 设备那两份东西摆进环境变量**（编不出来就留空，设备自己回落 CPU 备选）：
  *
  *   `OMNI_GL_LIB`      原生腿 `dlopen` 的那份 dylib（§13.8）
@@ -5308,7 +5336,7 @@ function timeoutBudgetS(name, dflt) {
  *
  * 旗子照 c_impl 的 `polydraw-render` / `polydraw-view`（`/Users/wurui/Documents/polydraw`）：
  *
- *   omni run x.pss                        render（默认）：画一帧，落 .omni-cache/gfx/frame.png
+ *   omni run x.pss                        render（默认）：画一帧，落 <缓存根>/gfx/x.png
  *   omni run x.pss --frame 30 -o out.png  走到第 30 帧、**只交出那一帧**（前 30 帧真跑过去）
  *   omni run x.pss --w 640 --h 480        画布尺寸（默认 320×240）
  *   omni run x.pss --perf                 每帧耗时与 fps 印到 stderr（`#perf gfx …`）
@@ -5322,6 +5350,8 @@ function timeoutBudgetS(name, dflt) {
  */
 function applyGfxFlags(verb, path, rest) {
   if (verb !== 'run' || path === undefined || path === null) return;
+  /* **一帧图默认落哪儿**（这一格对所有语言都管，不只 EVAL 那两门）。 */
+  setGfxDefaultOut(path);
   if (!(path.endsWith('.pss') || path.endsWith('.kc'))) return;
   /* **素材（文件纹理）按脚本所在的目录找**：`glsettex(0,"earth.jpg")` 里那是个相对路径，
      而原版是在脚本旁边跑的（`kzopen` 按 cwd）。判据从仓库根跑，所以这儿把脚本那一格目录

@@ -392,7 +392,10 @@ export function startServer(opts) {
        * （它是产物，不是源码），所以这一格自己关门 —— 放开整个 `.omni-cache` 等于把缓存交出去。
        */
       if (path === '/api/gfx') {
-        const rel = url.searchParams.get('path') ?? '';
+        let rel = url.searchParams.get('path') ?? '';
+        /* 落点是**绝对路径**的也收下：cwd 不在仓库根上那一趟，指针那一行印的就是绝对的
+           （见 `cli.js` 的 `setGfxDefaultOut`）。剥掉根这一段，下面那道闸照旧。 */
+        if (rel.startsWith(`${root}/`)) rel = rel.slice(root.length + 1);
         const png = rel.endsWith('.png');
         if (rel.includes('..') || !rel.startsWith('.omni-cache/gfx/')
           || !(png || rel.endsWith('.rgba'))) {

@@ -18,7 +18,7 @@
 //   node tests/lower/run.js awk      只跑名字里带 awk 的那几格
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LANGS } from '../../src/core/lower/langs.js';
@@ -193,14 +193,31 @@ for (const [name, families] of Object.entries(MIGRATED)) {
  *   * `.pss` = PolyDraw 的 **GL 立即模式**（`glBegin`/`glVertex`/`glColor` + 矩阵栈）——
  *     它多一层变换与三角形光栅化（`gl-rt.js`），所以值得单独一格。
  */
-const GFX_OUT = '.omni-cache/gfx/frame.png';
+/**
+ * 一帧图**默认**落哪儿：`<缓存根>/gfx/<脚本名>.png`（`cli.js` 的 `setGfxDefaultOut`）。
+ * 从前是钉死的 `.omni-cache/gfx/frame.png`（相对 cwd + 名字固定），两份脚本互相覆盖。
+ * 判据从仓库根跑、没设 `OMNI_CACHE_DIR`，所以缓存根就是 `<ROOT>/.omni-cache`。
+ *
+ * `jnc+ege` 那一格例外：落点烧在**库的源码里**（`ext/jnc/lib/ege.jnc` 的 `gfxframe(…)`
+ * 那一句，那是用户级的库代码、不读环境变量）—— 它判的就是那句老兜底。
+ */
+const GFX_FALLBACK = '.omni-cache/gfx/frame.png';
+const gfxOutOf = (G) => {
+  if (G.out !== undefined) return G.out;
+  const base = G.file.slice(G.file.lastIndexOf('/') + 1);
+  const cut = base.lastIndexOf('.');
+  /* 判据从仓库根跑 ⇒ 落点就在 cwd 底下 ⇒ CLI 印的是**相对**那一份（见 setGfxDefaultOut）。 */
+  return `.omni-cache/gfx/${cut > 0 ? base.slice(0, cut) : base}.png`;
+};
+
 const GFX_CASES = [
   { who: 'evaldraw+2d', file: 'ext/evaldraw/examples/draw2d.kc', w: 320, h: 240 },
   { who: 'polydraw+gl', file: 'ext/polydraw/examples/02-gl.pss', w: 320, h: 240 },
   /* jnc（C 那一侧）：同一格 op 的**指针那一档** —— 帧缓冲是 `int fb[N]`（一槽一个
      0xRRGGBB），不是 `(arr real)`。库是普通的 jnc 代码（`ext/jnc/lib/ege.jnc`），
-     只有"交出一帧"那一句走方言。 */
-  { who: 'jnc+ege', file: 'ext/jnc/examples/01-shapes.jnc', w: 320, h: 240 },
+     只有"交出一帧"那一句走方言。落点也烧在那份库里（用户级代码不读环境变量），
+     所以这一格判的是那句老兜底。 */
+  { who: 'jnc+ege', file: 'ext/jnc/examples/01-shapes.jnc', w: 320, h: 240, out: GFX_FALLBACK },
   /* **宿主设备那条路**（`OMNI_GFX=host`：画图落成 `(gfxcall "名字" …)`，设备在宿主那一侧）。
      判的是"搬家不改语义"：同一份 `.kc` 走这条路，与上头 `evaldraw+2d`（生成出来的 CPU
      光栅器）出来的表面**逐字节相同**。这条路才是往后的默认 —— GPU 那两档设备（WebGL2 /
@@ -274,18 +291,19 @@ const gfxLegs = [['js', []], ['interp', ['--backend', 'interp']], ['c', ['--back
 for (const G of GFX_CASES) {
   if (only.length > 0 && !only.some((x) => 'gfx'.includes(x) || G.file.includes(x) || G.who.includes(x))) continue;
   const seen = [];
+  const gout = gfxOutOf(G);
   for (const [leg, flags] of gfxLegs) {
     const label = `${G.who}(${leg})`;
     const got = omni(['run', ...flags, G.file, ...(G.args ?? [])], G.env);
     /* 一帧一行指针：帧循环那一档跑几帧就有几行。 */
     const want = new Array(G.frames === undefined ? 1 : G.frames)
-      .fill(`#gfx png ${GFX_OUT} ${G.w} ${G.h}`);
+      .fill(`#gfx png ${gout} ${G.w} ${G.h}`);
     if (got.code !== 0) { no(label, `退出码 ${got.code}：${got.err.split('\n').slice(-2).join(' ')}`); continue; }
     if (JSON.stringify(got.out) !== JSON.stringify(want)) {
       no(label, `stdout 期望 ${JSON.stringify(want)} 得到 ${JSON.stringify(got.out)}`);
       continue;
     }
-    const buf = readFileSync(join(ROOT, GFX_OUT));
+    const buf = readFileSync(gout.startsWith('/') ? gout : join(ROOT, gout));
     /* 默认出口是 PNG：解开它（页面那一格同一份解码器 —— 判据与 UI 不许各解一套）。
        解得开这件事本身就把"签名 / IHDR / stored 流 / filter 0"全判了。 */
     let px = null;
@@ -322,6 +340,33 @@ for (const G of GFX_CASES) {
     if (buf.equals(seen[0][1])) ok(`${G.who} ${seen[0][0]}/${leg} 逐字节相同`);
     else no(`${G.who} ${seen[0][0]}/${leg}`, '两条腿的表面不是同一份字节');
   }
+}
+
+/* ── **在别处的目录里跑**：落点跟着**缓存根**走，不在 cwd 底下拉一坨 ────────────────
+ *
+ * 上头那几格是从仓库根跑的（落点正好在 cwd 底下 ⇒ 印相对路径）。这一格换个 cwd：
+ * 指针那一行该是**绝对**的、指到 `<缓存根>/gfx/<脚本名>.png`，而且那个 cwd 底下
+ * **不许**多出 `.omni-cache/`。从前是钉死的相对 `.omni-cache/gfx/frame.png`：
+ * 在哪儿跑就在哪儿建一个空壳缓存目录，而编译那一摊缓存在另一个根上。
+ */
+if (only.length === 0 || only.some((x) => 'gfx'.includes(x))) {
+  const away = join(ROOT, '.omni-cache', 'test-cwd-away');
+  rmSync(away, { recursive: true, force: true });
+  mkdirSync(away, { recursive: true });
+  const src = join(ROOT, 'ext/evaldraw/examples/draw2d.kc');
+  const r = spawnSync(process.execPath, [CLI, 'run', src], {
+    encoding: 'utf8', cwd: away, env: process.env,
+  });
+  const line = (r.stdout ?? '').split('\n').find((s) => s.startsWith('#gfx ')) ?? '';
+  const want = `#gfx png ${join(ROOT, '.omni-cache/gfx/draw2d.png')} 320 240`;
+  if (line !== want) {
+    no('换个 cwd 跑：落点跟着缓存根走', `期望 ${want} 得到 ${line || '(没有指针行)'}`);
+  } else if (existsSync(join(away, '.omni-cache'))) {
+    no('换个 cwd 跑：不在 cwd 底下拉一坨', `${away}/.omni-cache 被建出来了`);
+  } else {
+    ok('换个 cwd 跑：落点跟着缓存根走、cwd 底下不落东西', '绝对路径 + 按脚本名');
+  }
+  rmSync(away, { recursive: true, force: true });
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed`

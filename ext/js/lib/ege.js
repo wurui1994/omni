@@ -13,7 +13,8 @@
  *
  * 一趟只有**一帧图**跨边界（`closegraph` / `present`）：默认写成一份 **PNG**
  * （8 位 RGBA、filter 0、zlib stored —— `src/core/host/png.js`），落在
- * `OMNI_GFX_OUT`（默认 `.omni-cache/gfx/frame.png`）。落点后缀换成 `.rgba` 就走备选出口，
+ * `OMNI_GFX_OUT`（没明说就是 CLI 摆的那格默认：`<缓存根>/gfx/<脚本名>.png`）。
+ * 落点后缀换成 `.rgba` 就走备选出口，
  * 那一份是裸表面：
  *
  *     #rgba <宽> <高>\n<w*h*4 个字节>
@@ -270,11 +271,12 @@ export function fillpoly(pts) {
  * 把这一帧交给设备。`closegraph()` 就是它 —— 分两个名字是因为动画那一档要在循环里调
  * （`present()` 每帧一次），而 `closegraph()` 是 BGI 里"收工"那一句。
  *
- * 落点：`OMNI_GFX_OUT`，默认 `.omni-cache/gfx/frame.png`（后缀换 `.rgba` 走裸表面那个备选）。
- * stdout 上只印一行指针 —— 图本身不走 stdout。
+ * 落点：`OMNI_GFX_OUT` > `OMNI_GFX_OUT_DEFAULT`（CLI 按脚本名 + 缓存根算的，
+ * 见 `cli.js` 的 `setGfxDefaultOut`）> `.omni-cache/gfx/frame.png`（独立产物的兜底）。
+ * 后缀换 `.rgba` 走裸表面那个备选。stdout 上只印一行指针 —— 图本身不走 stdout。
  */
 export function present() {
-  const path = env('OMNI_GFX_OUT') ?? '.omni-cache/gfx/frame.png';
+  const path = env('OMNI_GFX_OUT') ?? env('OMNI_GFX_OUT_DEFAULT') ?? '.omni-cache/gfx/frame.png';
   const slash = path.lastIndexOf('/');
   if (slash > 0) mkdirAll(path.slice(0, slash));
   /* 字节口径：封闭 ABI 的 `writeBinary` 吃的是**一个字符一个字节**的串（latin1）。

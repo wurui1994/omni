@@ -260,9 +260,17 @@ JS 腿 `$gfx_frame_fn(omni_eval$frame)`、C 腿 `omni_gfx_frame_fn((void *)…)`
 
 ### 7.1 一帧图的出口：**默认 PNG**，裸表面是备选
 
-* 默认落 `.omni-cache/gfx/frame.png`（8 位 RGBA、filter 0、zlib **stored**）——
+* 默认落 **`<缓存根>/gfx/<脚本名>.png`**（8 位 RGBA、filter 0、zlib **stored**）——
   双击能开、`magick compare` 直接吃。**不引 zlib**：stored 那点格式自己写就几十行，
   而且逐字节确定（压缩器换个版本字节就变，那会把"三条腿逐字节相同"毁掉）。
+  **2026-09-26 改的两处**：从前是钉死的相对路径 `.omni-cache/gfx/frame.png` ——
+  相对 **cwd**（在哪儿跑就在哪儿拉一坨 `.omni-cache/`，而编译那一摊缓存落的是真缓存根），
+  名字**钉死**（跑两份脚本互相覆盖，那是"把一帧图递给浏览器"那会儿图省事留下的旧契约）。
+  现在落点 = `cacheRoot()`（`OMNI_CACHE_DIR` > 按标志文件往上找的仓库根 > cwd）+ 脚本名；
+  **就在 cwd 底下的印相对、不在的印绝对**（不数 `../../..`）。CLI 把它摆进
+  `OMNI_GFX_OUT_DEFAULT`，三处落点都认那一格（`host/gfx-cpu.js` 的 `outPath`、
+  `runtime/omni_fmt.c` 的 `gfx_present`、`ir` 那一档烧进产物的 `irOutPath`）。
+  独立产物（`omni build` 出来的、没有 CLI）照旧走 `.omni-cache/gfx/frame.png` 那句兜底。
 * 落点后缀是 `.rgba` 才走裸表面（`#rgba <w> <h>\n` + `w*h*4` 个字节）——
   程序对程序那一头（`putImageData` / `glTexImage2D`）直接吃裸字节。
 * stdout 上永远只有**一行指针**：`#gfx <种类> <路径> <宽> <高>`（`png` / `rgba`）。
@@ -274,7 +282,7 @@ JS 腿 `$gfx_frame_fn(omni_eval$frame)`、C 腿 `omni_gfx_frame_fn((void *)…)`
 ### 7.2 命令行：`--mode render`（默认）/ `view`
 
 ```
-omni run x.pss                          render：画一帧，落 .omni-cache/gfx/frame.png
+omni run x.pss                          render：画一帧，落 <缓存根>/gfx/x.png
 omni run x.kc --frame 30 -o out.png     走到第 30 帧、**只交出那一帧**（前 30 帧真跑）
 omni run x.kc --w 640 --h 480           画布尺寸（默认 320×240）
 omni run x.kc --frame 60 --perf         每帧耗时与 fps 印到 stderr

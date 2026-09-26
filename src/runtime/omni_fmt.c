@@ -1145,7 +1145,11 @@ static void gfx_present(void) {
     return;
   }
   const char *p = getenv("OMNI_GFX_OUT");
+  /* 没明说落点就用 CLI 摆的**默认**（`<缓存根>/gfx/<脚本名>.png`，见 cli.js 的
+     `setGfxDefaultOut`）；连那格都没有（独立产物，没人知道脚本叫什么）才走最后这句。 */
+  if (p == NULL || p[0] == '\0') p = getenv("OMNI_GFX_OUT_DEFAULT");
   if (p == NULL || p[0] == '\0') p = ".omni-cache/gfx/frame.png";
+
   int64_t *fb = g_gfb;
   /* GL 那一档：把 GPU 那一层读回来当底，宿主那一层（-1 = 没人画）盖上去。
      一帧只读一次（`_read` 里是 `glFinish` + `glReadPixels`，同步的）。 */

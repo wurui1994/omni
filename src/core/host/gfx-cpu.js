@@ -26,7 +26,8 @@ import { dlopenAddon } from './ffi_host.js';
 /** 设备的那几格状态。**一格进程一格设备**（EVAL 的宿主本来就是这个形状）。 */
 const D = {
   w: 0, h: 0, fb: null, col: 0xffffff, x: 0, y: 0, on: false,
-  out: '.omni-cache/gfx/frame.png',
+  /* 落点。空着 = 没人明说，由 `outPath()` 定（`OMNI_GFX_OUT` > 这一格 > CLI 摆的默认）。 */
+  out: '',
   /* 帧循环那三格：`fno` 是已经开始画的帧数（脚本里的 `numframes` = fno-1，第一帧是 0）、
      `frames` 是这一趟要画几帧（`OMNI_FRAMES`，默认 1）、`dirty` 是"这一帧动过没有"
      —— 没动过就不重复写表面（脚本自己调 `refresh()` 之后帧末那一次就免了）。 */
@@ -952,13 +953,20 @@ export function gfxCall(name, args) {
 /** 表面的落点：`OMNI_GFX_OUT` 能换（与 `ext/js/lib/ege.js` 同一格开关）。 */
 function outPath() {
   const p = env('OMNI_GFX_OUT');
-  return p === undefined || p === null || p === '' ? D.out : p;
+  if (p !== undefined && p !== null && p !== '') return p;
+  /* 谁明着设过就听它（Studio 那一侧用 `gfxSetOut`）。 */
+  if (D.out !== '') return D.out;
+  /* CLI 摆的**默认落点**：`<缓存根>/gfx/<脚本名>.png`（见 cli.js 的 `setGfxDefaultOut`）。
+     独立产物（没有 CLI）才走最后那句兜底 —— 那儿没人知道脚本叫什么。 */
+  const d = env('OMNI_GFX_OUT_DEFAULT');
+  return d === undefined || d === null || d === '' ? '.omni-cache/gfx/frame.png' : d;
 }
 
 /**
  * CPU 备选那一档的"交出一帧"：写图 + stdout 上印一行指针。
  *
- * **默认写 PNG**（`.omni-cache/gfx/frame.png`）—— 双击能开、`magick`/`compare` 直接吃；
+ * **默认写 PNG**（`<缓存根>/gfx/<脚本名>.png`，见 `outPath`）—— 双击能开、`magick`/`compare`
+ *   直接吃；
  * 落点后缀是 `.rgba` 才走裸表面那个备选出口（它没有编码那一层，逐字节判据最直接）。
  * 指针那一行把种类也带上：`#gfx png <路径> <宽> <高>` / `#gfx rgba …`。
  */
@@ -990,7 +998,7 @@ function present() {
   if (G.win) {
     winPresent();
     /* 窗口那一档**只在 `OMNI_GFX_OUT` 明说时**顺带写一份（判据要那个口子）——
-       与原生腿一致：没明说就不往 `.omni-cache/gfx/frame.png` 里每帧写一次。 */
+       与原生腿一致：没明说就不往默认那个落点里每帧写一次。 */
     const o = env('OMNI_GFX_OUT');
     if (o === undefined || o === null || o === '') { D.dirty = false; return; }
   }
