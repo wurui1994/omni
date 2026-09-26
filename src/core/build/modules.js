@@ -283,3 +283,43 @@ export function sxForms(text) {
   }
   return out;
 }
+
+/**
+ * 把一项 `(main (do …))` / `(fn … (do …))` 的**那一格 `do` 拆成语句**（一句一条，带全）。
+ *
+ * 谁要它：`asyUnitModules` 的 `sections.main` 要的是**语句**（它自己再拼 `(main (do …))`），
+ * 而切单元那一侧手里只有整项（`sxForms` 回的那种）。与 `sxForms` 同一个深度计数的写法 ——
+ * 拆法只有这一份，别在某门语言那边再抄一遍。
+ *
+ * 认的形状：项里第一处 `(do` 之后、与它配对的那个右括号之前，每一句从**某一行的行首
+ * 那个左括号**起到括号平衡为止。回 `string[]`（每句已经 `trim` 过左边的缩进）。
+ */
+export function sxDoStmts(text) {
+  const lines = text.split('\n');
+  let at = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/\(do\s*$/.test(lines[i]) || /\(do\s/.test(lines[i])) { at = i; break; }
+  }
+  if (at < 0) return [];
+  const out = [];
+  let cur = null;
+  let depth = 0;
+  for (let i = at + 1; i < lines.length; i++) {
+    const ln = lines[i];
+    if (cur === null) {
+      if (!/^\s*\(/.test(ln)) continue;                 /* `))` 那种收尾行 */
+      cur = [];
+      depth = 0;
+    }
+    cur.push(ln.trimStart());
+    for (const c of ln) {
+      if (c === '(') depth++;
+      else if (c === ')') depth--;
+    }
+    if (depth <= 0) {
+      out.push(cur.join('\n'));
+      cur = null;
+    }
+  }
+  return out;
+}
