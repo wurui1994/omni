@@ -417,6 +417,48 @@ for (const [name, minFill, minColors] of [['04-shader.pss', 0.9, 1000],
   }
 }
 
+/* ── 第七节：**EvalDraw 的 GL 子集用 EvalDraw 的相机**（`.kc`，2026-09-26）───────────
+ *
+ * 那门语言的 `glBegin/glVertex` **不是 OpenGL**（`evaldraw.txt:1641`）：跟的是它自己那套
+ * 3D 相机（`setcam`/`setview`：**+z 是前、y 往下**），而且**没有 `glColor`** —— 顶点色就是
+ * 当前 `setcol`。从前这一族按 OpenGL 那套走（-z 是前、顶点色默认 0），于是 45 份用
+ * `glBegin` 的 `.kc` 画出来**全黑**（几何在镜头背后 + 颜色是黑的）。
+ *
+ * 探针两块四边形：z=+4 那块（红）该看得见、z=-4 那块（绿）在镜头背后该看不见。
+ */
+{
+  const probe = join(out, 'evgl.kc');
+  writeFileSync(probe, '()\n{\n   setcol(0xff0000);\n   glBegin(GL_QUADS);\n'
+    + '   glVertex(-1,-1,4); glVertex(1,-1,4); glVertex(1,1,4); glVertex(-1,1,4);\n'
+    + '   glEnd();\n   setcol(0x00ff00);\n   glBegin(GL_QUADS);\n'
+    + '   glVertex(-1,-1,-4); glVertex(1,-1,-4); glVertex(1,1,-4); glVertex(-1,1,-4);\n'
+    + '   glEnd();\n}\n');
+  const pe = join(out, 'evgl.rgba');
+  const re = spawnSync(process.execPath,
+    [join(ROOT, 'src/cli.js'), 'run', probe, '--backend', 'c', '-o', pe],
+    { encoding: 'utf8', cwd: ROOT, timeout: 180000,
+      env: { ...process.env, OMNI_GFX: 'gl', OMNI_GFX_MODE: 'render' } });
+  if (re.status !== 0 || !existsSync(pe)) {
+    no('.kc 的 glBegin 那一族走 EvalDraw 的相机',
+      `${(re.stdout ?? '').trim()} ${(re.stderr ?? '').trim()}`.slice(0, 300));
+  } else {
+    const b = rgba(pe);
+    let red = 0;
+    let green = 0;
+    for (let i = 0; i < b.length; i += 4) {
+      if (b[i] > 200 && b[i + 1] < 60) red++;
+      if (b[i + 1] > 200 && b[i] < 60) green++;
+    }
+    if (red > 2000 && green === 0) {
+      ok('.kc 的 glBegin 那一族走 EvalDraw 的相机（+z 是前）+ 顶点色来自 setcol',
+        `红 ${red} 格、绿 ${green} 格`);
+    } else {
+      no('.kc 的 glBegin 那一族走 EvalDraw 的相机',
+        `红 ${red} 格（该有一大片）、绿 ${green} 格（该是 0：那块在镜头背后）`);
+    }
+  }
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed（本机 OpenGL 设备）\n`);
 process.exit(fail === 0 ? 0 : 1);
 

@@ -660,6 +660,9 @@ export function gfxCall(name, args) {
       if (G.on && typeof G.m.cull === 'function') G.m.cull(Math.trunc(a(0)));
       return 0;
     case 'setcol/1': need(320, 240); D.col = Math.trunc(a(0)) & 0xffffff; return 0;
+    /* `getcol()`：当前颜色（打包好的 0xRRGGBB）。EvalDraw 的 `glBegin` 那一族靠它取顶点色
+       —— 那门语言没有 `glColor`（`evaldraw.txt:1641` 那张表里一格都没有）。 */
+    case 'getcol/0': need(320, 240); return D.col;
     case 'setpix/2': need(320, 240); px(a(0), a(1), D.col); return 0;
     case 'moveto/2': need(320, 240); D.x = a(0); D.y = a(1); return 0;
     case 'lineto/2':

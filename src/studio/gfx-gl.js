@@ -749,6 +749,12 @@ function call(name, args) {
       D.col = [((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255];
       return 0;
     }
+    /* `getcol()`：当前颜色打包回 0xRRGGBB（这一档的 `D.col` 是三格 0..1）——
+       EvalDraw 的 `glBegin` 那一族拿它当顶点色（那门语言没有 `glColor`）。 */
+    case 'getcol/0': {
+      const q = (x) => Math.max(0, Math.min(255, Math.round(x * 255)));
+      return q(D.col[0]) * 65536 + q(D.col[1]) * 256 + q(D.col[2]);
+    }
     /* 一格像素 = 一格 1×1 的四边形（`GL_POINTS` 的点大小在 WebGL 里不可靠）。 */
     case 'setpix/2':
       tri(a(0), a(1), a(0) + 1, a(1), a(0), a(1) + 1);

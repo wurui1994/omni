@@ -809,6 +809,9 @@ function callOf(x, C) {
        模型"放在语言这一侧 —— 设备只收投影完的 2D 图元（声音那几格也在这张表里，收下不响）。 */
     if (drawFn.startsWith('g3_')) {
       C.need3D = true;
+      /* **`g3_gl…` 是 EvalDraw 的 GL 桥**（`g3_glbegin`）：它一头连相机（g3）、一头连
+         立即模式（gl-rt 的 `gl_evproj`/`gl_begin`），所以两摊运行时都要带上。 */
+      if (drawFn.startsWith('g3_gl')) { C.needGL = true; C.usedGL = true; }
       /* 带数组实参的那几格（`BLOCK_ARGS`）：那一格发两个 —— 块本身 + 偏移。 */
       const blk = BLOCK_ARGS.get(`${n}/${rawArgs.length}`);
       if (blk !== undefined) {
@@ -3401,7 +3404,7 @@ export function evalToIR(cst, host, src = '') {
          设备是在 `nextframe` 那一格交图的，交之前批必须已经画下去。 */
       if (C.need3D) {
         decls.unshift(...gfx3GlobalDecls());
-        decls.push(...gfx3FnDecls(true));
+        decls.push(...gfx3FnDecls(true, C.needGL));
       }
       if (C.needGL) {
         decls.unshift(...glGlobalDecls());
@@ -3456,7 +3459,7 @@ export function evalToIR(cst, host, src = '') {
     decls.push(...gfxFnDecls(W, H), gfxPresentDecl(irOutPath()));
     if (C.need3D) {
       decls.unshift(...gfx3GlobalDecls());
-      decls.push(...gfx3FnDecls(false));
+      decls.push(...gfx3FnDecls(false, C.needGL));
     }
     if (C.needGL) {
       decls.unshift(...glGlobalDecls());

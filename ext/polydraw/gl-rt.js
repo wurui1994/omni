@@ -1027,6 +1027,68 @@ function glMatrixDecls() {
       ret(num(0)),
     ]),
     /**
+     * **EvalDraw 那套相机压成一张投影矩阵**（`evaldraw.txt:1311` 那一节的 GL 子集）。
+     *
+     * EvalDraw 的 `glBegin/glVertex` **不是 OpenGL**：它跟的是自己那套 3D 相机
+     * （`setcam`/`setview`，见 `gfx3-rt.js` 的头注）——
+     *
+     *     screen_x = (v·右)/(v·前) * hz + hx        v = 顶点 - 相机位置
+     *     screen_y = (v·下)/(v·前) * hz + hy        **y 往下为正**，+z 是前
+     *
+     * 而这台立即模式的顶点路是 `clip = 投影 · (模型视图 · v)`。所以把上面那两句摊成一张
+     * 4×4 摆进投影槽，顶点路一个字都不用改（纹理、裁剪、深度、合批全照旧）：
+     *
+     *     clip.x = (2hz/W)(v·右) + (2hx/W - 1)(v·前)
+     *     clip.y = -(2hz/H)(v·下) + (1 - 2hy/H)(v·前)
+     *     clip.z = A(v·前) + B        A=(zf+zn)/(zf-zn)、B=-2·zf·zn/(zf-zn)
+     *     clip.w = (v·前)
+     *
+     * `clip.y` 那一行取负号：EvalDraw 的屏幕 y 往下，而 NDC 的 y 往上。
+     * 相机位移落在第四列（`-(那一行的方向 · 相机位置)`）。模型视图顺手摆回单位 ——
+     * EvalDraw 那个子集里没有矩阵栈（说明书那张表里一格都没有）。
+     */
+    fn('gl_evproj', ['rx', 'ry', 'rz', 'dx', 'dy', 'dz', 'fx', 'fy', 'fz',
+      'cx', 'cy', 'cz', 'hx', 'hy', 'hz', 'w', 'h'], [
+      ex(call('gl_need', [])),
+      ex(call('gl_mvdirty', [])),
+      ...matIdent('gl_mv'),
+      letR('a0', bin('/', bin('*', num(2), nm('hz')), nm('w'))),
+      letR('b0', bin('-', bin('/', bin('*', num(2), nm('hx')), nm('w')), num(1))),
+      letR('a1', bin('-', num(0), bin('/', bin('*', num(2), nm('hz')), nm('h')))),
+      letR('b1', bin('-', num(1), bin('/', bin('*', num(2), nm('hy')), nm('h')))),
+      letR('A', num((1000 + 0.1) / (1000 - 0.1))),
+      letR('B', num(-2 * 1000 * 0.1 / (1000 - 0.1))),
+      /* 三行的方向向量（第四行就是"前"）。 */
+      ...[['0', 'a0', 'rx', 'ry', 'rz', 'b0'], ['1', 'a1', 'dx', 'dy', 'dz', 'b1']]
+        .flatMap(([r, a, vx, vy, vz, b]) => [
+          letR(`m${r}x`, bin('+', bin('*', nm(a), nm(vx)), bin('*', nm(b), nm('fx')))),
+          letR(`m${r}y`, bin('+', bin('*', nm(a), nm(vy)), bin('*', nm(b), nm('fy')))),
+          letR(`m${r}z`, bin('+', bin('*', nm(a), nm(vz)), bin('*', nm(b), nm('fz')))),
+        ]),
+      letR('m2x', bin('*', nm('A'), nm('fx'))),
+      letR('m2y', bin('*', nm('A'), nm('fy'))),
+      letR('m2z', bin('*', nm('A'), nm('fz'))),
+      /* 摆进 `gl_pj`（列主序：下标 = 列*4 + 行）。 */
+      ...[0, 1, 2].flatMap((r) => [
+        aset('gl_pj', num(0 * 4 + r), nm(`m${r}x`)),
+        aset('gl_pj', num(1 * 4 + r), nm(`m${r}y`)),
+        aset('gl_pj', num(2 * 4 + r), nm(`m${r}z`)),
+        aset('gl_pj', num(3 * 4 + r), bin('-', num(0), bin('+', bin('+',
+          bin('*', nm(`m${r}x`), nm('cx')), bin('*', nm(`m${r}y`), nm('cy'))),
+        bin('*', nm(`m${r}z`), nm('cz'))))),
+      ]),
+      /* 第三行还要加上那格常数 B（平移那一格上）。 */
+      aset('gl_pj', num(14), bin('+', aget('gl_pj', num(14)), nm('B'))),
+      /* 第四行 = 前（w = v·前）。 */
+      aset('gl_pj', num(3), nm('fx')),
+      aset('gl_pj', num(7), nm('fy')),
+      aset('gl_pj', num(11), nm('fz')),
+      aset('gl_pj', num(15), bin('-', num(0), bin('+', bin('+',
+        bin('*', nm('fx'), nm('cx')), bin('*', nm('fy'), nm('cy'))),
+      bin('*', nm('fz'), nm('cz'))))),
+      ret(num(0)),
+    ]),
+    /**
      * **抓屏那一族**（`glcapture([边长])` / `glcaptureend([槽])`，§22）。
      *
      * 这一侧只有两件事：**断批**（抓屏前后是两拨不同的东西，攒在一起就错了）与

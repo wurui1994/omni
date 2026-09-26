@@ -42,6 +42,8 @@ export const GFX3_GLOBALS = [
   'g3_hx', 'g3_hy', 'g3_hz',
   /* 投影出来的那三个数（`g3_xf` 算完摆在这儿：屏幕 x/y + 相机空间的 z）。 */
   'g3_sx', 'g3_sy', 'g3_sz',
+  /* EvalDraw 的 GL 子集：深度测试开过没有（说明书原话是"默认开"，见 `g3_glbegin`）。 */
+  'g3_glz',
 ];
 
 export function gfx3GlobalDecls() {
@@ -81,6 +83,10 @@ export const EVALDRAW_3D = new Map([
      配对着发（块 + 偏移）。 */
   ['getrgb/4', 'g3_getrgb4'],
   ['getpix/5', 'g3_getpix5'],
+  /* **EvalDraw 的 `glBegin` 走这门自己的相机**（见 `g3_glbegin` 的头注）：那门语言的
+     GL 子集不是 OpenGL —— +z 是前、y 往下、顶点色是当前 `setcol`。这张表挂在
+     `EVALDRAW_GL` 后头（同键后来者胜），所以 `.kc` 用这一份、`.pss` 照旧走 `gl_begin`。 */
+  ['glbegin/1', 'g3_glbegin'],
   /* 声音那一族：收下不响（见头注）。 */
   ['playsound/1', 'g3_nop1'], ['playsound/2', 'g3_nop2'], ['playsound/3', 'g3_nop3'],
   ['playsound/4', 'g3_nop4'], ['playsound/5', 'g3_nop5'],
@@ -113,15 +119,54 @@ function d2(host) {
     setpix: (x, y) => (host ? dev('setpix', [x, y]) : call('gfx_setpix', [x, y])),
     /* `getpix` 只有宿主设备那一档有（生成出来那一份没做读回）—— 那一档回 0。 */
     getpix: (x, y) => (host ? dev('getpix', [x, y]) : num(0)),
+    /* **当前 2D 颜色**（`setcol` 设的那一格）：宿主那条路上它住在设备里，所以要问一句；
+       生成出来那条路上它就是 `gfx_col`。EvalDraw 的 `glBegin` 那一族靠它取顶点色
+       —— 那门语言**没有 `glColor`**（`evaldraw.txt:1641` 那张表里一格都没有）。 */
+    getcol: () => (host ? dev('getcol', []) : nm('gfx_col')),
   };
 }
 
 /** 近平面：`z` 比它还小的点整格丢掉（这一版没有插值裁剪）。 */
 const ZNEAR = 1e-6;
 
-export function gfx3FnDecls(host = false) {
+export function gfx3FnDecls(host = false, withGL = false) {
   const D = d2(host);
   return [
+    ...(withGL ? [
+      /**
+       * **EvalDraw 的 `glBegin`**（`evaldraw.txt:1641`）：那门语言的 GL 子集**不是
+       * OpenGL** —— 它跟自己那套 3D 相机（`setcam`/`setview`），而且**没有 `glColor`**，
+       * 顶点色就是当前 `setcol`。所以这一格在 `glBegin` 那一刻做三件事：
+       *
+       *   1. 相机摆好（`g3_need`）并把它压成一张投影矩阵交给立即模式（`gl_evproj`）；
+       *   2. 顶点色 = 当前 2D 颜色（问设备一句 `getcol`，拆成 0..1 三格）；
+       *   3. 头一次还要开深度测试（说明书原话：`GL_DEPTH_TEST` **默认开**）。
+       *
+       * 之后 `glVertex`/`glTexCoord`/`glEnd` 原样走 `gl-rt.js` 那条路 ——
+       * 顶点、合批、拆 mode、纹理一个字都不用改（"只有一个模型"）。
+       */
+      fn('g3_glbegin', ['mode'], [
+        ex(call('g3_need', [])),
+        ex(call('gl_evproj', [nm('g3_rx'), nm('g3_ry'), nm('g3_rz'),
+          nm('g3_dx'), nm('g3_dy'), nm('g3_dz'), nm('g3_fx'), nm('g3_fy'), nm('g3_fz'),
+          nm('g3_cx'), nm('g3_cy'), nm('g3_cz'),
+          nm('g3_hx'), nm('g3_hy'), nm('g3_hz'), D.xres(), D.yres()])),
+        letR('c', rm('floor', [D.getcol()])),
+        letR('r', rm('floor', [bin('/', nm('c'), num(65536))])),
+        letR('g', rm('floor', [bin('/', bin('-', nm('c'),
+          bin('*', nm('r'), num(65536))), num(256))])),
+        letR('b', bin('-', nm('c'), bin('+', bin('*', nm('r'), num(65536)),
+          bin('*', nm('g'), num(256))))),
+        ex(call('gl_color3', [bin('/', nm('r'), num(255)),
+          bin('/', nm('g'), num(255)), bin('/', nm('b'), num(255))])),
+        iff(bin('==', nm('g3_glz'), num(0)), [
+          set('g3_glz', num(1)),
+          ex(call('gl_enable', [num(0x0b71)])),
+        ]),
+        ex(call('gl_begin', [nm('mode')])),
+        ret(num(0)),
+      ]),
+    ] : []),
     /** 第一次用 3D 那一族时把相机摆成"在原点、朝 +z"、视口按画布中心。 */
     fn('g3_need', [], [
       iff(bin('!=', nm('g3_on'), num(0)), [ret(num(0))]),
