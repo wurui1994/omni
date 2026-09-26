@@ -102,7 +102,12 @@ export const GL_GLOBALS = ['gl_on', 'gl_mode', 'gl_n', 'gl_r', 'gl_g', 'gl_b',
      所以原样送，不归一化。 */
   'gl_nx', 'gl_ny', 'gl_nz',
   /* 脚本那一格混合状态（`glAlphaEnable`/`Disable`）：**默认 1 = 关着**（`polydraw.c:2256`）。 */
-  'gl_bl'];
+  'gl_bl',
+  /* **EvalDraw 那套纹理句柄**（`evaldraw.txt:1627-1637`）：那门语言的 `glsettex` 没有"槽"
+     这个概念 —— 它**发一个句柄回来**、并且把它设成"当前纹理"。我们把句柄与设备的槽
+     一对一映上：`ev_texn` 是下一个要发的句柄、`ev_cur` 是当前那一格。 */
+  'ev_texn', 'ev_cur'];
+
 
 export function glGlobalDecls() {
   return [
@@ -113,6 +118,8 @@ export function glGlobalDecls() {
     glob('gl_mp', ARR),
     /* 三条顶点批：三角 / 线段 / 点（`(gfxbatch …)` 的三个类）。 */
     glob('gl_ob', ARR), glob('gl_lb', ARR), glob('gl_pb', ARR),
+    /* EvalDraw `glsettex(标量,1,1)` 那一档的一格中转块（见 `ev_settexone`）。 */
+    glob('ev_one', ARR),
   ];
 }
 
@@ -242,6 +249,38 @@ export const POLYDRAW_GL = uniqMap([
   /* `RGB(r,g,b)` / `RGBA(...)` 那两格在上头（`gl_rgb`/`gl_rgba`，夹到 0..255 再打包）——
      这儿**不许再来一条** `['rgb/3','gfx_rgb']`：同键后来者胜，那一条会把上头那格盖掉。 */
 ]);
+
+/**
+ * **EvalDraw 那套 `glsettex`**（`evaldraw.txt:1627-1637`）——与 PolyDraw 的**不是同一个函数**。
+ *
+ *     glsettex("wood.png");  // 按文件名设当前纹理，**回一个句柄**
+ *     glsettex(myhand);      // 按句柄设当前纹理，回那个句柄（`-1` = 只问不改）
+ *     glsettex(mybuf,x,y);   // 按静态数组设，回句柄（一格一个纹素、24 位 RGB，-1 透明）
+ *     glremovetex(myhand);   // 放掉一个句柄
+ *
+ * PolyDraw 那边**第一个实参是槽号**（`glsettex(0,"earth.jpg")`），所以两门共用一张表时
+ * `glsettex/3` 会撞：EvalDraw 的第 1 格是**数组**，撞上 PolyDraw 那格 `real` 形参 ——
+ * 语料里 5 份 `.kc` 就是这么红的（`'gl_settexf3' 的第 1 个形参是 real，给的是 arr<real>`）。
+ * 这张表挂在 EvalDraw 那张宿主表的**后头**（同键后来者胜），于是那门语言用这一份。
+ *
+ * 句柄怎么落：**与设备的槽一对一**（`ev_texn` 自增）。没有回收 —— `glremovetex` 只当
+ * 收到了（槽不复用）。那门说明书说"不放就会很快用光句柄"，而我们这一侧的上限是设备的
+ * 64 格；真要复用得有一张空闲表，记在 `docs/design/eval-realtime-gpu.md` §11。
+ */
+export const EVALDRAW_TEX = new Map([
+  ['glsettex/1', 'ev_settexsel'],
+  /* 串那一档：adapter 见到实参是**串字面量**时查的是带 `#str0` 的键（见 `callOf`）。 */
+  ['glsettex/1#str0', 'ev_settexname'],
+  /* 三参那一档有两种形状：第 0 格是**数组**（正常那一档）或者是**一格标量**
+     （`demos/usflag.kc:4`：`static whitepix = 0xffffff; glsettex(whitepix,1,1);`
+     —— 那门语言里一格标量的地址就是一格长度 1 的块）。adapter 按第 0 格是不是
+     数组名挑 `#arr0` 那个键（见 `callOf`）。 */
+  ['glsettex/3#arr0', 'ev_settexarr'],
+  ['glsettex/3', 'ev_settexone'],
+  ['glremovetex/1', 'ev_removetex'],
+]);
+
+
 
 /**
  * **GL 的那批常量**（宿主表里它们是"名字 -> 一格 double"）。值照 `GL/gl.h`，
@@ -478,6 +517,47 @@ function glShaderDecls() {
       ex(call('gl_settexf3', [nm('t'), nm('nm'), num(32)])),
       ret(num(0)),
     ]),
+    /* ── EvalDraw 那三档 `glsettex`（见 `EVALDRAW_TEX` 的头注）──────────────────
+       与 PolyDraw 的差别只有两件：**没有槽号**（句柄是我们发的）、**要回句柄**。
+       上传那两步直接借 PolyDraw 那两格（文件走 `gl_settexf3`、数组走 `gl_settex6`），
+       所以设备那一面一个字都不用改。 */
+    fn('ev_settexname', ['n'], [
+      letR('h', nm('ev_texn')),
+      set('ev_texn', bin('+', nm('ev_texn'), num(1))),
+      ex(call('gl_settexf3', [nm('h'), nm('n'), num(32)])),
+      set('ev_cur', nm('h')),
+      ex(call('gl_bindtex', [nm('h')])),
+      ret(nm('h')),
+    ]),
+    /* `glsettex(句柄)`：设当前纹理并回它；**负数只问不改**（说明书那句
+       `hand = glsettex(-1)`）。 */
+    fn('ev_settexsel', ['a'], [
+      iff(bin('>=', nm('a'), num(0)), [
+        set('ev_cur', nm('a')),
+        ex(call('gl_bindtex', [nm('a')])),
+      ]),
+      ret(nm('ev_cur')),
+    ]),
+    /* `glsettex(数组,x,y)`：一格一个纹素、24 位 RGB ⇒ 格是 `KGL_BGRA32`(0) +
+       `KGL_LINEAR`(0) + `KGL_REPEAT`(0) = **0**（`polydraw.c:190-193` 那三段 enum）。
+       `x` 是内层维度（说明书那句 "x being the inner-most dimension"）⇒ 宽。 */
+    fnT('ev_settexarr', [['px', ARR], ['xs'], ['ys']], [
+      letR('h', nm('ev_texn')),
+      set('ev_texn', bin('+', nm('ev_texn'), num(1))),
+      ex(call('gl_settex6', [nm('h'), nm('px'), nm('xs'), nm('ys'), num(1), num(0)])),
+      set('ev_cur', nm('h')),
+      ex(call('gl_bindtex', [nm('h')])),
+      ret(nm('h')),
+    ]),
+    /* 句柄回收：这一版**只当收到了**（槽不复用，见 `EVALDRAW_TEX` 头注最后一段）。 */
+    fn('ev_removetex', ['h'], [ret(num(0))]),
+    /* 标量那一档（`glsettex(0xffffff,1,1)`）：抄进 `ev_one` 那格长度 1 的块再上传。
+       **尺寸一律按 1×1 走**：标量后头没有第二格纹素，照 `xs,ys` 递会让设备当场说
+       "像素不够"（那样反而把脚本判红）。语料里这么写的只有 `usflag.kc` 的 1×1 白点。 */
+    fn('ev_settexone', ['v', 'xs', 'ys'], [
+      aset('ev_one', num(0), nm('v')),
+      ret(call('ev_settexarr', [nm('ev_one'), num(1), num(1)])),
+    ]),
     stateFn('gl_activetex', 'glactivetexture', ['u']),
     /**
      * `glquad(mode)`：满屏四边形。`0` 走 alpha 混合、`1` 不透明（说明书那一行）。
@@ -529,6 +609,8 @@ function glSetupDecls() {
       set('gl_ob', anew(num(OMAX * VS))),
       set('gl_lb', anew(num(OMAX * VS))),
       set('gl_pb', anew(num(OMAX * VS))),
+      /* EvalDraw 的 `glsettex(标量,1,1)` 那一档要一格长度 1 的块。 */
+      set('ev_one', anew(num(1))),
       set('gl_no', num(0)), set('gl_nl', num(0)), set('gl_np', num(0)),
       /* 画布尺寸问设备一句（它才知道 —— 窗口/离屏表面是它的）。 */
       set('gl_w', dev('xres')),

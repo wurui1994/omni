@@ -663,6 +663,37 @@ program 与 uniform —— 全是"只有设备做得到"的东西。`glquad` 的
 同步调用 —— 要接就得先有"帧函数之前先把资源准备好"那一层。所以这一刀先把**数组那三档**
 接通（判据能钉住的那一半），文件那一档当场报一句说清"是哪一格没有"，记在任务里。
 
+### 11.4 已落地（2026-09-26）：**EvalDraw 的 `glsettex` 是另一个函数**
+
+语料里 5 份 `.kc` 卡在同一句上：`'gl_settexf3' 的第 1 个形参是 real，给的是 arr<real>`。
+根因不是纹理这一族缺能力，是**两门语言同名不同签名**（`evaldraw.txt:1627-1637`）：
+
+* 第一个实参 —— PolyDraw 是**槽号**（`glsettex(0,…)`）；EvalDraw 没有槽，**回一个句柄**；
+* 文件 —— `glsettex(槽,"a.png"[,colmode])` 对 `glsettex("a.png")`；
+* 数组 —— `glsettex(槽,buf,宽[,高[,层]],格)` 对 `glsettex(buf,x,y)`
+  （一格一纹素、24 位 RGB、`-1` 透明）；
+* 选中 —— PolyDraw 靠 `glbindtexture(槽)`；EvalDraw 是 `glsettex(句柄)`，
+  而 `glsettex(-1)` 是**只问不改**；
+* 放掉 —— PolyDraw 没有；EvalDraw 有 `glremovetex(句柄)`。
+
+落法（`ext/polydraw/gl-rt.js` 的 `EVALDRAW_TEX` + 四格生成函数）：
+
+* **句柄 = 设备的槽，一对一**（`ev_texn` 自增、`ev_cur` 记当前）。上传那两步直接借
+  PolyDraw 那两格（文件 `gl_settexf3`、数组 `gl_settex6`）—— **设备那一面一个字没改**；
+* 这张表挂在 EvalDraw 宿主表的**最后**（同键后来者胜），所以 `.pss` 那一侧照旧；
+* **没有回收**：`glremovetex` 只当收到了。说明书说"不放会很快用光句柄"，而我们这边的
+  上限是设备的 64 格 —— 要复用得有一张空闲表，欠着。
+
+顺带补了 adapter 里一格**形状挑名字**的机制（`callOf`）：同一个"名字/元数"在不同实参
+形状下是不同函数时，按 `#str<位置>` / `#arr<位置>` 的键先查一次，查不到才落回光名字。
+EvalDraw 那两处歧义就靠它分开：
+
+* `glsettex(句柄)` 与 `glsettex("wood.png")` —— 一参那一档，靠 `#str0`；
+* `glsettex(buf,x,y)` 与 `glsettex(0xffffff,1,1)`（`demos/usflag.kc:4`，**一格标量
+  当 1×1 纹理** —— 那门语言里标量的地址就是一格长度 1 的块）—— 三参那一档，靠 `#arr0`。
+  标量那一档抄进 `ev_one` 那格长度 1 的块，**尺寸一律按 1×1 走**（照 `x,y` 递会让设备
+  喊"像素不够"，反而把脚本判红）。
+
 ## 12. "大部分脚本真能出图"这件事：现在靠什么、偏差在哪儿
 
 用户 2026-09-24 的口径：**先让大部分 `.pss` / `.kc` 出得来图**，别一格一格磨。所以这一刀

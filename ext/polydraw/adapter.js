@@ -167,6 +167,12 @@ const SHADER_FNS = new Map([
   /* **文件纹理**（`glsettex(槽,"earth.jpg"[,colmode])`）：第 1 格是串（§20）。 */
   ['glsettex/2', [1]],
   ['glsettex/3', [1]],
+  /* **EvalDraw 那三档**（`evaldraw.txt:1627-1637`，见 `gl-rt.js` 的 `EVALDRAW_TEX`）：
+     那门语言的 `glsettex` 没有槽号 —— 一参那一档的实参**可能是串、也可能是句柄**，
+     所以这儿登记"第 0 格可以是串"，真是串字面量时 `callOf` 会去查 `#str0` 那个键。
+     PolyDraw 没有一参那一档，所以这两行对它是空的（查不到名字就照旧落到设备调用）。 */
+  ['glsettex/1', [0]],
+  ['glremovetex/1', []],
   ['glgetattribloc/1', [0]],
   ['glvertexattrib1f/2', []],
   ['glvertexattrib2f/3', []],
@@ -599,19 +605,37 @@ function callOf(x, C) {
     if (strAt !== undefined) {
       C.needGfx = true;
       C.usedGL = true;
+      /* 哪几格**真的**是串字面量（登记过的位置不一定次次都递串 —— EvalDraw 的
+         `glsettex(句柄)` 与 `glsettex("wood.png")` 是同一个名字/元数）。 */
+      const strGot = [];
+      const arrGot = [];
       const as = raw.map((a, i) => {
         if (strAt.includes(i) && isList(a) && tag(a) === 'str') {
+          strGot.push(i);
           return num(internStr(C, cUnescape(unquote(leaf(kids(a)[0])))));
         }
+        if (isList(a) && tag(a) === 'name' && C.arrs.has(idOf(a))) arrGot.push(i);
         return exprOf(a, C);
       });
-      const glFn = C.host.glrt === true ? C.host.draw?.get(`${n}/${as.length}`) : undefined;
+      /* **形状挑名字**：递了串的那几格拼成 `#str0`、递了整块的拼成 `#arr0`
+         （多格就 `#str0,1`），按"串 -> 块 -> 光名字"的次序各查一次 ——
+         同一个名字/元数在不同实参形状下是**不同的宿主函数**时用这一格
+         （只有 EvalDraw 那三档 `glsettex` 用到，见 `gl-rt.js` 的 `EVALDRAW_TEX`）。 */
+      const keys = [];
+      if (strGot.length > 0) keys.push(`${n}/${as.length}#str${strGot.join(',')}`);
+      if (arrGot.length > 0) keys.push(`${n}/${as.length}#arr${arrGot.join(',')}`);
+      keys.push(`${n}/${as.length}`);
+      const glFn = C.host.glrt === true
+        ? keys.map((k) => C.host.draw?.get(k)).find((v) => v !== undefined)
+        : undefined;
+
       if (glFn !== undefined) {
         C.needGL = true;
         return { kind: 'call', fn: nameRef(glFn), args: as };
       }
       return gfxCallIR(n, as);
     }
+
   }
   /* **宿主调用的串实参一律换成名字表下标**（`glsettex(0,"earth.jpg")` 那一族）：
      宿主面只收 double，所以串在入口里内部到名字表、这儿发它的下标（与 `SHADER_FNS`
