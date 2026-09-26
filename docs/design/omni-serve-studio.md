@@ -374,3 +374,7 @@ PolyDraw 与 EvalDraw 各带一整棵例子树（`polydraw/{examples,ken,tigrou}
    `omni_rt.js` 由**浏览器按 URL 缓存**，每跑一趟只有入口那几 KB 是新的。
 
 判据：一趟改一行重跑，"新编 1 份 / 复用 N 份"（与 asy 那条腿同一个口径）+ 过网字节数。
+
+现在的基线（`polydraw/ken/balls.pss`，`omni serve` 的热工人，2026-09-26 量）：
+每趟 `emit js --gfx host` 头一趟 380ms、之后 **130 / 97ms**；过网 **247KB**
+（`--chunk` 80KB）。切开之后该是"入口那一份几 KB + `ev_rt.js`/`omni_rt.js` 命中浏览器缓存"。
