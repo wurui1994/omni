@@ -59,3 +59,17 @@ def show(vals):
 
 print(show([3, 1, 2]))
 print(show([2.5, 1.5]))
+
+# `for i, v in enumerate(xs)` 与 `for a, b in zip(a, b)` —— 都落成一格下标循环
+# （python 里它们交的是一串元组，而这一层没有元组；这两种写法不必先有元组这一档）
+words = ["a", "b", "c"]
+for i, w in enumerate(words):
+    print(i, w)
+for i, w in enumerate(words, 1):
+    print(i, w)
+
+nums = [10, 20]
+for w, n in zip(words, nums):
+    print(w, n)
+for ch, n in zip("xyz", [1, 2, 3, 4]):
+    print(ch, n)

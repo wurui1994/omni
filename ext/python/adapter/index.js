@@ -583,8 +583,15 @@ function scanOne(s, C, rets) {
       for (const n of kids(s)) C.markGlobal(String(leaf(n)));
       return;
     case 'for': {
-      const it = tyOfCst(kids(part(s, 'in') ?? { kind: 'list', items: [] })[0], C);
-      bindTarget(kids(s)[0], elemOf(it, kids(part(s, 'in') ?? { kind: 'list', items: [] })[0]), C);
+      const iterTok = kids(part(s, 'in') ?? { kind: 'list', items: [] })[0];
+      const pair = pairIter(kids(s)[0], iterTok, C);
+      if (pair !== null) {
+        /* `for i, v in enumerate(xs)` / `for a, b in zip(xs, ys)` —— 两格目标各自绑。 */
+        bindTarget(kids(kids(s)[0])[0], pair.t0, C);
+        bindTarget(kids(kids(s)[0])[1], pair.t1, C);
+      } else {
+        bindTarget(kids(s)[0], elemOf(tyOfCst(iterTok, C), iterTok), C);
+      }
       scanBinds(part(s, 'body'), C, rets);
       for (const e of kids(s).filter((y) => tag(y) === 'else')) scanBinds(e, C, rets);
       return;
@@ -630,8 +637,97 @@ function scanOne(s, C, rets) {
   }
 }
 
-/** 一格可迭代的东西装的元素是什么（`range(…)` 出 int，表出它的元素，串出串）。 */
-function elemOf(it, node) {
+/**
+ * `for a, b in enumerate(xs)` / `for a, b in zip(xs, ys)` —— 认得出来就答两格类型与实参，
+ * 别的（目标不是两格名字、或者可迭代不是这两个）答 `null`。
+ *
+ * 为什么这两个要单挑出来：python 里它们交的是**一串元组**，而这一层没有元组 ——
+ * 可这两种写法落下去都只是"一格下标循环"（enumerate 的第一格就是下标，
+ * zip 是两张表同一个下标），所以不必先有元组这一档。
+ */
+function pairIter(target, iterTok, C) {
+  if (target === undefined || tag(target) !== 'tuple') return null;
+  const ts = kids(target);
+  if (ts.length !== 2 || ts.some((t) => tag(t) !== 'n')) return null;
+  if (iterTok === undefined || tag(iterTok) !== 'call' || tag(kids(iterTok)[0]) !== 'n') return null;
+  const fn = String(nameOf(kids(iterTok)[0]));
+  const as = kids(part(iterTok, 'args') ?? { kind: 'list', items: [] });
+  if (fn === 'enumerate' && (as.length === 1 || as.length === 2)) {
+    const et = elemOf(tyOfCst(as[0], C), as[0]);
+    return { fn, args: as, t0: INT, t1: et };
+  }
+  if (fn === 'zip' && as.length === 2) {
+    return {
+      fn, args: as, t0: elemOf(tyOfCst(as[0], C), as[0]), t1: elemOf(tyOfCst(as[1], C), as[1]),
+    };
+  }
+  return null;
+}
+
+/**
+ * `enumerate` / `zip` 那两格 —— 一格下标循环，体开头把两格目标算出来。
+ *
+ * `zip` 走到**短的那一张**为止（python 的规矩）；`enumerate(xs, start)` 的第一格
+ * 是 `下标 + start`。两格都只走表与串（字典要先有"走一遍键"那一格）。
+ */
+function pairFor(x, pair, once, pre, C) {
+  const i = C.fresh('for_i');
+  C.bind(i, INT);
+  const idx = { kind: 'name', name: i };
+  const n0 = C.ref(String(nameOf(kids(kids(x)[0])[0])));
+  const n1 = C.ref(String(nameOf(kids(kids(x)[0])[1])));
+  /** 第 i 格（表按下标、串按一个字符）。 */
+  const at = (box) => {
+    const t = typeOfIR(box, C);
+    if (t.kind === 'arr') return { kind: 'index', obj: box, index: idx };
+    if (t.kind === 'string') return { kind: 'builtin', name: 'ssub', args: [box, idx, { kind: 'int', value: 1 }] };
+    throw new Error(`python->IR: \`${pair.fn}()\` 在 ${t.kind} 上还没接（表与串接了）`);
+  };
+  let cond;
+  let first;
+  let second;
+  if (pair.fn === 'enumerate') {
+    const box = once(pair.args[0], 'iter');
+    const start = pair.args.length === 2 ? once(pair.args[1], 'start') : { kind: 'int', value: 0 };
+    cond = { kind: 'binop', op: '<', left: idx, right: lenOf(box, C) };
+    first = start.kind === 'int' && Number(start.value) === 0
+      ? idx
+      : { kind: 'binop', op: '+', left: idx, right: start };
+    second = at(box);
+  } else {
+    const a = once(pair.args[0], 'zip_a');
+    const b = once(pair.args[1], 'zip_b');
+    const la = lenOf(a, C);
+    const lb = lenOf(b, C);
+    /* 短的那一张说了算 —— `(sel (< la lb) la lb)`。 */
+    cond = {
+      kind: 'binop', op: '<', left: idx,
+      right: {
+        kind: 'ternary', type: INT, cond: { kind: 'binop', op: '<', left: la, right: lb }, then: la, else_: lb,
+      },
+    };
+    first = at(a);
+    second = at(b);
+  }
+  C.bind(n0, pair.t0);
+  C.bind(n1, pair.t1);
+  return {
+    kind: 'block',
+    stmts: [...pre, {
+      kind: 'for',
+      init: { kind: 'let', name: i, type: INT, init: { kind: 'int', value: 0 } },
+      cond,
+      post: { kind: 'assign', target: idx, value: { kind: 'binop', op: '+', left: idx, right: { kind: 'int', value: 1 } } },
+      body: [
+        { kind: 'assign', target: { kind: 'name', name: n0 }, value: first },
+        { kind: 'assign', target: { kind: 'name', name: n1 }, value: second },
+        ...bodyStmts(part(x, 'body'), C),
+      ],
+    }],
+  };
+}
+
+/** 一格可迭代的东西装的元素是什么（`range(…)` 出 int，表出它的元素，串出串）。 */function elemOf(it, node) {
   if (node !== undefined && tag(node) === 'call' && tag(kids(node)[0]) === 'n'
     && String(nameOf(kids(node)[0])) === 'range') return INT;
   if (it === null) return null;
@@ -1048,8 +1144,6 @@ function forStmt(x, C) {
     throw new Error('python->IR: `for … else:` 还没接（那一支是"没 break 就跑"）');
   }
   const target = kids(x)[0];
-  if (tag(target) !== 'n') throw new Error(`python->IR: \`for\` 的目标是 \`${tag(target)}\` —— 拆包还没接`);
-  const name = C.ref(String(nameOf(target)));
   const iter = kids(part(x, 'in') ?? { kind: 'list', items: [] })[0];
   const pre = [];
   /** 循环前先算一遍并落一格临时量（python 的 range 与容器都只算一次）。 */
@@ -1062,6 +1156,14 @@ function forStmt(x, C) {
     pre.push({ kind: 'let', name: n, type: t, init: v });
     return { kind: 'name', name: n };
   };
+
+  /* `for i, v in enumerate(xs)` / `for a, b in zip(xs, ys)` —— 都落成一格下标循环。 */
+  const pair = pairIter(target, iter, C);
+  if (pair !== null) return pairFor(x, pair, once, pre, C);
+
+  if (tag(target) !== 'n') throw new Error(`python->IR: \`for\` 的目标是 \`${tag(target)}\` —— 拆包还没接`
+    + '（`enumerate(…)` 与 `zip(a, b)` 那两格接了）');
+  const name = C.ref(String(nameOf(target)));
 
   if (tag(iter) === 'call' && tag(kids(iter)[0]) === 'n' && String(nameOf(kids(iter)[0])) === 'range') {
     const as = kids(part(iter, 'args') ?? { kind: 'list', items: [] });
