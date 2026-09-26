@@ -994,6 +994,63 @@ const BYTEWISE = new Set(['nchar', 'substr', 'substring', 'toupper', 'tolower', 
      非 ASCII 上两种次序会分家，所以串字面量里有非 ASCII 就在调用点当场报。 */
   'sort', 'order']);
 
+/**
+ * **哪些名字装过非 ASCII 的串**（2026-09-26，量出来的）。
+ *
+ * `BYTEWISE` 那道门从前只看**调用点上直接写着的**串字面量，于是
+ * `s <- "合计"` 之后 `nchar(s)` / `substr(s, 1, 1)` 整个漏过去 —— 那是**静默答错**，
+ * 而且三种都错法不同（`.omni-cache/probe/utf8b.R` 量的）：
+ *
+ *   nchar("合计")            我们 6，R 2（R 数字符）
+ *   substr(s, 1, 1)          我们切出**半个字符**（一个坏字节），R 出 `合`
+ *   print(c("合计", "a"))    我们按**字节**补空格（8 格），R 按**显示宽**补（6 格 ——
+ *                            东亚宽字符占两列）
+ *
+ * 真接住要给核心方言加"按码位走"那一层（`slen` / `ssub` 只认字节，连"取一个字节的值"
+ * 都没有 —— 见 SPEC 第四节第 12 条）。在那之前这一遍先扫一趟整棵树，把"被赋过带非 ASCII
+ * 串字面量的表达式"的名字记下来：**不分作用域**，记多了只会让"当场报"来得更早，
+ * 不会让答案更假。运行期才来的串（读文件那种）照旧拦不住，那一条也写在 SPEC 里。
+ */
+const NON_ASCII_VARS = new Set();
+const NON_ASCII_RE = /[^\u0000-\u007F]/;
+function nonAsciiLit(node) {
+  if (node === null || node === undefined || !isList(node)) return null;
+  if (tag(node) === 'str') {
+    const s = String(leaf(kids(node)[0]));
+    return NON_ASCII_RE.test(s) ? s : null;
+  }
+  for (const k of kids(node)) {
+    const hit = nonAsciiLit(k);
+    if (hit !== null) return hit;
+  }
+  return null;
+}
+function taintedSym(node) {
+  if (node === null || node === undefined || !isList(node)) return null;
+  if (tag(node) === 'sym') {
+    const nm = mangle(nameOf(node));
+    return NON_ASCII_VARS.has(nm) ? nameOf(node) : null;
+  }
+  for (const k of kids(node)) {
+    const hit = taintedSym(k);
+    if (hit !== null) return hit;
+  }
+  return null;
+}
+function collectNonAscii(node) {
+  if (node === null || node === undefined || !isList(node)) return;
+  if (isAssign(node)) {
+    const { target, value } = assignParts(node);
+    if (tag(target) === 'sym' && nonAsciiLit(value) !== null) NON_ASCII_VARS.add(mangle(nameOf(target)));
+  }
+  if (tag(node) === 'for') {
+    const fc = kids(node)[0];
+    const v = kids(fc)[0];
+    if (tag(v) === 'sym' && nonAsciiLit(kids(fc)[1]) !== null) NON_ASCII_VARS.add(mangle(nameOf(v)));
+  }
+  for (const k of kids(node)) collectNonAscii(k);
+}
+
 /* ─── 内建（表外的名字当用户函数调） ──────────────────────────────────────
  *
  * 这张表是**判据**，不是方便：R 的内建在树上与用户函数完全同形（`length(x)` 与 `f(x)`
@@ -3985,13 +4042,36 @@ function callOf(x, types, extra, want, stmtPos) {
      */
     if (BYTEWISE.has(fn)) {
       for (const a of argsOf(x)) {
-        if (a.value === null || !isList(a.value) || tag(a.value) !== 'str') continue;
-        const s = String(leaf(kids(a.value)[0]));
-        if (!/[^\u0000-\u007F]/.test(s)) continue;
-        throw new Error(`r->IR: ${fn}() 收了一格**带非 ASCII 的串**（\`${s}\`）——`
-          + ' 方言的 `slen` / `ssub` / `supper` 数的是**字节**，而 R 数的是字符'
-          + '（`nchar("héllo")` 在 R 里是 5、按字节是 6）。要接它得先给核心方言加'
-          + '"按码位走"那一层，见 ext/r/SPEC.md 第四节第 12 条');
+        if (a.value === null) continue;
+        /* 字面量：整棵子树都看（不只是"这一格实参本身就是串字面量"—— 从前只看那一格，
+           于是 `nchar(paste0("合", "计"))` 也漏）。 */
+        const lit = nonAsciiLit(a.value);
+        if (lit !== null) {
+          throw new Error(`r->IR: ${fn}() 收了一格**带非 ASCII 的串**（\`${lit}\`）——`
+            + ' 方言的 `slen` / `ssub` / `supper` 数的是**字节**，而 R 数的是字符'
+            + '（`nchar("héllo")` 在 R 里是 5、按字节是 6）。要接它得先给核心方言加'
+            + '"按码位走"那一层，见 ext/r/SPEC.md 第四节第 12 条');
+        }
+        /* 名字：那一格装过非 ASCII 的串（`s <- "合计"` 之后的 `nchar(s)`）。 */
+        const v = taintedSym(a.value);
+        if (v !== null) {
+          throw new Error(`r->IR: ${fn}() 收的 \`${v}\` 装过**带非 ASCII 的串**——`
+            + ' 方言那几格数的是**字节**、R 数的是字符，所以这一格按字节办会静默答错'
+            + `（量出来：\`nchar\` 答 6 而 R 答 2、\`substr\` 切出半个字符）。`
+            + '见 ext/r/SPEC.md 第四节第 12 条');
+        }
+      }
+    }
+    /* **印一条字符向量**时那几行是按"显示宽"补空格的（东亚宽字符占**两列**），而这一层
+       数的是字节 —— `print(c("合计","a"))` R 补到 6、我们补到 8。一格标量串没有这个问题
+       （不补空格），所以只拦向量那一档。 */
+    if (fn === 'print') {
+      const a0 = argsOf(x)[0];
+      if (a0 !== undefined && a0.value !== null && isStrVec(typeOfExpr(a0.value, types))
+          && (nonAsciiLit(a0.value) !== null || taintedSym(a0.value) !== null)) {
+        throw new Error('r->IR: print() 一条**带非 ASCII 的字符向量**还没接 ——'
+          + ' 那几行是按**显示宽**补空格的（东亚宽字符占两列），而这一层数的是字节'
+          + '（量出来：R 补到 6 列、我们补到 8）。见 ext/r/SPEC.md 第四节第 12 条');
       }
     }
     /* **命名实参先过一遍白名单**。为什么要这一格：认不出来的命名实参从前是被**静默丢掉**的
@@ -11188,6 +11268,10 @@ export function rToIR(tree) {
   fnDefs.clear();
   fnFormals.clear();
   globalTys.clear();
+  /* **先扫一趟"哪些名字装过非 ASCII 的串"**（见 `NON_ASCII_VARS`）—— 按字节办的那几格
+     （`nchar` / `substr` / `sort` …）要靠它当场报，不然那一格是静默答错。 */
+  NON_ASCII_VARS.clear();
+  collectNonAscii(tree);
   const items = kids(tree);
   const fns = [];
   const rest = [];

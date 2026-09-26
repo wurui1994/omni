@@ -160,6 +160,11 @@ else if (!out.split('\n').map((l) => l.trim()).includes('JIT 0 call {')) {
  * 多一行**。退出码是 0、要的那几行也都在，上面那几格一格都发现不了。所以这儿比字节。
  *
  * 用的程序必须是编译器那一档**接不住**的（`as.numeric(串)` 与 S4），不然就走不到 libR。
+ *
+ * 里头那两行**非 ASCII**是另一格量出来的账（2026-09-26）：libR 不设 locale 就跑在 `C` 那一档，
+ * 于是 `print("合计")` 印的是 `[1] "\345\220\210\350\256\241"` —— 退出码 0、行数也对，
+ * 只有比字节才看得见。系统装的 R 在 macOS 上自己从 CFLocale 拿 `zh_CN`，我们这份自己编的
+ * 没有那一段，所以 `libr-run.js` 里补一格 `LC_CTYPE=UTF-8`（只在用户没设时补）。
  */
 const RSCRIPT_OK = spawnSync('which', ['Rscript'], { encoding: 'utf8' }).status === 0;
 if (!RSCRIPT_OK) {
@@ -170,7 +175,9 @@ if (!RSCRIPT_OK) {
     + 'setClass("Q", representation(n = "numeric"))\n'
     + 'q <- new("Q", n = 2)\n'
     + 'cat(q@n * 3, "\\n")\n'
-    + 'print(summary(c(1, 2, 3, 4)))\n');
+    + 'print(summary(c(1, 2, 3, 4)))\n'
+    + 'print("合计")\n'
+    + 'print(c("合计", "a"))\n');
   const mine = spawnSync(process.execPath, [join(ROOT, 'src/cli.js'), 'run', f], {
     encoding: 'utf8', timeout: 300000, cwd: ROOT,
   });

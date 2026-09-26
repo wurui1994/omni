@@ -63,6 +63,19 @@ export function runWithLibR(path, argv, why) {
   /* 时区表：R 启动时要读它，没有就一路 `unknown timezone` 的警告。 */
   const tz = env('TZDIR');
   if (tz === undefined || tz === null || tz === '') setEnv('TZDIR', '/usr/share/zoneinfo');
+  /**
+   * **字符那一档的 locale**：不设就是 `C`，那时 R 的 `print` 把非 ASCII 按八进制转义印出来
+   * （量出来的，2026-09-26：`print("合计")` 这一档印 `[1] "\345\220\210\350\256\241"`，
+   * 而 `Rscript` 印 `[1] "合计"` —— 这一档的承诺是"接不住就换档，答案照旧对"，
+   * 那一行是把承诺破了）。系统装的 R 在 macOS 上是自己从 CFLocale 拿 `zh_CN` 的，
+   * 我们这份自己编的没有那一段。
+   *
+   * 只补 `LC_CTYPE`、只在三格都没设的时候补：`LC_COLLATE` 不动（那一格管的是排序次序 ——
+   * 这一档的 `sort` 明说只认按字节比的 radix，把它挪到 locale 次序上是另一回事），
+   * 用户自己设了就照他的。值取 `UTF-8` 而不是 `en_US.UTF-8`：macOS 上认，而且不挑语言。
+   */
+  const hasLoc = (k) => { const v = env(k); return v !== undefined && v !== null && v !== ''; };
+  if (!hasLoc('LC_ALL') && !hasLoc('LC_CTYPE') && !hasLoc('LANG')) setEnv('LC_CTYPE', 'UTF-8');
   stderr('omni: 编译器那一档接不住 -> 换 libR 那一档（R 自己的编译器全关：'
     + 'R_ENABLE_JIT=0 / R_COMPILE_PKGS=0 / R_DISABLE_BYTECODE=1）\n');
   if (why !== undefined && why !== null) stderr(`omni: 换档的理由 —— ${why}\n`);

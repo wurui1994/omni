@@ -1066,8 +1066,18 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
       `"hé"`、按字节切出半个字符。要接它得先给核心方言加"按码位走"那一层
       （现在连"取第 i 个字节"都没有算子：只有 `slen` / `ssub` / `sfind`）。
       所以 `nchar` / `substr` / `substring` / `toupper` / `tolower` / `sprintf` 上
-      **串字面量里有非 ASCII 就当场报**（`BYTEWISE` 那张表）—— 那是编译期看得出来的那一半，
-      运行期才知道的拦不住，明写在这儿。`cat` / `paste` / `grepl` / `sub` / `gsub` /
+      **串字面量里有非 ASCII 就当场报**（`BYTEWISE` 那张表）。
+      这道门 2026-09-26 **加宽过两处**，都是扫出来的静默答错（`.omni-cache/probe/utf8b.R`）：
+      * 从前只看"这一格实参**本身**就是串字面量"，于是 `s <- "合计"` 之后的 `nchar(s)`
+        （答 6 而 R 答 2）、`substr(s, 1, 1)`（切出**半个字符** —— 一个坏字节）、
+        `nchar(paste0("合", "计"))` 全漏过去。现在**整棵子树**都看，另外先扫一趟
+        "哪些名字装过带非 ASCII 串字面量的表达式"（`NON_ASCII_VARS`，不分作用域 ——
+        记多了只会让当场报来得更早，不会让答案更假），实参里出现那种名字也报。
+      * `print(一条字符向量)` 也要拦：那几行是按**显示宽**补空格的（东亚宽字符占**两列**），
+        而这一层数字节 —— 量出来 `print(c("合计","a"))` R 补到 6 列、我们补到 8。
+        一格标量串不补空格，所以只拦向量那一档。
+      运行期才来的串（读文件那种）照旧拦不住，明写在这儿。
+      `cat` / `paste` / `grepl` / `sub` / `gsub` /
       `startsWith` **按字节办也对**（拼接与定串查找与码位无关），不在那张表里。
     * `tolower` 只管 **ASCII**：方言里只有 `(supper …)`，没有反过来的那一格，所以
       `r_lower` 拿两张 26 个字母的表查（`(sfind 大写表 这个字符)` 给位置）。表里查不到的
@@ -1212,6 +1222,15 @@ R_DISABLE_BYTECODE=1  连**执行**字节码那一路也关掉（`bcEval` 不进
 （不是 `bytecode`）、装进来的 `stats::var` 的体还是 `{`。
 
 `R_HOME` 在 `.omni-cache/r-rt/libR/home`，`bin/R` / `bin/exec/R` 都在那儿。
+
+**还补两格环境**（都是"这一档的输出要与 `Rscript` 逐字节相同"逼出来的）：`TZDIR`
+（不给就一路 `unknown timezone` 的警告），以及 `LC_CTYPE=UTF-8` —— 不设 locale 时这一档
+跑在 `C` 那一档，`print("合计")` 印的是 `[1] "\345\220\210\350\256\241"`
+（量出来的，2026-09-26；退出码 0、行数也对，只有比字节才看得见）。系统装的 R 在 macOS 上
+自己从 CFLocale 拿 `zh_CN`，我们这份自己编的没有那一段。只补 `LC_CTYPE`、只在
+`LC_ALL` / `LC_CTYPE` / `LANG` 三格都没设时补：`LC_COLLATE` 不动（那一格管排序次序，而
+这一档的 `sort` 明说只认按字节比的 radix）。判据在 `tests/r/libr.js` 第 9 格里那两行非 ASCII。
+
 两档的判据分开：编译器那一档是 `tests/r/oracle.js`（逐字节对 `Rscript`），
 libR 那一档是 `tests/r/libr.js`（base / stats+LAPACK / methods 的 S4 / quartz 出 PNG /
 ggplot2 的 `ggsave` / Rcpp 的 `cppFunction`）。
