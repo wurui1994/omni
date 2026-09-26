@@ -2222,7 +2222,7 @@ function autoShape(C, s) {
  * 因为"每趟调用重来"正是它与 static 的差别。这儿只把它们从 `written` 里摘掉，
  * 不然同一个名字会声明两次。
  */
-function bodyOf(blk, params, C, curFn) {
+function bodyOf(blk, params, C, curFn, boxInit = []) {
   const autos = autoDecls(blk).map((s) => autoShape(C, s));
   const autoNames = new Set(autos.map((a) => a.name));
   const written = writtenNames(blk);
@@ -2296,7 +2296,7 @@ function bodyOf(blk, params, C, curFn) {
   }
   const prevLocalReal = C.localReal;
   C.localReal = localReal;
-  const out = [...lets, ...stmtsOf(kids(blk), C)];
+  const out = [...lets, ...boxInit, ...stmtsOf(kids(blk), C)];
   C.localReal = prevLocalReal;
   return out;
 }
@@ -2319,6 +2319,9 @@ function bodyOf(blk, params, C, curFn) {
  * 两个数。函数体里 `a[j]` 落成 `a[a$o + j]`，调用点按实参形状算那格偏移。
  */
 const offName = (n) => `${n}$o`;
+
+/** **按值形参在入口里开箱子**那一档里，原来那格形参改的名字（见 fn 那一段的注）。 */
+const valArgName = (n) => `${n}$v`;
 
 /**
  * **入口收一整块那一档**（`(a[16])` —— EvalDraw 的"自己写乐器"模式，`insts/` 那一族
@@ -2662,16 +2665,34 @@ export function evalToIR(cst, host, src = '') {
        （`demos/planpos.kc` 里 `year` 在一处是 `&year`、在 `getday(year,…)` 里是按值的形参）。 */
     C.valParams = new Set(ps.filter((p) => p.type === REAL).map((p) => p.name));
     C.boxed = boxedFor(x, C);
-    /* 标号那张表**按函数算**（同名的标号在另一个函数里是另一回事）。 */
+    /**
+     * **按值收的形参也被 `&` 取过地址**（`games/chess/chess.kc` 的 `&caststat`、
+     * `geeky/…` 那一份的 `&r`）—— 从前这儿当场报"这一版不接"。
+     *
+     * 做法就是行注里那句"在入口里开箱子"：形参改名成 `名字$v`（照旧按值收），
+     * 函数体里那个名字变成**一格长度 1 的数组**（`bodyOf` 的装箱那段自己会开它，
+     * 因为改名之后它不在 `params` 里了），入口先抄一句 `名字[0] = 名字$v`。
+     *
+     * 这是**对的**而不是将就：EVAL 的按值形参就是调用方那个值的一份拷贝，
+     * `&它` 要的只是"一格能写的地方"，写回调用方本来也不该发生。
+     */
+    const own = collectBoxed(x, C, new Set(), C.blockNames);
+    const valBox = [...C.valParams].filter((n) => own.has(n));
+    for (const n of valBox) { C.valParams.delete(n); C.boxed.add(n); }
+    const psOut = ps.map((p) => (valBox.includes(p.name)
+      ? { ...p, name: valArgName(p.name) } : p));
+    const boxInit = valBox.map((n) => ({
+      kind: 'assign', target: boxRef(n), value: nameRef(valArgName(n)),
+    }));
     C.innerLabels = new Map();
     /* 这一份函数体里"收整块的形参"各自那格偏移（`名字$o`）—— 下标都要加上它。 */
     C.offs = new Map(ps.filter((p) => p.type === ARR).map((p) => [p.name, offName(p.name)]));
     decls.push({
       kind: 'fn',
       name,
-      params: ps,
+      params: psOut,
       ret: REAL,
-      body: bodyOf(kids(x)[2], ps.map((p) => p.name), C, idOf(kids(x)[0])),
+      body: bodyOf(kids(x)[2], psOut.map((p) => p.name), C, idOf(kids(x)[0]), boxInit),
     });
   }
 
