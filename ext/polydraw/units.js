@@ -28,10 +28,16 @@ function putForm(sec, form) {
   else sec.fns.push(form.text);
 }
 
-/** 入口那份产物的名字：脚本的基名（去掉目录与后缀）+ 路径哈希（同名不同路不撞）。 */
-function entryName(path) {
+/**
+ * 入口那份产物的名字：**基名 + 内容哈希**。
+ *
+ * 为什么按内容而不是按路径：页面那一侧是 `import(URL)`，而浏览器的模块登记表**按 URL 缓存**
+ * —— 名字不变的话改一行脚本再跑，页面拿到的还是上一份模块（改了没反应）。按内容起名之后
+ * 每一版是一个新 URL，而且"同一份内容"永远命中同一份产物（与 `ev_rt` 同一条纪律）。
+ */
+function entryName(path, text) {
   const base = path.slice(path.lastIndexOf('/') + 1).replace(/\.[^.]*$/, '');
-  return `${base.replace(/[^A-Za-z0-9_]/g, '_')}_${hash16(path).slice(0, 6)}`;
+  return `${base.replace(/[^A-Za-z0-9_]/g, '_')}_${hash16(text).slice(0, 8)}`;
 }
 
 /**
@@ -50,17 +56,20 @@ export function evalUnitTexts(path, argv = []) {
     if (f.head === 'main') { main = sxDoStmts(f.text); continue; }
     putForm(rt.has(f.name) ? lib : app, f);
   }
+  /* 入口那一份的名字按**它自己那几项**算（含 `(main …)` 里那几句）。 */
+  const appText = [...app.cls, ...app.glb, ...app.fns, ...main].join('\n');
+  const entry = entryName(path, appText);
   /* 运行时那一层一项都没有（纯算术的 `.pss`）：一格单元都不必切。 */
   const libItems = [...lib.cls, ...lib.glb, ...lib.fns];
   if (libItems.length === 0) {
     const secs = new Map([[0, app]]);
     return asyUnitModules({
       ids: [0], secs, keys: new Map([[0, { file: path }]]), weak: [], main,
-    }, () => entryName(path));
+    }, () => entry);
   }
   const rtName = `ev_rt_${hash16(libItems.join('\n')).slice(0, 8)}`;
   const keys = new Map([[0, { file: path }], [1, { file: `<${rtName}>` }]]);
-  const nameOf = (k) => (k.file === `<${rtName}>` ? rtName : entryName(path));
+  const nameOf = (k) => (k.file === `<${rtName}>` ? rtName : entry);
   return asyUnitModules({
     ids: [0, 1], secs: new Map([[0, app], [1, lib]]), keys, weak: [], main,
   }, nameOf);
@@ -85,7 +94,10 @@ export function evalUnitTexts(path, argv = []) {
 export function evalUnitsBuild(o) {
   const r = evalUnitTexts(o.path, o.argv ?? []);
   if (r === null) return null;
-  const entry = entryName(o.path);
+  /* 入口那一份的名字由切法算出来（按内容）—— 这儿从单元清单里认它：唯一不是 `ev_rt_…`
+     的那一份就是入口。 */
+  const entry = [...r.units, ...(r.reused ?? [])]
+    .map((u) => u.name).find((n) => !n.startsWith('ev_rt_')) ?? '';
   const rowOf = (u) => (u.name === entry
     ? { self: o.path, incs: [], deps: [], needs: [], extras: [...(u.deps ?? [])] }
     : { self: '', incs: [], deps: [], needs: [], extras: [u.name] });
