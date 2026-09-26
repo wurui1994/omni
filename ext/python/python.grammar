@@ -1,0 +1,734 @@
+;; ext/python/python.grammar —— Python（CPython 3.16.0a0），照 **CPython 自己那份 PEG** 复刻
+;;
+;; 正本是参考树里的 `cpython/Grammar/python.gram`（PEG / PEP 617）、`cpython/Grammar/Tokens`
+;; （记号名单）与 `cpython/Parser/lexer/` + `Parser/tokenizer/`（词法与缩进栈）。
+;;
+;; ## 从 PEG 抄到 GLR，差别在哪儿
+;;
+;; python.gram 是 **PEG**：`|` 是**有序选择**，前一支过了后一支就不看；还带无限回退与
+;; `~` 剪枝。GLR 不是这样 —— 它把所有解都推出来，**两条产生式推出同一棵树就是歧义**。
+;; 所以照抄产生式不行，得把 PEG 靠"次序"藏起来的那几处**写进语法**。逐处记在下面。
+;;
+;; 另外 python.gram 里 `invalid_*` 那一族（约 90 条）是**专给报错用的第二遍**，不是语言的
+;; 一部分，一条都不抄。
+;;
+;; ## 这一份从 mojo / nim 那两份学到什么
+;;
+;; mojo 是 python 的近亲，那一份已经把三条教训量过了，这一份从第一行起照办：
+;;
+;;   1. **每条语句自带终结符**。语句表左递归，小语句以 NEWLINE 收尾、块语句以 DEDENT 收尾。
+;;   2. **歧义要写进语法**。最常见的两处：单元素元组与括号表达式（元组要么两格以上、
+;;      要么带尾随逗号）；形参表里"光名字"与"带类型"混着推。
+;;   3. **只差空白的两种写法要在词法层分开** —— python 用不上（运算符集封闭、没有命令式调用）。
+;;
+;; 与 mojo 那一份的**实质差别**（不是改名字）：
+;;   * lambda 的形参**不带括号**（`lambda x, y=1: e`）—— 于是形参表要另一条链 `lambda-params`，
+;;     里头不许有 `:`，不然 lambda 的那个冒号就分不出是"标注"还是"体的开头"；
+;;   * `yield` 是**表达式**（`x = yield v` / `(yield from g)`）；
+;;   * `await` 自己一层，夹在 `**` 与 `primary` 之间（照 python.gram 的 `await_primary`）；
+;;   * 元组那一格照 python.gram 的 `star_expressions` 写成**回一个节点**（`a, b` 是元组，
+;;     `a` 不是）—— mojo 那份回一张列表，"有没有尾随逗号"在 CST 里就丢了；
+;;   * `.` 后面只许一个名字（python 不许硬关键字当属性名）—— 比 mojo 那份的 `field` 短一大截；
+;;   * `except*`（PEP 654）、`nonlocal`、`async for` / `async with`、相对 import 的点。
+;;
+;; ## 词法这边动了一处**通用**的（`src/core/glr/lex.js`）
+;;
+;; 加了两个字符类 `ualpha` / `ualnum` —— 标识符里许 Unicode 那一族（PEP 3131）。口径照
+;; CPython 自己的词法：ASCII 那一段照旧，其余"码点 >= 128 就算"，**不查 XID 表**
+;; （CPython 的词法自己也不查，它先收下整个词再用 `PyUnicode_IsIdentifier` 验）。
+;; 代价说清：`€ = 2` 这种非 XID_Start 的名字我们也读下来，那一格的拒绝归语义层。
+;;
+;; ## 这一版**故意不收**的（各自的账写在末尾）
+;;
+;;   * f-string / t-string 的**内部结构**。CPython 从 3.12 起（PEP 701）把它拆成
+;;     FSTRING_START / MIDDLE / END 三个记号，于是 `f"{d["k"]}"`（里外同一种引号）也合法。
+;;     这一版把整个 f-string 收成**一个 STRING 记号**，里头那段表达式留给 adapter 再读 ——
+;;     代价是嵌套同种引号的那 8 份读不下来（剩下的 9 份没过里它占 8）。
+;;   * match 的**嵌套 as 模式**（`case {0: (0 | 1 | 2 as z)}:`，1 份）。模式那一族这儿是
+;;     借表达式的语法收的，`as` 只在 case 的顶层收 —— 要收嵌套的就得写真正的模式语法，
+;;     而那一套与表达式那一族大面积重解。
+
+(grammar python
+  (tokens NAME NUMBER STRING NL IND DED AUGOP)
+
+  (start module)
+
+  (lex
+    ;; 空白：空格、制表、回车，外加一个**真的换页符**（U+000C，源文件里就是那一个字节）。
+    ;; 换页符是 python 自己的空白之一（`Parser/tokenizer/` 里它把列号清零），标准库里
+    ;; 有几份拿 `^L` 当分页记号。这套 s-expr 读取器没有 `\f` 那个转义，所以写成字面字节。
+    (skip (+ (set " \t\r")))
+    ;; 反斜杠续行：整个吃掉，连换行一起 —— 于是缩进那一步根本看不见它
+    (skip "\\" (? "\r") "\n")
+    (comment "#" (* (not "\n")))
+    (indent NL IND DED (brackets "()" "[]" "{}"))
+
+    ;; ---- 串。三引号排在前面，最长匹配自然也让它赢；反斜杠那一支排在 `(or …)` 的头一位，
+    ;; 不然 `"""…\"""` 里的 `\"` 会被当成"普通字符 + 结尾"。
+    ;; 前缀最多两格（`rb` / `br` / `fr` / `Rb` …），照 `Parser/lexer/lexer.c` 的 `verify_end_of_string`。
+    (token STRING (? (set "rRbBuUfFtT")) (? (set "rRbBuUfFtT")) "\"\"\""
+      (* (or (seq "\\" any) (not "\"") (seq "\"" (not "\"")) (seq "\"\"" (not "\"")))) "\"\"\"")
+    (token STRING (? (set "rRbBuUfFtT")) (? (set "rRbBuUfFtT")) "'''"
+      (* (or (seq "\\" any) (not "'") (seq "'" (not "'")) (seq "''" (not "'")))) "'''")
+    (token STRING (? (set "rRbBuUfFtT")) (? (set "rRbBuUfFtT")) "\""
+      (* (or (seq "\\" any) (not "\"\n\\"))) "\"")
+    (token STRING (? (set "rRbBuUfFtT")) (? (set "rRbBuUfFtT")) "'"
+      (* (or (seq "\\" any) (not "'\n\\"))) "'")
+
+    ;; ---- 数。python 只有**一个** NUMBER 记号（`Grammar/Tokens` 第 5 行），整数与浮点
+    ;; 的分辨归后端；虚数后缀 `j` 也在同一格里。
+    (token NUMBER "0" (or "x" "X") (+ (or hex "_")))
+    (token NUMBER "0" (or "b" "B") (+ (set "01_")))
+    (token NUMBER "0" (or "o" "O") (+ (set "01234567_")))
+    (token NUMBER (+ digit) (* (or digit "_")) "." (* (or digit "_"))
+      (? (or "e" "E") (? (or "+" "-")) (+ (or digit "_"))) (? (set "jJ")))
+    ;; `.` 开头的浮点（`.5`）：小数点后**必须先是一个数字** —— 写成 `(+ (or digit "_"))` 的话
+    ;; `x.__len__()` 里的 `.__` 会被收成一个数（mojo 那一份量到过，语料里立刻现形）。
+    (token NUMBER "." digit (* (or digit "_"))
+      (? (or "e" "E") (? (or "+" "-")) (+ (or digit "_"))) (? (set "jJ")))
+    (token NUMBER (+ digit) (* (or digit "_")) (or "e" "E") (? (or "+" "-"))
+      (+ (or digit "_")) (? (set "jJ")))
+    (token NUMBER digit (* (or digit "_")) (? (set "jJ")))
+
+    ;; 标识符许 Unicode（PEP 3131）—— `ualpha` / `ualnum` 的口径照 CPython 自己的词法
+    ;; （`Parser/lexer/lexer.c` 的 `is_potential_identifier_start`：ASCII 那一段照旧，
+    ;; 其余"码点 >= 128 就算"）。语料里 8 份文件用到，其中 2 份是故意写坏的。
+    (token NAME (or ualpha "_") (* (or ualnum "_")))
+    ;; 硬关键字：`Lib/keyword.py` 的 `kwlist`（35 个）。
+    (keyword NAME
+      "False" "None" "True" "and" "as" "assert" "async" "await" "break" "class"
+      "continue" "def" "del" "elif" "else" "except" "finally" "for" "from"
+      "global" "if" "import" "in" "is" "lambda" "nonlocal" "not" "or" "pass"
+      "raise" "return" "try" "while" "with" "yield"
+      ;; **软关键字**（`Lib/keyword.py` 的 `softkwlist`，加 PEP 810 的 `lazy`）。
+      ;; python 的软关键字是"看上下文才算关键字"：`type(x)` 里的 `type` 是普通名字，
+      ;; `type X = int` 里的才是关键字。CPython 的 PEG 靠回退分辨；这套词法只有一张表，
+      ;; 所以办法是**进表，再从 `sname` 那一条把它们当名字放回去**（mojo 那一份同样的手法）。
+      ;; 代价是这四个词每出现一次驱动器就多推一条路，收益是 `match` 语句、PEP 695 的
+      ;; `type X = …`、PEP 810 的 `lazy import` 都读得下来。语料里的量：
+      ;; match 语句 35 份、`type X =` 110 处、`lazy import` 71 份。
+      "match" "case" "type" "lazy")
+
+    ;; ---- 运算符与标点。python 的运算符集是**封闭的**，所以一条条列（照 `Grammar/Tokens`）。
+    ;; 复合赋值归成一格 AUGOP：语法里它们的用法完全一样，分开只多十来条产生式。
+    (punct AUGOP "**=" "//=" "<<=" ">>=" "+=" "-=" "*=" "/=" "%=" "&=" "|=" "^=" "@=")
+    (op "..."
+        "**" "//" "<<" ">>" "<=" ">=" "==" "!=" "->" ":="
+        "(" ")" "[" "]" "{" "}" "," ":" "." ";" "@" "=" "+" "-" "*" "/" "%" "&" "|" "^" "~" "<" ">"))
+
+  ;; ---- 语句表：每条语句自带终结符（见文件头教训 1）--------------------------------
+
+  (rule module
+    (-> (stmts) (module $*1)))
+
+  (rule stmts
+    (-> () ())
+    (-> (stmts stmt) ($*1 $2)))
+
+  (rule stmt
+    (-> (simples NL) (line $*1))
+    (-> (block) $1))
+
+  ;; 一行里用 `;` 隔开的几条小语句，行尾允许多一个 `;`
+  (rule simples
+    (-> (simple) ($1))
+    (-> (simples ";") $*1)
+    (-> (simples ";" simple) ($*1 $3)))
+
+  ;; `:` 之后那一段。python 的块体**只有两种**形状（`python.gram` 的 `block`）：换行缩进，
+  ;; 或者同一行上的几条小语句。mojo 那份还收"块语句直接当体"（`if a: if b: c`）——
+  ;; python 不许，所以这儿少一条，也就少一处歧义。
+  (rule body
+    (-> (NL IND stmts DED) (body $*3))
+    (-> (simples NL) (body $*1)))
+  ;; ---- 小语句 ------------------------------------------------------------------
+
+  (rule simple
+    (-> (star-exprs) (expr $1))
+    (-> (yield-expr) (expr $1))
+    ;; `a = b = c` —— 左边一串"目标表 ="，照 `python.gram` 的 `assignment` 第三支
+    (-> (assign-lhs star-exprs) (assign (lhs $*1) $2))
+    (-> (assign-lhs yield-expr) (assign (lhs $*1) $2))
+    (-> (target AUGOP star-exprs) (augassign $2 $1 $3))
+    (-> (target AUGOP yield-expr) (augassign $2 $1 $3))
+    ;; 带标注的赋值（`x: int`、`x: int = 0`）。左边**只许一格目标**，照 python.gram 的
+    ;; `annotated_rhs`：`a, b: int` 不是合法 python。
+    (-> (target ":" expr) (annot $1 $3))
+    (-> (target ":" expr "=" star-exprs) (annot $1 $3 (init $5)))
+    (-> (target ":" expr "=" yield-expr) (annot $1 $3 (init $5)))
+    (-> ("pass") (pass))
+    (-> ("break") (break))
+    (-> ("continue") (continue))
+    (-> ("return") (return))
+    (-> ("return" star-exprs) (return $2))
+    (-> ("raise") (raise))
+    (-> ("raise" expr) (raise $2))
+    (-> ("raise" expr "from" expr) (raise $2 (from $4)))
+    (-> ("del" targets) (del $2))
+    (-> ("assert" expr) (assert $2))
+    (-> ("assert" expr "," expr) (assert $2 $4))
+    (-> ("global" names) (global $*2))
+    (-> ("nonlocal" names) (nonlocal $*2))
+    ;; PEP 695 的类型别名：`type Alias = int` / `type Alias[T] = list[T]`（语料里 110 处）
+    (-> ("type" sname "=" expr) (typealias (n $2) $4))
+    (-> ("type" sname "[" tparams "]" "=" expr) (typealias (n $2) (tparams $*4) $7))
+    (-> (import-stmt) $1))
+
+  ;; **软关键字当普通名字用**的那一条。`re.match(…)`、`type(x)`、`case = 1` 都走这儿。
+  ;; 所有"这里该是一个名字"的位置都用 `sname`，不用 NAME —— 漏一处，那一处就废掉一个词。
+  (rule sname
+    (-> (NAME) $1)
+    (-> ("match") $1)
+    (-> ("case") $1)
+    (-> ("type") $1)
+    (-> ("lazy") $1))
+
+  (rule assign-lhs
+    (-> (targets "=") ((targets $1)))
+    (-> (assign-lhs targets "=") ($*1 (targets $2))))
+
+  (rule names
+    (-> (sname) ($1))
+    (-> (names "," sname) ($*1 $3)))
+
+  ;; ---- import ------------------------------------------------------------------
+  ;;
+  ;; `lazy` 那一格是 PEP 810（3.16）：`lazy import x` / `lazy from m import y`。
+  ;; 语料里 71 份用到 —— 这棵树是 3.16.0a0，标准库自己已经改过来了。
+  (rule import-stmt
+    (-> ("import" dotted-as-list) (import $*2))
+    (-> ("lazy" "import" dotted-as-list) (import (lazy) $*3))
+    (-> (from-import) $1)
+    (-> ("lazy" from-import) (lazy $2)))
+
+  (rule from-import
+    (-> ("from" dotted-name "import" import-targets) (from $2 (import $*4)))
+    (-> ("from" dots "import" import-targets) (from (rel $2) (import $*4)))
+    (-> ("from" dots dotted-name "import" import-targets) (from (rel $2) $3 (import $*5))))
+
+  ;; `from . import x` / `from .. import x` / `from ... import x`（三点是 ELLIPSIS 那一格记号）
+  (rule dots
+    (-> (".") 1)
+    (-> ("...") 3)
+    (-> (dots ".") $1)
+    (-> (dots "...") $1))
+
+  (rule import-targets
+    (-> ("*") (all))
+    (-> (import-as-list) ($*1))
+    (-> ("(" import-as-list ")") ($*2))
+    (-> ("(" import-as-list "," ")") ($*2)))
+
+  (rule import-as-list
+    (-> (import-as) ($1))
+    (-> (import-as-list "," import-as) ($*1 $3)))
+
+  (rule import-as
+    (-> (sname) (n $1))
+    (-> (sname "as" sname) (as (n $1) $3)))
+
+  ;; `import a.b.c` / `import a.b as c` —— 带点的那一种只在 `import` 后面出现
+  (rule dotted-as-list
+    (-> (dotted-as) ($1))
+    (-> (dotted-as-list "," dotted-as) ($*1 $3)))
+
+  (rule dotted-as
+    (-> (dotted-name) $1)
+    (-> (dotted-name "as" sname) (as $1 $3)))
+
+  (rule dotted-name
+    (-> (sname) (n $1))
+    (-> (dotted-name "." sname) (dot $1 $3)))
+  ;; ---- 块语句 ------------------------------------------------------------------
+
+  (rule block
+    (-> (plain-block) $1)
+    (-> (decorated) $1))
+
+  ;; 不带装饰器的块语句。**装饰器那一族单独一层**：写成 `decorated -> decos block` 而
+  ;; `block -> decorated` 的话，`@a` `@b` `def f` 就有两个解（decos=[a,b]，或者 decos=[a]
+  ;; 再套一层 decos=[b]）。这就是"歧义要写进语法"那条的又一例（mojo 那份的账里值 119 份）。
+  (rule plain-block
+    (-> (if-stmt) $1)
+    (-> (while-stmt) $1)
+    (-> (for-stmt) $1)
+    (-> (try-stmt) $1)
+    (-> (with-stmt) $1)
+    (-> (funcdef) $1)
+    (-> (classdef) $1)
+    (-> (match-stmt) $1)
+    ;; `async def` / `async for` / `async with`（`python.gram` 的 `async_stmt`）
+    (-> ("async" funcdef) (async $2))
+    (-> ("async" for-stmt) (async $2))
+    (-> ("async" with-stmt) (async $2)))
+
+  ;; 装饰器一行一个。`@` 后面是 `named_expression`（3.9 起放宽成任意表达式）
+  (rule decorated
+    (-> (decos plain-block) (decorated (decos $*1) $2)))
+
+  (rule decos
+    (-> (deco) ($1))
+    (-> (decos deco) ($*1 $2)))
+
+  (rule deco
+    (-> ("@" named-expr NL) (deco $2)))
+
+  (rule if-stmt
+    (-> ("if" named-expr ":" body elifs) (if $2 $4 (elifs $*5)))
+    (-> ("if" named-expr ":" body elifs "else" ":" body) (if $2 $4 (elifs $*5) (else $8))))
+
+  (rule elifs
+    (-> () ())
+    (-> (elifs "elif" named-expr ":" body) ($*1 (elif $3 $5))))
+
+  (rule while-stmt
+    (-> ("while" named-expr ":" body) (while $2 $4))
+    (-> ("while" named-expr ":" body "else" ":" body) (while $2 $4 (else $7))))
+
+  (rule for-stmt
+    (-> ("for" targets "in" star-exprs ":" body) (for $2 (in $4) $6))
+    (-> ("for" targets "in" star-exprs ":" body "else" ":" body) (for $2 (in $4) $6 (else $9))))
+
+  (rule try-stmt
+    (-> ("try" ":" body handlers) (try $3 $*4))
+    (-> ("try" ":" body handlers "else" ":" body) (try $3 $*4 (else $7)))
+    (-> ("try" ":" body handlers "finally" ":" body) (try $3 $*4 (finally $7)))
+    (-> ("try" ":" body handlers "else" ":" body "finally" ":" body) (try $3 $*4 (else $7) (finally $10)))
+    (-> ("try" ":" body "finally" ":" body) (try $3 (finally $6))))
+
+  (rule handlers
+    (-> (handler) ($1))
+    (-> (handlers handler) ($*1 $2)))
+
+  ;; `except*`（PEP 654）与 `except` 共用一族 —— 星号那一格标在节点上。
+  ;; 不带括号的多个异常类（`except A, B:`）是 PEP 758（3.14）—— 语料里 37 份里有它。
+  ;; 那一条要求**两格以上**（`except-seq`），一格的走 `expr` —— 不然 `except A:` 两个解。
+  (rule handler
+    (-> ("except" ":" body) (except $3))
+    (-> ("except" expr ":" body) (except $2 $4))
+    (-> ("except" expr "as" sname ":" body) (except $2 (as $4) $6))
+    (-> ("except" except-seq ":" body) (except (any $*2) $4))
+    (-> ("except" except-seq "as" sname ":" body) (except (any $*2) (as $4) $6))
+    (-> ("except" "*" expr ":" body) (except (group) $3 $5))
+    (-> ("except" "*" expr "as" sname ":" body) (except (group) $3 (as $5) $7)))
+
+  (rule except-seq
+    (-> (expr "," expr) ($1 $3))
+    (-> (except-seq "," expr) ($*1 $3)))
+
+  ;; `with a as f, b:`，以及 3.10 起的**带括号**那一种（`with (a as f, b as g):`）。
+  ;; 带括号那一条与"上下文管理器是个元组"**真的**两个解（`with (a, b):` 两条路都通）——
+  ;; 所以带括号那一条要求**至少有一格带 `as`**（`with-items-as`），`with (a, b):` 只剩元组那一解。
+  (rule with-stmt
+    (-> ("with" with-items ":" body) (with (items $*2) $4))
+    (-> ("with" "(" with-items-as ")" ":" body) (with (items $*3) $6))
+    (-> ("with" "(" with-items-as "," ")" ":" body) (with (items $*3) $7)))
+
+  (rule with-items
+    (-> (with-item) ($1))
+    (-> (with-items "," with-item) ($*1 $3)))
+
+  (rule with-item
+    (-> (expr) $1)
+    (-> (expr "as" target) (as $1 $3)))
+
+  ;; 至少一格带 `as` 的 with 项表。左边那一段没有 `as`，跟着一格带 `as` 的，后面随便。
+  (rule with-items-as
+    (-> (with-item-as) ($1))
+    (-> (with-items "," with-item-as) ($*1 $3))
+    (-> (with-items-as "," with-item) ($*1 $3)))
+
+  (rule with-item-as
+    (-> (expr "as" target) (as $1 $3)))
+
+  ;; ---- match（PEP 634）--------------------------------------------------------
+  ;;
+  ;; 模式那一族**借表达式的语法**，不另写一套：`case Point(x=0)` 是个调用、`case [1, *r]`
+  ;; 是个列表、`case {"k": v}` 是个字典、`case 1 | 2` 是按位或、`case _` 是个名字。
+  ;; CPython 那边模式是独立的 20 条产生式（`python.gram` 的 `patterns` 一节），照抄会与
+  ;; 表达式那一族大面积重解 —— "同一棵树两条路"正是 GLR 最不该有的东西。
+  ;; 代价是**语法收得比 python 宽**（`case f(x) + 1:` 也读得下来），那一格由 adapter 判。
+  (rule match-stmt
+    (-> ("match" star-exprs ":" NL IND cases DED) (match $2 (cases $*6))))
+
+  (rule cases
+    (-> (case-clause) ($1))
+    (-> (cases case-clause) ($*1 $2)))
+
+  (rule case-clause
+    (-> ("case" patterns ":" body) (case $2 $4))
+    (-> ("case" patterns "if" named-expr ":" body) (case $2 (guard $4) $6)))
+
+  (rule patterns
+    (-> (pattern) $1)
+    (-> (pattern ",") (tuple $1))
+    (-> (pattern-seq) (tuple $*1))
+    (-> (pattern-seq ",") (tuple $*1)))
+
+  (rule pattern-seq
+    (-> (pattern "," pattern) ($1 $3))
+    (-> (pattern-seq "," pattern) ($*1 $3)))
+
+  (rule pattern
+    (-> (star-expr) $1)
+    (-> (star-expr "as" sname) (as $1 $3)))
+
+  ;; ---- 函数与类 ----------------------------------------------------------------
+  ;;
+  ;; `[T]` 那一格是 PEP 695 的类型形参（`def f[T](x: T) -> T` / `class C[T]:`）。
+  (rule funcdef
+    (-> ("def" sname "(" param-list ")" ":" body) (def (n $2) (params $*4) $7))
+    (-> ("def" sname "(" param-list ")" "->" expr ":" body) (def (n $2) (params $*4) (ret $7) $9))
+    (-> ("def" sname "[" tparams "]" "(" param-list ")" ":" body)
+      (def (n $2) (tparams $*4) (params $*7) $10))
+    (-> ("def" sname "[" tparams "]" "(" param-list ")" "->" expr ":" body)
+      (def (n $2) (tparams $*4) (params $*7) (ret $10) $12)))
+
+  ;; 基类表就是一张实参表（`class C(B, metaclass=M)`），所以直接用 `call-args`；
+  ;; 它自己收得下空表，于是**不必**再写一条 `("class" sname "(" ")" …)` —— 写了就两个解。
+  (rule classdef
+    (-> ("class" sname ":" body) (class (n $2) (bases) $4))
+    (-> ("class" sname "(" call-args ")" ":" body) (class (n $2) (bases $*4) $7))
+    (-> ("class" sname "[" tparams "]" ":" body) (class (n $2) (tparams $*4) (bases) $7))
+    (-> ("class" sname "[" tparams "]" "(" call-args ")" ":" body)
+      (class (n $2) (tparams $*4) (bases $*7) $10)))
+
+  ;; PEP 695 的类型形参：`T`、`T: bound`、`T = default`（PEP 696）、`*Ts`、`**P`
+  (rule tparams
+    (-> (tparam) ($1))
+    (-> (tparams "," tparam) ($*1 $3))
+    (-> (tparams ",") $*1))
+
+  (rule tparam
+    (-> (sname) (tp (n $1)))
+    (-> (sname ":" expr) (tp (n $1) (bound $3)))
+    (-> (sname "=" expr) (tp (n $1) (default $3)))
+    (-> (sname ":" expr "=" expr) (tp (n $1) (bound $3) (default $5)))
+    (-> ("*" sname) (tpstar (n $2)))
+    (-> ("*" sname "=" expr) (tpstar (n $2) (default $4)))
+    (-> ("**" sname) (tpstarstar (n $2)))
+    (-> ("**" sname "=" expr) (tpstarstar (n $2) (default $4))))
+
+  ;; ---- 形参 --------------------------------------------------------------------
+  ;;
+  ;; 一格一个名字（`(a, b: int)` 是"形参 a"加"形参 b: int"）。`/` 与 `*` 是位置标记。
+  ;; **光写名字那一条不单列**：`param -> (NAME)` 已经收下它，再写一条带类型的就够。
+  (rule param-list
+    (-> () ())
+    (-> (param) ($1))
+    (-> (param-list "," param) ($*1 $3))
+    (-> (param-list ",") $*1))
+
+  (rule param
+    (-> (sname) (p (n $1)))
+    (-> (sname ":" expr) (p (n $1) $3))
+    (-> (sname "=" expr) (p (n $1) (default $3)))
+    (-> (sname ":" expr "=" expr) (p (n $1) $3 (default $5)))
+    (-> ("/") (posonly))
+    (-> ("*") (kwonly))
+    (-> ("*" sname) (vararg (n $2)))
+    (-> ("*" sname ":" expr) (vararg (n $2) $4))
+    ;; `*args: *Ts` —— PEP 646 的异构可变参数包
+    (-> ("*" sname ":" "*" expr) (vararg (n $2) (unpack $5)))
+    (-> ("**" sname) (kwargs (n $2)))
+    (-> ("**" sname ":" expr) (kwargs (n $2) $4)))
+
+  ;; lambda 的形参**不带括号、也不许标注**（`python.gram` 的 `lambda_params`）。
+  ;; 单独一条链是必须的：里头要是能出现 `:`，`lambda x: e` 的那个冒号就分不出归谁。
+  (rule lambda-params
+    (-> (lambda-param) ($1))
+    (-> (lambda-params "," lambda-param) ($*1 $3))
+    (-> (lambda-params ",") $*1))
+
+  (rule lambda-param
+    (-> (sname) (p (n $1)))
+    (-> (sname "=" expr) (p (n $1) (default $3)))
+    (-> ("/") (posonly))
+    (-> ("*") (kwonly))
+    (-> ("*" sname) (vararg (n $2)))
+    (-> ("**" sname) (kwargs (n $2))))
+
+  ;; ---- 赋值目标 ----------------------------------------------------------------
+  ;;
+  ;; 目标就是 `primary`（`a`、`a.b`、`a[i]`）；元组 / 列表目标由 `atom` 那边收
+  ;; （`(a, b) = t` 里的 `(a, b)` 是一个 atom），所以这儿**不要**再写一遍括号形式。
+  (rule target
+    (-> (primary) $1)
+    (-> ("*" target) (star $2)))
+
+  ;; `a`、`a, b`、`a,` —— 后两种是元组。照 `python.gram` 的 `star_targets`：
+  ;; **回一个节点**，不回列表 —— "有没有尾随逗号"得留在树里，`x = a,` 与 `x = a` 不是一件事。
+  (rule targets
+    (-> (target) $1)
+    (-> (target ",") (tuple $1))
+    (-> (target-seq) (tuple $*1))
+    (-> (target-seq ",") (tuple $*1)))
+
+  ;; 两格以上。头一条要求**正好两格**，别的都靠递归 —— 不然三格有两条路。
+  (rule target-seq
+    (-> (target "," target) ($1 $3))
+    (-> (target-seq "," target) ($*1 $3)))
+
+  ;; ---- 表达式：python 的优先级表（`Doc/reference/expressions.rst` 末尾那一张）-------
+
+  (rule expr
+    (-> (ternary) $1)
+    (-> (lambda-expr) $1))
+
+  ;; `a if c else b` —— 右边那一支是 `expression`（还能再套 lambda / 三元）
+  (rule ternary
+    (-> (or-expr) $1)
+    (-> (or-expr "if" or-expr "else" expr) (cond $3 $1 $5)))
+
+  ;; 海象。只在"条件位、实参位、显示字面量里、推导式的 if"这几处合法，所以单开一格
+  (rule named-expr
+    (-> (expr) $1)
+    (-> (sname ":=" expr) (walrus $1 $3)))
+
+  (rule lambda-expr
+    (-> ("lambda" ":" expr) (lambda (params) $3))
+    (-> ("lambda" lambda-params ":" expr) (lambda (params $*2) $4)))
+
+  ;; `yield` 是**表达式**（`x = yield v`），但只在少数位置合法：语句位、赋值右边、
+  ;; 括号里。所以它自己一格，不进 `expr` —— 进了就到处都能写。
+  (rule yield-expr
+    (-> ("yield") (yield))
+    (-> ("yield" star-exprs) (yield $2))
+    (-> ("yield" "from" expr) (yield (from $3))))
+
+  (rule or-expr
+    (-> (and-expr) $1)
+    (-> (or-expr "or" and-expr) (or $1 $3)))
+
+  (rule and-expr
+    (-> (not-expr) $1)
+    (-> (and-expr "and" not-expr) (and $1 $3)))
+
+  (rule not-expr
+    (-> (cmp) $1)
+    (-> ("not" not-expr) (not $2)))
+
+  ;; 链式比较：`a < b < c` 是一条链，不是 `(a < b) < c`。这儿照 python.gram 左递归收，
+  ;; 摊平那一步归 adapter（CST 里 `(cmp op (cmp op a b) c)` 的形状够还原）
+  (rule cmp
+    (-> (bor) $1)
+    (-> (cmp cmpop bor) (cmp $2 $1 $3)))
+
+  (rule cmpop
+    (-> ("<") $1) (-> (">") $1) (-> ("<=") $1) (-> (">=") $1)
+    (-> ("==") $1) (-> ("!=") $1)
+    (-> ("in") $1) (-> ("is") $1)
+    (-> ("not" "in") notin)
+    (-> ("is" "not") isnot))
+
+  (rule bor
+    (-> (bxor) $1)
+    (-> (bor "|" bxor) (bin "|" $1 $3)))
+
+  (rule bxor
+    (-> (band) $1)
+    (-> (bxor "^" band) (bin "^" $1 $3)))
+
+  (rule band
+    (-> (shift) $1)
+    (-> (band "&" shift) (bin "&" $1 $3)))
+
+  (rule shift
+    (-> (arith) $1)
+    (-> (shift "<<" arith) (bin "<<" $1 $3))
+    (-> (shift ">>" arith) (bin ">>" $1 $3)))
+
+  (rule arith
+    (-> (term) $1)
+    (-> (arith "+" term) (bin "+" $1 $3))
+    (-> (arith "-" term) (bin "-" $1 $3)))
+
+  (rule term
+    (-> (factor) $1)
+    (-> (term "*" factor) (bin "*" $1 $3))
+    (-> (term "/" factor) (bin "/" $1 $3))
+    (-> (term "//" factor) (bin "//" $1 $3))
+    (-> (term "%" factor) (bin "%" $1 $3))
+    (-> (term "@" factor) (bin "@" $1 $3)))
+
+  (rule factor
+    (-> (power) $1)
+    (-> ("+" factor) (un "+" $2))
+    (-> ("-" factor) (un "-" $2))
+    (-> ("~" factor) (un "~" $2)))
+
+  ;; `**` 右结合，右边可以带一元号（`2 ** -1`）；左边是 `await_primary`
+  (rule power
+    (-> (await-primary) $1)
+    (-> (await-primary "**" factor) (bin "**" $1 $3)))
+
+  ;; `await` 夹在 `**` 与 `primary` 之间（`python.gram` 的 `await_primary`）——
+  ;; 所以 `await f() ** 2` 是 `(await f()) ** 2`
+  (rule await-primary
+    (-> (primary) $1)
+    (-> ("await" primary) (await $2)))
+
+  (rule primary
+    (-> (atom) $1)
+    (-> (primary "." sname) (attr $1 $3))
+    (-> (primary "(" call-args ")") (call $1 (args $*3)))
+    (-> (primary "[" subscripts "]") (index $1 (subs $*3))))
+
+  (rule call-args
+    (-> () ())
+    (-> (call-arg) ($1))
+    (-> (call-args "," call-arg) ($*1 $3))
+    (-> (call-args ",") $*1))
+
+  (rule call-arg
+    (-> (expr) $1)
+    (-> (sname ":=" expr) (walrus $1 $3))
+    (-> (sname "=" expr) (kw $1 $3))
+    (-> ("*" expr) (star $2))
+    (-> ("**" expr) (starstar $2))
+    ;; `sum(x for x in xs)` —— 不带括号的生成器表达式只许**独自**当实参
+    (-> (expr comp-fors) (genexp $1 $*2)))
+
+  (rule subscripts
+    (-> (subscript) ($1))
+    (-> (subscripts "," subscript) ($*1 $3))
+    (-> (subscripts ",") $*1))
+
+  ;; 下标位置收的是 `named_expression`（`python.gram` 的 `slice` 第二支）—— 海象在这儿合法：
+  ;; `a[b := 0]`。`a[k=v]` 不是 python；`a[x for x in y]` 也不是 —— 两条都不收。
+  (rule subscript
+    (-> (named-expr) $1)
+    (-> ("*" expr) (star $2))
+    (-> (slice) $1))
+
+  (rule slice
+    (-> (sl-opt ":" sl-opt) (slice $1 $3))
+    (-> (sl-opt ":" sl-opt ":" sl-opt) (slice $1 $3 $5)))
+
+  (rule sl-opt
+    (-> () ())
+    (-> (expr) $1))
+
+  ;; 推导式的从句。`async for` 也在这儿（`python.gram` 的 `for_if_clauses`）
+  (rule comp-fors
+    (-> (comp-for) ($1))
+    (-> (comp-fors comp-clause) ($*1 $2)))
+
+  (rule comp-for
+    (-> ("for" targets "in" or-expr) (for $2 $4))
+    (-> ("async" "for" targets "in" or-expr) (afor $3 $5)))
+
+  (rule comp-clause
+    (-> (comp-for) $1)
+    (-> ("if" or-expr) (if $2))
+    ;; 推导式的 if 里也能写海象：`[y for x in xs if (y := f(x))]`
+    (-> ("if" sname ":=" or-expr) (if (walrus $2 $4))))
+
+  ;; ---- 逗号表：`a, b` 是元组，`a` 不是 --------------------------------------------
+  ;;
+  ;; **这一格比 python.gram 收得宽一点**：那边分 `star_expressions`（语句位，不许海象）与
+  ;; `star_named_expressions`（显示字面量里，许海象）两条链。这儿合成一条 —— 于是
+  ;; `x := 1` 单独当一条语句也读得下来（python 会拒）。理由是分两条要多一整套逗号表规则，
+  ;; 而"解析不是校验"：海象该不该出现在语句位，由 adapter 判，不由语法判。
+  (rule star-expr
+    (-> (named-expr) $1)
+    (-> ("*" or-expr) (star $2)))
+
+  ;; 照 `python.gram` 的 `star_expressions`：回一个节点
+  (rule star-exprs
+    (-> (star-expr) $1)
+    (-> (star-expr ",") (tuple $1))
+    (-> (star-expr-seq) (tuple $*1))
+    (-> (star-expr-seq ",") (tuple $*1)))
+
+  (rule star-expr-seq
+    (-> (star-expr "," star-expr) ($1 $3))
+    (-> (star-expr-seq "," star-expr) ($*1 $3)))
+
+  ;; 列表 / 集合字面量里那张表：尾随逗号不改变意思，所以这一格回**列表**
+  (rule item-list
+    (-> (star-expr) ($1))
+    (-> (item-list "," star-expr) ($*1 $3))
+    (-> (item-list ",") $*1))
+
+  (rule dict-items
+    (-> (dict-item) ($1))
+    (-> (dict-items "," dict-item) ($*1 $3))
+    (-> (dict-items ",") $*1))
+
+  (rule dict-item
+    (-> (expr ":" expr) (kv $1 $3))
+    (-> ("**" or-expr) (starstar $2)))
+
+  ;; 相邻串自动拼接（`"a" "b"` 是一个串；文档串与长正则常这么写）
+  (rule strings
+    (-> (STRING) ($1))
+    (-> (strings STRING) ($*1 $2)))
+
+  (rule atom
+    (-> (sname) (n $1))
+    (-> (NUMBER) (num $1))
+    (-> (strings) (str $*1))
+    (-> ("True") (true))
+    (-> ("False") (false))
+    (-> ("None") (none))
+    (-> ("...") (ellipsis))
+    (-> ("(" ")") (tuple))
+    (-> ("(" named-expr ")") (paren $2))
+    (-> ("(" yield-expr ")") (paren $2))
+    ;; 元组要**两格以上**或者带尾随逗号 —— 不然 `(a)` 同时是括号与单元素元组
+    (-> ("(" star-expr "," ")") (tuple $2))
+    (-> ("(" star-expr-seq ")") (tuple $*2))
+    (-> ("(" star-expr-seq "," ")") (tuple $*2))
+    ;; 推导式的**元素位**收 `star_named_expression`（`python.gram:1049/1053/1057`）——
+    ;; 也就是说 `[*i for i in xs]` 是合法语法（3.15 的 PEP 798；跑起来才报 TypeError）。
+    (-> ("(" star-expr comp-fors ")") (genexp $2 $*3))
+    (-> ("[" "]") (list))
+    (-> ("[" item-list "]") (list $*2))
+    (-> ("[" star-expr comp-fors "]") (listcomp $2 $*3))
+    ;; `{}` 是空**字典**（不是空集合）—— python 没有空集合字面量
+    (-> ("{" "}") (dict))
+    (-> ("{" dict-items "}") (dict $*2))
+    (-> ("{" item-list "}") (set $*2))
+    (-> ("{" star-expr comp-fors "}") (setcomp $2 $*3))
+    (-> ("{" expr ":" expr comp-fors "}") (dictcomp $2 $4 $*5))
+    (-> ("{" "**" or-expr comp-fors "}") (dictcomp (starstar $3) $*4))))
+
+;; ## 量到的
+;;
+;; （`node bench/grammars.js python`，语料 = 参考树 `cpython/Lib` 下 2063 份 .py、38MB，
+;;   外加 `examples/` 里那一份本地回归语料 —— 参考树不在的机器上也还量得出一个数）
+;;
+;;   577 状态 / 312 产生式 / 81 终结符 / **10 处**冲突留给驱动器
+;;   **2055 / 2064 过（99.6%）**，1.2 MB/s、21.0 万记号/s
+;;
+;; 那 10 处冲突值得单说：同一趟里 mojo 那一份 112 处、nim 那一份 551 处。这门语言的语法
+;; 比两者都大，冲突却少一个量级 —— 因为元组、目标表、with 项表、模式表这几族都是
+;; **把歧义写进语法**（"两格以上"、"至少一格带 as"），不是丢给驱动器去消。吞吐也因此是
+;; 三者里最快的（mojo 9.8、nim 8.9 万记号/s）。
+;;
+;; 头一版就过了 1895 份（91.9%）—— 而 mojo 那一份头一版 224/602（37%）、nim 那一份头一版 3 份。
+;; 差别不在这门语言更简单，在于**前两份把教训量出来了，这一份从第一行就照办**，而且
+;; mojo 是 python 的近亲：语句表、缩进块、表达式级联那三大块几乎可以直接搬。
+;;
+;; 一路的账（每一刀都先按报错归类，最大那一类先修，再量）：
+;;   1895 → 头一版
+;;   2045 → **四个软关键字进关键字表、再从 `sname` 那条把它们当名字放回去**。这一刀一次
+;;          关掉三个洞：PEP 810 的 `lazy import`（71 份 —— 这棵树是 3.16.0a0，标准库自己
+;;          已经改过来了）、`match` 语句（35 份）、PEP 695 的 `type X = …`（110 处）。
+;;          同一刀里还有：带括号的 with 项表（37 份，要求**至少一格带 `as`**，不然
+;;          `with (a, b):` 与"上下文管理器是个元组"两个解）、不带括号的多异常
+;;          `except A, B:`（PEP 758）、PEP 695 的类型形参 `def f[T]` / `class C[T]`（11 份）、
+;;          显示字面量里的海象（`(a, b := c)`）。
+;;   2052 → 标识符许 Unicode（`ualpha` / `ualnum`，见上）—— 7 份。
+;;   2054 → 下标位收 `named_expression`（`a[b := 0]`）+ 推导式的元素位收
+;;          `star_named_expression`（`[*i for i in xs]`，PEP 798 —— 那是合法语法，
+;;          跑起来才报 TypeError）。
+;;
+;; 剩下 9 份，按类：
+;;   * 8 份是 f-string / t-string 里外用同一种引号（PEP 701）—— 见文件头"故意不收"；
+;;   * 1 份是 match 的嵌套 as 模式。
+;;
+;; 另外：这棵树里那 5 份 `badsyntax_*` / `bad_coding*` 我们**全读下来了**，而且这是对的 ——
+;; 它们坏在编码声明（`# coding:` 那一行、非法 UTF-8 字节）、XID 校验、`from __future__`
+;; 的位置上，一样都不是语法。所以 `bench.json` 里**没有** `invalid` 那一格。

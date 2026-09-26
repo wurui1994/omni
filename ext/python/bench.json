@@ -1,0 +1,8 @@
+{
+  "grammar": "python.grammar",
+  "doc": "语料 = 参考树 cpython 里 Lib 下的 .py（标准库自己，2063 份、38MB）—— 这一堆把这门语言用全了：装饰器、推导式、async、match、f-string、PEP 695 的类型形参、PEP 810 的 lazy import 都在里头。树不在就跳过。没有 `invalid` 那一格：这棵树里那 5 份 `badsyntax_*` / `bad_coding*` 坏的是**编码声明与 XID 校验**（`# coding:` 那一行、非 XID_Start 的标识符、`from __future__` 的位置），不是坏在语法上 —— 语法分析器本来就该读下来，归语义层拒。",
+  "corpus": [
+    { "tree": "cpython", "env": "CPYTHON_SRC", "sub": "Lib", "ext": ".py" },
+    { "dir": "examples", "ext": ".py" }
+  ]
+}
