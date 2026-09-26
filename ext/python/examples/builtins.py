@@ -104,3 +104,9 @@ print(int("  7  "), int("1_000"), int("123456789012345"))
 print(int("0x1f", 16), int("1f", 16), int("0XFF", 16), int("-ff", 16))
 print(int("101", 2), int("0b101", 2), int("777", 8), int("0o17", 8))
 print(int("z", 36), int("Z", 36), int("10", 36))
+
+# `ord()` —— 方言里没有"串 → 码位"那一格，所以**反着来**：拿 `(chr i)` 从 0 数到 127。
+# 只有 ASCII 那一档对得上（串是字节不是码点），非 ASCII 的当场报，不悄悄答个字节值。
+print(ord("A"), ord("a"), ord("0"), ord(" "))
+print(chr(ord("a") + 1), ord("a") - ord("A"), [ord(c) for c in "abc"])
+

@@ -18,8 +18,11 @@
 #     `rpartition` 交 `('', '', s)` —— 不是对称的。
 #   - `.count()` 数的是**不重叠**的那几段（`"aaa".count("aa")` 是 1），而空的那一段数的是
 #     "位置数"（`"abc".count("")` 是 4）。
+#   - `.expandtabs(n)` 的制表位是**按列**算的（补到下一个 n 的整数倍），列数换行归零；
+#     `.splitlines()` 与 `.split("\n")` **不是一回事** —— 末尾那个换行不留空段。
 #
-# 明说还没接的：`.format()`、`.encode()`。
+# 明说还没接的：`.encode()`；`.splitlines()` 只认 `\n` 与 `\r`（python 还认 `\v` / `\f` /
+# U+2028 那一批）。
 
 
 def main():
@@ -86,6 +89,17 @@ def main():
     # 不带分隔符地切：按连续空白，首尾的空段不算
     print("  a b  c ".split(), "".split(), " ".split())
     print("a b  c".split(None, 1), "a b c".split(None, 0))
+
+    # 制表位是**按列**算的（不是"一个 tab 换 n 个空格"），换行归零
+    print("a\tb".expandtabs(4) + "|", "ab\tc".expandtabs(4) + "|")
+    print("abcd\te".expandtabs(4) + "|", "\t".expandtabs(4) + "|")
+    print("a\tb".expandtabs() + "|", "a\nb\tc".expandtabs(4) + "|")
+
+    # 按行切：与 .split("\n") 不是一回事（末尾那个换行不留空段，\r\n 算一个分隔）
+    print("a\nb".splitlines(), "a\nb\n".splitlines())
+    print("".splitlines(), "\n".splitlines(), "a\n\nb".splitlines())
+    print("a\r\nb".splitlines(), "a\rb".splitlines())
+    print("a\n".splitlines(), "a\n".split("\n"))
 
 
 main()

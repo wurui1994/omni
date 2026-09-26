@@ -1350,6 +1350,140 @@ export function intOfStr(s0, base, C, badMsg) {
   });
 }
 
+/**
+ * `ord(c)` —— 方言里没有"串 → 码位"那一格算子，所以**反着来**：拿 `(chr i)` 从 0 数到
+ * 127，对上了就是它。128 步是上限，而且只有 ASCII 那一档对得上 —— 非 ASCII 的字符在
+ * 这一层是**几个字节**（串是字节不是码点），对不上就当场报，不悄悄答个字节值出去。
+ */
+export function ordOf(c0, C) {
+  const h = holder(C);
+  const c = h.keep(c0, 'od_c');
+  const out = h.decl('od_o', INT, int(-1));
+  const i = h.decl('od_i', INT, int(0));
+  h.pre.push({
+    kind: 'if',
+    cond: bin('!=', call1('slen', [c]), int(1)),
+    then: [{
+      kind: 'builtin-stmt',
+      name: 'fail',
+      args: [str('ord() expected a character (one ASCII byte)')],
+    }],
+    else_: null,
+  });
+  h.pre.push({
+    kind: 'while',
+    cond: bin('&&', bin('<', out, int(0)), bin('<', i, int(128))),
+    body: [
+      {
+        kind: 'if',
+        cond: bin('==', call1('chr', [i]), c),
+        then: [{ kind: 'assign', target: out, value: i }],
+        else_: null,
+      },
+      inc(i),
+    ],
+  });
+  h.pre.push({
+    kind: 'if',
+    cond: bin('<', out, int(0)),
+    then: [{ kind: 'builtin-stmt', name: 'fail', args: [str('ord() 只接 ASCII（串是字节不是码点）')] }],
+    else_: null,
+  });
+  return h.wrap(out);
+}
+
+/**
+ * `s.expandtabs(n)` —— 制表位是**按列**算的（不是"一个 tab 换 n 个空格"）：补到下一个
+ * n 的整数倍，而列数**每换一行归零**。
+ */
+export function expandTabsOf(s0, n, C) {
+  const h = holder(C);
+  const s = h.keep(s0, 'et_s');
+  const out = h.decl('et_o', STR, str(''));
+  const col = h.decl('et_c', INT, int(0));
+  const i = h.decl('et_i', INT, int(0));
+  const ch = h.decl('et_h', STR, str(''));
+  const pad = h.decl('et_p', INT, int(0));
+  h.pre.push({
+    kind: 'while',
+    cond: bin('<', i, call1('slen', [s])),
+    body: [
+      { kind: 'assign', target: ch, value: call1('ssub', [s, i, int(1)]) },
+      {
+        kind: 'if',
+        cond: bin('==', ch, str('\t')),
+        then: [
+          /* 补到下一个整数倍：正好在倍数上也要补满一格（python 就是这样）。 */
+          { kind: 'assign', target: pad, value: bin('-', int(n), bin('%', col, int(n))) },
+          { kind: 'assign', target: out, value: bin('+', out, call1('srep', [str(' '), pad])) },
+          { kind: 'assign', target: col, value: bin('+', col, pad) },
+        ],
+        else_: [
+          { kind: 'assign', target: out, value: bin('+', out, ch) },
+          {
+            kind: 'if',
+            cond: bin('||', bin('==', ch, str('\n')), bin('==', ch, str('\r'))),
+            then: [{ kind: 'assign', target: col, value: int(0) }],
+            else_: [{ kind: 'assign', target: col, value: bin('+', col, int(1)) }],
+          },
+        ],
+      },
+      inc(i),
+    ],
+  });
+  return h.wrap(out);
+}
+
+/**
+ * `s.splitlines()` —— 与 `.split("\n")` **不是一回事**：末尾那个换行不留空段
+ * （`"a\n".splitlines()` 是一格，而 `"a\n".split("\n")` 是两格），`\r\n` 算一个分隔。
+ * python 还认 `\v` / `\f` / U+2028 那一批 —— 这儿只认 `\n` 与 `\r`（明说的不足）。
+ */
+export function splitLinesOf(s0, C) {
+  const h = holder(C);
+  const s = h.keep(s0, 'sl_s');
+  const t = arrOf(STR);
+  const out = h.decl('sl_o', t, { kind: 'builtin', name: 'anew', args: [{ kind: 'type', type: t }, int(0)] });
+  const ls = h.decl('sl_l', INT, call1('slen', [s]));
+  const i = h.decl('sl_i', INT, int(0));
+  const a = h.decl('sl_a', INT, int(0));
+  const ch = h.decl('sl_h', STR, str(''));
+  h.pre.push({
+    kind: 'while',
+    cond: bin('<', i, ls),
+    body: [
+      { kind: 'assign', target: ch, value: call1('ssub', [s, i, int(1)]) },
+      {
+        kind: 'if',
+        cond: bin('||', bin('==', ch, str('\n')), bin('==', ch, str('\r'))),
+        then: [
+          { kind: 'builtin-stmt', name: 'apush', args: [out, call1('ssub', [s, a, bin('-', i, a)])] },
+          /* `\r\n` 算**一个**分隔。 */
+          {
+            kind: 'if',
+            cond: bin('&&', bin('==', ch, str('\r')),
+              bin('&&', bin('<', bin('+', i, int(1)), ls),
+                bin('==', call1('ssub', [s, bin('+', i, int(1)), int(1)]), str('\n')))),
+            then: [inc(i)],
+            else_: null,
+          },
+          { kind: 'assign', target: a, value: bin('+', i, int(1)) },
+        ],
+        else_: null,
+      },
+      inc(i),
+    ],
+  });
+  /* 末尾那一段：**只有非空才推**（末尾的换行不留空段）。 */
+  h.pre.push({
+    kind: 'if',
+    cond: bin('<', a, ls),
+    then: [{ kind: 'builtin-stmt', name: 'apush', args: [out, call1('ssub', [s, a, bin('-', ls, a)])] }],
+    else_: null,
+  });
+  return h.wrap(out);
+}
+
 /** `s.startswith(p)` / `s.endswith(p)` —— 比一段（方言里没有这一格算子）。 */
 export function startsEndsOf(s0, p0, atStart, C) {
   const h = holder(C);

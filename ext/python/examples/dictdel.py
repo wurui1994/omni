@@ -73,5 +73,16 @@ def main():
     del xs[0]
     print(xs, len(xs))
 
+    # `.popitem()` —— 拿掉**最后进来的**那一对（python 3.7 起是 LIFO），交两格的元组。
+    # 删过再加之后"最后一格"是新加的那格，所以这几行也在钉次序。
+    d2 = {"a": 1, "b": 2, "c": 3}
+    print(d2.popitem(), d2)
+    print(d2.popitem(), len(d2))
+    d2["z"] = 9
+    print(d2.popitem(), d2)
+    e2 = {1: "x"}
+    k, v = e2.popitem()
+    print(k, v, len(e2))
+
 
 main()

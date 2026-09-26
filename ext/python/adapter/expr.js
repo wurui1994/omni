@@ -31,7 +31,7 @@ import {
   containsList, indexOfList, countList, valuesList, dictPopOf, dictSetDefaultOf,
   concatList, repeatList, reversedList, stepSlice, bankRound,
   caseMapOf, charClassOf, rfindOf, copyList, copyDict, charsOf, dictOfPairs,
-  listEqOf, listCmpOf, dictEqOf, intOfStr,
+  listEqOf, listCmpOf, dictEqOf, intOfStr, ordOf, expandTabsOf, splitLinesOf,
 } from './builtins.js';
 
 /** 一格名字节点（`(n x)`）的文本；也收裸记号。 */
@@ -396,12 +396,13 @@ function methodType(recvTy, name, argTys, C) {
   }
   if (recvTy.kind === 'string') {
     if (['upper', 'lower', 'title', 'capitalize', 'swapcase', 'strip', 'lstrip', 'rstrip',
-      'replace', 'join', 'ljust', 'rjust', 'zfill', 'center', 'format',
+      'replace', 'join', 'ljust', 'rjust', 'zfill', 'center', 'format', 'expandtabs',
       'removeprefix', 'removesuffix'].includes(name)) return STR;
     if (['find', 'rfind', 'count', 'index', 'rindex'].includes(name)) return INT;
     if (['startswith', 'endswith',
       'isdigit', 'isalpha', 'isalnum', 'isspace', 'isupper', 'islower'].includes(name)) return BOOL;
     if (name === 'split') return arrOf(STR);
+    if (name === 'splitlines') return arrOf(STR);
     /* `.partition()` / `.rpartition()` —— 三格串的元组（那格记录顺手登记上）。 */
     if (name === 'partition' || name === 'rpartition') return tupleRec([STR, STR, STR], C).type;
     return null;
@@ -423,6 +424,7 @@ function methodType(recvTy, name, argTys, C) {
     }
     if (name === 'setdefault') return recvTy.value;
     if (name === 'items') return arrOf(tupleRec([recvTy.key, recvTy.value], C).type);
+    if (name === 'popitem') return tupleRec([recvTy.key, recvTy.value], C).type;
     if (name === 'copy') return recvTy;
     if (name === 'clear' || name === 'update') return { kind: 'void' };
     return null;
@@ -2190,6 +2192,65 @@ function tupleSlice(box, sliceTok, rec, C) {
   return pre.length === 0 ? value : { kind: 'block-expr', stmts: pre, value };
 }
 
+/**
+ * `d.popitem()` —— 拿掉**最后进来的**那一对并交出来（python 3.7 起是 LIFO，不是随便挑
+ * 一格）。`dkeys` 交的是插入序，所以"最后一格键"就是它。空字典是 KeyError。
+ */
+function popItemOf(box0, C) {
+  const t = ty(box0, C);
+  const rec = tupleRec([t.key, t.value], C);
+  const pre = [];
+  const pin = (e, et, p) => {
+    if (isPure(e)) return e;
+    const n = C.fresh(p);
+    C.bind(n, et);
+    pre.push({ kind: 'let', name: n, type: et, init: e });
+    return { kind: 'name', name: n };
+  };
+  const d = pin(box0, t, 'pi_d');
+  const kt = arrOf(t.key);
+  const ksn = C.fresh('pi_ks');
+  C.bind(ksn, kt);
+  pre.push({ kind: 'let', name: ksn, type: kt, init: { kind: 'builtin', name: 'dkeys', args: [d] } });
+  const ks = { kind: 'name', name: ksn };
+  pre.push({
+    kind: 'if',
+    cond: { kind: 'binop', op: '==', left: { kind: 'builtin', name: 'alen', args: [ks] }, right: { kind: 'int', value: 0 } },
+    then: [{ kind: 'builtin-stmt', name: 'fail', args: [{ kind: 'string', value: "popitem(): dictionary is empty" }] }],
+    else_: null,
+  });
+  const kn = C.fresh('pi_k');
+  C.bind(kn, t.key);
+  pre.push({
+    kind: 'let',
+    name: kn,
+    type: t.key,
+    init: {
+      kind: 'index',
+      obj: ks,
+      index: {
+        kind: 'binop', op: '-',
+        left: { kind: 'builtin', name: 'alen', args: [ks] },
+        right: { kind: 'int', value: 1 },
+      },
+    },
+  });
+  const k = { kind: 'name', name: kn };
+  const vn = C.fresh('pi_v');
+  C.bind(vn, t.value);
+  pre.push({ kind: 'let', name: vn, type: t.value, init: { kind: 'builtin', name: 'dget', args: [d, k] } });
+  const v = { kind: 'name', name: vn };
+  pre.push({ kind: 'expr-stmt', expr: { kind: 'builtin', name: 'ddel', args: [d, k] } });
+  return {
+    kind: 'block-expr',
+    stmts: pre,
+    value: {
+      kind: 'new-record', type: rec.type, ref: true,
+      fields: [k, v].map((x, i) => ({ name: `_${i}`, value: x })),
+    },
+  };
+}
+
 /** `xs[i]` / `d[k]` / `s[i]` / `xs[a:b]` / `s[a:b]`。 */
 function indexOf(x, C) {
   const box = exprOf(kids(x)[0], C);
@@ -2771,7 +2832,10 @@ function builtinOf(nm, args, argToks, C) {
     case 'bool':
       return condOfExpr(args[0], C);
     case 'ord':
-      throw new Error('python->IR: `ord()` 还没接（方言里没有"串 → 码位"那一格）');
+      if (args.length !== 1 || t0.kind !== 'string') {
+        throw new Error('python->IR: `ord()` 收一格串');
+      }
+      return ordOf(args[0], C);
     case 'chr':
       return { kind: 'builtin', name: 'chr', args };
     case 'abs':
@@ -3071,6 +3135,16 @@ function methodOf(recvTok, name, args, C) {
     if ((name === 'partition' || name === 'rpartition') && args.length === 1) {
       return partitionOf(recv, args[0], C, name === 'rpartition');
     }
+    /* `.expandtabs()` / `.splitlines()` —— 都是走一遍（制表位按列算、末尾换行不留空段）。 */
+    if (name === 'expandtabs' && args.length <= 1) {
+      if (args.length === 1 && args[0].kind !== 'int') {
+        throw new Error('python->IR: `.expandtabs(n)` 的 n 要写成一格整数字面量');
+      }
+      const n = args.length === 1 ? Number(args[0].value) : 8;
+      if (n <= 0) throw new Error('python->IR: `.expandtabs(n)` 的 n 要大于 0');
+      return expandTabsOf(recv, n, C);
+    }
+    if (name === 'splitlines' && args.length === 0) return splitLinesOf(recv, C);
     /* `.format()` —— 模板要是串字面量（替换字段得在编译期拆，与 f-string 同一条）。 */
     if (name === 'format') {
       if (recv.kind !== 'string') {
@@ -3245,6 +3319,8 @@ function methodOf(recvTok, name, args, C) {
     if (name === 'items' && args.length === 0) return pairsList('items', [recv], C);
     /* `d.copy()` —— 抄一格新字典（浅抄）。 */
     if (name === 'copy' && args.length === 0) return copyDict(recv, C);
+    /* `d.popitem()` —— 拿掉最后进来的那一对，交一格两格的元组。 */
+    if (name === 'popitem' && args.length === 0) return popItemOf(recv, C);
     if (name === 'clear' || name === 'update') {
       throw new Error(`python->IR: \`d.${name}()\` 交 None，所以只当语句用（单独一行）`);
     }
