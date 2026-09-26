@@ -998,18 +998,19 @@ function cmpOne(o, a, b, C) {
   /* 有一边是箱子：标签一样才比值，不一样 `==` 是 False（python 的 `1 == "1"`）。 */
   if (isDyn(ta) || isDyn(tb)) return dynBin(op, a, b, C);
   /* **元组逐格比**（python 的元组比的是内容）。不这么办的话落成"是不是同一个句柄"，
-     `(1, 2) == (1, 2)` 会静默答 False —— 量到过。
-     `<` / `>` 那几格（字典序）还没接：那要"第一处不同的那一格说了算"，得逐格发分支。 */
+     `(1, 2) == (1, 2)` 会静默答 False —— 量到过。 */
   const tupA = tupleOf(C.recOf(ta));
   if (tupA !== null) {
-    if (op !== '==' && op !== '!=') {
-      throw new Error(`python->IR: 元组上的 \`${o}\` 还没接（只接了 == 与 !=）`);
-    }
     const tupB = tupleOf(C.recOf(tb));
-    if (tupB === null || tupB.length !== tupA.length
-      || !tupA.every((t, i) => sameType(t, tupB[i]))) {
+    const same = tupB !== null && tupB.length === tupA.length
+      && tupA.every((t, i) => sameType(t, tupB[i]));
+    if (!same) {
       /* 形状不一样的两格元组在 python 里 `==` 恒 False（长度或元素类型不同）。 */
-      return { kind: 'bool', value: op === '!=' };
+      if (op === '==' || op === '!=') return { kind: 'bool', value: op === '!=' };
+      /* 大小就不是恒定的了：python 逐格比到第一处不同、都一样就短的那格小，而且对上的
+         两格类型不同那一处会 TypeError。所以这一层要**同形状**才敢答。 */
+      throw new Error(`python->IR: 形状不同的两格元组比 \`${o}\` 还没接`
+        + '（python 是逐格比到第一处不同、都一样就短的那格小）');
     }
     const pre = [];
     const pin = (e, t, p) => {
@@ -1021,14 +1022,37 @@ function cmpOne(o, a, b, C) {
     };
     const l = pin(a, ta, 'tq_a');
     const r = pin(b, tb, 'tq_b');
+    const fld = (box, i) => ({ kind: 'field', obj: box, name: `_${i}` });
     let out = null;
-    tupA.forEach((_, i) => {
-      const one = cmpOne(op === '==' ? '==' : '!=',
-        { kind: 'field', obj: l, name: `_${i}` },
-        { kind: 'field', obj: r, name: `_${i}` }, C);
-      out = out === null ? one
-        : { kind: 'binop', op: op === '==' ? '&&' : '||', left: out, right: one };
-    });
+    if (op === '==' || op === '!=') {
+      tupA.forEach((_, i) => {
+        const one = cmpOne(op, fld(l, i), fld(r, i), C);
+        out = out === null ? one
+          : { kind: 'binop', op: op === '==' ? '&&' : '||', left: out, right: one };
+      });
+    } else {
+      /* **字典序**：第一处不同的那一格说了算。落成一棵纯表达式 ——
+           `a < b`  ⇒  `a0 < b0 || (a0 == b0 && (a1 < b1 || (a1 == b1 && …)))`
+         最后一格用算子本身（`<=` 只在那儿才允许"到底都相等也算真"），前面各格一律用
+         严格的那一版。不用发分支：`||` / `&&` 本来就短路。 */
+      const dir = op[0] === '<' ? '<' : '>';
+      const lex = (i) => {
+        const av = fld(l, i);
+        const bv = fld(r, i);
+        if (i === tupA.length - 1) return cmpOne(op, av, bv, C);
+        return {
+          kind: 'binop', op: '||',
+          left: cmpOne(dir, av, bv, C),
+          right: {
+            kind: 'binop', op: '&&',
+            left: cmpOne('==', av, bv, C),
+            right: lex(i + 1),
+          },
+        };
+      };
+      /* 空元组（`() < ()`）：没有一格可比，`<=` / `>=` 真、`<` / `>` 假。 */
+      out = tupA.length === 0 ? { kind: 'bool', value: op.length === 2 } : lex(0);
+    }
     return pre.length === 0 ? out : { kind: 'block-expr', stmts: pre, value: out };
   }
   let l = a;
@@ -1040,6 +1064,27 @@ function cmpOne(o, a, b, C) {
 
 /** 一格 `==`（`builtins.js` 那几格"找"要它 —— 元素是箱子时按标签分派）。 */
 export const cmpEq = (a, b, C) => cmpOne('==', a, b, C);
+
+/** 一格 `<`（min / max / sort 那几格要它 —— 元组走上面那棵字典序的树）。 */
+export const cmpLt = (a, b, C) => cmpOne('<', a, b, C);
+
+/**
+ * "这一格类型有没有比法" —— 排序、挑大小之前先问一声。
+ * 有比法的就三类标量加**同形状的元组**；别的当场报，不然落到方言里会去比句柄，
+ * 静默答错（`min([(2,'b'), (1,'a')])` 从前就答 `(2, 'b')` —— 量到过）。
+ */
+export function needOrd(t, C, what) {
+  if (['int', 'real', 'string'].includes(t.kind)) return;
+  if (tupleOf(C.recOf(t)) !== null) return;
+  throw new Error(`python->IR: \`${what}\` 的元素是 ${t.kind} —— 还没接（要有"怎么比"）`);
+}
+
+/** `sorted(xs)` —— 先问一声"元素怎么比"，再把比法递给那趟插入排序。 */
+function sortedPy(xsE, C, desc) {
+  const t = ty(xsE, C);
+  if (t.kind === 'arr') needOrd(t.elem, C, 'sorted()');
+  return sortedOf(xsE, C, desc, (x, y) => cmpOne('<', x, y, C));
+}
 
 /** `x in 容器` —— 字典是"有这个键"、串是"找得到这一段"、表是走一遍。 */
 function containsOf(box, needle, C) {
@@ -1941,8 +1986,11 @@ const MATH = new Map([
 /** 这几格 `math.*` 在 python 里交的是 **int**（不是 float）。 */
 const MATH_INT = new Set(['floor', 'ceil']);
 
-/** 两格同型的值里挑一格（`min` / `max`）—— 不纯的先落一格临时量。 */
-function pickOf(a, b, op, C) {
+/**
+ * 两格同型的值里挑一格（`min` / `max`）—— 不纯的先落一格临时量。
+ * `cmp` 递进来就用它当"挑左边那格"的条件（元组要按字典序比）；不递就是方言的那格算子。
+ */
+function pickOf(a, b, op, C, cmp = null) {
   const pre = [];
   const keep = (e, p) => {
     if (isPure(e)) return e;
@@ -1956,7 +2004,7 @@ function pickOf(a, b, op, C) {
   const r = keep(b, 'pick_b');
   const value = {
     kind: 'ternary', type: ty(l, C),
-    cond: { kind: 'binop', op, left: l, right: r },
+    cond: cmp === null ? { kind: 'binop', op, left: l, right: r } : cmp(l, r),
     then: l, else_: r,
   };
   return pre.length === 0 ? value : { kind: 'block-expr', stmts: pre, value };
@@ -2187,7 +2235,7 @@ export function callOf(x, C) {
       }
       desc = tag(v) === 'true';
     }
-    return sortedOf(exprOf(pos[0], C), C, desc);
+    return sortedPy(exprOf(pos[0], C), C, desc);
   }
   for (const a of argToks) {
     if (['kw', 'star', 'starstar'].includes(tag(a))) {
@@ -2305,10 +2353,18 @@ function builtinOf(nm, args, argToks, C) {
     case 'min': case 'max': {
       const op = nm === 'min' ? '<' : '>';
       if (args.length === 0) throw new Error(`python->IR: \`${nm}()\` 至少要一格实参`);
+      /* 比法递下去 —— 元组按字典序（`cmpOne`），不然落到方言里是比句柄、静默答错。 */
+      const less = (x, y) => cmpOne('<', x, y, C);
       /* 一格实参：那是一格表（`min(xs)`）。两格以上：逐个挑（`min(a, b, c)`）。 */
-      if (args.length === 1) return pickList(args[0], op, nm, C);
+      if (args.length === 1) {
+        if (t0.kind === 'arr') needOrd(t0.elem, C, `${nm}()`);
+        return pickList(args[0], op, nm, C, less);
+      }
+      args.forEach((a) => needOrd(ty(a, C), C, `${nm}()`));
       let best = args[0];
-      for (let i = 1; i < args.length; i += 1) best = pickOf(best, args[i], op, C);
+      for (let i = 1; i < args.length; i += 1) {
+        best = pickOf(best, args[i], op, C, op === '<' ? less : (l, r) => less(r, l));
+      }
       return best;
     }
     case 'sum': {
@@ -2377,7 +2433,7 @@ function builtinOf(nm, args, argToks, C) {
     }
     case 'sorted': {
       if (args.length !== 1) throw new Error('python->IR: `sorted(xs, key=…)` 那几格还没接');
-      return sortedOf(args[0], C);
+      return sortedPy(args[0], C, false);
     }
     case 'list': {
       /* `list(range(…))` —— range 当值用只在 `callOf` 那一处拦了（最常见的去处）。 */

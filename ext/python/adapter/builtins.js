@@ -68,8 +68,13 @@ export function sumOf(xs0, C) {
   return h.wrap(acc);
 }
 
-/** `min(xs)` / `max(xs)` —— 空表在 python 里是 ValueError，这儿 `(fail …)`。 */
-export function pickList(xs0, op, name, C) {
+/**
+ * `min(xs)` / `max(xs)` —— 空表在 python 里是 ValueError，这儿 `(fail …)`。
+ * `less(a, b)` 是"a 比 b 小"那一格，由 `expr.js` 递进来：元组要按字典序逐格比，
+ * 直接 `bin('<', …)` 会去比句柄、静默答错（量到过）。比法是**严格**的，所以并列时留
+ * 靠前那一格 —— 与 python 一条。
+ */
+export function pickList(xs0, op, name, C, less) {
   const h = holder(C);
   const xs = h.keep(xs0, 'pk_xs');
   const t = C.tyOfIR(xs);
@@ -82,13 +87,14 @@ export function pickList(xs0, op, name, C) {
   });
   const best = h.decl('pk_b', t.elem, { kind: 'index', obj: xs, index: int(0) });
   const i = h.decl('pk_i', INT, int(1));
+  const cand = { kind: 'index', obj: xs, index: i };
   h.pre.push({
     kind: 'while',
     cond: bin('<', i, call1('alen', [xs])),
     body: [
       {
         kind: 'if',
-        cond: bin(op, { kind: 'index', obj: xs, index: i }, best),
+        cond: op === '<' ? less(cand, best) : less(best, cand),
         then: [{ kind: 'assign', target: best, value: { kind: 'index', obj: xs, index: i } }],
         else_: null,
       },
@@ -130,14 +136,16 @@ export function anyAllOf(xs0, wantAll, C, truthy) {
  * `sorted(xs)` —— **插入排序**（python 的 sort 是稳定的，插入排序也是；
  * 这儿要的是"答得对"，不是"快"。真要快得先有"函数值当比较器"那一层）。
  */
-export function sortedOf(xs0, C, desc = false) {
+export function sortedOf(xs0, C, desc = false, less = null) {
   const h = holder(C);
   const xs = h.keep(xs0, 'st_xs');
   const t = C.tyOfIR(xs);
   if (t.kind !== 'arr') throw new Error('python->IR: `sorted()` 收一格表');
-  if (!['int', 'real', 'string'].includes(t.elem.kind)) {
+  if (less === null && !['int', 'real', 'string'].includes(t.elem.kind)) {
     throw new Error(`python->IR: \`sorted()\` 的元素是 ${t.elem.kind} —— 还没接（要有"怎么比"）`);
   }
+  /* "a 比 b 小"那一格：默认就是方言的 `<`，元组那一档由 `expr.js` 递一份进来。 */
+  const lt = (x, y) => (less === null ? bin('<', x, y) : less(x, y));
   /* 先抄一份（python 的 sorted 不动原表）。 */
   const out = h.decl('st_o', t, { kind: 'builtin', name: 'anew', args: [{ kind: 'type', type: t }, int(0)] });
   const i = h.decl('st_i', INT, int(0));
@@ -162,7 +170,8 @@ export function sortedOf(xs0, C, desc = false) {
       {
         kind: 'while',
         cond: bin('&&', bin('>=', k, int(0)),
-          bin(desc ? '<' : '>', { kind: 'index', obj: out, index: k }, cur)),
+          desc ? lt({ kind: 'index', obj: out, index: k }, cur)
+            : lt(cur, { kind: 'index', obj: out, index: k })),
         body: [
           {
             kind: 'assign',
@@ -448,13 +457,14 @@ export function bankRound(x0, C) {
  * `xs.sort()` / `xs.sort(reverse=True)` —— **就地**排（python 里它交 None，
  * 与 `sorted()` 正相反：那一格抄一份）。插入排序，与 `sortedOf` 里那一段同一条。
  */
-export function sortStmts(xs, C, desc = false) {
+export function sortStmts(xs, C, desc = false, less = null) {
   const h = holder(C);
   const t = C.tyOfIR(xs);
   if (t.kind !== 'arr') throw new Error('python->IR: `.sort()` 的接收者要是一格表');
-  if (!['int', 'real', 'string'].includes(t.elem.kind)) {
+  if (less === null && !['int', 'real', 'string'].includes(t.elem.kind)) {
     throw new Error(`python->IR: \`.sort()\` 的元素是 ${t.elem.kind} —— 还没接（要有"怎么比"）`);
   }
+  const lt = (x, y) => (less === null ? bin('<', x, y) : less(x, y));
   const j = h.decl('so_j', INT, int(1));
   const k = h.decl('so_k', INT, int(0));
   const cur = h.decl('so_c', t.elem, { kind: 'index', obj: xs, index: int(0) });
@@ -467,7 +477,8 @@ export function sortStmts(xs, C, desc = false) {
       {
         kind: 'while',
         cond: bin('&&', bin('>=', k, int(0)),
-          bin(desc ? '<' : '>', { kind: 'index', obj: xs, index: k }, cur)),
+          desc ? lt({ kind: 'index', obj: xs, index: k }, cur)
+            : lt(cur, { kind: 'index', obj: xs, index: k })),
         body: [
           {
             kind: 'assign',

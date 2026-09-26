@@ -31,7 +31,7 @@ import { INT, STR, BOOL, DYN, arrOf, sameType, typeOf, named } from '../../../sr
 import { typeToSx } from '../../../src/core/lower/ty.js';
 import {
   exprOf, condOf, nameOf, typeOfAnnot, tyOfCst, tyArg, pyStr, pyRepr, lenOf, hasFields, fstringParts, cmpEq,
-  kwOrder, tupleOf,
+  kwOrder, tupleOf, cmpLt, needOrd,
 } from './expr.js';
 import {
   reverseStmts, clearStmts, extendStmts, insertStmts, dropAtStmts, indexOfList,
@@ -1060,7 +1060,9 @@ function listMut(m, box, argToks, C) {
       }
       desc = tag(v) === 'true';
     }
-    return sortStmts(box, C, desc);
+    const bt = C.tyOfIR(box);
+    if (bt.kind === 'arr') needOrd(bt.elem, C, '.sort()');
+    return sortStmts(box, C, desc, (x, y) => cmpLt(x, y, C));
   }
   if (m === 'append') {
     if (argToks.length !== 1) throw new Error('python->IR: `.append()` 只收一格实参');
