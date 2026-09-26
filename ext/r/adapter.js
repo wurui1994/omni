@@ -7849,10 +7849,13 @@ function assignOf(x, types) {
       }
       const skN = fresh('sk');
       const skE = { kind: 'name', name: skN };
+      const svN = fresh('sw');
       return {
         kind: 'block',
         stmts: [
           { kind: 'let', name: skN, type: INT, init: zeroBased(exprOf(keys[0], types), typeOfExpr(keys[0], types)) },
+          /* 要写的那格串先绑住：下头两条路都要用它，发两遍的话带副作用的式子会算两回。 */
+          { kind: 'let', name: svN, type: STR, init: exprOf(value, types) },
           {
             kind: 'if',
             cond: b('<', skE, { kind: 'int', value: 0 }),
@@ -7868,20 +7871,35 @@ function assignOf(x, types) {
             else_: null,
           },
           {
+            /**
+             * **正好接在末尾那一格**（`s <- c("a","b"); s[3] <- "c"`）：`(arr string)`
+             * 自带 `apush`，一格 `NA_character_` 都不用填 —— R 那边出来的也正是
+             * `"a" "b" "c"`（量出来的，2026-09-27）。从前这一格与"下标过长"同一条，
+             * 在运行期当场停：过了换档那道门，退出码 70、一行输出都没有（**硬错**）。
+             * 再往后（`s[5] <- "z"`，中间要填缺失）照旧停 —— 那才是真缺那种值。
+             */
             kind: 'if',
-            cond: b('>=', skE, svLen(o)),
-            then: [{
-              kind: 'builtin-stmt',
-              name: 'fail',
-              args: [{
-                kind: 'string',
-                value: 'v[k] <- 串：下标超出了这条字符向量的长度 —— R 那边会把它接长、'
-                  + '中间填 NA_character_，而这一档没有那种值（见 ext/r/SPEC.md 第四节第 12 条）',
-              }],
-            }],
-            else_: null,
+            cond: b('==', skE, svLen(o)),
+            then: [{ kind: 'builtin-stmt', name: 'apush', args: [o, { kind: 'name', name: svN }] }],
+            else_: [
+              {
+                kind: 'if',
+                cond: b('>', skE, svLen(o)),
+                then: [{
+                  kind: 'builtin-stmt',
+                  name: 'fail',
+                  args: [{
+                    kind: 'string',
+                    value: 'v[k] <- 串：下标比这条字符向量的长度还多两格以上 —— R 那边会把它接长、'
+                      + '中间填 NA_character_，而这一档没有那种值（见 ext/r/SPEC.md 第四节第 12 条）；'
+                      + '正好接一格（k == 长度 + 1）那一档接了',
+                  }],
+                }],
+                else_: null,
+              },
+              { kind: 'assign', target: svGet(o, skE), value: { kind: 'name', name: svN } },
+            ],
           },
-          { kind: 'assign', target: svGet(o, skE), value: exprOf(value, types) },
         ],
       };
     }

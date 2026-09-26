@@ -332,3 +332,11 @@ print(letters[[3]])
 print(LETTERS[[5]])
 print(month.abb[[2]])
 cat(month.name[[1]], letters[[1]], letters[1], "\n")
+## 往末尾接一格（k == 长度 + 1）：中间不缺格，所以不必要 NA_character_
+kex <- c("a", "b")
+kex[3] <- "c"
+print(kex)
+kex[length(kex) + 1] <- "d"
+print(kex)
+kex[2] <- "z"
+cat(kex, length(kex), "\n")
