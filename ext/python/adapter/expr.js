@@ -2849,7 +2849,15 @@ function calleeSig(fn, C) {
     names: use.map((p) => String(nameOf(kids(p)[0]))),
     defs: use.map((p) => {
       const d = part(p, 'default');
-      return d === undefined ? undefined : kids(d)[0];
+      if (d === undefined) return undefined;
+      const e = kids(d)[0];
+      /* 默认值写的是模块级那格常量（`def f(x=RATE)`）—— 补的是**它那棵字面量**。
+         这与 python 一样：默认值 `def` 那一刻就算好了，之后再改 `RATE` 也换不动它。 */
+      if (tag(e) === 'n') {
+        const lit = C.constGlobals.get(String(nameOf(e)));
+        if (lit !== undefined) return lit;
+      }
+      return e;
     }),
   };
 }

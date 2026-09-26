@@ -324,6 +324,14 @@ function makeCtx() {
     fnNodes: new Map(),
     /** 模块级变量名 → 类型。 */
     globals: new Map(),
+    /**
+     * **模块级只赋过一次、赋的是不可变字面量**的那几个名字 → 那棵字面量的树。
+     *
+     * 只有一个用处：形参的默认值写成 `def f(x=RATE)` 那一档（见 `checkDefault` 与
+     * `calleeSig`）。默认值在这一层是调用点展开的，展开成**字面量本身**——
+     * 这正好是 python 的语义（`def` 那一刻算一遍、以后共享同一格不可变的值）。
+     */
+    constGlobals: new Map(),
     /** 记录（class）—— 这一版空着，留着让 `typeOfAnnot` 那条路不必分支。 */
     records: new Map(),
     fresh: (p) => { tmpN += 1; return `${p}${tmpN}`; },
@@ -435,14 +443,15 @@ const annotTok = (p) => {
  * 字面量看不出区别；可变的（`def f(xs=[])`）区别是根本性的 —— python 里两次调用改的是
  * 同一张表。所以那一档当场报，不悄悄换语义。
  */
-function checkDefault(nm, p) {
+function checkDefault(nm, p, C) {
   const d = part(p, 'default');
   if (d === undefined) return;
   const e = kids(d)[0];
-  const ok = ['num', 'str', 'true', 'false', 'none'].includes(tag(e))
-    || (tag(e) === 'un' && String(leaf(kids(e)[0])) === '-' && tag(kids(e)[1]) === 'num');
+  /* 模块级那几格常量（`RATE = 0.08`）也收 —— 展开的是它那棵字面量（见 `collectConstGlobals`）。 */
+  const ok = litTok(e) !== null
+    || (tag(e) === 'n' && C.constGlobals.has(String(nameOf(e))));
   if (!ok) {
-    throw new Error(`python->IR: \`def ${nm}\` 的默认值只收字面量（这里是 \`${tag(e)}\`）——`
+    throw new Error(`python->IR: \`def ${nm}\` 的默认值只收字面量与模块级常量（这里是 \`${tag(e)}\`）——`
       + ' 这一层的默认值是**调用点展开**的，而 python 的默认值 `def` 时算一遍、以后共享'
       + '同一格；可变的默认值（`def f(xs=[])`）两者差得是根本的');
   }
@@ -466,12 +475,15 @@ function namesIn(nd) {
   return out;
 }
 
-/** 一棵树里**被赋过值**的那几个名字（赋值、带标注的赋值、`+=`、`for` 的目标）。 */
-function boundIn(nd) {
-  const out = new Set();
+/** 一棵树里**被赋过值**的那几个名字（赋值、带标注的赋值、`+=`、`for` 的目标）—— 按次数。 */
+function boundTimes(nd) {
+  const out = new Map();
   const take = (t) => {
     if (t === undefined || t === null) return;
-    if (tag(t) === 'n') out.add(String(nameOf(t)));
+    if (tag(t) === 'n') {
+      const n = String(nameOf(t));
+      out.set(n, (out.get(n) ?? 0) + 1);
+    }
     if (tag(t) === 'tuple') for (const k of kids(t)) take(k);
   };
   for (const s of allNodes(nd)) {
@@ -486,6 +498,41 @@ function boundIn(nd) {
        一格嵌套函数调它的兄弟**不是捕获**（量到过：`a2` 调 `a1` 被误判成闭包）。 */
   }
   return out;
+}
+
+/** 同上，只要那几个名字。 */
+const boundIn = (nd) => new Set(boundTimes(nd).keys());
+
+/** 那棵树是不是一格**不可变字面量**（`-1` 那样的负号数也算；带 `{}` 的串不算）。 */
+function litTok(e) {
+  if (e === undefined || e === null) return null;
+  if (tag(e) === 'str') return hasFields(e) ? null : e;
+  if (['num', 'true', 'false', 'none'].includes(tag(e))) return e;
+  if (tag(e) === 'un' && String(leaf(kids(e)[0])) === '-' && tag(kids(e)[1]) === 'num') return e;
+  return null;
+}
+
+/**
+ * **模块级的常量**：只赋过一次、赋的是不可变字面量的那几个名字。
+ *
+ * 收它只为默认值那一档（`RATE = 0.08` 上头，`def f(x=RATE)` 下头）。展开成字面量本身
+ * 与 python 对得上：python 的默认值是 `def` 那一刻算的，往后再改那个模块级的名字也
+ * 换不动已经算好的那一格。所以"只赋过一次"这一条是为了**知道那一刻算出来的是哪个值**
+ * ——赋两回就说不清 `def` 排在哪一回后头了，那时照旧当场报。
+ */
+function collectConstGlobals(scriptStmts, tree, C) {
+  const times = boundTimes(tree);
+  for (const s of scriptStmts) {
+    if (tag(s) !== 'assign') continue;
+    const lhs = part(s, 'lhs');
+    if (lhs === undefined || kids(lhs).length !== 1) continue;
+    const one = kids(kids(lhs)[0])[0];
+    if (tag(one) !== 'n') continue;
+    const nm = String(nameOf(one));
+    if (times.get(nm) !== 1) continue;
+    const lit = litTok(kids(s)[kids(s).length - 1]);
+    if (lit !== null) C.constGlobals.set(nm, lit);
+  }
 }
 
 /** 一棵 `def` 的形参名字。 */
@@ -534,6 +581,8 @@ function hoistNested(f, C) {
  */
 function infer(C, tree, scriptStmts) {
   C.globals.set('__name__', STR);
+  /* 默认值那一档要用（`def f(x=RATE)`）—— 在扫形参之前收好。 */
+  collectConstGlobals(scriptStmts, tree, C);
 
   /* 每个函数先摆一格骨架（标注读出来、形参的名字定下来）。 */
   const shells = new Map();
@@ -541,7 +590,7 @@ function infer(C, tree, scriptStmts) {
     const ps = paramsOf(f);
     for (const p of ps) {
       if (tag(p) !== 'p') throw new Error(`python->IR: \`def ${nm}\` 的形参里有 \`${tag(p)}\` —— 还没接（*args / **kw / 位置标记）`);
-      checkDefault(nm, p);
+      checkDefault(nm, p, C);
     }
     /* 方法的名字是 `<类名>.<方法名>`（`declareClasses` 摆进来的）。它的第一格形参是
        `self`，类型就是那个类 —— 相当于自带一格标注，所以调用点不必推它。 */

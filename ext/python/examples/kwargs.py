@@ -5,9 +5,13 @@
 # （`tyOfCall`）、**收单态化实例那一趟**（`collectInsts`）—— 漏掉最后一处的症状是
 # 按次序取的类型错位，挑出来的实例是错的那一格。
 #
-# 默认值是**调用点展开**的，所以它只收**字面量**：python 的默认值是 `def` 那一刻算一遍、
-# 以后**共享同一格**，`def f(xs=[])` 两次调用改的是同一张表 —— 展开就成了两张。
-# 字面量看不出区别，可变的差得是根本的，所以那一档当场报，不悄悄换语义。
+# 默认值是**调用点展开**的，所以它只收**字面量**，外加**模块级那几格常量**
+# （`RATE = 0.08` 上头、`def f(x=RATE)` 下头 —— 补的是它那棵字面量）。
+# 为什么这两档够而别的不够：python 的默认值是 `def` 那一刻算一遍、以后**共享同一格**，
+# `def f(xs=[])` 两次调用改的是同一张表 —— 展开就成了两张。字面量看不出区别；
+# 模块级常量也看不出（往后再改那个名字也换不动已经算好的那一格，展开成字面量正是这条）。
+# 可变的差得是根本的，所以那一档当场报，不悄悄换语义。
+# 常量那一条要"只赋过一次"：赋两回就说不清 `def` 排在哪一回后头，那时照旧报。
 #
 # 内建各有各的规矩，所以不走那条通路：`print(sep=, end=)` 与 `sorted(reverse=, key=)`
 # 在各自那一处收。`sorted(reverse=…)` **只收 True / False 字面量** —— 升序降序
@@ -16,6 +20,11 @@
 #
 # 多目标赋值（`a, b = x, y`，含 `a, b = b, a` 那个交换）也在这一份里：
 # 发射那一侧本来就对（右边全算完再赋），缺的是**绑定那一趟**没逐格对着绑。
+
+
+RATE = 0.08
+MARK = "*"
+BACK = -1
 
 
 def area(w: int, h: int) -> int:
@@ -38,6 +47,18 @@ def dbl(k):
     return k * 2
 
 
+def grow(x, rate=RATE):
+    return round(x * (1 + rate), 4)
+
+
+def deco(s, mark=MARK, times=2):
+    return s + mark * times
+
+
+def back(x, by=BACK):
+    return x + by
+
+
 class Box:
     def __init__(self, w, h=2):
         self.w = w
@@ -45,6 +66,9 @@ class Box:
 
     def area(self, k=1):
         return self.w * self.h * k
+
+    def scaled(self, rate=RATE):
+        return round(self.w * self.h * (1 + rate), 4)
 
 
 class Point:
@@ -77,6 +101,12 @@ def main():
     by = Box(3, 4)
     print(bx.w, bx.h, by.w, by.h)
     print(bx.area(), bx.area(2), by.area(k=2))
+
+    # 默认值写的是模块级那格常量
+    print(grow(100.0), grow(100.0, 0.5), grow(100.0, rate=0.0))
+    print(deco("a"), deco("a", "?"), deco("a", MARK, 3), deco("a", times=1))
+    print(back(5), back(5, 2), back(5, by=10))
+    print(bx.scaled(), bx.scaled(0.0), by.scaled(rate=1.0))
 
     # **实参是局部变量**也要收得到实例（从前这一格漏了：平铺全树扫的时候
     # 局部变量在 tyOfCst 那儿答 null，于是 `dbl(v)` 报"没有对得上的那一格"）
