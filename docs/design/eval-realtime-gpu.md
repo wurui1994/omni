@@ -3153,3 +3153,64 @@ EvalDraw 的脚本一半把帧循环写在自己身上（语料里 21 份 `.kc`�
 （主体里的局部量提成全局 + 新设备口 `quitframes`）。那是同一件事的第二份实现 ——
 帧的边界本来就在 `refresh()` 上，改写脚本只是把它搬了个地方，还多欠一笔
 （局部量提升的语义、循环条件的取反、两处帧号口径）。已整段删掉。
+
+## 35. 浏览器那一档的"出图"账：104 份 `.pss` 逐份点过一遍（2026-09-27）
+
+用户报的是「chrome 很多例子无法支持渲染，如 ceilflor2.pss / driftbox.pss 等，都是黑色。
+balls.pss 倒是正常」。逐份查下来是**五格互不相干的缺口**，其中头一格一个人就占了二十来份。
+
+### 35.1 判据只能是**截图**（这一格骗过了所有别的量法）
+
+`getContext('webgl2')` 默认 `alpha: true` 且**预乘**。ken 那批脚本的片元着色器大量写
+`gl_FragColor = vec4(r,g,b,0)` —— 正本画的是窗口帧缓冲，那儿**没有 alpha 通道**，写多少
+都不影响看见的颜色。浏览器这边的后果是整张画布透明，屏幕上看到的是 `.gfx-canvas`
+的黑底。
+
+这一格骗过了：`glslangValidator`（着色器没问题）、`readPixels`（76082 个亮像素）、
+`dev.frames()`（60fps）、`dev.misses()`（空）、控制台（一条错都没有）。**只有截图是真的**。
+一行 `alpha: false` 修掉，二十来份一起从全黑变成出图。
+
+中间还错怪过一次"画布 CSS 尺寸是 0"：那是因为落地页默认在**展示模式**
+（`body[data-mode=show]` 把 `.pane` 整个 `display:none`）—— 用 CDP 驱动真 Chrome 量之前
+得先切到 IDE 模式。
+
+### 35.2 抓屏那一族（6 份）
+
+`glcapture()` / `glcaptureend(槽)` 从前根本没接（只记账）。口径照本机那一档
+（`omni_ev_gl_capbegin` 的头注：跟 c_impl 的"整帧"）。页面这一档**没有离屏帧缓冲**，
+所以"抓屏"就是从默认帧缓冲 `copyTexImage2D`；内部格式要跟着读缓冲走（`alpha:false`
+的画布是 RGB8，往 RGBA 拷是 INVALID_OPERATION）。
+clock / texture / funky / tree / captest / 25_offscreen 六份出图，clock 的截图是 3×3
+平铺的表盘（`3.0*uv` + REPEAT 那一格对上了）。
+
+### 35.3 3D 纹理与立方体贴图（各 1 份语料 + 一族 bench 探针）
+
+* 层 > 1 -> `TEXTURE_3D`，四种 KGL 格式各自的内部格式一一对上；**3D 那一档 alpha
+  原样收**（体素空的地方 alpha 是 0）。两格坑：纹理对象的目标**一绑就定死**（同一槽
+  换目标要换对象，`glbindtexture` 也得按这一槽自己的 `tar` 绑）；**ES 3.00 只给
+  `sampler2D`/`samplerCube` 定了默认精度，`sampler3D` 没有** —— `toEs300` 要补
+  `precision highp sampler3D;`。
+* 一竖条 6 格 -> `TEXTURE_CUBE_MAP`，面的次序照原版那张 `cubemapindex`
+  （`{1,3,4,5,0,2}`）；WebGL 没法从 `Image` 取子矩形，过一格 2D 画布裁。
+
+### 35.4 剩下这几格（记明白是哪一类）
+
+* **几何着色器**（`geo_test` / `geo_duptris`）：WebGL2 压根没有这一级 —— 设备当场报，
+  说清"只有本机 OpenGL 那一档跑得了"。要在浏览器上跑就得在 CPU 上展开，是另一件活。
+* **int/float 混用**（`gspiral`：`f*f*npoints`，`npoints` 是 `uniform int`）：桌面 GLSL 1.20
+  隐式转换，ES 3.00 不转。要做的是 GLSL 那一层的类型推导（任务 #40），**不许用文本
+  替换糊过去** —— 那会把整数除法的语义悄悄改掉。
+* `glcapture(2,XT,YT,KGL_VEC4)` 那个扩展形（`gpgpu`，要浮点渲染目标）。
+* `glpointsize`（我们自己那两份例子）。
+* `orthoglobe`：跑满帧、无错、全黑，还没归因。
+
+### 35.5 顺手挖出来的两格（都与出图无关）
+
+* **`omni serve` 开机五分钟后自己死**：`/api/units` 走进程内编译，而 `armDevDeadline`
+  给编译这一趟装的是"到点给**本进程**一枪"（`OMNI_BUILD_TIMEOUT` 默认 300s）——
+  本进程就是服务。三次重启都死在 305s 上。照常驻工人那一档 `OMNI_CLI_NO_SHOT=1`。
+  连带纠正一个误读：`-v` 末尾那句 `进程内 36902ms` 是**进程自开机以来**的总账，
+  不是这一趟请求（我据此错怪过 `28_peaks.pss` "编一趟要几分钟"）。
+* **`examples/opengl/28_peaks.pss` 自己是错的**：具名函数定义后面跟一串裸语句不是
+  合法脚本（问过真 kasm87：`fun(x,y){…} z=fun(1,2); z` 答 `ERROR: FUN undefined`）。
+  主体裹进 `()` `{}`、helper 挪到后面就过了。
