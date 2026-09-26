@@ -699,6 +699,46 @@ export function copyDict(d0, C) {
   return h.wrap(out);
 }
 
+/** `list("abc")` —— 串拆成一格一个字符的表。 */
+export function charsOf(s0, C) {
+  const h = holder(C);
+  const s = h.keep(s0, 'ch_s');
+  const t = arrOf(STR);
+  const out = h.decl('ch_o', t, call1('anew', [{ kind: 'type', type: t }, int(0)]));
+  const i = h.decl('ch_i', INT, int(0));
+  h.pre.push({
+    kind: 'while',
+    cond: bin('<', i, call1('slen', [s])),
+    body: [
+      { kind: 'builtin-stmt', name: 'apush', args: [out, call1('ssub', [s, i, int(1)])] },
+      inc(i),
+    ],
+  });
+  return h.wrap(out);
+}
+
+/** `dict(pairs)` —— 一串两格的元组造一格字典（键重了后一格盖前一格，与 python 同）。 */
+export function dictOfPairs(ps0, kt, vt, C, mk) {
+  const h = holder(C);
+  const ps = h.keep(ps0, 'dp2_p');
+  const t = mk(vt, kt);
+  const out = h.decl('dp2_o', t, call1('dnew', [{ kind: 'type', type: t }]));
+  const i = h.decl('dp2_i', INT, int(0));
+  const at = { kind: 'index', obj: ps, index: i };
+  h.pre.push({
+    kind: 'while',
+    cond: bin('<', i, call1('alen', [ps])),
+    body: [
+      {
+        kind: 'builtin-stmt', name: 'dset',
+        args: [out, { kind: 'field', obj: at, name: '_0' }, { kind: 'field', obj: at, name: '_1' }],
+      },
+      inc(i),
+    ],
+  });
+  return h.wrap(out);
+}
+
 /* ─── 表上那几个"找"与"改"（`in` / index / count / insert / remove / …）─────── */
 
 /**
@@ -925,7 +965,7 @@ export function joinOf(sep0, xs0, C) {
  * `s.split(sep)` —— **分隔符不能是空串**（python 那边是 ValueError）。
  * 空段算一格（`"a,,b".split(",")` 是三格，`",".split(",")` 是两格空串）。
  */
-export function splitOf(s0, sep0, C) {
+export function splitOf(s0, sep0, C, maxsplit = null) {
   const h = holder(C);
   const s = h.keep(s0, 'sp_s');
   const sep = h.keep(sep0, 'sp_d');
@@ -940,6 +980,9 @@ export function splitOf(s0, sep0, C) {
     then: [{ kind: 'builtin-stmt', name: 'fail', args: [str('empty separator')] }],
     else_: null,
   });
+  /* `maxsplit`：切够那么多次就把剩下的整段推进去（python 的规矩）。
+     `maxsplit < 0` 是"不限"，与不给是一回事。 */
+  const cut = maxsplit === null || maxsplit < 0 ? null : h.decl('sp_n', INT, int(0));
   h.pre.push({
     kind: 'while',
     cond: { kind: 'bool', value: true },
@@ -951,6 +994,12 @@ export function splitOf(s0, sep0, C) {
         value: call1('ssub', [s, at, bin('-', call1('slen', [s]), at)]),
       },
       { kind: 'assign', target: hit, value: call1('sfind', [rest, sep]) },
+      ...(cut === null ? [] : [{
+        kind: 'if',
+        cond: bin('>=', cut, int(maxsplit)),
+        then: [{ kind: 'assign', target: hit, value: int(-1) }],
+        else_: [{ kind: 'assign', target: cut, value: bin('+', cut, int(1)) }],
+      }]),
       {
         kind: 'if',
         cond: bin('<', hit, int(0)),

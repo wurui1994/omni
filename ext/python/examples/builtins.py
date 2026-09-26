@@ -73,3 +73,24 @@ for w, n in zip(words, nums):
     print(w, n)
 for ch, n in zip("xyz", [1, 2, 3, 4]):
     print(ch, n)
+
+# ---- pow / list(…) / dict(…) / .split(sep, maxsplit) --------------------------
+print(pow(2, 3), pow(2.0, 3), pow(2, 0), pow(2, -1))
+
+# `list(串)` 拆成一格一个字符；`list(字典)` 交键表；**`list(表)` 抄一份**
+print(list("abc"), len(list("")))
+copy_src = [1, 2]
+copy_dst = list(copy_src)
+copy_dst.append(3)
+print(copy_src, copy_dst)
+ages2 = {"a": 1, "b": 2}
+print(list(ages2))
+
+# `dict(一串两格的元组)`；键重了后一格盖前一格
+print(dict([("a", 1), ("b", 2)]))
+print(dict([("a", 1), ("a", 9)]))
+print(dict(list(ages2.items())))
+
+# `.split(sep, maxsplit)`：切够那么多次就把剩下的整段推进去
+print("a,b,c".split(",", 1), "a,b,c".split(",", 0), "a,b,c".split(",", 5))
+print("a::b".split(":", 1), "a,b".split(",", -1))

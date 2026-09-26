@@ -410,6 +410,17 @@ R 那一门（ADR-0045/0046/0047，`r-lang` 分支）已经把这条路走通过
   `.encode()`、`.count(sub, start, end)` 那一族带范围的都还没接；
   `.center(w)` 的 w 要写成字面量。
 
+* **`pow` / `list(…)` / `dict(…)` / `.split(sep, maxsplit)`**。
+  判据：`ext/python/examples/builtins.py` 三条腿与 python3 逐字节相同。
+
+  **顺带修了一处会答错的**：`list(xs)` 从前直接交**原表**（"先当同一格"），
+  所以 `ys = list(xs); ys.append(v)` 把 xs 也改了 —— python 的 `list()` 是浅拷贝。
+  现在抄一份。`list(串)` 拆成一格一个字符、`list(字典)` 交键表。
+
+  `dict(一串两格的元组)` 走元组那一档（键重了后一格盖前一格）。`dict(a=1)` 那种
+  命名实参没接。`type(x)` **明说不接** —— 这一层没有"类型当值"那一档，要判类型用
+  `isinstance`；照 `type(x)` 交个串出来会让 `type(x) is int` 静默答错。
+
 ### 下一刀，按顺序
 
 1. **箱子里的函数拆出来调**（`(asfn …)` 那一格 —— 于是 `f = g` 之后 `f()` 走得通，

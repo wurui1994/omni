@@ -30,7 +30,7 @@ import {
   joinOf, splitOf, stripOf, replaceOf, startsEndsOf, justOf,
   containsList, indexOfList, countList, valuesList, dictPopOf, dictSetDefaultOf,
   concatList, repeatList, reversedList, stepSlice, bankRound,
-  caseMapOf, charClassOf, rfindOf, copyList, copyDict,
+  caseMapOf, charClassOf, rfindOf, copyList, copyDict, charsOf, dictOfPairs,
 } from './builtins.js';
 
 /** 一格名字节点（`(n x)`）的文本；也收裸记号。 */
@@ -625,6 +625,8 @@ function tyOfCall(x, C) {
     const ea = a.kind === 'arr' ? a.elem : (a.kind === 'string' ? STR : null);
     return ea === null ? null : arrOf(tupleRec([INT, ea], C).type);
   }
+  if (nm === 'pow') return argTys.length === 2 && argTys.every((t) => t != null && t.kind === 'int')
+    ? INT : REAL;
   if (nm === 'range') return arrOf(INT);
   const inst = C.resolveFn(nm, argTys);
   return inst === null ? null : inst.ret;
@@ -2378,12 +2380,41 @@ function builtinOf(nm, args, argToks, C) {
       return sortedOf(args[0], C);
     }
     case 'list': {
-      /* `list(range(…))` —— range 当值用只在这一处接了（那是它最常见的去处）。 */
+      /* `list(range(…))` —— range 当值用只在 `callOf` 那一处拦了（最常见的去处）。 */
       if (args.length !== 1) throw new Error('python->IR: `list()` 收一格实参');
       const t = ty(args[0], C);
-      if (t.kind === 'arr') return args[0];      // `list(xs)` 抄一份 —— 这儿先当同一格
-      throw new Error(`python->IR: \`list(${t.kind})\` 还没接（\`list(range(…))\` 接了）`);
+      /* **`list(xs)` 要抄一份**（python 的 `list()` 是浅拷贝）—— 从前这儿直接交原表，
+         `ys = list(xs); ys.append(v)` 会把 xs 也改了。 */
+      if (t.kind === 'arr') return copyList(args[0], C);
+      if (t.kind === 'string') return charsOf(args[0], C);
+      if (t.kind === 'map') return { kind: 'builtin', name: 'dkeys', args: [args[0]] };
+      throw new Error(`python->IR: \`list(${t.kind})\` 还没接（表 / 串 / 字典 / range 接了）`);
     }
+    /* `dict(pairs)` —— 一串两格的元组造一格字典。`dict(a=1)` 那种命名实参没接。 */
+    case 'dict': {
+      if (args.length !== 1) throw new Error('python->IR: `dict()` 收一格实参（一串两格的元组）');
+      const t = ty(args[0], C);
+      const tup = t.kind === 'arr' ? tupleOf(C.recOf(t.elem)) : null;
+      if (tup === null || tup.length !== 2) {
+        throw new Error('python->IR: `dict(…)` 只接一串**两格的元组**'
+          + `（这里是 ${t.kind === 'arr' ? `arr<${t.elem.kind}>` : t.kind}）`);
+      }
+      return dictOfPairs(args[0], tup[0], tup[1], C, dictOf);
+    }
+    /* `pow(a, b)` 就是 `a ** b`。整数那一档要靠"指数是非负整数字面量"才敢说 int ——
+       与 `**` 那一处同一条（`argToks` 手上有，所以这儿判得出来）。 */
+    case 'pow': {
+      if (args.length !== 2) throw new Error('python->IR: `pow()` 收两格实参（三格的模幂还没接）');
+      const p = { kind: 'rmath', fn: 'pow', args: [toReal(args[0], C), toReal(args[1], C)] };
+      const bTok = argToks[1];
+      const wantInt = ty(args[0], C).kind === 'int' && bTok !== undefined && tag(bTok) === 'num'
+        && numValue(leaf(kids(bTok)[0])).kind === 'int'
+        && numValue(leaf(kids(bTok)[0])).value >= 0n;
+      return wantInt ? { kind: 'builtin', name: 'toint', args: [p] } : p;
+    }
+    case 'type':
+      throw new Error('python->IR: `type(x)` 还没接 —— 这一层没有"类型当值"那一档；'
+        + '要判类型用 `isinstance(x, T)`');
     case 'round': {
       /* python 的 `round` 是**半数取偶**（`round(0.5)` 是 0、`round(2.5)` 是 2）——
          `bankRound` 用 floor / fmod 拼出来（方言的 `(rmath "round")` 是 C 的"远离零"，
@@ -2490,7 +2521,12 @@ function methodOf(recvTok, name, args, C) {
     /* 下面这几格**现场发一趟循环**（`builtins.js`）—— 方言的串那一族只有五格算子，
        python 的这几个方法是它自己的规矩（空段算一格、去哪几个空白字符）。 */
     if (name === 'join' && args.length === 1) return joinOf(recv, args[0], C);
-    if (name === 'split' && args.length === 1) return splitOf(recv, args[0], C);
+    if (name === 'split' && (args.length === 1 || args.length === 2)) {
+      if (args.length === 2 && args[1].kind !== 'int') {
+        throw new Error('python->IR: `.split(sep, maxsplit)` 的 maxsplit 要写成一格整数字面量');
+      }
+      return splitOf(recv, args[0], C, args.length === 2 ? Number(args[1].value) : null);
+    }
     if (name === 'split' && args.length === 0) {
       throw new Error('python->IR: `.split()` 不带分隔符那一档还没接'
         + '（它按连续空白切，而且首尾的空段不算 —— 与带分隔符是两条规矩）');
