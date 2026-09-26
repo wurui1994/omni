@@ -119,8 +119,11 @@ export const EVALDRAW_3D = new Map([
  * 2D 那几格的落点**按产物形状选一次**：宿主设备那条路发 `(gfxcall "名字" …)`，
  * 生成出来那条 CPU 路调 `gfx_*`（`gfx-rt.js` 那一份）。两条路**只有落点不同**，
  * 投影那段算术只有一份 —— 这正是"只有一个模型"。
+ *
+ * **文字那一族也用它**（`text-rt.js` 的 `gt_*`）：一格字画出来就是一堆 `setpix` ——
+ * 落点这件事全仓库只有这一处。
  */
-function d2(host) {
+export function d2(host) {
   const dev = (name, args) => bi('gfxcall', [str(name), ...args]);
   return {
     sph: (x, y, r) => (host ? dev('drawsph', [x, y, r]) : call('gfx_sph', [x, y, r])),

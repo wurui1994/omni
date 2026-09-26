@@ -1,0 +1,38 @@
+// ext/evaldraw/examples/text.kc —— **画布上的文字那一族**（`ext/polydraw/text-rt.js`）
+//
+// 判的是四件事：
+//   1. `setfont(w,h)` 换字号（6×8 那张字模按最近邻铺到 w×h）；
+//   2. `moveto(x,y)` 摆的是**同一个光标**（`print*` 用它，`evaldraw.txt:1481`）；
+//   3. `printchar(码)` 一格字、`printnum(值)` 一格数**并且换行**（`evaldraw.txt:523`）；
+//   4. `printf(…)` 画在画布上（`evaldraw.txt:1531`）—— 这一门的 `printf` 不是只落 stdout。
+//
+// 例子里的字号与落点都挑过：判据按几格**指定像素**核对（见 tests/lower/run.js 的 probes），
+// 那几格正好落在字模的笔画上/笔画间 —— 于是"字模抄对了没有"是判得出来的，
+// 不是"画了点什么就算过"。
+cls(0);
+
+// 'H'（6×8，白）：左竖在 x=10、中横在 y=13（字模第 3 行）。
+setcol(255,255,255);
+setfont(6,8);
+moveto(10,10);
+printchar(72);
+
+// 'A'（12×16，绿）：每格像素放大成 2×2。
+setcol(0,255,0);
+setfont(12,16);
+moveto(10,30);
+printchar(65);
+
+// 一格数 + 换行（红）：`printnum` 画完回到 `moveto` 那个 x、往下一格字高。
+setcol(255,0,0);
+setfont(6,8);
+moveto(100,10);
+printnum(42);
+printchar(33);
+
+// `printf` 画在画布上（蓝）—— 这一门的 `printf` 不是"只落 stdout"。
+// （stdout 那一份照旧有：语料里几十份 `.kc` 拿它当唯一输出，判据是 stdout 逐字节。）
+setcol(0,128,255);
+moveto(180,10);
+printf("ok %g\n",7);
+printchar(35);

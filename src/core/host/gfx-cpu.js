@@ -899,11 +899,14 @@ export function gfxCall(name, args) {
     case 'clz/1': return 0;
     /* ── **收下但这一档画不出来的那几族**（2026-09-24 第七刀）────────────────────
        纹理与贴图（`glsettex`/`glbindtexture`/`glactivetexture`/`glcapture`/`drawspr`/
-       体素那几格）、画布文字（`setfont`/`printg`/`printchar`）：这一档是个平面的帧缓冲，
-       没有纹理采样也没有字模 ⇒ **收下记着不用**。
-       为什么不报：这些脚本的主体是几何（3D 的球/锥/线），贴图与文字只是点缀 ——
-       报了整份图都出不来，收下则"图能出、少了贴图与文字"。这一条偏差明写在
-       `docs/design/eval-realtime-gpu.md` 第 12 节，真要贴图与文字得走 GPU 那两档设备。 */
+       体素那几格）：这一档是个平面的帧缓冲，没有纹理采样 ⇒ **收下记着不用**。
+       为什么不报：这些脚本的主体是几何（3D 的球/锥/线），贴图只是点缀 ——
+       报了整份图都出不来，收下则"图能出、少了贴图"。这一条偏差明写在
+       `docs/design/eval-realtime-gpu.md` 第 12 节，真要贴图得走 GPU 那两档设备。
+
+       **画布文字不在这儿了**（2026-09-26）：`setfont`/`printg`/`printchar`/`printnum`
+       落在**语言那一侧**（`ext/polydraw/text-rt.js`），画出来就是一堆 `setpix` ——
+       所以三台设备一次全有，这一层一格都不用认。 */
     /* **抓屏那一族**（`glcapture` / `glcaptureend`，§22）：GL 那一档真做（换视口 +
        一次 `glCopyTexImage2D`），CPU 备选收下不管（这一层没有纹理采样）。
        语言那一侧发的是一参那两格（边长 / 槽）—— 矩阵那一半在它那儿。 */
@@ -927,10 +930,6 @@ export function gfxCall(name, args) {
     case 'drawspr/4': case 'drawspr/5': case 'drawspr/6':
     case 'drawkv6/4': case 'drawkv6/5': case 'drawkv6/7': case 'drawkv6/8':
     case 'drawvox/4': case 'drawvox/5':
-    case 'setfont/2': case 'setfont/3':
-    case 'printg/1': case 'printg/2': case 'printg/3': case 'printg/4': case 'printg/5':
-    case 'printchar/1': case 'printchar/2': case 'printchar/3':
-    case 'printchar/4': case 'printchar/5': case 'printchar/6':
     case 'setview/4': case 'setview/7':
     case 'glnormal/3': case 'gltexcoord/2': case 'gltexcoord/3': case 'gltexcoord/4':
       return 0;

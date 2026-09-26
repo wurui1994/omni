@@ -29,6 +29,7 @@
 import { evalToIR } from '../polydraw/adapter.js';
 import { EVALDRAW_2D } from '../polydraw/gfx-rt.js';
 import { EVALDRAW_3D } from '../polydraw/gfx3-rt.js';
+import { EVALDRAW_TEXT } from '../polydraw/text-rt.js';
 import { GL_CONSTS, POLYDRAW_GL, EVALDRAW_TEX } from '../polydraw/gl-rt.js';
 
 /**
@@ -64,8 +65,11 @@ export const EVALDRAW_HOST = {
       GL 那个子集与 PolyDraw 共用 `gl-rt.js` 那一份（见 `EVALDRAW_GL`）—— 这门自己的名字
       写在后头，撞上就以它为准。
       `EVALDRAW_TEX` 就是这么一格：这门的 `glsettex` **没有槽号、要回句柄**，
-      与 PolyDraw 那一族同名不同函数（见 `gl-rt.js` 里那段头注）。 */
-  draw: new Map([...EVALDRAW_GL, ...EVALDRAW_2D, ...EVALDRAW_3D, ...EVALDRAW_TEX]),
+      与 PolyDraw 那一族同名不同函数（见 `gl-rt.js` 里那段头注）。
+      `EVALDRAW_TEXT` 摆最后：画布文字那一族（`text-rt.js`）—— `moveto(x,y)` 在这门里
+      摆的是**同一个光标**（`print*` 用它），所以那一格也归它。 */
+  draw: new Map([...EVALDRAW_GL, ...EVALDRAW_2D, ...EVALDRAW_3D, ...EVALDRAW_TEX,
+    ...EVALDRAW_TEXT]),
   /** GL 那一族走 `gl-rt.js`（命令 -> 顶点批），不是"把名字递给设备"。 */
   glrt: true,
   /** GL 那几格常量（`GL_QUADS` / `GL_TEXTURE0` …）—— EvalDraw 的脚本里也有 GL 子集，

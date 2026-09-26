@@ -1455,14 +1455,8 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
   if (!strcmp(nm, "drawkv6") && argc == 8) { return 0.0; }
   if (!strcmp(nm, "drawvox") && argc == 4) { return 0.0; }
   if (!strcmp(nm, "drawvox") && argc == 5) { return 0.0; }
-  if (!strcmp(nm, "setfont") && argc == 2) { return 0.0; }
-  if (!strcmp(nm, "setfont") && argc == 3) { return 0.0; }
-  if (!strcmp(nm, "printg") && argc == 1) { return 0.0; }
-  if (!strcmp(nm, "printg") && argc == 2) { return 0.0; }
-  if (!strcmp(nm, "printg") && argc == 3) { return 0.0; }
-  if (!strcmp(nm, "printg") && argc == 4) { return 0.0; }
-  if (!strcmp(nm, "printg") && argc == 5) { return 0.0; }
-  if (!strcmp(nm, "printchar") && argc >= 1 && argc <= 6) { return 0.0; }
+  /* 画布文字（`setfont`/`printg`/`printchar`）**不在这一层**（2026-09-26）：它落在语言
+     那一侧（`ext/polydraw/text-rt.js`），画出来就是一堆 `setpix` —— 三台设备一次全有。 */
 
   if (!strcmp(nm, "setview") && argc == 4) { return 0.0; }
   if (!strcmp(nm, "setview") && argc == 7) { return 0.0; }

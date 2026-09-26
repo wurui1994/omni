@@ -290,6 +290,31 @@ const GFX_CASES = [
     h: 120,
     args: ['--frame', '2', '--w', '160', '--h', '120'],
   },
+  /* **画布文字那一族**（`setfont`/`moveto`/`printchar`/`printnum`/`printf`，落在语言
+     那一侧：`ext/polydraw/text-rt.js`）。probes 挑的是字模上的**具体笔画**：'H' 的左竖与
+     中横、两竖之间那一格黑、'A' 铺到 12×16 之后的竖与横、`printnum` 换行之后那个 '!'、
+     `printf` 里 `\n` 之后那个 '#' —— 于是"字模抄对了没有、字号缩放对不对、光标走位对不对"
+     都判得出来，不是"画了点什么就算过"。
+     `text` 是脚本自己印到 stdout 的那一份（这门的 `printf` 两处都去）：它与指针行的**先后
+     按缓冲走**（c 那条腿先印文字），所以有 `text` 的例子比的是集合，不是次序。 */
+  {
+    who: 'evaldraw+text',
+    file: 'ext/evaldraw/examples/text.kc',
+    w: 320,
+    h: 240,
+    env: { OMNI_GFX: 'host' },
+    text: ['ok 7'],
+    probes: [
+      [11, 10, 255, 255, 255],    /* 'H' 左竖（6×8，白） */
+      [13, 13, 255, 255, 255],    /* 'H' 中横：字模第 3 行 */
+      [13, 10, 0, 0, 0],          /* 两竖之间：没画 */
+      [12, 33, 0, 255, 0],        /* 'A' 左竖（12×16：一格放大成 2×2） */
+      [16, 38, 0, 255, 0],        /* 'A' 中横 */
+      [103, 18, 255, 0, 0],       /* `printnum(42)` 换过行 —— '!' 落在下一行 */
+      [182, 20, 0, 128, 255],     /* `printf("ok %g\n")` 里那个 `\n` 也换行了 */
+      [300, 200, 0, 0, 0],        /* 没写字的地方：没动过 */
+    ],
+  },
   /* **顶点批那一格 op**（`(gfxbatch 类 数 顶点)`，手写 `.sx`）。只有一个模型：变换 /
      拆 mode / 2D 图元变顶点 / **合批**全在语言那一侧，交到设备手里的就是一段顶点
      （`docs/design/eval-realtime-gpu.md` 第 9 节 —— 用户的口径是"绝对不要硬件对应的
@@ -321,8 +346,11 @@ for (const G of GFX_CASES) {
     /* 一帧一行指针：帧循环那一档跑几帧就有几行。 */
     const want = new Array(G.frames === undefined ? 1 : G.frames)
       .fill(`#gfx png ${gout} ${G.w} ${G.h}`);
+    if (G.text !== undefined) want.push(...G.text);
     if (got.code !== 0) { no(label, `退出码 ${got.code}：${got.err.split('\n').slice(-2).join(' ')}`); continue; }
-    if (JSON.stringify(got.out) !== JSON.stringify(want)) {
+    /* 脚本自己也往 stdout 印东西的那一档（`text`）：指针行与它的先后按缓冲走，比集合。 */
+    const cmp = (a) => JSON.stringify(G.text === undefined ? a : [...a].sort());
+    if (cmp(got.out) !== cmp(want)) {
       no(label, `stdout 期望 ${JSON.stringify(want)} 得到 ${JSON.stringify(got.out)}`);
       continue;
     }

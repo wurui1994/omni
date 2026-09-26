@@ -32,6 +32,7 @@ import { cUnescape, fmtToStmts } from '../../src/core/lower/fmt.js';
 import { gfxGlobalDecls, gfxFnDecls, gfxPresentDecl } from './gfx-rt.js';
 import { POLYDRAW_GL, GL_CONSTS, glGlobalDecls, glFnDecls } from './gl-rt.js';
 import { gfx3FnDecls, gfx3GlobalDecls } from './gfx3-rt.js';
+import { textFnDecls, textStubDecls, textGlobalDecls } from './text-rt.js';
 import { glslAlign } from './glsl.js';
 import { NOISE_FNS, noiseGlobalDecls, noiseFnDecls } from './noise-rt.js';
 import {
@@ -839,6 +840,13 @@ function callOf(x, C) {
         });
         return { kind: 'call', fn: nameRef(drawFn), args: out };
       }
+      return { kind: 'call', fn: nameRef(drawFn), args };
+    }
+    /* **画布文字那一族永远走生成出来的那一份**（`text-rt.js`）：实参里有串、画出来是一堆
+       `setpix` —— 两条理由都在那份文件的头注里。三台设备一次全有。 */
+    if (drawFn.startsWith('gt_')) {
+      C.needText = true;
+      C.fns.set(drawFn, { params: args.map(() => REAL), ret: REAL });
       return { kind: 'call', fn: nameRef(drawFn), args };
     }
     /* **宿主调用那条路**：一格 `(gfxcall "名字" 实参…)`，设备在宿主那一侧。
@@ -1745,6 +1753,11 @@ function exprStmtOf(e, C) {
     if (tag(head) === 'name' && (idOf(head) === 'printf' || idOf(head) === 'fprintf')) {
       return printfOf(e, C);
     }
+    /* `printg(x,y,色,fmt,…)`（PolyDraw）：**画在画布上**那一格 —— 实参里有串，所以
+       与 `printf` 同一条路（编译期切格式串），不走设备那一面。 */
+    if (tag(head) === 'name' && idOf(head) === 'printg' && kids(e).length >= 5) {
+      return printgOf(e, C);
+    }
     return [{ kind: 'expr-stmt', expr: callOf(e, C) }];
   }
   return [{ kind: 'expr-stmt', expr: exprOf(e, C) }];
@@ -1754,6 +1767,12 @@ function exprStmtOf(e, C) {
  * `printf($fmt, …)` —— 走公共层那台格式串机器（`lower/fmt.js` 的 `fmtToStmts`）：
  * 按 `\n` 切段，带换行的段发 `print`、末段没换行发 `write`。
  * 格式串必须是字面量（旧实现那侧也是编译期就切好的）。
+ *
+ * **EvalDraw 那一门还要画在画布上**（`evaldraw.txt:1531`：`printf` 是画在当前位置、
+ * 当前字体、当前颜色上的）—— 同一段文字 `gt_str` 一份、stdout 一份。为什么 stdout 那一份
+ * 也留着：语料里几十份 `.kc` 拿 `printf` 当唯一输出（判据是 stdout 逐字节），
+ * 而正本那边"文字窗口"这件事是编辑器的，不在语言里。没画过别的图的脚本拿到的是
+ * **空的那一份文字运行时**（`textStubDecls`），一格像素都不画。
  */
 function printfOf(e, C) {
   const args = kids(e).slice(1);
@@ -1763,7 +1782,54 @@ function printfOf(e, C) {
   }
   const fmt = cUnescape(unquote(leaf(kids(fmtTok)[0])));
   const vals = args.slice(1).map((a) => exprOf(a, C));
-  return fmtToStmts(fmt, vals, C.tyCtx(), 'eval->IR', C.fresh);
+  const stmts = fmtToStmts(fmt, vals, C.tyCtx(), 'eval->IR', C.fresh);
+  if (C.host.who !== 'evaldraw') return stmts;
+  return textAndStdout(stmts, C);
+}
+
+/**
+ * 一段段"格式化好的串"→ **画布一份 + stdout 一份**。
+ *
+ * 那一格串表达式**只算一次**（落一格 `let`）：`fmt` 那台机器发出来的串里可能带临时量，
+ * 同一棵树发两遍等于把那一格临时量声明两遍。
+ */
+function textAndStdout(stmts, C, toStdout = true) {
+  C.needText = true;
+  const out = [];
+  for (const s of stmts) {
+    const t = C.fresh('gt');
+    out.push({ kind: 'let', name: t, type: { kind: 'string' }, init: s.values[0] });
+    if (toStdout) out.push({ kind: s.kind, values: [nameRef(t)] });
+    out.push({ kind: 'expr-stmt', expr: { kind: 'call', fn: nameRef('gt_str'), args: [nameRef(t)] } });
+    if (s.kind === 'print') {
+      out.push({ kind: 'expr-stmt', expr: { kind: 'call', fn: nameRef('gt_nl'), args: [] } });
+    }
+  }
+  return out;
+}
+
+/**
+ * `printg(x, y, fcol, $fmt, …)`（PolyDraw，`polydraw.c:789` 的 `myprintg`）——
+ * **只画在画布上**，不落 stdout（那一门的 `printf` 才是文字窗口那一格）。
+ *
+ * 光标与颜色先摆好（`gt_at`），画完把颜色那一档复原（`gt_atend`）—— 正本也是
+ * push/pop 当前色的，脚本的 `setcol` 不该被它改掉。
+ */
+function printgOf(e, C) {
+  const args = kids(e).slice(1);
+  if (args.length < 4 || tag(args[3]) !== 'str') {
+    throw new Error('eval->IR: `printg(x,y,色,"…",…)` 的格式串不是字面量'
+      + '（运行期格式化还没接）');
+  }
+  const fmt = cUnescape(unquote(leaf(kids(args[3])[0])));
+  const vals = args.slice(4).map((a) => exprOf(a, C));
+  const at = args.slice(0, 3).map((a) => exprOf(a, C));
+  C.needGfx = true;
+  return [
+    { kind: 'expr-stmt', expr: { kind: 'call', fn: nameRef('gt_at'), args: at } },
+    ...textAndStdout(fmtToStmts(fmt, vals, C.tyCtx(), 'eval->IR', C.fresh), C, false),
+    { kind: 'expr-stmt', expr: { kind: 'call', fn: nameRef('gt_atend'), args: [] } },
+  ];
 }
 
 /* ─── 一段里被写过的名字（没有声明的语言要它） ───────────────────────── */
@@ -3086,6 +3152,7 @@ export function evalToIR(cst, host, src = '') {
     gotoPair: new Map(),
     needRnd: false,                     /* 用过 `RND`/`NRND`/`SRAND` 没有 */
     need3D: false,                      /* 用过 3D 那一族没有（`gfx3-rt.js`：投影在语言这一侧） */
+    needText: false,                    /* 用过画布文字没有（`text-rt.js`：`gt_*`） */
     needNoise: false,                   /* 用过 `NOISE`/`NOISE3D` 没有（`noise-rt.js`） */
     usedGL: false,                      /* 这份脚本用过 GL 那一族没有（每帧初态要不要发） */
     /* 用到了宿主那"每帧盖一次"的哪几格（`xres`/`yres`/`mousx`/`mousy`）——
@@ -3465,6 +3532,10 @@ export function evalToIR(cst, host, src = '') {
         decls.unshift(...rt(C, gfx3GlobalDecls()));
         decls.push(...rt(C, gfx3FnDecls(true, C.needGL)));
       }
+      if (C.needText) {
+        decls.unshift(...rt(C, textGlobalDecls()));
+        decls.push(...rt(C, textFnDecls(true)));
+      }
       if (C.needGL) {
         decls.unshift(...rt(C, glGlobalDecls()));
         decls.push(...rt(C, glFnDecls()));
@@ -3520,6 +3591,10 @@ export function evalToIR(cst, host, src = '') {
       decls.unshift(...rt(C, gfx3GlobalDecls()));
       decls.push(...rt(C, gfx3FnDecls(false, C.needGL)));
     }
+    if (C.needText) {
+      decls.unshift(...rt(C, textGlobalDecls()));
+      decls.push(...rt(C, textFnDecls(false)));
+    }
     if (C.needGL) {
       decls.unshift(...rt(C, glGlobalDecls()));
       decls.push(...rt(C, glFnDecls()));
@@ -3529,6 +3604,9 @@ export function evalToIR(cst, host, src = '') {
       expr: { kind: 'call', fn: nameRef('gfx_present'), args: [] },
     });
   }
+  /* **画布文字但从头到尾没画过图**（拿 `printf` 当输出的算题脚本）：发一份**空的**同名
+     运行时（`textStubDecls`）—— 那一档没有画布，文字照旧只落 stdout。见那份文件的头注。 */
+  if (C.needText && !C.needGfx) decls.push(...rt(C, textStubDecls()));
   decls.push({ kind: 'main', body: [...initStmts, ...voidRets(mainBody)] });
   return { kind: 'module', decls, rtNames: [...C.rtNames] };
 }
