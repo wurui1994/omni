@@ -135,8 +135,13 @@ function compile(gl, kind, src) {
 
 /** 开设备：一格 canvas + 一格 WebGL2 上下文 + 那对最简着色器。 */
 function open(canvas, w, h) {
+  /* **`alpha: false` 是一条判据不是一格口味**：正本画的是窗口的帧缓冲，那儿没有
+     alpha 通道 —— 片元写多少 alpha 都不影响看见的颜色。浏览器这边默认 `alpha: true`
+     且预乘，于是脚本里那句 `gl_FragColor = vec4(r,g,b,0)`（ken 那批写 0 的很多，
+     ceilflor2/driftbox 都是）出来**整张透明**：画确实画上了（readPixels 七万多个
+     亮像素、60fps），屏幕上却是 `.gfx-canvas` 的黑底 —— "很多例子全黑"就是这一格。 */
   const gl = canvas.getContext('webgl2', {
-    antialias: false, preserveDrawingBuffer: true, depth: true,
+    alpha: false, antialias: false, preserveDrawingBuffer: true, depth: true,
   });
   if (gl === null) throw new Error('这个浏览器没有 WebGL2 —— 换 --gfx=cpu 那一档');
   const prog = gl.createProgram();
