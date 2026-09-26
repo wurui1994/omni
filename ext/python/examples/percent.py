@@ -48,3 +48,21 @@ print("%r %r" % (s, 2.5))
 # 拼在一起用
 for k, v in zip(["a", "bb"], [1, 22]):
     print("%-4s %3d" % (k, v))
+
+# ---- `%` 的**类型**也是串 -----------------------------------------------------
+# 发射那一侧早就在算右边之前拦了（右边是一格元组，这一层没有元组那一档），可**类型**那一侧
+# 从前漏了：`o === '%'` 落到"两边都是数"那一条上、答 real。平时看不出来（拼进 print 里
+# 就没人问它的类型），`return` 那一处一问就露：报"要返回 real，给的是 string"。
+def row(name, qty, price):
+    return name.ljust(8) + str(qty).rjust(4) + ("%8.2f" % price)
+
+
+print(row("widget", 3, 2.5))
+print(row("bolt", 12, 0.125))
+
+
+def pct(x):
+    return "%d%%" % x
+
+
+print(pct(30), len(pct(5)))

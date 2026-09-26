@@ -617,6 +617,11 @@ function tyOfBin(x, C) {
   const [opTok, a, b] = kids(x);
   const o = String(leaf(opTok));
   if (CMP.has(o)) return BOOL;
+  /* **`"%s=%s" % (…)` 交的是串** —— 发射那一侧早就在算右边之前拦了（`percentOf`），
+     类型这一侧从前漏了：于是 `o === '%'` 落到"两边都是数"那一条上，答 real。
+     症状（量出来的）：`return a.ljust(3) + ("%8.2f" % p)` 报"要返回 real，给的是 string"
+     —— 返回类型是按 `tyOfCst` 推的，推错了就与真发出来那一格对不上。 */
+  if (o === '%' && tag(a) === 'str') return STR;
   const taD = tyOfCst(a, C);
   const tbD = tyOfCst(b, C);
   /* 有一边是箱子：算出来的还是一格箱子（`dynBin` 每一支都装回去 —— 那几支的类型不一样，
@@ -680,7 +685,11 @@ function tyOfCall(x, C) {
        两格以上逐个挑（交的还是同一档）。 */
     /* **`key=` 不算一格实参** —— 它只管怎么比，交出来的还是元素（不看这一条会把
        `min(xs, key=…)` 的类型答成那张表）。 */
-    if (args.filter((a) => tag(a) !== 'kw').length !== 1) return t;
+    /* 两格以上：**逐格合成**（`unify`）—— 全一样就是它，int 与 real 混着来退到箱子
+       （发射那一侧也装箱，见 `min`/`max` 那一格的账）。 */
+    if (args.filter((a) => tag(a) !== 'kw').length !== 1) {
+      return unify(args.filter((a) => tag(a) !== 'kw').map((_, i) => argTys[i]));
+    }
     if (t.kind === 'arr') return t.elem;
     /* `min(字典)` / `max(字典[, key=…])` —— 字典走的是**键**。 */
     if (t.kind === 'map') return t.key;
@@ -3287,6 +3296,11 @@ function builtinOf(nm, args, argToks, C) {
       }
       throw new Error(`python->IR: \`int(${t0.kind})\` 还没接（串与数接了）`);
     case 'float':
+      if (t0 !== null && t0.kind === 'string') {
+        throw new Error('python->IR: `float(串)` 还没接 —— 串转浮点要"最短往返"那一档'
+          + '（借来的 CPython `pystrtod`，见 SPEC 的下一刀），自己写的解析会在末位上差一点，'
+          + '不装作有；`int(串)` 是另一回事（逐位乘加本来就精确）');
+      }
       return t0.kind === 'real' ? args[0] : toReal(args[0], C);
     case 'str':
       return pyStr(args[0], C);
@@ -3348,9 +3362,26 @@ function builtinOf(nm, args, argToks, C) {
         return pickList(one, op, nm, C, less);
       }
       args.forEach((a) => needOrd(ty(a, C), C, `${nm}()`));
-      let best = args[0];
-      for (let i = 1; i < args.length; i += 1) {
-        best = pickOf(best, args[i], op, C, op === '<' ? less : (l, r) => less(r, l));
+      /* **int 与 real 混着来：两边都装箱**（`max(1, 2.5)`）。
+         方言的三目两支必须同型，不动就报"(sel …) 两支要同型：甲是 int，乙是 real"。
+         而**不能把 int 提到 real**：python 的 `max(3, 2.5)` 交的是 `3`（int），印出来是
+         `3` 不是 `3.0` —— 提上去就印错数。箱子那条道正是为这一格来的（印的时候按标签分派）。 */
+      let vals = args;
+      const tys = args.map((a) => ty(a, C));
+      if (tys.some((t) => t.kind === 'real') && tys.some((t) => t.kind === 'int')
+        && tys.every((t) => ['int', 'real'].includes(t.kind))) {
+        vals = args.map((a) => boxOf(a, C));
+      }
+      /* **平手时留左边那一格** —— python 的 `min` / `max` 交的是"第一个最小/最大的"
+         （`a if a <= b else b`）。平时看不出来（两格值一样），可 int 与 real 混着来那一档
+         看得出：`max(2, 2.0)` 是 `2`（int），印 `2` 不是 `2.0`。所以比法要**非严格**：
+         用 `!(右 < 左)` / `!(左 < 右)`，别用严格小于。
+         （一格表那条路 `pickList` 本来就对：只在**严格**更好时才换 best。） */
+      const not = (e) => ({ kind: 'unop', op: '!', operand: e });
+      let best = vals[0];
+      for (let i = 1; i < vals.length; i += 1) {
+        best = pickOf(best, vals[i], op, C,
+          op === '<' ? (l, r) => not(less(r, l)) : (l, r) => not(less(l, r)));
       }
       return best;
     }
