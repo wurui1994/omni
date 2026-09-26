@@ -984,7 +984,24 @@ function hostStore(ht, op, val, C) {
  * 落成**照抄那一段**：护卫那一招只退得出去、退不进去，而那一段（标号到它那格语句表末尾）
  * 只要**不会走到底**（末句是 `goto`/`return`）就可以原样在跳转点再降一份 —— 原处那一段
  * 照旧留着给顺着走下来的那条路。见 `stmtOf1` 的 `goto` 那一格。
+ *
+ * 往前跳那一族还有两种形状（2026-09-26 补，语料里各占几份）：
+ *
+ * * **跳进一格循环体里**（`games/backgammon.kc:890` 的 `ls=0; goto in2it; do{…in2it:…}while(1)`、
+ *   `games/kenken.kc:503` 的 `goto in2y`）—— 经典的**循环入口旗子**：goto 那儿置旗、
+ *   循环照常进、体里标号前头那一段在旗子起着的那一趟整段跳过、标号那儿清旗，
+ *   循环的条件上 OR 一格旗子（原文那一跳压根没测过条件）。见 `loopEntryAt`。
+ * * **往前跳进一格嵌套里**（`games/chess/chess.kc:162` 跳进 `if (n==0){dowin:…}`、
+ *   `games/bowling/bowling.kc:119` 从 `if` 的这一支跳进 `else` 那一支）—— 旗子护卫
+ *   **到那句为止**（于是控制流退到那句后头），而标号那儿本该跑的那一段（含一路上外层的
+ *   尾巴）在 goto 那儿照抄一份先跑掉。见 `blockEntryAt`。
+ *
+ * **往后跳进一格嵌套里**（`games/kenken.kc:909` 的 `goto back2it`：标号在两层 `if` 里头
+ * 那格 `while` 的体上）要**两格旗子**：绕回旗把"那句起到这段末尾"包进 `while (绕回旗)`
+ * （与往后跳那一档同一招），进入旗把那条路上每一格判断改成"起着就一定走"、标号那儿清掉。
+ * 见 `pathEntryAt` 与 `entryLower`。
  */
+
 const gotoFlag = (name) => `pd_go_${name}`;
 
 /** 这一格语句表里第一个标号的位置（没有就是 -1）。 */
@@ -1005,6 +1022,87 @@ function gotoNamesIn(x, out) {
   return out;
 }
 
+/** 一格循环（三种写法）的**体**；不是循环就 undefined。 */
+function loopBodyOf(s) {
+  const t = tag(s);
+  const k = kids(s);
+  if (t === 'while') return k[1];
+  if (t === 'dowhile') return k[0];
+  if (t === 'for') return k[3];
+  return undefined;
+}
+
+/**
+ * **跳进循环体里**那一档：这格语句表上有没有"一格循环、它体上头一层摆着某个标号、
+ * 而 `goto` 到那个标号的在循环**前头**"（`games/backgammon.kc:890`、
+ * `games/kenken.kc:503`）—— 有就回 `{ j, name, flag }`（`j` 是那格循环的位置）。
+ */
+function loopEntryAt(list) {
+  for (let j = 0; j < list.length; j += 1) {
+    if (!isList(list[j])) continue;
+    const b = loopBodyOf(list[j]);
+    if (b === undefined || !isList(b) || tag(b) !== 'block') continue;
+    const at = labelAt(kids(b));
+    if (at < 0) continue;
+    const name = idOf(kids(kids(b)[at])[0]);
+    if (!gotoNames(list.slice(0, j)).has(name)) continue;
+    /* 循环体里也有人跳到它 ⇒ 那是体那一格自己的事（前/后两种落法），这儿不碰。 */
+    if (gotoNames(kids(b).slice(0, at)).has(name)) continue;
+    if (gotoNames(kids(b).slice(at + 1)).has(name)) continue;
+    return { j, name, flag: gotoFlag(name) };
+  }
+  return null;
+}
+
+/**
+ * 一句语句（含嵌套的 `block` / `if`）里找 `name:` 这个标号 —— 找到就回**那几段"往后的
+ * 尾巴"**：标号自己那格语句表的尾，再一路上外层每格表的尾（内层在前，正是"落下来"
+ * 的次序）。路上碰到循环就回 null（那要另一种落法，见 `loopEntryAt`）。
+ */
+function labelTails(s, name) {
+  if (!isList(s)) return null;
+  const t = tag(s);
+  if (t === 'label') return idOf(kids(s)[0]) === name ? [] : null;
+  if (t === 'block') {
+    const list = kids(s);
+    for (let i = 0; i < list.length; i += 1) {
+      const r = labelTails(list[i], name);
+      if (r !== null) return [...r, list.slice(i + 1)];
+    }
+    return null;
+  }
+  if (t === 'if') {
+    for (const b of kids(s).slice(1)) {
+      const r = labelTails(b, name);
+      if (r !== null) return r;
+    }
+    return null;
+  }
+  return null;
+}
+
+/**
+ * **往前跳进一格块里**那一档：`goto` 在这格语句表上（含嵌套）、标号在后头某一句
+ * **里头**（`games/chess/chess.kc:162` 跳进 `if (n==0) {…}`、
+ * `games/bowling/bowling.kc:119` 从 `if` 的这一支跳进 `else` 那一支）。
+ * 回 `{ j, name, flag, region }`：`region` 是标号那儿往后要**照抄一份**的那几句。
+ */
+function blockEntryAt(list, C) {
+  for (let j = 0; j < list.length; j += 1) {
+    if (!isList(list[j])) continue;
+    for (const name of gotoNames(list.slice(0, j + 1))) {
+      if (C.gotoCopy.has(name)) continue;    /* 这一格正在降（下面那一层的递归）—— 别再拆一遍 */
+      const tails = labelTails(list[j], name);
+      if (tails === null) continue;
+      const region = tails.flat();
+      /* 那一段里又有人跳回这个标号 ⇒ 抄一份就不是同一件事了，留给别的落法报。 */
+      if (gotoNames(region).has(name)) continue;
+      return { j, name, flag: gotoFlag(name), region };
+    }
+  }
+  return null;
+}
+
 function stmtsOf(list, C) {
   /* 标号那一刀。两个方向各一种落法，旗子那一格是同一个：
      * **往前跳**（`goto` 在标号前头）：`旗子=0;` + 前面那段整段加护卫，后面那段照常降；
@@ -1015,6 +1113,18 @@ function stmtsOf(list, C) {
   if (at >= 0) {
     const name = idOf(kids(list[at])[0]);
     const flag = gotoFlag(name);
+    /* **这格表就是"被跳进来的循环体"**（旗子是外头那一层摆的，见 `loopEntryAt`）：
+       标号前头那一段整段包进 `if (旗子 == 0) {…}`、标号这儿把旗子清掉 —— 跳进来的
+       那一趟正好从标号那句开始，往后每一趟照旧从头走。 */
+    if (C.loopEntry.get(name) === flag) {
+      C.loopEntry.delete(name);
+      const pre = stmtsOf(list.slice(0, at), C);
+      return [
+        ...guardStmts(bin('==', nameRef(flag), num(0)), pre),
+        { kind: 'assign', target: nameRef(flag), value: num(0) },
+        ...stmtsOf(list.slice(at + 1), C),
+      ];
+    }
     const fwd = gotoNames(list.slice(0, at)).has(name);
     const back = gotoNames(list.slice(at + 1)).has(name);
     if (fwd && back) {
@@ -1055,9 +1165,229 @@ function stmtsOf(list, C) {
       ...stmtsOf(list.slice(at + 1), C),
     ];
   }
+  /* **跳进一格循环体里**（`ls = 0; goto in2it; do { … in2it: … } while (1);`）——
+     护卫那一招只退得出去、退不进去，而"跳进循环体"这件事是经典的**循环入口旗子**：
+     goto 那儿置旗，循环照常进，体里标号前头那一段在旗子起着的那一趟整段跳过、
+     标号那儿清旗。循环的条件上也要 OR 一格旗子 —— 原文那一跳压根没测过条件。 */
+  const ent = loopEntryAt(list);
+  if (ent !== null) {
+    const { j, name, flag } = ent;
+    C.gotoActive.push(flag);
+    const pre = stmtsOf(list.slice(0, j), C);
+    C.gotoActive.pop();
+    C.loopEntry.set(name, flag);
+    const loop = loopEntryStmt(list[j], C, flag, name);
+    C.loopEntry.delete(name);
+    return [
+      { kind: 'let', name: flag, type: REAL, init: num(0) },
+      ...pre,
+      ...loop,
+      ...stmtsOf(list.slice(j + 1), C),
+    ];
+  }
+  /* **往前跳进一格块里**（`goto dowin;` … `if (n == 0) { dowin: … }`）——
+     旗子那一格管"往前跳"：置旗之后这格表上到那句为止（含嵌套）每句都被护卫挡着，
+     于是控制流一路退到那句**后头**；而标号那儿本该跑的那一段（含一路上外层的尾巴）
+     在 goto 那儿**照抄一份**先跑掉。两件事合起来正是那一跳。 */
+  const inb = blockEntryAt(list, C);
+  if (inb !== null) {
+    const { j, name, flag, region } = inb;
+    C.gotoCopy.set(name, region);
+    C.gotoActive.push(flag);
+    const guarded = stmtsOf(list.slice(0, j + 1), C);
+    C.gotoActive.pop();
+    C.gotoCopy.delete(name);
+    return [
+      { kind: 'let', name: flag, type: REAL, init: num(0) },
+      ...guarded,
+      ...stmtsOf(list.slice(j + 1), C),
+    ];
+  }
+  /* **往后跳进一格嵌套里**（`games/kenken.kc:909` 的 `goto back2it`：标号在两层 `if` 里头
+     那格 `while` 的体上，`goto` 在这格表的末尾）—— 两格旗子合起来：
+       `绕回旗` 把"标号那句起到这段末尾"包进 `while (绕回旗)`（与往后跳那一档同一招），
+       `进入旗` 把**那条路上每一格判断**改成"起着就一定走"（见 `entryLower`）、标号那儿清掉。 */
+  const pe = pathEntryAt(list, C);
+  if (pe !== null) {
+    const { j, name } = pe;
+    const f = gotoFlag(name);
+    const g = `${f}$back`;
+    if (looseBreak(list.slice(j + 1))) {
+      throw new Error(`eval->IR: \`goto ${name}\` 往后跳进嵌套里，可那一段里有 \`break\` ——`
+        + ' 这一版把那一段包进一格 while，`break` 的去处就变了');
+    }
+    const pre = stmtsOf(list.slice(0, j), C);
+    C.pathEntry.set(name, f);
+    C.gotoPair.set(name, g);
+    const head = entryLower(list[j], C, f, name);
+    C.gotoActive.push(g);
+    const rest = stmtsOf(list.slice(j + 1), C);
+    C.gotoActive.pop();
+    C.gotoPair.delete(name);
+    C.pathEntry.delete(name);
+    return [
+      { kind: 'let', name: f, type: REAL, init: num(0) },
+      ...pre,
+      { kind: 'let', name: g, type: REAL, init: num(1) },
+      {
+        kind: 'while',
+        cond: bin('!=', nameRef(g), num(0)),
+        body: [
+          { kind: 'assign', target: nameRef(g), value: num(0) },
+          ...head,
+          ...rest,
+        ],
+      },
+    ];
+  }
   const out = [];
   for (const s of list) out.push(...stmtOf(s, C));
   return out;
+}
+
+/** 这一段（不进更里头那层循环）里有没有"光秃秃的 `break`"。 */
+function looseBreak(list) {
+  for (const s of list) if (looseBreakIn(s)) return true;
+  return false;
+}
+
+function looseBreakIn(x) {
+  if (!isList(x)) return false;
+  const t = tag(x);
+  if (t === 'break') return true;
+  if (t === 'while' || t === 'dowhile' || t === 'for') return false;
+  return kids(x).some((k) => looseBreakIn(k));
+}
+
+/** 这一句（含嵌套）里有 `name:` 这个标号没有。 */
+function hasLabel(x, name) {
+  if (!isList(x)) return false;
+  if (tag(x) === 'label') return idOf(kids(x)[0]) === name;
+  return kids(x).some((k) => hasLabel(k, name));
+}
+
+/**
+ * **往后跳进一格嵌套里**：这格表上有没有"某句里头藏着标号、而 `goto` 到它的在那句
+ * **后头**"（`games/kenken.kc` 那格 `back2it`）—— 有就回 `{ j, name }`。
+ */
+function pathEntryAt(list, C) {
+  for (let j = 0; j < list.length; j += 1) {
+    if (!isList(list[j])) continue;
+    for (const name of gotoNames(list.slice(j + 1))) {
+      if (C.pathEntry.has(name)) continue;
+      if (!hasLabel(list[j], name)) continue;
+      return { j, name };
+    }
+  }
+  return null;
+}
+
+/**
+ * 把一句语句"照原样降，但**去那个标号那条路上**的每一格判断都改成'进入旗起着就一定走'"：
+ * `if` 的条件 OR 上它（标号在 else 支就反过来 AND 上"旗子没起"）、循环的条件 OR 上它、
+ * 一格语句表里标号前头那一段整段包进 `if (旗子 == 0)`，标号那儿把旗子清掉。
+ */
+function entryLower(s, C, f, name) {
+  const t = tag(s);
+  const on = bin('!=', nameRef(f), num(0));
+  const off = bin('==', nameRef(f), num(0));
+  const skipPre = (pre) => guardStmts(off, pre);
+  if (t === 'block') {
+    const list = kids(s);
+    const at = labelAt(list);
+    if (at >= 0 && idOf(kids(list[at])[0]) === name) {
+      return [{
+        kind: 'block',
+        stmts: [
+          ...skipPre(stmtsOf(list.slice(0, at), C)),
+          { kind: 'assign', target: nameRef(f), value: num(0) },
+          ...stmtsOf(list.slice(at + 1), C),
+        ],
+      }];
+    }
+    const i = list.findIndex((k) => hasLabel(k, name));
+    return [{
+      kind: 'block',
+      stmts: [
+        ...skipPre(stmtsOf(list.slice(0, i), C)),
+        ...entryLower(list[i], C, f, name),
+        ...stmtsOf(list.slice(i + 1), C),
+      ],
+    }];
+  }
+  if (t === 'if') {
+    const k = kids(s);
+    const inThen = hasLabel(k[1], name);
+    const cond = exprOf(k[0], C, 'cond');
+    return [{
+      kind: 'if',
+      cond: inThen ? bin('||', on, cond) : bin('&&', off, cond),
+      then: inThen ? entryLower(k[1], C, f, name) : stmtsOf([k[1]], C),
+      else_: k.length > 2
+        ? (inThen ? stmtsOf([k[2]], C) : entryLower(k[2], C, f, name))
+        : [],
+    }];
+  }
+  if (t === 'while') {
+    const k = kids(s);
+    return [{
+      kind: 'while',
+      cond: bin('||', on, exprOf(k[0], C, 'cond')),
+      body: entryLower(k[1], C, f, name),
+    }];
+  }
+  if (t === 'dowhile') {
+    const k = kids(s);
+    C.doN = (C.doN ?? 0) + 1;
+    const d = `pd_do${C.doN}`;
+    return [
+      { kind: 'let', name: d, type: REAL, init: num(1) },
+      {
+        kind: 'while',
+        cond: bin('||', truthy(nameRef(d)), exprOf(k[1], C, 'cond')),
+        body: [
+          { kind: 'assign', target: nameRef(d), value: num(0) },
+          ...entryLower(k[0], C, f, name),
+        ],
+      },
+    ];
+  }
+  if (t === 'for') {
+    const [init, cond, post, body] = kids(s);
+    const some = (n) => isList(n) && tag(n) !== undefined && tag(n) !== null;
+    if (some(init)) {
+      throw new Error(`eval->IR: \`goto ${name}\` 那条路上有格 for 头上带初值 ——`
+        + ' 原文那一跳压根没跑过它，这一版不接');
+    }
+    return [{
+      kind: 'for',
+      init: null,
+      cond: some(cond) ? bin('||', on, exprOf(cond, C, 'cond')) : null,
+      post: some(post) ? (exprStmtOf(post, C)[0] ?? null) : null,
+      body: entryLower(body, C, f, name),
+    }];
+  }
+  throw new Error(`eval->IR: \`goto ${name}\` 那条路上有一格 ${t} —— 这一版只接 block/if/循环`);
+}
+
+/**
+ * "被跳进来的那格循环"：照常降一份，再把条件上 OR 一格旗子（跳进来的那一趟不测条件）。
+ * `for` 头上有初值的不接 —— 原文那一跳没跑过初值，我们这儿跑了就不是同一件事。
+ */
+function loopEntryStmt(s, C, flag, name) {
+  if (tag(s) === 'for') {
+    const init = kids(s)[0];
+    if (isList(init) && tag(init) !== undefined && tag(init) !== null) {
+      throw new Error(`eval->IR: \`goto ${name}\` 跳进的那格 for 头上有初值 ——`
+        + ' 原文那一跳压根没跑过它，这一版不接');
+    }
+  }
+  const res = stmtOf1(s, C).map((st) => {
+    if (st.kind !== 'while' && st.kind !== 'for') return st;
+    const g = bin('!=', nameRef(flag), num(0));
+    return { ...st, cond: st.cond === null ? null : bin('||', g, st.cond) };
+  });
+  return applyGuards(res, C);
 }
 
 /**
@@ -1067,18 +1397,35 @@ function stmtsOf(list, C) {
  * 套一层 `if (旗子 == 0)`，循环的条件上再 `&& 旗子 == 0`（见 `stmtsOf` 头上那段）。
  */
 function stmtOf(s, C) {
-  const res = stmtOf1(s, C);
+  return applyGuards(stmtOf1(s, C), C);
+}
+
+/** 正在降的那几格旗子都套上护卫（`C.gotoActive` 空着就原样回）。 */
+function applyGuards(res, C) {
   if (C.gotoActive.length === 0) return res;
   const g = C.gotoActive
     .map((f) => bin('==', nameRef(f), num(0)))
     .reduce((a, b) => bin('&&', a, b));
-  return res.map((st) => {
+  return res.flatMap((st) => {
     /* 循环：条件上加一格 —— 光在外头套 `if` 退不出来（旗子是循环体里置的）。 */
-    if (st.kind === 'while') return { ...st, cond: bin('&&', st.cond, g) };
-    if (st.kind === 'for') return { ...st, cond: st.cond === null ? g : bin('&&', st.cond, g) };
-    return { kind: 'if', cond: g, then: [st], else_: [] };
+    if (st.kind === 'while') return [{ ...st, cond: bin('&&', st.cond, g) }];
+    if (st.kind === 'for') return [{ ...st, cond: st.cond === null ? g : bin('&&', st.cond, g) }];
+    /* **声明不许关进那层 `if` 里** —— 关进去就成了那格块的局部量，后头引它的看不见
+       （`do{…}while` 落出来的 `let pd_doN` 与它那格 while 就是这么被切开的：
+       `games/kenken.kc` 上报"未声明的变量 pd_do3"）。这门语言里 `let` 的初值是常量或
+       `anew`，多做一次没有副作用。 */
+    if (st.kind === 'let') return [st];
+    return [{ kind: 'if', cond: g, then: [st], else_: [] }];
   });
 }
+
+/** 一段整段包进 `if (cond) {…}`，但**声明留在外头**（同 `applyGuards` 那条理由）。 */
+function guardStmts(cond, stmts) {
+  const lets = stmts.filter((s) => s.kind === 'let');
+  const rest = stmts.filter((s) => s.kind !== 'let');
+  return [...lets, ...(rest.length === 0 ? [] : [{ kind: 'if', cond, then: rest, else_: [] }])];
+}
+
 
 function stmtOf1(s, C) {
   const t = tag(s);
@@ -1208,8 +1555,18 @@ function stmtOf1(s, C) {
   if (t === 'goto') {
     const name = idOf(kids(s)[0]);
     const flag = gotoFlag(name);
+    /* **往后跳进嵌套里**那一档（`pathEntryAt`）：两格旗子一起置 —— 进入旗管"那条路上
+       每格判断都走"，绕回旗管"退到那句、再走一趟"。 */
+    const back = C.gotoPair.get(name);
+    if (back !== undefined) {
+      return [
+        { kind: 'assign', target: nameRef(flag), value: num(1) },
+        { kind: 'assign', target: nameRef(back), value: num(1) },
+      ];
+    }
     if (!C.gotoActive.includes(flag)) {
       /* **跳进块里那一档**（`ken/drawcone2.pss`：`singsph:` 在 `if {}` 里头，而
+         `goto singsph` 在函数体这一层）—— 标准 IR 里没有无条件跳转，护卫那一招也退不进去。
          `goto singsph` 在函数体这一层）—— 标准 IR 里没有无条件跳转，护卫那一招也退不进去。
          落法是**照抄那一段**：标号到它所在那格语句表末尾的那几句，原样在这儿降一份。
          **前提是那一段不会走到底**（末句是 `goto` 或 `return`）—— 不然抄完还要接着往下走，
@@ -1232,8 +1589,21 @@ function stmtOf1(s, C) {
         + ' 这一版只接"同一函数里、往前跳到某一格语句表上的标号"与"跳进块里那一段"');
     }
     /* 置旗。后面每一句都在 `if (旗子 == 0)` 里头（见 `stmtOf`），所以控制流一路退到标号。
-       注意这一句自己也被那层护卫裹着 —— 置旗只在"还没跳"的时候发生。 */
+       注意这一句自己也被那层护卫裹着 —— 置旗只在"还没跳"的时候发生。
+       **跳进块里那一档**（`C.gotoCopy`，见 `blockEntryAt`）还要在置旗**之前**把标号那儿
+       该跑的那一段照抄一份 —— 旗子只管"退到那句后头"，跑那一段是另一半。 */
+    const copyRegion = C.gotoCopy.get(name);
+    if (copyRegion !== undefined) {
+      if (C.expanding.has(name)) {
+        throw new Error(`eval->IR: \`goto ${name}\` 抄那一段的时候又碰上它自己 —— 这一版不接`);
+      }
+      C.expanding.add(name);
+      const copy = stmtsOf(copyRegion, C);
+      C.expanding.delete(name);
+      return [...copy, { kind: 'assign', target: nameRef(flag), value: num(1) }];
+    }
     return [{ kind: 'assign', target: nameRef(flag), value: num(1) }];
+
   }
   throw new Error(`eval->IR: 这一格语句还没接：${t}`);
 }
@@ -2515,6 +2885,13 @@ export function evalToIR(cst, host, src = '') {
        见 `stmtOf1` 的 `goto` 那一格与 `stmtsOf` 头上那段。`expanding` 是防自套的记号。 */
     innerLabels: new Map(),
     expanding: new Set(),
+    /* **跳进循环体**那一档：名字 -> 旗子（`stmtsOf` 看见这格标号时拆成"前段包一层 if"）。 */
+    loopEntry: new Map(),
+    /* **跳进块里**那一档：名字 -> 那几句原文（`goto` 那儿照抄一份，见 `blockEntryAt`）。 */
+    gotoCopy: new Map(),
+    /* **往后跳进嵌套里**那一档：名字 -> 进入旗 / 名字 -> 绕回旗（见 `pathEntryAt`）。 */
+    pathEntry: new Map(),
+    gotoPair: new Map(),
     needRnd: false,                     /* 用过 `RND`/`NRND`/`SRAND` 没有 */
     need3D: false,                      /* 用过 3D 那一族没有（`gfx3-rt.js`：投影在语言这一侧） */
     needNoise: false,                   /* 用过 `NOISE`/`NOISE3D` 没有（`noise-rt.js`） */
@@ -2612,7 +2989,17 @@ export function evalToIR(cst, host, src = '') {
     const where = isMain ? '主函数' : idOf(kids(x)[0]);
     const body = isMain ? kids(x)[1] : kids(x)[2];
     const ren = new Map();
+    /* 同一个函数里**同名的 static 写了两遍**（`games/backgammon.kc` 的 `dicephys` 里
+       `static m[9]` 写在两处）—— 那是**同一格量**（这门语言函数里就一张平名字空间），
+       只算头一格：不然改名与声明各做两遍，落出两格同名的模块级量（下游当场报重复定义）。 */
+    const sdecls = [];
+    const sseen = new Set();
     for (const s of staticDecls(body)) {
+      if (sseen.has(s.name)) continue;
+      sseen.add(s.name);
+      sdecls.push(s);
+    }
+    for (const s of sdecls) {
       const prev = C.staticOwner.get(s.name);
       if (prev === undefined || prev === where) continue;
       let nn = `${isMain ? 'main' : where}__${s.name}`;
@@ -2621,16 +3008,17 @@ export function evalToIR(cst, host, src = '') {
       C.staticOwner.set(nn, where);
     }
     if (ren.size > 0) renameStatics(body, ren);
-    for (const s of staticDecls(body)) {
-      C.staticOwner.set(s.name, where);
+    for (const s of sdecls) {
+      const nm = ren.get(s.name) ?? s.name;
+      C.staticOwner.set(nm, where);
       /* 带类型的那一档（`static cel_t cel[12][12]` 写在函数体里）。 */
       if (s.ty !== undefined) { declTyped(C, preDecls, s.ty, s.one, where); continue; }
-      if (s.arr !== undefined) { declArr(C, preDecls, s.name, s.arr, where); continue; }
-      if (!C.globals.has(s.name)) {
-        C.globals.set(s.name, REAL);
-        preDecls.push({ kind: 'global', name: s.name, type: REAL });
+      if (s.arr !== undefined) { declArr(C, preDecls, nm, s.arr, where); continue; }
+      if (!C.globals.has(nm)) {
+        C.globals.set(nm, REAL);
+        preDecls.push({ kind: 'global', name: nm, type: REAL });
       }
-      if (s.init !== undefined) C.staticInits.push({ name: s.name, init: s.init });
+      if (s.init !== undefined) C.staticInits.push({ name: nm, init: s.init });
     }
   }
 
