@@ -45,3 +45,27 @@ cat(x + 1, "\n")
 sizes <- c("sm", "md", "lg")
 for (s in 1:3) cat(switch(sizes[s], sm = "S", md = "M", lg = "L", "?"), "")
 cat("\n")
+
+# **花括号括住一支**：R 里 `{ … }` 的值就是里头最后一格，所以只有一格的 `{ x }` 就是 x。
+# 要紧的是这说明"见着花括号就断定是语句"是错的 —— 每一支都写成 `{ … }` 的 switch
+# 交的仍然是**值**（从前那种函数的回值落成 void，而那一格是在公共 lower 那层才炸）。
+blkS <- switch("two", one = { "1" }, two = { "2" }, "other")
+cat(blkS, "\n")
+blkG <- switch("z", one = { 1 }, two = { 2 }, { 99 })
+cat(blkG, "\n")
+cat({ 7 }, "\n")
+blkV <- c({ 1 }, { 2 }, 3)
+cat(blkV, "\n")
+blkB <- if (length(blkV) > 2) { "长" } else { "短" }
+cat(blkB, "\n")
+cat(sapply(1:4, function(k) { k * k }), "\n")
+cat(sapply(c("a", "bb"), function(z) { nchar(z) }), "\n")
+blkF <- function(i) if (i > 0) { i } else { -i }
+cat(blkF(3), blkF(-3), "\n")
+blkK <- function(k) switch(k, a = { "甲" }, b = { "乙" }, { "别的" })
+for (k in c("a", "b", "c")) cat(k, blkK(k), "\n")
+blkT <- 0
+for (i in 1:3) blkT <- blkT + { i * 2 }
+cat(blkT, "\n")
+cat(Reduce(function(a, b) { a + b }, 1:5), "\n")
+cat(unlist(Filter(function(z) { z %% 2 == 0 }, 1:8)), "\n")

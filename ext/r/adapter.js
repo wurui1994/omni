@@ -2848,12 +2848,25 @@ const STMT_ONLY_FNS = new Set(['cat', 'print', 'set.seed', 'stop', 'stopifnot'])
 function switchIsStmt(x) {
   const arms = argsOf(x).slice(1).filter((a) => a.value !== null).map((a) => a.value);
   if (arms.length === 0) return true;
-  return arms.every((v) => {
+  /**
+   * **花括号本身说明不了是语句还是值**（2026-09-26 量出来的）：R 里 `{ … }` 的值就是里头
+   * 最后一格，所以 `switch(k, a = { "甲" }, b = { "乙" }, { "别的" })` 交的是**值**。
+   * 从前这儿见着 `block` 就一口断定"语句"，于是那种函数的回值类型落成 `void` ——
+   * 而那一格是在公共 lower 那一层才炸的（`(write E) 的实参要是 string，这里是 void`），
+   * 已经过了换档那道门：退 1、没有输出，libR 也接不着。所以往**里头最后一格**看。
+   */
+  const isStmtArm = (v) => {
     if (isAssign(v)) return true;
-    if (tag(v) === 'block' || tag(v) === 'for' || tag(v) === 'while' || tag(v) === 'repeat') return true;
+    if (tag(v) === 'for' || tag(v) === 'while' || tag(v) === 'repeat') return true;
+    if (tag(v) === 'paren') return isStmtArm(kids(v)[0]);
+    if (tag(v) === 'block') {
+      const ks = kids(v);
+      return ks.length === 0 ? true : isStmtArm(ks[ks.length - 1]);
+    }
     if (tag(v) === 'call' && tag(kids(v)[0]) === 'sym') return STMT_ONLY_FNS.has(nameOf(kids(v)[0]));
     return false;
-  });
+  };
+  return arms.every(isStmtArm);
 }
 
 /**
@@ -3584,6 +3597,21 @@ function exprOf(x, types, want, stmtPos) {
         return b(op, asNumE(le, lt), asNumE(re, rt));
       }
       return b(op, le, re);
+    }
+    case 'block': {
+      /* 表达式位上的 `{ … }`：R 里它的值是**最后一格**，前面那几格只是做事。
+         这一层透明接住的是"里头只有一格"那种 —— 真代码里花括号多半只是拿来括住一支
+         （`switch(k, a = { "A" }, …)` / `sapply(v, function(x) { x + 1 })`），那时
+         `{ x }` 就是 `x` 本身。
+         两格以上当场报：要接得把前面那几格**提出去**发一遍，而表达式位上没有语句槽可提 ——
+         提到整条语句前面是错的（`switch` 只求被选中的那一支，提出去就变成每趟都做）。
+         静默只取最后一格更糟：前面的副作用整个丢掉，而判据是逐字节对 `Rscript`。
+         零格（`{ }`）R 的值是 `NULL`，这一层没有那一格。 */
+      const ks = kids(x);
+      if (ks.length === 1) return exprOf(ks[0], types, want, stmtPos);
+      throw new Error(`r->IR: 表达式位上的 \`{ … }\` 里有 ${ks.length} 格还没接 ——`
+        + ' R 那儿值是最后一格、前面几格照做，而这一层在表达式位上没有语句槽摆它们'
+        + '（只有一格的 `{ x }` 接了）');
     }
     default:
       throw new Error(`r->IR: 这一格表达式还没接：${tag(x) ?? JSON.stringify(x).slice(0, 40)}`);
