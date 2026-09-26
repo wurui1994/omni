@@ -35,6 +35,49 @@ import {
   listEqOf, listCmpOf, dictEqOf, intOfStr, ordOf, expandTabsOf, splitLinesOf,
 } from './builtins.js';
 
+/** 这一格 IR 里是不是夹着几句话（`block-expr`）—— 摆在条件位上就要当心。 */
+export function carriesStmts(e) {
+  if (e === null || typeof e !== 'object') return false;
+  if (Array.isArray(e)) return e.some(carriesStmts);
+  if (e.kind === 'block-expr') return true;
+  return Object.values(e).some(carriesStmts);
+}
+
+/**
+ * `a and b` / `a or b` —— **右边夹着几句话时要真短路**。
+ *
+ * python 的 `and` / `or` 是短路的（左边定了就不算右边），而这一层把两边摆进方言的
+ * `&&` / `||` 里：右边那几句（`s[i].isdigit()` 那种要现场走一趟循环）会被**提到整句
+ * 前头**，于是右边照算 —— `while j < n and src[j].isdigit()` 在 j == n 那一圈当场炸
+ * （`substring out of range`）。
+ *
+ * 落成一格临时量加一句 `if`：只有该算右边的时候才算。
+ */
+function andOrOf(x, C) {
+  const isAnd = tag(x) === 'and';
+  const l = condOf(kids(x)[0], C);
+  const r = condOf(kids(x)[1], C);
+  if (!carriesStmts(r)) {
+    return { kind: 'binop', op: isAnd ? '&&' : '||', left: l, right: r };
+  }
+  const n = C.fresh(isAnd ? 'sc_a' : 'sc_o');
+  C.bind(n, BOOL);
+  const v = { kind: 'name', name: n };
+  return {
+    kind: 'block-expr',
+    stmts: [
+      { kind: 'let', name: n, type: BOOL, init: l },
+      {
+        kind: 'if',
+        cond: isAnd ? v : { kind: 'unop', op: '!', operand: v },
+        then: [{ kind: 'assign', target: v, value: r }],
+        else_: [],
+      },
+    ],
+    value: v,
+  };
+}
+
 /** 一格名字节点（`(n x)`）的文本；也收裸记号。 */
 export const nameOf = (x) => (tag(x) === 'n' ? leaf(kids(x)[0]) : leaf(x));
 
@@ -974,8 +1017,7 @@ export function exprOf(x, C) {
       return { kind: 'name', name: C.ref(n) };
     }
     case 'not': return { kind: 'unop', op: '!', operand: condOf(kids(x)[0], C) };
-    case 'and': return { kind: 'binop', op: '&&', left: condOf(kids(x)[0], C), right: condOf(kids(x)[1], C) };
-    case 'or': return { kind: 'binop', op: '||', left: condOf(kids(x)[0], C), right: condOf(kids(x)[1], C) };
+    case 'and': case 'or': return andOrOf(x, C);
     case 'un': {
       const o = String(leaf(kids(x)[0]));
       if (o === '+') return exprOf(kids(x)[1], C);

@@ -31,7 +31,7 @@ import { INT, STR, BOOL, DYN, arrOf, dictOf, sameType, typeOf, named } from '../
 import { typeToSx } from '../../../src/core/lower/ty.js';
 import {
   exprOf, condOf, nameOf, typeOfAnnot, tyOfCst, tyArg, pyStr, pyRepr, lenOf, hasFields, fstringParts, cmpEq,
-  kwOrder, tupleOf, cmpLt, needOrd, tupleToList, sortByKeyPy, emptyOf,
+  kwOrder, tupleOf, cmpLt, needOrd, tupleToList, sortByKeyPy, emptyOf, carriesStmts,
 } from './expr.js';
 import {
   reverseStmts, clearStmts, extendStmts, insertStmts, dropAtStmts, indexOfList,
@@ -1823,7 +1823,9 @@ function markBreaks(list, clear) {
   for (let i = list.length - 1; i >= 0; i -= 1) {
     const s = list[i];
     if (s === null || typeof s !== 'object') continue;
-    if (s.kind === 'break') { list.splice(i, 0, clear); continue; }
+    /* `synthetic` 那一格是 `whileStmt` 自己摆的"条件不成立就出去" —— 那是**正常收尾**，
+       不是 python 源码里的 `break`，所以不清 `while … else` 的标记。 */
+    if (s.kind === 'break') { if (s.synthetic !== true) list.splice(i, 0, clear); continue; }
     if (s.kind === 'for' || s.kind === 'while') continue;
     for (const key of ['then', 'else_', 'body', 'stmts']) markBreaks(s[key], clear);
   }
@@ -1847,8 +1849,35 @@ function ifStmt(x, C) {
   return { kind: 'if', cond, then, else_: els };
 }
 
+/**
+ * `while` —— **条件里夹着几句话时，改成 `while true` + 体开头 break**。
+ *
+ * 量到的原话（一处真会答错的）：`while j < n and src[j].isdigit()` 整个循环走到串尾 ——
+ * 串上那几个分类（`isdigit` / `isalnum` / …）要现场走一趟循环，于是条件那一格是
+ * `block-expr`；**摆在 while 的条件位上，那几句会被提到 while 外头**，条件就冻在头一圈
+ * 那个字符上了。症状：`tokenize("x1 + 42")` 只交一格记号 `('name', 'x1 + 42')`。
+ *
+ * 改成体开头"条件不成立就 break"，那几句就落在体里、每圈重算一遍。**`continue` 照旧对**
+ * （跳到 while 顶上，也就跳回那几句前面）；`while … else` 也照旧 —— 这一格 break 打了
+ * `synthetic` 记号，`markBreaks` 不给它补"清标记"那一句。
+ */
 function whileStmt(x, C) {
-  return { kind: 'while', cond: condOf(kids(x)[0], C), body: bodyStmts(part(x, 'body'), C) };
+  const cond = condOf(kids(x)[0], C);
+  const body = bodyStmts(part(x, 'body'), C);
+  if (!carriesStmts(cond)) return { kind: 'while', cond, body };
+  return {
+    kind: 'while',
+    cond: { kind: 'bool', value: true },
+    body: [
+      {
+        kind: 'if',
+        cond: { kind: 'unop', op: '!', operand: cond },
+        then: [{ kind: 'break', label: null, synthetic: true }],
+        else_: [],
+      },
+      ...body,
+    ],
+  };
 }
 
 /**
