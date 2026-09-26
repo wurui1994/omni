@@ -394,7 +394,7 @@ export function cTypeName(t) {
  *  它与 vec 同一条理由（值语义的聚合，24 字节躺在格子里），不是句柄。 */
 export function arrIsBlob(elem) {
   return elem.k === 'vec' || elem.k === 'class' || elem.k === 'arr' || elem.k === 'fn'
-      || elem.k === 'struct' || elem.k === 'enum' || elem.k === 'dynamic';
+      || elem.k === 'struct' || elem.k === 'enum' || elem.k === 'dynamic' || elem.k === 'dict';
 }
 
 /**

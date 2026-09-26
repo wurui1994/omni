@@ -85,3 +85,27 @@ def main():
 
 
 main()
+
+# ---- 一串记录（表的元素是一张字典）------------------------------------------
+# `rows = []` 之后 `rows.append({...})` —— 从 CSV / 配置里读出来的东西几乎都是这个形状。
+# 方言那一侧与"数组套数组"同一档：格子里躺一个句柄（字典是引用语义），走按字节那条路。
+# 缺的两处都是表：方言的元素白名单，与 `arrIsBlob`（少了它 C 那条腿走标量那条路，
+# `arrSuffix` 当场抛）。
+rows = []
+for i in range(3):
+    row = {}
+    row["id"] = i
+    row["sq"] = i * i
+    rows.append(row)
+print(len(rows), rows)
+for r in rows:
+    print(r["id"], r["sq"], len(r))
+print(rows[1]["sq"], rows[-1]["id"])
+# 引用语义：手上那一格与表里那一格是同一张字典
+last = rows[2]
+last["extra"] = 1
+print(len(rows[2]), sorted(rows[2]))
+tot = 0
+for r in rows:
+    tot += r["sq"]
+print(tot)

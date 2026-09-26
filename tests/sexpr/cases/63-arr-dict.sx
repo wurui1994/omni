@@ -1,0 +1,49 @@
+;; 表的元素是一张字典。这一份的存在理由是 python 里**"一串记录"**那种写法：
+;; `rows = []` 之后 `rows.append({...})` —— 从 CSV / 配置里读出来的东西几乎都是这个形状。
+;;
+;; 与"数组套数组"（`(arr (arr T))`，早就收了）**同一档**：格子里躺一个句柄（字典是引用
+;; 语义），走 `arrIsBlob` 那条按字节的路。所以这一刀只有两处：方言那张元素白名单，
+;; 与 `arrIsBlob` 里那一格（少了它，C 那条腿走标量那条路，`arrSuffix` 当场抛）。
+;;
+;; **零值是空引用**（与数组套数组一条）：`(anew (arr (dict …)) N)` 铺出来的 N 格都是空句柄，
+;; 谁要哪一格谁先造 —— 所以这一份一律 `apush` / `aset` 现成的字典进去，不读没写过的格子。
+;;
+;; 判据的要点是**引用语义**：推进去之后改源头那张字典，表里那一格要跟着变（与
+;; 44-dicts 里"值是一格类"同一条）。
+(module
+  (main
+    (let rows (arr (dict string int)) (anew (arr (dict string int)) (int 0)))
+    (let r (dict string int) (dnew (dict string int)))
+    (dset (var r) (str "id") (int 7))
+    (apush (var rows) (var r))
+    (print (alen (var rows)))
+    (print (dget (aget (var rows) (int 0)) (str "id")))
+
+    ;; 引用语义：改源头那张字典，表里那一格跟着变
+    (dset (var r) (str "id") (int 9))
+    (print (dget (aget (var rows) (int 0)) (str "id")))
+
+    ;; 反过来：直接往表里那一格上写，源头也看得见
+    (dset (aget (var rows) (int 0)) (str "sq") (int 81))
+    (print (dlen (aget (var rows) (int 0))))
+    (print (dlen (var r)))
+
+    ;; 再推一张：两格各是各的
+    (let r2 (dict string int) (dnew (dict string int)))
+    (dset (var r2) (str "id") (int 1))
+    (apush (var rows) (var r2))
+    (print (alen (var rows)))
+    (print (dlen (aget (var rows) (int 1))))
+    (print (dget (aget (var rows) (int 1)) (str "id")))
+
+    ;; `aset` 摆一张进去：句柄，与 `apush` 同一档
+    (aset (var rows) (int 1) (var r))
+    (print (dlen (aget (var rows) (int 1))))
+
+    ;; 另一种键（int 键）—— C 那条腿要为它另生成一份容器
+    (let t (arr (dict int string)) (anew (arr (dict int string)) (int 0)))
+    (let u (dict int string) (dnew (dict int string)))
+    (dset (var u) (int 3) (str "three"))
+    (apush (var t) (var u))
+    (print (dget (aget (var t) (int 0)) (int 3)))
+    (print (alen (var t)))))

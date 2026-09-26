@@ -349,6 +349,13 @@ class CoreLowerer {
         const e = this.ty(en, what);
         return e === null ? null : arrType(e);
       }
+      // **字典的数组**：与"数组套数组"同一档 —— 格子里躺一个句柄（字典是引用语义），
+      // 走 arrIsBlob 那条按字节的路，零值是空引用（谁要哪一格谁先造）。
+      // python 的"一串记录"（`rows = []` 之后 `rows.append({...})`）落的就是这一格。
+      if (isList(en) && head(en) === 'dict') {
+        const e = this.ty(en, what);
+        return e === null ? null : arrType(e);
+      }
       // **函数值的数组**（第三十七刀）：格子里躺一个函数句柄（C 侧是 `omni_fn`，一个指针），
       // 与类元素同一档 —— 走 arrIsBlob 那条按字节的路，零值是空引用（NullFn）。
       // 量出来的理由：`plain_picture.asy:95` 的 `boundRoutine[] bound;`
@@ -367,7 +374,7 @@ class CoreLowerer {
       if (nm !== null && this.structs.has(nm)) return arrType(this.structs.get(nm));
       const e = nm === null ? undefined : BASE_TYPES.get(nm);
       if (e === undefined || e === VOID) {
-        return this.err(node, `${what}：(arr 元素) 的元素只能是 int / real / bool / string / (vec T N) / 类名 / 结构体名`);
+        return this.err(node, `${what}：(arr 元素) 的元素只能是 int / real / bool / string / (vec T N) / (arr …) / (dict K V) / (fnty …) / 类名 / 结构体名`);
       }
       return arrType(e);
     }
