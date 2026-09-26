@@ -257,8 +257,12 @@ async function runRequest(root, body, verb, extra, pool) {
      画图落成 `(gfxcall …)`，产物交给**页面**那台 WebGL2 设备去画（见
      `src/studio/eval-live.js` 的头注）。白名单同上：从网上进来的字符串要拼进 argv。 */
   if (typeof body.gfx === 'string' && RUN_GFX.has(body.gfx)) argv.push('--gfx', body.gfx);
-  /* **`--units`：落成一目录按单元产物**（`/api/units` 那一格用它 —— 运行时那一层只编一次）。 */
-  if (body.units === true) argv.push('--units', '--gfx', 'host');
+  /* **`--units`：落成一目录按单元产物**（`/api/units` 那一格用它 —— 运行时那一层只编一次）。
+     这一档**就在服务进程里编**（见 `runInProc` 的头注）：它一个字节的用户代码都不跑，
+     进池子只会让语法表/指纹/JIT 每趟重新热身。 */
+  if (body.units === true) {
+    return runInProc([...argv, '--units', '--gfx', 'host']);
+  }
   return runOmni(root, argv, body.timeout ?? 30, pool);
 }
 
@@ -267,6 +271,40 @@ const RUN_FORMATS = new Set(['eps', 'svg']);
 
 /** `--gfx` 认的那几档（`src/core/cli.js` 的那张表）。 */
 const RUN_GFX = new Set(['host', 'ir', 'cpu', 'null', 'gl']);
+
+/**
+ * **编译这件事就在服务进程里做**（`/api/units` 那一格），不进热工人池。
+ *
+ * 为什么：工人池存在的理由是"**跑**别人的程序要隔开"。而 `emit js --units` 一个字节的
+ * 用户代码都不执行 —— 程序是在**浏览器**里跑的。进了池子反倒每趟都在赔钱：一格工人一格
+ * 语法表、一格编译器指纹、一份自己的 JIT，四格工人轮着来、还按趟数回收，于是热身永远
+ * 热不起来。量过（同一个"改一个字符"的请求）：走工人 **48~284ms**，留在一个待久了的
+ * 进程里 **20ms**。
+ *
+ * 留在同一个进程里那几样只付一次：语法表、`srcStamp()`、V8 的 JIT、模块缓存。
+ * 代价写在明处：编译器自己抛的异常要在这儿拦住（下面那个 try），别把服务带走。
+ */
+let CLI_MOD = null;
+async function runInProc(argv) {
+  if (CLI_MOD === null) CLI_MOD = await import('./cli.js');
+  let out = '';
+  let err = '';
+  const so = process.stdout.write.bind(process.stdout);
+  const se = process.stderr.write.bind(process.stderr);
+  process.stdout.write = (c) => { out += typeof c === 'string' ? c : String(c); return true; };
+  process.stderr.write = (c) => { err += typeof c === 'string' ? c : String(c); return true; };
+  let code = 1;
+  try {
+    code = CLI_MOD.runCli(argv) ?? 0;
+  } catch (e) {
+    err += `${e && e.message ? e.message : e}\n`;
+    code = 1;
+  } finally {
+    process.stdout.write = so;
+    process.stderr.write = se;
+  }
+  return { stdout: out, stderr: err, code, via: 'inproc' };
+}
 
 
 /* ------------------------------------------------------------ 控制台的会话

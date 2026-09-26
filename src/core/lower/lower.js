@@ -15,9 +15,23 @@ import * as sx from './sx.js';
  *
  * @param {object} module   标准 IR 的模块描述（§1.2 的 { kind: 'module', decls } ）
  * @param {object} hooks    语言钩子（语义配置 + 回调函数）
+ * @param {object} [opts]   `skipBodies`：**这几个名字只登记、不发正文**（见下）
  * @returns {string}        .sx 文本
+ *
+ * ## `skipBodies`：正文不发、签名照登记
+ *
+ * 谁要它：按单元产物那条路上，**运行时那一层是所有脚本共用的一格**（EVAL 两门的
+ * `gl_*`/`g3_*`/`gfx_*`/`gt_*`：一份脚本 77KB 的 sx 里有 68KB 是它）。盘上那份产物还算数
+ * 的时候，把它的正文再降一遍是纯浪费 —— 量过：降 + 印那 68KB 每趟 13~20ms，
+ * 而产物**逐字节相同**。
+ *
+ * 做法是"第一遍照旧、第二遍跳过"：签名/类型/模块级量**全都登记**（所以脚本里引它们
+ * 照旧查得到类型），只是不发那几项的正文。于是这一趟的 `.sx` 里只有脚本自己那几项，
+ * 拼单元时把那一份按 `sections.skipped` 交出去（`frontend-asy/link.js` 早就认这一格 ——
+ * asy 那条腿复用库产物走的是同一条路）。
  */
-export function lower(module, hooks = {}) {
+export function lower(module, hooks = {}, opts = {}) {
+  const skip = opts.skipBodies instanceof Set ? opts.skipBodies : null;
   const scope = new Scope();
   const typeEnv = new TypeEnv();
 
@@ -100,6 +114,9 @@ export function lower(module, hooks = {}) {
 
   // 第二遍：发射函数体
   for (const decl of module.decls) {
+    /* **正文不发的那几项**（`skipBodies`）：签名上头已经登记过了，这儿一格都不发 ——
+       盘上那份产物还算数（见头注）。 */
+    if (skip !== null && typeof decl.name === 'string' && skip.has(decl.name)) continue;
     if (decl.kind === 'fn') {
       lines.push(lowerFn(decl, ctx));
     }

@@ -83,8 +83,10 @@ export function hasAdapter(lang) {
  *
  * @param {string} path 源文件
  * @param {string[]} argv `run` / `build` 后面那些参数（`--lang` 在里头）
+ * @param {object|null} out 出参（`out.rtNames`：哪些名字是那门语言的运行时层）
+ * @param {object} opts `skipBodies(rtNames)`：回一格 `Set` 就**只登记不发正文**（见下）
  */
-export function sxTextOf(path, argv = [], out = null) {
+export function sxTextOf(path, argv = [], out = null, opts = {}) {
   const lang = pickLang(path, cliArg(argv, '--lang'));
   if (!hasAdapter(lang)) {
     throw new OmniError(`${lang.name} 还没有 adapter —— 这条路（ADR-0044）要登记处那一格 toIR`);
@@ -173,7 +175,17 @@ export function sxTextOf(path, argv = [], out = null) {
     if (out !== null && out !== undefined) {
       out.rtNames = Array.isArray(ir.rtNames) ? ir.rtNames : [];
     }
-    return lower(ir, lang.hooks ?? {});
+    /**
+     * **要不要跳过运行时那一层的正文**（`opts.skipBodies(rtNames)` -> `Set` 或 null）。
+     *
+     * 这一问只有调用方答得上来（它才知道盘上那份产物还算不算数），而它要问之前得先知道
+     * 那一层有哪些名字 —— 那正是 `toIR` 刚算出来的 `rtNames`。所以钩子摆在这儿：
+     * 语言与缓存两边的知识各留在各自那一侧（见 `lower.js` 里 `skipBodies` 的头注）。
+     */
+    const skip = typeof opts.skipBodies === 'function'
+      ? opts.skipBodies(Array.isArray(ir.rtNames) ? ir.rtNames : [])
+      : null;
+    return lower(ir, lang.hooks ?? {}, skip instanceof Set ? { skipBodies: skip } : {});
   } catch (err) {
     throw new OmniError(`${path}：${lang.name} 这一格还没接住 —— ${err.message}`);
   }
@@ -218,6 +230,6 @@ export function borrowedExts() {
  * 输入一模一样的那条路（lower → OIR → MIR → 原生 / js / llvm，还有 `--cc` /
  * `OMNI_MIR_OPT` / 摇树 / profile），所以下游一行都不用再写。
  */
-export function coreSxText(path, argv, out = null) {
-  return sxTextOf(path, argv, out);
+export function coreSxText(path, argv, out = null, opts = {}) {
+  return sxTextOf(path, argv, out, opts);
 }

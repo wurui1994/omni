@@ -247,6 +247,31 @@ export function moduleOrderOf(dir, mainName) {
 
 
 /**
+ * 一行里的**括号净变化**，`"…"` 里头的不算。
+ *
+ * 为什么非要跳串：`.pss` 的着色器原文是整段塞进一格 `(str "…")` 的，里头有 `{`、`(`、`)`、
+ * 注释，**括号未必配对**（`ken/driftbox.pss` 那份片元着色器就多一个右括号）。朴素计数在
+ * 那一行上会提前判定"这一项收尾了"，切出来的入口那一份少一个右括号 —— 症状是
+ * `unterminated list: missing )`，而错行指到 `(module` 那一行（离真正的毛病一千行远）。
+ *
+ * 转义按方言的写法认：`\\` 与 `\"`（`lower/sx.js` 的 `quoteSx` 只发这两种）。
+ */
+function parenDelta(line) {
+  let d = 0;
+  let inStr = false;
+  let esc = false;
+  for (const c of line) {
+    if (esc) { esc = false; continue; }
+    if (c === '\\') { esc = true; continue; }
+    if (c === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (c === '(') d += 1;
+    else if (c === ')') d -= 1;
+  }
+  return d;
+}
+
+/**
  * 把一份 `(module …)` 的**核心方言文本切成顶层项**（一项一条，正文带全）。
  *
  * 谁要它：把一份程序切成几格单元时，"哪几项归哪一份"是按名字分的
@@ -254,9 +279,9 @@ export function moduleOrderOf(dir, mainName) {
  * `docs/design/omni-serve-studio.md` §9.3）。`frontend-asy/link.js` 的 `formsOf` 只取
  * **签名那一行**（它要的是"谁定义了什么"），这一格要的是**整项的正文**，两件事。
  *
- * 认的形状只有一种：顶层项从**行首那个左括号**起（`  (fn 名字 …`），到括号平衡为止。
- * 公共降级器印出来的就是这个样子（缩进两格、一项一段）。`(module` 自己与末尾那个
- * 右括号不算项。回 `[{head, name, text}]`，`head` 是 `fn`/`global`/`main`… 。
+ * 认的形状只有一种：顶层项从**行首那个左括号**起（`  (fn 名字 …`），到括号平衡为止
+ * （括号按 `parenDelta` 数 —— 串里头的不算）。`(module` 自己与末尾那个右括号不算项。
+ * 回 `[{head, name, text}]`，`head` 是 `fn`/`global`/`main`… 。
  */
 export function sxForms(text) {
   const out = [];
@@ -272,10 +297,7 @@ export function sxForms(text) {
       depth = 0;
     }
     cur.lines.push(ln);
-    for (const c of ln) {
-      if (c === '(') depth++;
-      else if (c === ')') depth--;
-    }
+    depth += parenDelta(ln);
     if (depth <= 0) {
       out.push({ head: cur.head, name: cur.name, text: cur.lines.join('\n') });
       cur = null;
@@ -314,10 +336,18 @@ export function sxDoStmts(text) {
     /* **这一行可能装着好几层的收尾**（`…))))` 里后几个右括号是 `do` / `main` /
        外层 `while` 的）—— 所以按字符数深度，深度回到 0 的那一刻就在那儿把行切断，
        多出来的那几个右括号不属于这一句。踩过：不切断的话入口那一份括号多出六个，
-       降级器当场报 `unexpected )`。 */
+       降级器当场报 `unexpected )`。
+       **串里头的括号不算**（着色器原文整段在一格 `(str "…")` 里，括号未必配对 ——
+       见 `parenDelta` 的头注）。 */
     let cut = -1;
+    let inStr = false;
+    let esc = false;
     for (let k = 0; k < ln.length; k++) {
       const c = ln[k];
+      if (esc) { esc = false; continue; }
+      if (c === '\\') { esc = true; continue; }
+      if (c === '"') { inStr = !inStr; continue; }
+      if (inStr) continue;
       if (c === '(') { depth++; continue; }
       if (c !== ')') continue;
       depth--;
@@ -419,7 +449,20 @@ export function buildUnits(o) {
     rows.set(u.name, row);
     const key = ix.keyOf(row, o.tool);
     const had = ix.row(u.name);
-    if (had !== null && had.key === key && exists(jsPath)) { kept++; continue; }
+    if (had !== null && had.key === key && exists(jsPath)) {
+      /* **产物还算数、可它的接口还得补**：`<名字>.d.sx` 是别人"正文不降"时发签名用的
+         （见 `ext/polydraw/units.js` 的头注）。旧版不写签名，于是盘上留着一堆只有表头的
+         空接口 —— 不补的话那条快路永远命中不了（症状：一片"未声明的函数"，或者干脆
+         每趟都全降一遍）。补一趟只是几 KB 的写，而且内容一样就不写。 */
+      if (u.name !== o.entry && (u.sigs ?? []).length > 0) {
+        const d = declRead(o.dir, u.name);
+        if (d === null || (d.sigs ?? []).length !== u.sigs.length) {
+          declWrite(o.dir, u.name, u.sigs, u.iface ?? null);
+        }
+      }
+      kept++;
+      continue;
+    }
     writeText(jsPath, o.emitJs(u));
     if (u.name !== o.entry) declWrite(o.dir, u.name, u.sigs ?? [], u.iface ?? null);
     ix.set(u.name, row, o.tool);

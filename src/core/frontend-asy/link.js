@@ -26,7 +26,7 @@ import { hash16 } from '../host/hash.js';
  * 一条形式的**签名**是它自己的第一行，缺几个右括号补几个（按那一行的括号深度算）。
  * 签名与定义用的是同一份文本，所以两者不可能不一致。
  */
-function formsOf(text) {
+export function formsOf(text) {
   const out = [];
   const lines = text.split('\n');
   let d = 0;
