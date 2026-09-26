@@ -510,7 +510,14 @@ export function tyOfCst(x, C) {
       /* 元组的那一格：下标是字面量，答的是那一格字段的类型。 */
       const tup = tupleOf(C.recOf(base));
       if (tup !== null) {
-        if (first === undefined || tag(first) !== 'num') return null;
+        if (first === undefined) return null;
+        /* 切一段：形状是编译期算出来的（与 `tupleSlice` 用的是同一份清单）。 */
+        if (tag(first) === 'slice') {
+          const pick = tupleSlicePick(tup.length, kids(first), C, false);
+          if (pick === null || pick.length === 0) return null;
+          return tupleRec(pick.map((at) => tup[at]), C).type;
+        }
+        if (tag(first) !== 'num') return null;
         let at = Number(numValue(leaf(kids(first)[0])).value ?? NaN);
         if (Number.isNaN(at)) return null;
         if (at < 0) at += tup.length;
@@ -2043,6 +2050,70 @@ function formatOf(tmpl, args, C) {
   return out.reduce((l, r) => ({ kind: 'binop', op: '+', left: l, right: r }));
 }
 
+/**
+ * 切元组要取的**下标清单** —— 编译期就得算出来（交出来的形状由它定）。
+ * 三个边界都要是整数字面量；拿不准就回 `null`（`strict` 时当场报）。
+ * 算法照 python 自己那套 `slice.indices`：负的加长度再夹住，而**步长为负时两头的夹法
+ * 与正的不一样** —— 照抄，别猜。
+ */
+function tupleSlicePick(n, parts, C, strict) {
+  const lit = (at, what) => {
+    const tok = parts[at];
+    if (tok === undefined || tag(tok) === null) return null;
+    const v = exprOf(tok, C);
+    if (v.kind !== 'int') {
+      if (!strict) return undefined;
+      throw new Error(`python->IR: 切元组的${what}要写成一格整数字面量 ——`
+        + ' 交出来的形状（几格、逐格什么类型）得在编译期定');
+    }
+    return Number(v.value);
+  };
+  const start = lit(0, '起点');
+  const stop = lit(1, '终点');
+  const step = lit(2, '步长');
+  if (start === undefined || stop === undefined || step === undefined) return null;
+  if (step === 0) {
+    if (!strict) return null;
+    throw new Error('python->IR: 切片的步长不能是 0');
+  }
+  const st = step === null ? 1 : step;
+  const pick = [];
+  if (st > 0) {
+    let lo = start === null ? 0 : (start < 0 ? Math.max(0, start + n) : Math.min(start, n));
+    const hi = stop === null ? n : (stop < 0 ? Math.max(0, stop + n) : Math.min(stop, n));
+    for (; lo < hi; lo += st) pick.push(lo);
+  } else {
+    const clamp = (v) => (v < 0 ? (v + n < 0 ? -1 : v + n) : Math.min(v, n - 1));
+    let lo = start === null ? n - 1 : clamp(start);
+    const hi = stop === null ? -1 : clamp(stop);
+    for (; lo > hi; lo += st) if (lo >= 0) pick.push(lo);
+  }
+  return pick;
+}
+
+/** `t[a:b:c]` —— **切元组是编译期的事**：按下标清单造一格新形状的记录。 */
+function tupleSlice(box, sliceTok, rec, C) {
+  const pick = tupleSlicePick(rec.tuple.length, kids(sliceTok), C, true);
+  if (pick.length === 0) {
+    throw new Error('python->IR: 这一刀切出来是空元组 `()` —— 还没接（记录得有至少一格字段）');
+  }
+  const pre = [];
+  let b = box;
+  if (!isPure(box)) {
+    const nm2 = C.fresh('ts_t');
+    const bt = ty(box, C);
+    C.bind(nm2, bt);
+    pre.push({ kind: 'let', name: nm2, type: bt, init: box });
+    b = { kind: 'name', name: nm2 };
+  }
+  const out = tupleRec(pick.map((at) => rec.tuple[at]), C);
+  const value = {
+    kind: 'new-record', type: out.type, ref: true,
+    fields: pick.map((at, k) => ({ name: `_${k}`, value: { kind: 'field', obj: b, name: `_${at}` } })),
+  };
+  return pre.length === 0 ? value : { kind: 'block-expr', stmts: pre, value };
+}
+
 /** `xs[i]` / `d[k]` / `s[i]` / `xs[a:b]` / `s[a:b]`。 */
 function indexOf(x, C) {
   const box = exprOf(kids(x)[0], C);
@@ -2051,7 +2122,7 @@ function indexOf(x, C) {
   const t = ty(box, C);
   const tup = tupleOf(C.recOf(t));
   if (tup !== null) {
-    if (tag(subs[0]) === 'slice') throw new Error('python->IR: 切元组还没接');
+    if (tag(subs[0]) === 'slice') return tupleSlice(box, subs[0], C.recOf(t), C);
     return tupleAt(box, subs[0], C.recOf(t), C);
   }
   if (tag(subs[0]) === 'slice') return sliceOf(box, subs[0], C);
