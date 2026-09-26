@@ -598,8 +598,11 @@ function tyOfCall(x, C) {
   if (nm === 'min' || nm === 'max') {
     const t = argTys[0];
     if (t === null || t === undefined) return null;
-    /* 一格实参那是一格表（`min(xs)` 交元素）；两格以上逐个挑（交的还是同一档）。 */
-    return args.length === 1 ? (t.kind === 'arr' ? t.elem : null) : t;
+    /* 一格实参那是一格表（`min(xs)` 交元素）；串也算（`min("abc")` 交一格串）。
+       两格以上逐个挑（交的还是同一档）。 */
+    if (args.length !== 1) return t;
+    if (t.kind === 'arr') return t.elem;
+    return t.kind === 'string' ? STR : null;
   }
   if (nm === 'any' || nm === 'all') return BOOL;
   if (nm === 'sum') {
@@ -612,7 +615,10 @@ function tyOfCall(x, C) {
   if (nm === 'round') return args.length >= 2 ? REAL : INT;
   if (nm === 'list' || nm === 'sorted' || nm === 'reversed') {
     const t = argTys[0];
-    return t === null || t === undefined ? null : (t.kind === 'arr' ? t : null);
+    if (t === null || t === undefined) return null;
+    /* `sorted(串)` / `list(串)` 交的是一张字符表（`reversed` 只收表）。 */
+    if (t.kind === 'string' && nm !== 'reversed') return arrOf(STR);
+    return t.kind === 'arr' ? t : null;
   }
   if (nm === 'zip' && argTys.length === 2) {
     const a = argTys[0];
@@ -630,6 +636,13 @@ function tyOfCall(x, C) {
   }
   if (nm === 'pow') return argTys.length === 2 && argTys.every((t) => t != null && t.kind === 'int')
     ? INT : REAL;
+  /* `divmod(a, b)` —— 两格的元组，逐格类型与 `//` / `%` 交的同一档。 */
+  if (nm === 'divmod' && argTys.length === 2) {
+    const [x, y] = argTys;
+    if (x == null || y == null) return null;
+    const one = x.kind === 'int' && y.kind === 'int' ? INT : REAL;
+    return tupleRec([one, one], C).type;
+  }
   if (nm === 'range') return arrOf(INT);
   const inst = C.resolveFn(nm, argTys);
   return inst === null ? null : inst.ret;
@@ -1121,11 +1134,12 @@ export function needOrd(t, C, what) {
   throw new Error(`python->IR: \`${what}\` 的元素是 ${t.kind} —— 还没接（要有"怎么比"）`);
 }
 
-/** `sorted(xs)` —— 先问一声"元素怎么比"，再把比法递给那趟插入排序。 */
+/** `sorted(xs)` —— 先问一声"元素怎么比"，再把比法递给那趟插入排序。串按一格一个字符排。 */
 function sortedPy(xsE, C, desc) {
-  const t = ty(xsE, C);
+  const src = ty(xsE, C).kind === 'string' ? charsOf(xsE, C) : xsE;
+  const t = ty(src, C);
   if (t.kind === 'arr') needOrd(t.elem, C, 'sorted()');
-  return sortedOf(xsE, C, desc, (x, y) => cmpOne('<', x, y, C));
+  return sortedOf(src, C, desc, (x, y) => cmpOne('<', x, y, C));
 }
 
 /** `x in 容器` —— 字典是"有这个键"、串是"找得到这一段"、表是走一遍。 */
@@ -1290,10 +1304,29 @@ function binOf(x, C) {
   /* **串上的 `%` 要在算右边之前拦**：`"%s=%s" % (a, b)` 的右边是一格元组，
      而这一层没有元组这一档 —— 算它会当场报"这一格表达式还没接：tuple"。 */
   if (o === '%' && tag(aTok) === 'str') return percentOf(aTok, bTok, C);
-  const a = exprOf(aTok, C);
-  const b = exprOf(bTok, C);
-  const ta = ty(a, C);
-  const tb = ty(b, C);
+  let a = exprOf(aTok, C);
+  let b = exprOf(bTok, C);
+  let ta = ty(a, C);
+  let tb = ty(b, C);
+
+  /* python 的 bool **就是** int 的一种（`True + True` 是 2、`True * 2` 是 2）。
+     方言里那是两档类型，所以这儿现折一格 `b ? 1 : 0`。只在两边都是数或布尔时折 ——
+     `True + "a"` 还是当场报（python 那儿也是 TypeError）。
+     **位运算不折**：python 的 `True & True` 交的是 `True` 而不是 `1`，印出来不一样。 */
+  if (!BITS.has(o) && (ta.kind === 'bool' || tb.kind === 'bool')
+    && (ta.kind === 'bool' || isNum(ta)) && (tb.kind === 'bool' || isNum(tb))) {
+    const asInt = (e) => ({
+      kind: 'ternary', type: INT, cond: e, then: { kind: 'int', value: 1 }, else_: { kind: 'int', value: 0 },
+    });
+    if (ta.kind === 'bool') {
+      a = asInt(a);
+      ta = INT;
+    }
+    if (tb.kind === 'bool') {
+      b = asInt(b);
+      tb = INT;
+    }
+  }
 
   /* 0. 有一边是箱子：按 `(dtag …)` 两边各问一次，走 `dyn.js` 那一族。
      `//` `%` `**` 的算法（python 那三条规矩）从这儿递进去 —— 静态那一侧用的是同一份。 */
@@ -1310,9 +1343,12 @@ function binOf(x, C) {
   }
   if (o === '**') {
     const p = { kind: 'rmath', fn: 'pow', args: [toReal(a, C), toReal(b, C)] };
-    const wantInt = isInt(ta) && tag(bTok) === 'num'
+    /* 指数是**非负的整数字面量**时交 int（python 的 `2 ** 3` 是 3 而不是 3.0）。
+       `True` / `False` 也算整数字面量 —— bool 就是 int 的一种，上面刚折成 0 / 1。 */
+    const boolExp = tag(bTok) === 'true' || tag(bTok) === 'false';
+    const wantInt = isInt(ta) && (boolExp || (tag(bTok) === 'num'
       && numValue(leaf(kids(bTok)[0])).kind === 'int'
-      && numValue(leaf(kids(bTok)[0])).value >= 0n;
+      && numValue(leaf(kids(bTok)[0])).value >= 0n));
     return wantInt ? { kind: 'builtin', name: 'toint', args: [p] } : p;
   }
   if (BITS.has(o)) {
@@ -2445,6 +2481,12 @@ function builtinOf(nm, args, argToks, C) {
       if (t0.kind === 'int') return args[0];
       /* **`int(3.7)` 是向零取整**（`int(-3.7)` 是 -3）—— 方言的 `toint` 正是这一格。 */
       if (t0.kind === 'real') return { kind: 'builtin', name: 'toint', args };
+      /* python 的 bool 就是 int 的一种：`int(True)` 是 1。 */
+      if (t0.kind === 'bool') {
+        return {
+          kind: 'ternary', type: INT, cond: args[0], then: { kind: 'int', value: 1 }, else_: { kind: 'int', value: 0 },
+        };
+      }
       throw new Error(`python->IR: \`int(${t0.kind})\` 还没接（串转数要走 CPython 那份 C）`);
     case 'float':
       return t0.kind === 'real' ? args[0] : toReal(args[0], C);
@@ -2459,15 +2501,47 @@ function builtinOf(nm, args, argToks, C) {
     case 'abs':
       if (t0.kind === 'real') return { kind: 'rmath', fn: 'fabs', args };
       return pickOf(args[0], { kind: 'unop', op: '-', operand: args[0] }, '>', C);
+    /* `divmod(a, b)` —— 交一格两格的元组 `(a // b, a % b)`。取整与取模用的就是
+       `//` / `%` 那两份（`floorDiv` / `pyMod`），所以 python 的符号规矩不用再说一遍。 */
+    case 'divmod': {
+      if (args.length !== 2) throw new Error('python->IR: `divmod()` 收两格实参');
+      const t1 = ty(args[1], C);
+      if (!isNum(t0) || !isNum(t1)) {
+        throw new Error(`python->IR: \`divmod(${t0.kind}, ${t1.kind})\` 还没接（数才有这一格）`);
+      }
+      const pre = [];
+      const pin = (e, p) => {
+        if (isPure(e)) return e;
+        const n = C.fresh(p);
+        const t = ty(e, C);
+        C.bind(n, t);
+        pre.push({ kind: 'let', name: n, type: t, init: e });
+        return { kind: 'name', name: n };
+      };
+      const x = pin(args[0], 'dm_a');
+      const y = pin(args[1], 'dm_b');
+      const both = isInt(t0) && isInt(t1);
+      const q = floorDiv(x, y, both, C);
+      const r = pyMod(x, y, both, C);
+      const rec = tupleRec([ty(q, C), ty(r, C)], C);
+      const value = {
+        kind: 'new-record', type: rec.type, ref: true,
+        fields: [q, r].map((v, i) => ({ name: `_${i}`, value: v })),
+      };
+      return pre.length === 0 ? value : { kind: 'block-expr', stmts: pre, value };
+    }
     case 'min': case 'max': {
       const op = nm === 'min' ? '<' : '>';
       if (args.length === 0) throw new Error(`python->IR: \`${nm}()\` 至少要一格实参`);
       /* 比法递下去 —— 元组按字典序（`cmpOne`），不然落到方言里是比句柄、静默答错。 */
       const less = (x, y) => cmpOne('<', x, y, C);
-      /* 一格实参：那是一格表（`min(xs)`）。两格以上：逐个挑（`min(a, b, c)`）。 */
+      /* 一格实参：那是一格表（`min(xs)`），串也算（一格一个字符）。
+         两格以上：逐个挑（`min(a, b, c)`）。 */
       if (args.length === 1) {
-        if (t0.kind === 'arr') needOrd(t0.elem, C, `${nm}()`);
-        return pickList(args[0], op, nm, C, less);
+        const one = t0.kind === 'string' ? charsOf(args[0], C) : args[0];
+        const tOne = ty(one, C);
+        if (tOne.kind === 'arr') needOrd(tOne.elem, C, `${nm}()`);
+        return pickList(one, op, nm, C, less);
       }
       args.forEach((a) => needOrd(ty(a, C), C, `${nm}()`));
       let best = args[0];

@@ -2,7 +2,23 @@
 #
 # 这一份的每一行都是**判据**：整除向下取整、取模符号跟着除数、`/` 永远是浮点、
 # 浮点转串是最短往返。任一处走了 C 的口径，与 python3 的 diff 立刻现形。
+#
+# **python 的 bool 就是 int 的一种**（`True + True` 是 2）—— 方言里那是两档类型，
+# 所以当数用的时候现折一格 `b ? 1 : 0`。位运算**不折**：python 的 `True & True` 交的是
+# `True` 而不是 `1`，印出来不一样，所以那一格还是当场报（明说的不足）。
 import math
+
+
+def bool_as_int():
+    print(True + True, True * 2, int(True), int(False))
+    print(True + 1, 1 + True, True - False, True + 1.5)
+    print(2 ** True, True / 2, True // 1, True % 2)
+
+
+def divmods():
+    # 交一格两格的元组；取整与取模走的就是 `//` / `%` 那两份
+    print(divmod(7, 3), divmod(-7, 2), divmod(7, -2), divmod(-7, -2))
+    print(divmod(7.5, 2), divmod(-7.5, 2))
 
 
 def floor_div_table():
@@ -33,6 +49,8 @@ def rounding():
     print(int(3.7), int(-3.7), int(0.0))
     print(abs(-4), abs(4), abs(-4.5))
     print(min(3, 7), max(3, 7), min(-1.5, 2.0), max(-1.5, 2.0))
+    # 串上的挑与排：一格一个字符
+    print(min("abc"), max("abc"), sorted("bca"), sorted("cba", reverse=True))
 
 
 def bits():
@@ -62,6 +80,8 @@ def main():
     rounding()
     bits()
     maths()
+    bool_as_int()
+    divmods()
     print(compare_chain(1, 2, 3), compare_chain(3, 2, 1), compare_chain(1, 3, 2))
 
 
