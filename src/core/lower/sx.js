@@ -88,6 +88,9 @@ export const SX_ARITY = {
      没设时回空串 —— 与 R 同解，所以不必再包一层。 */
   getenv: 1,
   sfix: 2, ssci: 2, sgen: 2, sgenk: 2, sbase: 2,
+  /* **往返无损的 real 文本**（`(srepr E)`）：与 `tostr` 的 %.6g 是两条不同规则。
+     python 的 `str(float)` / `repr(float)` 要的正是这一格。 */
+  srepr: 1,
   /* 整数与实数之间（**无符号 64 位要走 `torealu`**：那一格的位当有符号读是负数） */
   toreal: 1, torealu: 1, toint: 1,
   /* **实数上的数学函数**（`(rmath "sqrt" A [B [C]])`）：名单是 C99 math.h 与 ECMA-262 Math 的

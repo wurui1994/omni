@@ -2007,6 +2007,24 @@ class CoreLowerer {
       }
       return { kind: 'Builtin', name: 'to_string_g', args: [v, p], type: STRING, argType: REAL };
     }
+    /* `(srepr E)` —— **往返无损的 real 文本**。与 `(tostr E)` 的 %.6g 是两条不同规则
+       （ADR-0005）：这一格取 15/16/17 位里第一个能 `strtod` 回原值的，再保证末尾有
+       `.0` 或 `e`。Omni 自己那一层本来就有它（`repr(x)`，`hir/check.js`），三条腿的实现
+       也早就在（`omni_repr_real` / `$repr_real` / `reprReal`）—— **缺的一直只是方言这个口**。
+       谁要它：python 的 `str(float)` 与 `repr(float)` 就是最短往返（`4.0` 不是 `4`、
+       `0.1` 不是 `0.100000`），走 %.6g 的话每一处浮点输出都与 CPython 差一截。 */
+    if (h === 'srepr') {
+      if (n.items.length !== 2) return this.err(n, '(srepr E) 要 1 个参数');
+      const v = this.expr(n.items[1]);
+      if (v === null) return null;
+      if (v.type.k === 'int') {
+        return { kind: 'Builtin', name: 'to_string', args: [v], type: STRING, argType: v.type };
+      }
+      if (v.type.k !== 'real') {
+        return this.err(n, `(srepr E) 只接受 int / real，这里是 ${coreTypeText(v.type)}`);
+      }
+      return { kind: 'Builtin', name: 'repr', args: [v], type: STRING, argType: REAL };
+    }
     // `(rmath "NAME" A [B])`：real 上的数学函数。名单是**量出来的**（runtime/omni_math.c
     // 的头注里写着）：只有各家实现必然一致的那几个进得来 —— sqrt 是 IEEE-754 强制正确
     // 舍入，fabs/floor/ceil/round/fmod 是精确运算，pow 在 80 组随机输入上 libm 与 V8

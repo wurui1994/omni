@@ -117,7 +117,7 @@ function builtinType(e, ctx) {
     /* 串那一族交出来的都是串（漏了 `ssub` 的症状是 `(let c int (ssub …))` —— 声明说 int，
        装进去的是串，方言当场报"未声明的变量"那一串连锁错）。 */
     case 'tostr': case 'ssub': case 'srep': case 'supper':
-    case 'sfix': case 'ssci': case 'sgen': case 'sgenk': case 'sbase': return STR;
+    case 'sfix': case 'ssci': case 'sgen': case 'sgenk': case 'sbase': case 'srepr': return STR;
     /* `(chr 码位)` 交的是**一个字符的串**（`printf("%c")` 走它）。 */
     case 'chr': return STR;
     /* `(gfxcall "名字" …)`：图形设备的宿主面 —— 回的是 real（那一面只有 double）。 */

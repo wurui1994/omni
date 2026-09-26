@@ -111,6 +111,9 @@ const RT_OPS = new Map([
   // `(tostr E N)`：按 N 位有效数字。位数是普通 i64 实参，不是常量折进符号名 ——
   // 那样每多一个位数就多一个符号，而 ABI 里多一个 i64 什么都不用改。
   ['to_string_g.real', { sym: 'omni_str_realg', ret: '[2 x i64]', params: ['double', 'i64'] }],
+  /* `(srepr E)`：往返无损的 real 文本（Omni 那一层的 `repr(x)` 落的是同一格）。
+     `omni_repr_real` 一直在 omni.h 里，缺的只是这一行 —— python 的 `str(float)` 要它。 */
+  ['repr.real', { sym: 'omni_repr_real', ret: '[2 x i64]', params: ['double'] }],
   // `(readtext E)`：整份读一份文本文件。omni_read_text 是 omni.h 里的真符号，
   // 收发都是 omni_str = [2 x i64]（与 to_string.* 那三条同一个拼法）。
   ['read_text.string', { sym: 'omni_read_text', ret: '[2 x i64]', params: ['[2 x i64]'] }],
