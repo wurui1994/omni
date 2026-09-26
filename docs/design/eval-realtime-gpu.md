@@ -284,6 +284,13 @@ omni run x.pss --mode view              有窗口地跑 —— **这条腿上还
 * **`render` 模式下 `klock()` 是确定性时钟**：帧号 / 60（照 c_impl 的
   `pdrl_set_clock_scale(ctx, 1/60)`）。离屏出的图要能逐字节比，墙上时间在那儿是噪声。
   `view` 模式才是真墙上时间。
+* **`view` 模式下 `klock()` 的零点是"这一趟开跑"**（2026-09-26 修）。正本里它是 `qtim0`，
+  在**编译那一刻**重置（`polydraw_src/polydraw.c:2259`，与 `dnumframes = 0` 同一句；
+  1669 行的注释写着 `0=seconds since compile`）。从前 C 那侧回的是 `CLOCK_MONOTONIC`
+  （开机至今）、js 那侧是 `Date.now()` —— 于是**按 `dtim = klock()-otim` 走位的脚本
+  第二帧就飞出画布**：`ken/balls.pss --mode view` 头一帧对、之后全黑
+  （头一帧的 `dtim` 是几十万秒，16384 个球被推到几千万像素外）。
+  零点摆在 `gfx_frame_setup`（第一帧之前），判据在 `tests/gl/run.js` 第四节最后一格。
 * 这几格旗子落成**环境变量**（`OMNI_GFX_MODE` / `_FRAME` / `_W` / `_H` / `_PERF` / `_OUT`）：
   四条腿唯一都认的口径（C 腿是另一个进程），而且**不进产物缓存的印记** ——
   同一份编好的东西换个旗子再跑就换个行为（与 `.asy` 的出图设置同一条规矩）。

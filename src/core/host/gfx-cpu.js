@@ -110,7 +110,16 @@ const QUERY = new Set(['nextframe', 'numframes', 'klock', 'xres', 'yres',
  * 之后每一次再往前一帧的量（1/60）。仍然是确定性的 —— 一个字都不读墙上时间。
  */
 function klockSec() {
-  if (modeOf() === 'view') return nowMs() / 1000;
+  /* view：墙上时间，**从这一趟开跑算起**。正本里这个零点是 `qtim0`，在**编译那一刻**
+     重置（`polydraw_src/polydraw.c:2259`，1669 行注释写着 "0=seconds since compile"）。
+     从前这儿直接回 `nowMs()/1000`（= `Date.now()`，1970 年至今），于是脚本头一帧的
+     `dtim = klock() - 0` 是十几亿秒：`ken/balls.pss` 的球第二帧就被推到天外，
+     画面**从第二帧起全黑** —— "只闪一帧然后变黑"就是这一格。 */
+  if (modeOf() === 'view') {
+    if (D.kt0 === undefined) D.kt0 = nowMs();
+    return (nowMs() - D.kt0) / 1000;
+  }
+
   const base = (D.fno > 0 ? D.fno - 1 : 0) / 60;
   const n = D.kn ?? 0;
   D.kn = n + 1;
@@ -479,7 +488,10 @@ export function gfxOpen(w = 320, h = 240) { D.on = false; need(w, h); }
  */
 function frameSetup() {
   const one = intEnv('OMNI_GFX_FRAME', -1);
+  /* `klock()` 的零点摆在这儿 —— 正本是"编译那一刻"，这儿是"第一帧之前"（见 `klockSec`）。 */
+  D.kt0 = nowMs();
   D.only = one;
+
   const n = one >= 0 ? one + 1 : intEnv('OMNI_FRAMES', 1);
   D.frames = n > 0 ? n : 1;
   D.perf = env('OMNI_GFX_PERF') === '1' ? 1 : 0;

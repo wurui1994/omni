@@ -267,6 +267,28 @@ for (const [name, minFill, minColors] of [['04-shader.pss', 0.9, 1000],
       ok('输入那一族：view 听窗口、render 听 OMNI_MOUSE',
         `view ${JSON.stringify(cv)} / render ${JSON.stringify(cr)}`);
     }
+    /* **view 那一档的 `klock()` 从"这一趟开跑"起算**，不是开机至今（2026-09-26）。
+       正本里这个零点是 `qtim0`，在编译那一刻重置（`polydraw.c:2259`；1669 行注释写着
+       "0=seconds since compile"）。从前 C 那侧回的是 `CLOCK_MONOTONIC`（开机至今）、
+       js 那侧是 `Date.now()` —— 于是**按 `dtim` 走位的脚本第二帧就飞出画布**：
+       `ken/balls.pss --mode view` 只闪一帧然后全黑。
+       探针按 `dtim` 推一个点（每秒 10 像素），三帧之后它该还在起点附近；
+       零点错的话头一帧的 `dtim` 是几十万秒，点早出画布了 ⇒ 全黑。 */
+    const kp = join(out, 'klock.kc');
+    writeFileSync(kp, '()\n{\n   static px = 40, tim = 0;\n'
+      + '   otim = tim; tim = klock(); dtim = tim-otim;\n'
+      + '   px += dtim*10;\n'
+      + '   cls(0,0,0); setcol(255,255,255); drawsph(px,40,6);\n}\n');
+    const pk = join(out, 'klock.view.rgba');
+    winRun(kp, pk, {});
+    const ck = existsSync(pk) ? center(pk) : null;
+    if (ck === null) {
+      no('view 那一档 klock 从 0 起（不是开机至今）', '三帧之后画布全黑：点飞出去了');
+    } else if (Math.abs(ck[0] - 40) > 6 || Math.abs(ck[1] - 40) > 6) {
+      no('view 那一档 klock 从 0 起（不是开机至今）', `重心 ${JSON.stringify(ck)}（该在 (40,40) 附近）`);
+    } else {
+      ok('view 那一档 klock 从"这一趟开跑"起算', `重心 ${JSON.stringify(ck)}`);
+    }
   }
 }
 

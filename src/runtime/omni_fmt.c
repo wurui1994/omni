@@ -544,6 +544,14 @@ static long g_grefr = 0;
 static long g_gkn = 0;
 static double g_gklast = 0.0;
 
+/* **`klock()` 的零点**（view 模式才用得上）。正本里它是 `qtim0`，**在编译那一刻重置**
+   （`polydraw_src/polydraw.c:2259`，与 `dnumframes = 0` 同一句；1669 行的注释写着
+   "0=seconds since compile"）—— 我们这儿对应"这一趟开跑"（`gfx_frame_setup`）。
+   从前 view 模式直接回 `gfx_now_ms()/1000` = **CLOCK_MONOTONIC（开机至今）**，
+   于是脚本头一帧的 `dtim = klock() - 0` 是几十万秒：`ken/balls.pss` 的球第二帧就被
+   推到几千万像素外，画面**从第二帧起全黑**（"只闪一帧然后变黑"就是这一格）。 */
+static double g_gkt0 = -1.0;
+
 /* `klock()` / `klock(0)` 的秒数 —— 与 host/gfx-cpu.js 的 `klockSec()` 同一句话：
    view 模式是真墙上时间；render 模式是确定性时钟（帧号/60），**但同一帧里第二次起
    往前走一帧的量**（语料里有"把帧限速写在脚本里"那个写法：
@@ -551,7 +559,12 @@ static double g_gklast = 0.0;
    钉死的时钟让它永远出不来）。一帧读一次的脚本逐字节不变。 */
 static double gfx_klock_sec (void) {
   double base, v;
-  if (gfx_mode() == 2) return gfx_now_ms() / 1000.0;
+  if (gfx_mode() == 2) {
+    /* view：墙上时间，**从这一趟开跑算起**（见 `g_gkt0` 那段）。 */
+    if (g_gkt0 < 0) g_gkt0 = gfx_now_ms();
+    return (gfx_now_ms() - g_gkt0) / 1000.0;
+  }
+
   base = (double)(g_gfno > 0 ? g_gfno - 1 : 0) / 60.0;
   if (g_gkn == 0) { g_gkn = 1; g_gklast = base; return base; }
   v = base + (double)g_gkn / 60.0;
@@ -1155,6 +1168,9 @@ static void gfx_present(void) {
 /* 帧循环那几格旗子读一次（与 host/gfx-cpu.js 的 frameSetup 一字不差）。 */
 static void gfx_frame_setup(void) {
   g_gonly = gfx_int_env("OMNI_GFX_FRAME", -1);
+  /* `klock()` 的零点摆在这儿 —— 正本是"编译那一刻"，这儿是"第一帧之前"（见 `g_gkt0`）。 */
+  g_gkt0 = gfx_now_ms();
+
   int64_t n = g_gonly >= 0 ? g_gonly + 1 : gfx_int_env("OMNI_FRAMES", 1);
   /* **窗口那一档**：默认**没有上限** —— 收摊的是"窗口关了"，不是帧数。
      `OMNI_FRAMES=N` 仍然管用（判据要一个能自己停下来的口子）。 */
