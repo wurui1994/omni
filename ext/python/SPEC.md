@@ -93,6 +93,70 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 机制的一格样品：库函数用 python 写、由这条链自己编、按调用点单态化、没人用不发）。
 那四格**不再长**；下一刀是把对象层借进来。
 
+**量到哪儿了（2026-09-27，第 0 刀的 (b) 那一步）**
+
+1. **我们自己那台 C 前端编得下 CPython 的 C** —— 第一格判据过了：
+
+   ```
+   $ node src/cli.js c obj -I … cpython/Python/dtoa.c -o /tmp/dtoa.o
+   $ ls -la /tmp/dtoa.o          # 46414 字节，真的目标文件
+   ```
+
+   2841 行的 `dtoa.c`（David Gay 那份，一个字没改）**一遍过**。顺手记一条口径：
+   库那样的翻译单元要走 `omni c obj`，不是 `omni c mir` —— 后者是"一遍过编到 MIR"，
+   它要所有符号都解析得上（`dtoa.c` 里 `omni_py_interp` 是外部的，那儿就会报
+   `undefined symbol`）。
+
+2. **卡住的不是 C 前端，是我们那层地板太薄**。`Objects/unicodeobject.c`（15436 行）
+   报在 `Include/internal/pycore_abstract.h:65`：`PySendResult` 没定义 —— 那是
+   `Include/cpython/abstract.h` 里的一格 enum，而我们的 `rt/shim/Python.h` 只有 92 行，
+   是**照"借两份浮点文件"量出来的**（`gen-pyconf.js` 算出来只有 6 个宏进得来）。
+   也就是说：**借整份运行时就不能再垫这层薄地板**，形状要换成
+   **用 CPython 自己的 `Include/Python.h`**（凡是它有的都用它的 —— 这本来就是纪律第 2 条），
+   `rt/shim/` 退回去只给"我们自己那几格 `.c`"用。
+
+3. **`pyconfig.h` 由我们自己探，一行 configure 都不跑**。这一条是纪律，不是省事：
+   **不跑 CPython 的 `configure`、不用它的 `Makefile`、不碰参考树**（那棵树是几个 worktree
+   共用的只读输入）。`ext/python/build.js` + 那台 JS ninja 从第一天就是照这条写的，
+   `rt/gen-pyconf.js` 已经是"照 `configure.ac` 一格一格真探一遍"的形状。
+   要长的只是它那张名单 —— 量出来的数（同一套交集算法，`pyconfig.h.in` 的 727 个宏
+   ∩ 源码真读到的）：
+
+   - 只 `Objects/unicodeobject.c`：**10** 个
+   - `Include/` 整棵（头的链）：**68** 个
+   - 对象层那十份 `.c`（unicode / list / dict / long / float / abstract / object /
+     bool / tuple / bytes）：**14** 个
+   - 合起来：**71 / 727**
+
+   71 个里绝大多数是**机械的**四族，所以 `gen-pyconf.js` 这一刀写成**按族探**
+   （探法照 `configure.ac`，不自己发明）：
+   `HAVE_<头>_H`（`#include <x.h>` 编得过吗；下划线是目录分隔还是名字的一部分说不准，
+   所以几种拼法都试一遍）、`HAVE_<函数>`（自己声明一格取地址、链一遍 —— `AC_CHECK_FUNC`
+   的老办法，故意不包那份头）、`SIZEOF_* / ALIGNOF_*`（真跑一遍印 `sizeof` / `_Alignof`）、
+   `HAVE_DECL_X`（`AC_CHECK_DECLS` 那一族**总是定义**，有就 1 没有就 0 ——
+   CPython 那边写的是 `#if` 不是 `#ifdef`）。
+   顺手加了一格 `--extra <相对路径,…>`（目录就整棵走）：**只为"下一批要探多少"这一个问题**，
+   不进 `build.js` 那条路。
+
+   量出来的结果（`--extra Include,Objects/那十份`）：**71 个里四族答了 59 个，剩 12 个**。
+   而且剩下的这 12 个基本**不是机器能探的，是我们要做的决定**：
+
+   - 分配器：`WITH_PYMALLOC` / `WITH_MIMALLOC` / `PYMALLOC_USE_HUGEPAGES`
+   - 整数一位几比特：`PYLONG_BITS_IN_DIGIT`（CPython 在 64 位上默认 30）
+   - 要不要留文档串 / DTrace / perf trampoline：`WITH_DOC_STRINGS` / `WITH_DTRACE` /
+     `PY_HAVE_PERF_TRAMPOLINE`
+   - 线程栈：`THREAD_STACK_SIZE`（CPython 默认 0 = 由系统定）
+   - 真探针那两格：`SIGNED_RIGHT_SHIFT_ZERO_FILLS`（跑一遍看右移补什么）、
+     `SETPGRP_HAVE_ARG`（编一遍看它收几个实参）
+   - curses 那两格（`MVWDELCH_IS_EXPRESSION` / `WINDOW_HAS_FLAGS`）是**扫整棵 `Include/`
+     扫进来的**（`py_curses.h`）—— 真借的时候不借 curses，那两格写清"为什么不定义"。
+
+   **所以"借整份运行时"这件事上，configure 不是必需品，那 12 个决定是。** 这一条把第 0 刀
+   (b) 的判据说实了：不是"跑一遍它的配置"，而是"这 12 格各自写下决定与理由"。
+   `gen-pyconf.js` 那条"**算出来的名字里有一个不认得怎么探就当场报**"照旧 ——
+   少定义一格 `HAVE_*` 的后果往往不是编不过，而是 CPython 走进另一条 `#else`、
+   在某个角落静默答错。
+
 ## 二、进度
 
 ### 已落地

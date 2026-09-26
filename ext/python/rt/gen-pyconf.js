@@ -30,7 +30,7 @@
 // exit 1，因为那时 dtoa.c 自己会 `#error`，早报比晚报好。
 
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -57,6 +57,16 @@ const SOURCES = [
   'Include/internal/pycore_dtoa.h',
   'Include/pystrtod.h',
 ];
+
+/**
+ * **`--extra <相对路径,…>`**：临时多算几份（目录就整棵走一遍 `.c` / `.h`）。
+ *
+ * 只为"**下一批要探多少**"这一个问题：借整份运行时之前，先拿
+ * `--extra Objects/unicodeobject.c,Include` 问一句"名单会涨到几个、哪几个还不知道怎么探"。
+ * 不进 `build.js` 那条路（那边的名单是 `SOURCES`，与 `BORROWED` 一起改）。
+ */
+const EXTRA = (argOf('--extra') ?? '').split(',').map((s) => s.trim()).filter((s) => s !== '');
+
 
 const scratch = mkdtempSync(join(tmpdir(), 'omni-pyconf-'));
 let probes = 0;
@@ -171,12 +181,28 @@ if (canDefine.size < 400) {
 }
 
 const needed = new Set();
-for (const rel of SOURCES) {
+/** 一格路径 -> 要读的那几份文件（目录就整棵走，只看 `.c` / `.h`）。 */
+const filesOf = (p) => {
+  if (!statSync(p).isDirectory()) return [p];
+  const out = [];
+  const walk = (d) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const q = join(d, e.name);
+      if (e.isDirectory()) walk(q);
+      else if (/\.[ch]$/.test(e.name)) out.push(q);
+    }
+  };
+  walk(p);
+  return out;
+};
+for (const rel of [...SOURCES, ...EXTRA]) {
   const p = join(SRC, rel);
   if (!existsSync(p)) throw new Error(`gen-pyconf.js: 借来的那份不在：${p}`);
-  const text = readFileSync(p, 'utf8');
-  for (const m of text.matchAll(/\b([A-Z][A-Z0-9_]{2,})\b/g)) {
-    if (canDefine.has(m[1])) needed.add(m[1]);
+  for (const f of filesOf(p)) {
+    const text = readFileSync(f, 'utf8');
+    for (const m of text.matchAll(/\b([A-Z][A-Z0-9_]{2,})\b/g)) {
+      if (canDefine.has(m[1])) needed.add(m[1]);
+    }
   }
 }
 
@@ -189,6 +215,112 @@ HOW.set('WORDS_BIGENDIAN', () => (wordsBigEndian() ? 1 : null));
 HOW.set('X87_DOUBLE_ROUNDING', () => (x87DoubleRounding() ? 1 : null));
 HOW.set('HAVE_GCC_ASM_FOR_X87', () => (gccAsmX87() ? 1 : null));
 HOW.set('HAVE_GCC_ASM_FOR_MC68881', () => (gccAsmMc68881() ? 1 : null));
+
+/* ---- 四族通用探针 ---------------------------------------------------------
+ *
+ * 往后要借的是**整份运行时**（`ext/python/SPEC.md` §一之二），而那一批源码读到的宏
+ * 量过是 **71 个**（`pyconfig.h.in` 的 727 ∩ 对象层那十份 .c 加 `Include/` 整棵）。
+ * 71 个里绝大多数是机械的四族，所以这儿写成**按族探**，不是一格一格列：
+ *
+ *   `HAVE_<头>_H`        -> `AC_CHECK_HEADERS`：`#include <x.h>` 编得过吗
+ *   `HAVE_<函数>`        -> `AC_CHECK_FUNCS`：取个地址链得上吗（autoconf 的老办法）
+ *   `SIZEOF_T` / `ALIGNOF_T` -> `AC_CHECK_SIZEOF` / `AC_CHECK_ALIGNOF`：真跑一遍印出来
+ *   `HAVE_DECL_X`        -> `AC_CHECK_DECLS`：那个名字声明过吗（缺省 0，不是不定义）
+ *
+ * **一条纪律不动**：按族也认不出来的名字照旧当场报（见下面 `unknown`）。
+ * 按族探是为了不必手抄 60 条，不是为了"猜一个默认值" —— 猜出来的 `#else` 分支
+ * 会在某个角落静默答错。
+ *
+ * 另一条：**这儿一行 CPython 的 configure 都不跑**（也不用它的 Makefile、不碰参考树）。
+ * 探的是这台机器，问的是"这一格该定义成什么"。
+ */
+
+/** `HAVE_SYS_STAT_H` -> 几种可能的头名（下划线可能是目录分隔，也可能是名字的一部分）。 */
+function headerCandidates(macro) {
+  const parts = macro.slice('HAVE_'.length, -'_H'.length).toLowerCase().split('_');
+  if (parts.length === 0 || parts[0] === '') return [];
+  /* 每个下划线各有"当斜杠"与"留着"两种，2^(n-1) 种拼法（部分多于 4 段的就不猜了）。 */
+  if (parts.length > 4) return [`${parts.join('_')}.h`];
+  const out = [];
+  for (let mask = 0; mask < (1 << (parts.length - 1)); mask += 1) {
+    let s = parts[0];
+    for (let i = 1; i < parts.length; i += 1) s += ((mask >> (i - 1)) & 1) === 1 ? `/${parts[i]}` : `_${parts[i]}`;
+    out.push(`${s}.h`);
+  }
+  return out;
+}
+
+/** 那个头在不在（任一种拼法编得过就算在）。 */
+const hasHeader = (macro) => headerCandidates(macro)
+  .some((h) => compiles(`#include <${h}>\nint main(void){return 0;}\n`));
+
+/**
+ * 那个函数在不在。照 `AC_CHECK_FUNC` 的老办法：**自己声明一格、取地址、链一遍** ——
+ * 故意不包那份头（包了就变成"这台机器的头声明了它吗"，而问的是"链得上吗"）。
+ */
+const hasFunc = (name) => links(`char ${name}(void);\nint main(void){ return (int)(long)&${name}; }\n`);
+
+/** `SIZEOF_VOID_P` / `ALIGNOF_MAX_ALIGN_T` -> C 里那个类型（认不出来交 null）。 */
+function typeOfSizeMacro(macro) {
+  const KNOWN = new Map([
+    ['VOID_P', 'void *'], ['SIZE_T', 'size_t'], ['MAX_ALIGN_T', 'max_align_t'],
+    ['WCHAR_T', 'wchar_t'], ['PID_T', 'pid_t'], ['TIME_T', 'time_t'],
+    ['OFF_T', 'off_t'], ['UINTPTR_T', 'uintptr_t'], ['INTPTR_T', 'intptr_t'],
+    ['PTHREAD_T', 'pthread_t'], ['PTHREAD_KEY_T', 'pthread_key_t'],
+    ['_BOOL', '_Bool'], ['FPOS_T', 'fpos_t'],
+  ]);
+  const rest = macro.replace(/^(SIZEOF|ALIGNOF)_/, '');
+  const hit = KNOWN.get(rest);
+  if (hit !== undefined) return hit;
+  /* 剩下的是几个内建类型拼起来的（`LONG_LONG` / `LONG_DOUBLE` / `SHORT`）。 */
+  const words = rest.toLowerCase().split('_');
+  const OK = ['char', 'short', 'int', 'long', 'float', 'double', 'signed', 'unsigned'];
+  return words.every((w) => OK.includes(w)) ? words.join(' ') : null;
+}
+
+/** 真跑一遍印 `sizeof` / `_Alignof`（探不出来交 null —— 那一格会当场报）。 */
+function sizeOrAlign(macro) {
+  const ty = typeOfSizeMacro(macro);
+  if (ty === null) return null;
+  const op = macro.startsWith('ALIGNOF_') ? '_Alignof' : 'sizeof';
+  const r = runs('#include <stdio.h>\n#include <stddef.h>\n#include <stdint.h>\n'
+    + '#include <sys/types.h>\n#include <pthread.h>\n#include <time.h>\n'
+    + `int main(void){ printf("%d", (int)${op}(${ty})); return 0; }\n`);
+  if (r === null || r.status !== 0) return null;
+  const n = Number(r.out.trim());
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/**
+ * `HAVE_DECL_RTLD_NOW` 那一族。与别的不同：`AC_CHECK_DECLS` **总是定义**
+ * （有就 1、没有就 0），因为 CPython 那边写的是 `#if HAVE_DECL_X` 而不是 `#ifdef`。
+ * 声明在哪份头里说不准，所以把常用那几份一起包上问一句"这个名字用得上吗"。
+ */
+function hasDecl(macro) {
+  const name = macro.slice('HAVE_DECL_'.length);
+  const heads = ['stdio.h', 'stdlib.h', 'string.h', 'unistd.h', 'dlfcn.h', 'math.h',
+    'fcntl.h', 'signal.h', 'time.h', 'errno.h', 'limits.h', 'sys/types.h'];
+  const inc = heads.map((h) => `#include <${h}>\n`).join('');
+  return compiles(`${inc}int main(void){ (void)(${name}); return 0; }\n`) ? 1 : 0;
+}
+
+/** 按族认：认出来就往 `HOW` 里补一格（一格一格列的那几个优先，不覆盖）。 */
+for (const name of needed) {
+  if (HOW.has(name)) continue;
+  if (name.startsWith('HAVE_DECL_')) { HOW.set(name, () => hasDecl(name)); continue; }
+  if (/^HAVE_[A-Z0-9_]+_H$/.test(name)) { HOW.set(name, () => (hasHeader(name) ? 1 : null)); continue; }
+  if (/^(SIZEOF|ALIGNOF)_/.test(name) && typeOfSizeMacro(name) !== null) {
+    HOW.set(name, () => sizeOrAlign(name));
+    continue;
+  }
+  /* 函数那一族：全小写下来是个合法的 C 标识符，而且不是上面那几种形状。
+     判据是"链得上"，所以猜错名字的后果是"不定义"，与 autoconf 找不到那个函数一样。 */
+  if (/^HAVE_[A-Z][A-Z0-9_]*$/.test(name)) {
+    const fn = name.slice('HAVE_'.length).toLowerCase();
+    HOW.set(name, () => (hasFunc(fn) ? 1 : null));
+  }
+}
+
 
 const unknown = [...needed].filter((n) => !HOW.has(n)).sort();
 if (unknown.length > 0) {
