@@ -84,7 +84,7 @@ export function hasAdapter(lang) {
  * @param {string} path 源文件
  * @param {string[]} argv `run` / `build` 后面那些参数（`--lang` 在里头）
  */
-export function sxTextOf(path, argv = []) {
+export function sxTextOf(path, argv = [], out = null) {
   const lang = pickLang(path, cliArg(argv, '--lang'));
   if (!hasAdapter(lang)) {
     throw new OmniError(`${lang.name} 还没有 adapter —— 这条路（ADR-0044）要登记处那一格 toIR`);
@@ -165,6 +165,14 @@ export function sxTextOf(path, argv = []) {
 
   try {
     const ir = lang.toIR(tree, { also, src: mainSrc });
+    /* **顺手把"哪些名字是那门语言的运行时层"带出去**（`out.rtNames`，EVAL 两门在用）：
+       切单元产物时按它分 —— 运行时那一层是所有脚本共用的一格，只编一次只发一次
+       （`docs/design/omni-serve-studio.md` §9.3）。别的语言没这一格就是空表。
+       为什么走 `out` 而不是改回值：`sxTextOf` 的回值是"核心方言文本"，十几处调用点
+       都这么用；多一格出参谁不要谁不传。 */
+    if (out !== null && out !== undefined) {
+      out.rtNames = Array.isArray(ir.rtNames) ? ir.rtNames : [];
+    }
     return lower(ir, lang.hooks ?? {});
   } catch (err) {
     throw new OmniError(`${path}：${lang.name} 这一格还没接住 —— ${err.message}`);
@@ -198,6 +206,6 @@ export function borrowedExts() {
  * 输入一模一样的那条路（lower → OIR → MIR → 原生 / js / llvm，还有 `--cc` /
  * `OMNI_MIR_OPT` / 摇树 / profile），所以下游一行都不用再写。
  */
-export function coreSxText(path, argv) {
-  return sxTextOf(path, argv);
+export function coreSxText(path, argv, out = null) {
+  return sxTextOf(path, argv, out);
 }
