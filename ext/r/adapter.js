@@ -3181,7 +3181,7 @@ function indexRead(x, types) {
   throw new Error(`r->IR: ${nameOf(obj)} 上的下标读不知道是数组还是表 —— 推出来是 ${ot.kind}`);
 }
 
-function exprOf(x, types, want) {
+function exprOf(x, types, want, stmtPos) {
   switch (tag(x)) {
     case 'num': return numLit(leaf(kids(x)[0]));
     case 'str': return { kind: 'string', value: leaf(kids(x)[0]) };
@@ -3193,9 +3193,9 @@ function exprOf(x, types, want) {
       }
       return { kind: 'name', name: nm };
     }
-    case 'paren': return exprOf(kids(x)[0], types);
+    case 'paren': return exprOf(kids(x)[0], types, want, stmtPos);
     case 'sub1': case 'sub2': return indexRead(x, types);
-    case 'call': return callOf(x, types, undefined, want);
+    case 'call': return callOf(x, types, undefined, want, stmtPos);
     case 'pipe': {
       /* `x |> f(…)` 就是 `f(x, …)`（R 在语法动作 `xxpipe` 里当场展开，gram.y:495）。 */
       const [lhs, rhs] = kids(x);
@@ -3573,7 +3573,7 @@ function condOf(x, types) {
  * 一次调用。`extra` 是 `|>` 塞到第一位的那格实参。
  * 内建**不是调用** —— 它们落成方言的算子（与 chez 的 `vector-ref` 落 `aget` 同一条）。
  */
-function callOf(x, types, extra, want) {
+function callOf(x, types, extra, want, stmtPos) {
   const fnNode = kids(x)[0];
   const fn = tag(fnNode) === 'sym' ? nameOf(fnNode) : null;
   /* `c(a = 1, b = 2)` 里那几个名字是**元素名**（数据），所以 `c` 这一格要按原序拿**全部**
@@ -4935,6 +4935,21 @@ function callOf(x, types, extra, want) {
   }
   const bound = bindArgs(fn, pnames, fnDefs.get(mangle(fn)) ?? [], x, extra !== undefined);
   /**
+   * **不交值的函数不能当值用**（体尾是 `cat` / `print` 那种"做事"的）。R 里
+   * `print(x)` 交的是"不可见的那格 x"，所以 `y <- f(v)` 在 R 那边是有意义的；
+   * 这一档没有"可见性"这一层，`f` 落成 void。
+   *
+   * 从前这儿不问，于是 `y <- f(v)` 一路发到公共层才报 `'y' 是 int，赋的值是 void`
+   * —— 那时**已经过了换档那道门**，整份源码直接失败而不是退到 libR（量出来的，
+   * 2026-09-26）。所以在这儿当场报：报了才退得回去，libR 会把 R 的答案印对。
+   */
+  const rt0 = fnRets.get(mangle(fn));
+  if (stmtPos !== true && rt0 !== undefined && rt0.kind === 'void') {
+    throw new Error(`r->IR: ${fn}() 不交值（体尾是 \`cat\` / \`print\` 那种"做事"的）——`
+      + ' 这儿在拿它的值用。R 里 `print(x)` 交的是"不可见的那格 x"，而这一档没有'
+      + '"可见性"这一层');
+  }
+  /**
    * 实参落下来。**带名字的向量那一格交两样东西**：值那一条，紧跟着名字那一条
    * （见 `fnDecl` 里对上的那格影子形参）。名字算不出来（这一格实参不带名字）就交
    * **零长**的那条 —— 被调方的印法自己会退回不带名字的那一行（`r_print_named`）。
@@ -5383,7 +5398,7 @@ function stmtOf(x, types) {
     case 'block': return { kind: 'block', stmts: kids(x).map((k) => stmtOf(k, types)) };
     case 'bin': {
       if (isAssign(x)) return assignOf(x, types);
-      return { kind: 'expr-stmt', expr: exprOf(x, types) };
+      return { kind: 'expr-stmt', expr: exprOf(x, types, undefined, true) };
     }
     case 'bin-rev': return assignOf(x, types);
     case 'if': {
@@ -5450,11 +5465,11 @@ function stmtOf(x, types) {
           })),
         };
       }
-      return { kind: 'expr-stmt', expr: exprOf(x, types) };
+      return { kind: 'expr-stmt', expr: exprOf(x, types, undefined, true) };
     }
     case 'paren': return stmtOf(kids(x)[0], types);
     default:
-      return { kind: 'expr-stmt', expr: exprOf(x, types) };
+      return { kind: 'expr-stmt', expr: exprOf(x, types, undefined, true) };
   }
 }
 
@@ -5520,7 +5535,18 @@ function tailOf(x, types) {
     case 'call': {
       const fnNode = kids(x)[0];
       const fn = tag(fnNode) === 'sym' ? nameOf(fnNode) : null;
-      if (fn === 'cat' || fn === 'return') return [stmtOf(x, types)];
+      /**
+       * **"只能摆在语句位上"那几格摆在尾位也照语句落**（`cat` / `print` / `set.seed` /
+       * `stopifnot` / `stop`）。R 里它们交的是"不可见的那格值"，而这一档没有"可见性"
+       * 这一层 —— 于是 `f <- function(x) { print(x) }` 当 void 算（R 那边 `f(v)` 印一遍、
+       * 交回去的那格值不可见，所以印出来的东西一字不差）。
+       *
+       * 真有人拿它的值用（`y <- f(v)`，R 里 y 就是 x）：`fnRets` 是 void，那一格在
+       * `typeOfCall` 里按 int 算，发到公共层会当场报 —— **报而不是猜**，退到 libR
+       * 由 R 自己答。从前 `print` 不在这张单子里，于是**整份**源码只要有一个函数以
+       * `print(…)` 收尾就退档（量出来的，2026-09-26）。
+       */
+      if (fn !== null && (fn === 'return' || STMT_ONLY_FNS.has(fn))) return [stmtOf(x, types)];
       /* 尾位上的 `switch`：每一支都在"做事"时按语句落（见 `switchIsStmt`）。 */
       if (fn === 'switch' && switchIsStmt(x)) return [stmtOf(x, types)];
       return [{ kind: 'return', values: [retVal(x, types)] }];
@@ -10461,7 +10487,9 @@ function returnType(body, types) {
       case 'bin': case 'bin-rev': if (isAssign(x)) return; seen.push(typeOfExpr(x, types)); return;
       case 'call': {
         const fn = tag(kids(x)[0]) === 'sym' ? nameOf(kids(x)[0]) : null;
-        if (fn === 'cat') return;
+        /* "只能摆在语句位上"那几格（`cat` / `print` / `stop` / `set.seed` / `stopifnot`）
+           不算一处带值的尾位 —— 与 `tailOf` 同一张单子，两边必须同解。 */
+        if (fn !== null && STMT_ONLY_FNS.has(fn)) return;
         /* `switch` 交的是**被选中那一支**的东西 —— 所以往每一支里看，不问 `switch` 本身。
            每一支都是 `cat(…)` 那种"做事不交值"的，这个函数就回 void。 */
         if (fn === 'switch') {

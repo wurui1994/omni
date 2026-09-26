@@ -140,3 +140,19 @@ bub <- function(v) {
 zz <- c(3, 1, 2)
 print(bub(zz))
 print(zz)
+
+# **体尾是 `print(…)` 那种"做事"的也算不交值**（2026-09-26 接了）。R 里 `print(x)` 交的是
+# "不可见的那格 x"，而这一档没有"可见性"这一层 —— 所以按 void 算，印出来的东西一字不差。
+# 从前只有 `cat` 在这张单子上，于是**整份**源码只要有一个函数以 `print(…)` 收尾就退到 libR。
+# 拿它的值用（`y <- shout(v)`，R 里 y 就是 v）照旧**当场报** —— 报了才退得回去。
+shout <- function(v) print(v)
+shout(c(1, 2, 3))
+shout(c(9))
+banner <- function(s) {
+  cat("== ")
+  print(s)
+}
+banner("hi")
+maybe <- function(x) if (x > 0) print("pos") else print("neg")
+maybe(1)
+maybe(-1)
