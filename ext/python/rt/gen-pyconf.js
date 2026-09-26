@@ -322,6 +322,67 @@ for (const name of needed) {
 }
 
 
+/* ---- 两格真探针（照 configure.ac，按族认不出来的那种）--------------------- */
+
+/**
+ * 右移**补零**吗（`configure.ac:6845`）。
+ *
+ * 照它那段程序**一字不改**：`return (((-1)>>3 == -1) ? 0 : 1);` ——
+ * 退出码 0 = 右移补的是符号位（几乎所有机器，**不定义**这个宏），1 = 补零（定义）。
+ * 这一格的方向很容易写反（我第一版就反了，量出来 arm64 上答成了"补零"）：
+ * 宏的名字说的是**反常的那一种**，所以"跑通了"= 不定义。
+ */
+function rshiftZeroFills() {
+  const r = runs('int main(void)\n{\n\treturn (((-1)>>3 == -1) ? 0 : 1);\n}\n');
+  return r !== null && r.status === 1;
+}
+
+/** `setpgrp` 要两个实参吗（`configure.ac:5989`：编一遍 `setpgrp(0,0)`）。 */
+const setpgrpHasArg = () => hasFunc('setpgrp')
+  && compiles('#include <unistd.h>\nint main(void){ setpgrp(0,0); return 0; }\n');
+
+/* ---- 那几格**不是探针、是决定** -------------------------------------------
+ *
+ * 借整份运行时那件事（SPEC §一之二）量出来：对象层那一批读到 71 个宏，上面四族答了 59 个，
+ * 剩下这 12 个**机器探不出来** —— 它们问的不是"这台机器怎么样"，而是"你想编成什么样"。
+ * 所以一格一格写下决定与理由，理由跟着写进生成出来的那份头里（那份头要能自己解释自己）。
+ * 这一处**故意不给缺省**：`HOW` 里没有的名字会当场报，逼着人做决定而不是留空。
+ */
+const WHY = new Map();
+/** 决定：`[名字, 值（null = 不定义 / 'probe:*' = 上头那两格探针）, 理由]`。 */
+const DECIDED = [
+  ['WITH_PYMALLOC', 1,
+    '照 configure 的缺省（configure.ac:5296 —— 除 Emscripten/WASI 一律 yes）。'
+    + 'obmalloc 是对象层自己那套池分配器'],
+  ['WITH_MIMALLOC', null,
+    '**我们的决定**：不借 mimalloc（Objects/mimalloc/ 那一整棵第三方分配器）。'
+    + '注意 configure 在这台机器上的缺省是 yes（configure.ac:5271 看 stdatomic.h 在不在）'
+    + ' —— 这一格是有意与它不同的，代价是 mimalloc 那几条 #if 分支一律不编'],
+  ['PYMALLOC_USE_HUGEPAGES', null, 'Linux 专有的一格加速（madvise 大页），与语义无关'],
+  ['PYLONG_BITS_IN_DIGIT', null,
+    '照 configure 的缺省：不定义（只有 --enable-big-digits 才给值，configure.ac:6649）。'
+    + '不定义时 CPython 自己按 SIZEOF_VOID_P 挑 30 或 15（pycore_long.h）—— 让它挑'],
+  ['WITH_DOC_STRINGS', 1,
+    '照 configure 的缺省（configure.ac:5183）。这一格**是语义**：__doc__ 程序看得见'],
+  ['WITH_DTRACE', null, '不借 DTrace 那几格探针（Include/pydtrace.h 那一路）'],
+  ['PY_HAVE_PERF_TRAMPOLINE', null, '不借 perf 的跳板（给 Linux 的 perf 看栈用的）'],
+  ['THREAD_STACK_SIZE', process.platform === 'darwin' ? '0x1000000' : null,
+    'configure.ac:3822 —— Darwin / iOS 上给 16MB（系统默认 8MB 装不下它自己的递归上限），'
+    + '别的平台不定义（用系统的）'],
+  ['SIGNED_RIGHT_SHIFT_ZERO_FILLS', 'probe:rshift',
+    'configure.ac:6845 —— 真跑一遍：右移补零才定义，补符号（几乎所有机器）不定义'],
+  ['SETPGRP_HAVE_ARG', 'probe:setpgrp', 'configure.ac:5989 —— 编一遍 setpgrp(0,0)'],
+  ['MVWDELCH_IS_EXPRESSION', null,
+    'curses 专有，是扫整棵 Include/ 扫进来的（py_curses.h）—— 我们不借 curses'],
+  ['WINDOW_HAS_FLAGS', null, '同上（curses 的 WINDOW 里有没有 _flags）'],
+];
+for (const [name, value, why] of DECIDED) {
+  WHY.set(name, why);
+  if (value === 'probe:rshift') { HOW.set(name, () => (rshiftZeroFills() ? 1 : null)); continue; }
+  if (value === 'probe:setpgrp') { HOW.set(name, () => (setpgrpHasArg() ? 1 : null)); continue; }
+  HOW.set(name, () => value);
+}
+
 const unknown = [...needed].filter((n) => !HOW.has(n)).sort();
 if (unknown.length > 0) {
   throw new Error(`gen-pyconf.js: 这 ${unknown.length} 个宏这几份源码读得到，可这儿不知道怎么探：\n`
@@ -357,6 +418,10 @@ const lines = [
 ];
 for (const name of [...needed].sort()) {
   const v = HOW.get(name)();
+  /* 那几格"是决定不是探针"的，把理由跟着写进去 —— 这份头要能自己解释自己
+     （下一个人看到 `/* #undef WITH_MIMALLOC *​/` 时不必去翻提交记录）。 */
+  const why = WHY.get(name);
+  if (why !== undefined) lines.push(`/* ${why} */`);
   lines.push(v === null ? `/* #undef ${name} */` : `#define ${name} ${v}`);
 }
 lines.push('', '#endif /* OMNI_PYCONF_H */', '');
