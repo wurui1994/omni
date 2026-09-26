@@ -442,7 +442,7 @@ export function startServer(opts) {
         }
         const abs = join(root, '.omni-cache', 'modules', 'js-eval', name);
         if (!exists(abs)) return json(res, 404, { error: 'not found' });
-        const immutable = /^ev_rt_[0-9a-f]+\.js$/.test(name);
+        const immutable = /^(ev_rt|omni_rt)_[0-9a-f]+\.js$/.test(name);
         res.writeHead(200, {
           'content-type': 'text/javascript; charset=utf-8',
           'cache-control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache',

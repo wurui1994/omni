@@ -96,6 +96,9 @@ export function evalUnitsBuild(o) {
   if (r === null) return null;
   /* 入口那一份的名字由切法算出来（按内容）—— 这儿从单元清单里认它：唯一不是 `ev_rt_…`
      的那一份就是入口。 */
+  const rtFile = typeof o.runtimeText === 'string'
+    ? `omni_rt_${hash16(o.runtimeText).slice(0, 8)}.js`
+    : 'omni_rt.js';
   const entry = [...r.units, ...(r.reused ?? [])]
     .map((u) => u.name).find((n) => !n.startsWith('ev_rt_')) ?? '';
   const rowOf = (u) => (u.name === entry
@@ -111,7 +114,9 @@ export function evalUnitsBuild(o) {
     emitJs: (u) => o.emitEsm(o.textToMod(u.name, u.text, `omni_init_${u.name}`)),
     unitSym: (n) => `omni_init_${n}`,
     runtimeText: o.runtimeText,
-    prelude: ["import './omni_rt.js';"],
+    /* **运行时那一份也按内容起名**：浏览器才敢给它 immutable（四百 KB 一次都不再问）。 */
+    runtimeName: rtFile,
+    prelude: [`import './${rtFile}';`],
     tail: ['$js_check_uncaught();', '$flush();'],
   });
 }

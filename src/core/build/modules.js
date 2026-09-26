@@ -353,8 +353,19 @@ export function buildUnits(o) {
   const ix = new UnitIndex(o.dir);
   let made = 0;
   let kept = (o.reused ?? []).length;
-  if (typeof o.runtimeText === 'string' && !exists(join(o.dir, 'omni_rt.js'))) {
-    writeText(join(o.dir, 'omni_rt.js'), o.runtimeText);
+  /* 运行时那一份（`omni_rt*.js`）：一目录一份，所有产物共用。名字由调用方给 ——
+     按内容起名的话（`omni_rt_<哈希>.js`）浏览器就能给它 immutable，四百 KB 一次都不再问。 */
+  const rtFile = typeof o.runtimeName === 'string' ? o.runtimeName : 'omni_rt.js';
+  if (typeof o.runtimeText === 'string' && !exists(join(o.dir, rtFile))) {
+    writeText(join(o.dir, rtFile), o.runtimeText);
+  }
+  /* **`omni_rt.js` 这个名字非留不可**：每份单元产物自己头上就有一句
+     `import './omni_rt.js';`（`backend-js/emit.js` 的 `importLines` —— 它只为副作用引一次）。
+     按内容起名之后那一句会 404、整份模块加载不起来（真浏览器里量出来的样子是
+     `code 1` + 一帧都没画 + 一条 300 字节的空回包）。所以留一格**三十字节的转口**指向
+     带哈希那一份：四百 KB 那一份照旧 immutable，这一格每趟问一次也就一个包头。 */
+  if (rtFile !== 'omni_rt.js' && typeof o.runtimeText === 'string') {
+    writeText(join(o.dir, 'omni_rt.js'), `import './${rtFile}';\n`);
   }
   const rows = new Map();
   for (const u of o.units) {
