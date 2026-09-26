@@ -39,3 +39,18 @@ cat(factorial(0), "\n", sep = "")
 cat(factorial(10), "\n", sep = "")
 cat(factorial(2.5), "\n", sep = "")
 print(factorial(c(3, 4)))
+
+# **缺失进这一族**（2026-09-26）：nmath 每个函数开头都是 `if (ISNAN(x)) return x + digits;`。
+# C 那条腿上那句是对的 —— 硬件把第一个 NaN 操作数的**载荷**带出来，`NA` 还是 `NA`。
+# JS 那条腿上 `NaN + 0` 是规范化的 NaN，载荷没了，同一份源码会印成 `NaN`。
+# 所以现在在**进 nmath 之前**拦：谁是缺失就把那一格原样交回去 —— `NA` 与 `NaN` 分得开。
+cat(round(NA), signif(NA), trunc(NA), sign(NA), "\n")
+cat(round(NaN), signif(NaN), trunc(NaN), sign(NaN), "\n")
+cat(gamma(NA), lgamma(NA), factorial(NA), factorial(NaN), "\n")
+cat(beta(NA, 2), beta(2, NA), choose(NA, 2), choose(5, NA), "\n")
+cat(log1p(NA), expm1(NA), dnorm(NA), pnorm(NA), qnorm(NA), "\n")
+cat(dnorm(0, NA), dbinom(NA, 10, 0.5), dpois(NA, 1), "\n")
+cat(pmax(NA, 1), pmin(1, NA), "\n")
+cat(round(c(NA, 1.5)), signif(c(NA, 1.23456)), "\n")
+cat(gamma(c(NA, 4)), factorial(c(NA, 4)), sign(c(NA, -3, 0, 2)), "\n")
+cat(is.na(round(NA)), is.nan(round(NaN)), is.na(round(NaN)), is.nan(round(NA)), "\n")

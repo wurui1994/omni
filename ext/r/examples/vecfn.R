@@ -282,3 +282,11 @@ print(!ok)
 print(sum(ok))
 print(rep(FALSE, 2))
 print(rep(c(TRUE, FALSE), 2))
+
+# `rep(x)` **一格实参**那一档 —— R 的默认是 `times = 1`，也就是原样抄一份。
+# 从前这儿当场报、白白退到 libR 一趟（扫"省掉可选实参"那一趟扫出来的）。
+print(rep(c(1, 2)))
+print(rep(5))
+print(rep(c("a", "b")))
+print(rep(c(TRUE, FALSE)))
+cat(length(rep(1:3)), "\n")

@@ -189,6 +189,17 @@ R 往数值那边收，所以"每一格都是逻辑"才算逻辑。
 nmath 那一族**只在第一格实参上**逐元素，别的格先存进临时量（循环里要读好多遍）——
 R 其实是多头回收的（`round(xs, c(1,2))`），那一格当场报，不假装。
 
+**缺失在进 nmath 之前就拦住**（2026-09-26，判据 `ext/r/examples/rmath.R` 末尾那一段）。
+nmath 每个函数开头都是 `if (ISNAN(x)) return x + digits;` 这一套。C 那条腿上那句是对的 ——
+硬件把第一个 NaN 操作数的**载荷**原样带出来，所以 `round(NA)` 出 `NA`。JS 那条腿上
+`NaN + 0` 是**规范化**的 NaN，载荷没了，同一份源码 C 印 `NA`、JS 印 `NaN`（量出来的）。
+这不是"JS 那份 nmath 编错了"能修的：载荷过不了 JS 的加法，那是 JS 的语义
+（同一件事 `tests/r/oracle.js` 的 nanpayload 那一组里已经钉着）。所以 `rmathCall` 里
+R 那侧给的每一格 double 实参先存进临时量，谁是缺失就把**那一格原样交回去** ——
+交回去的是输入本身，于是 `NaN` 还是 `NaN`、`NA` 还是 `NA`，与 nmath 那句 `x + …`
+在硬件上的行为一字不差，只是不再指望载荷过得了加法。缺省值填的那几格与 `i32` 的
+旗子格不用管（前者是字面量、后者不是 double）。
+
 进出都是向量的几格：`rev` / `seq_along` / `which` / `sort` / `cumsum` / `cumprod` /
 `cummax` / `cummin` / `diff` / `range` / `head` / `tail` / `rep` / `rep_len` / `seq` /
 `tabulate` / `append` / `replace` / `rank`；
@@ -446,7 +457,9 @@ R 那儿挑出的是 `NA_character_`，这一档没有那种值，与 `v[掩码]
 
 `sort` / `head` / `tail` / `rep` 出来的**元素类型跟着进去的那条走**（逻辑向量排完还是逻辑、
 字符向量重复完还是字符向量）。`rep` 的三格都接了（`times` / `each`，R 的次序是**先 each
-再 times**）；`seq` 认 `seq(n)` / `seq(a, b)` / `seq(a, b, by)` / `seq(a, b, length.out = k)`
+再 times**）；两格都省掉就是 R 的默认 `times = 1`，也就是原样抄一份（`rep(c(1,2))` 出
+`1 2`）—— 那一档从前当场报、白白退到 libR 一趟；
+`seq` 认 `seq(n)` / `seq(a, b)` / `seq(a, b, by)` / `seq(a, b, length.out = k)`
 ——`length.out` 那一档步长是 `(b-a)/(k-1)`、**最后一格写成 `b`**（R 的 `seq.c` 也是这个口径）。
 `xor` / `isTRUE` / `isFALSE` / `ifelse` 也接了：`xor` 逐元素三态、`isTRUE` / `isFALSE`
 回的是**两态**（`isTRUE(NA)` 在 R 里是 `FALSE`，不是 `NA`）、`ifelse` 的形状随 `test`

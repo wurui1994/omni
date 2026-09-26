@@ -1964,6 +1964,7 @@ function applyTy(fn, x, types) {
     case 'sin': case 'cos': case 'tan': case 'asin': case 'acos': case 'atan':
     case 'sinh': case 'cosh': case 'tanh':
       return args.length > 0 && isVecTy(typeOfExpr(args[0], types)) ? RVEC : REAL;
+
     case 'abs': return args.length === 0 ? INT : typeOfExpr(args[0], types);
     /* `invisible(x)` 的类型就是 x 的（差别只在顶层要不要印）。 */
     case 'invisible': return args.length === 0 ? INT : typeOfExpr(args[0], types);
@@ -2549,10 +2550,41 @@ function rmathCall(rname, spec, args, argTys) {
     const ty = i < args.length ? argTys[i] : undefined;
     return sig.params[i] === 'i32' ? e : asReal(e, ty);
   });
+  /* ── 缺失要在**进 nmath 之前**拦住 ─────────────────────────────────────
+   *
+   * nmath 里每个函数开头都是 `if (ISNAN(x)) return x + digits;` 这一套。在 C 那条腿上
+   * 那句是对的：硬件把第一个 NaN 操作数的**载荷**原样带出来，所以 `round(NA)` 出 NA。
+   * JS 那条腿不行 —— `NaN + 0` 在 JS 里是规范化的 NaN，载荷没了，于是同一份源码
+   * C 那条腿印 `NA`、JS 那条腿印 `NaN`（量出来的，2026-09-26：
+   * `cat(round(NA), trunc(NA), signif(NA))` C 出 `NA NA NA`、JS 出 `NaN NaN NaN`）。
+   *
+   * 这不是"JS 那份 nmath 编错了"能修的 —— 载荷过不了 JS 的加法，那是 JS 的语义
+   * （同一件事在 `tests/r/oracle.js` 的 nanpayload 那一组里已经钉着）。所以在这儿
+   * 拦：R 那侧给的每一格 double 实参先存进临时量（**一次求值** —— 下面要读两遍），
+   * 谁是缺失就把**那一格原样交回去**。交回去的是输入本身，所以 `NaN` 还是 `NaN`、
+   * `NA` 还是 `NA`（`r_is_na` 是 R 的 `is.na`，两者都真），与 nmath 那句 `x + …`
+   * 在硬件上的行为一字不差，只是不再指望载荷过得了加法。
+   *
+   * 缺省值填的那几格与 `i32` 的旗子格不用管：前者是字面量、后者不是 double。
+   */
+  const stmts = [];
+  const gs = [];
+  for (let i = 0; i < out.length; i += 1) {
+    if (i >= args.length || sig.params[i] === 'i32') continue;
+    const tn = fresh('rg');
+    stmts.push({ kind: 'let', name: tn, type: REAL, init: out[i] });
+    out[i] = { kind: 'name', name: tn };
+    gs.push({ kind: 'name', name: tn });
+  }
   /* `bump`：给第一个实参加个常数（只有 `factorial` 用 —— R 把它定义成 `gamma(x+1)`）。
-     摆在这儿而不是调用点上，是因为"第一格是向量就逐元素"那一层在上头，写在那儿就要写两遍。 */
+     摆在这儿而不是调用点上，是因为"第一格是向量就逐元素"那一层在上头，写在那儿就要写两遍。
+     **要在存完临时量之后加** —— 拦缺失看的是 R 那侧给的 `x`，不是 `x + 1`。 */
   if (spec.bump !== undefined) out[0] = b('+', out[0], { kind: 'real', value: spec.bump });
-  return { kind: 'ccall', sym: spec.sym, args: out };
+  let value = { kind: 'ccall', sym: spec.sym, args: out };
+  for (let i = gs.length - 1; i >= 0; i -= 1) {
+    value = { kind: 'ternary', cond: naQ(gs[i]), then: gs[i], else_: value };
+  }
+  return stmts.length === 0 ? value : { kind: 'block-expr', stmts, value };
 }
 
 
@@ -4992,9 +5024,11 @@ function callOf(x, types, extra, want, stmtPos) {
         const each = eachNode === undefined
           ? { kind: 'int', value: 1 }
           : scalarCnt(eachNode, 'each');
-        if (cnt === null && eachNode === undefined) {
-          throw new Error('r->IR: rep() 要 `times` 或者 `each`（`length.out=` 没接）');
-        }
+        /**
+         * 两格都没给就是 R 的默认 `times = 1` —— `rep(c(1, 2))` 出 `1 2`（量出来的，
+         * 就是原样抄一份）。从前这儿当场报，扫"省掉可选实参"那一趟扫出来的：
+         * 默认值摆在那儿没接，白白退到 libR 一趟。
+         */
         if (cnt === null) cnt = { kind: 'int', value: 1 };
         if (isStrVec(t)) return lglCall('r_rep_str', ev(0), cnt, each);
         if (t.kind === 'string') {
