@@ -732,6 +732,8 @@ const NAME_DROP_OK = new Set([
   /* `order` 回的是**位置**，R 自己也不带名字（量出来 `order(c(a=3,b=1))` 是没名字的
      `2 1`）—— 从前它不在这张表上，于是带名字的向量进来白白退一档。 */
   'order',
+  /* 这四格 R 自己也丢名字（量出来 `startsWith(c(x="p"), "p")` 印的是 `[1] TRUE`）。 */
+  'startsWith', 'endsWith', 'grepl', 'grep',
   /* `duplicated` 量出来 R 自己也丢名字（2026-09-26）—— 从前这张表外，于是带名字的向量上报。 */
   'duplicated',
   'as.character', 'as.numeric', 'as.double', 'as.integer', 'as.logical',
@@ -765,9 +767,20 @@ const NAME_KEEP_NUM = new Set([
      就是它自己（R 的文档）—— 两格的名字都原样跟着（量出来的，2026-09-26）。 */
   'replace', 'unlist',
 ]);
+/**
+ * **逐元素的串那一族（名字原样跟着）** —— 名字在哪一格实参上，值就写在这张表里
+ * （`sub(pattern, repl, x)` 的数据是第 2 格，不是第 0 格）。量出来的（`Rscript`，
+ * 2026-09-26）：`nchar` / `toupper` / `tolower` / `casefold` / `trimws` / `substr` /
+ * `substring` / `strrep` / `chartr` / `sub` / `gsub` **都把名字带过去**，
+ * 而 `startsWith` / `endsWith` / `grepl` / `grep` **不带**（那四格进了 `NAME_DROP_OK`）。
+ */
+const NAME_KEEP_STR = new Map([
+  ['nchar', 0], ['toupper', 0], ['tolower', 0], ['casefold', 0], ['trimws', 0],
+  ['substr', 0], ['substring', 0], ['strrep', 0], ['chartr', 2], ['sub', 2], ['gsub', 2],
+]);
 /* `NAME_KEEP` 只管那道门（`callOf` 里"名字跟不住就报"那一句）：这几格的名字跟得住。
    `c` 也在里头 —— 它的名字是**接起来**而不是原样跟着（见 `namesExprOf` 的 `c` 那一格）。 */
-const NAME_KEEP = new Set([...NAME_KEEP_LGL, ...NAME_KEEP_NUM,
+const NAME_KEEP = new Set([...NAME_KEEP_LGL, ...NAME_KEEP_NUM, ...NAME_KEEP_STR.keys(),
   'rev', 'head', 'tail', 'sort', 'c', 'diff', 'which.max', 'which.min', 'append', 'which',
   'quantile', 'ifelse']);
 /** 第 i 格（0 起）。方言的 `{kind:'index'}` 落成 `(aget …)`，赋值那侧落 `(aset …)`。 */
@@ -1522,6 +1535,12 @@ function namesExprOf(x, types) {
     const as = posArgs(x);
     return as.length < 1 ? null : namesExprOf(as[0], types);
   }
+  /* 逐元素的串那一族（`NAME_KEEP_STR`）：名字在表里记着的那一格实参上。 */
+  if (fn !== null && NAME_KEEP_STR.has(fn)) {
+    const as = posArgs(x);
+    const k = NAME_KEEP_STR.get(fn);
+    return as.length <= k ? null : namesExprOf(as[k], types);
+  }
   /**
    * `rev` / `head` / `tail` / `sort` —— 位置动了，所以名字那一条也得**跟着动**：
    * `rev` / `head` / `tail` 走字符向量上同名的那几格辅助函数（`r_rev_str` /
@@ -1980,6 +1999,15 @@ function applyTy(fn, x, types) {
      摆在 `RMATH` 那一问之前 —— 不然 `sqrt(v)` 会落回没名字的 `RVEC`。 */
   if (fn !== null && NAME_KEEP_NUM.has(fn) && args.length > 0
       && isNamedTy(typeOfExpr(args[0], types))) return RNVEC;
+  /* 逐元素的串那一族（`NAME_KEEP_STR`）：带名字的字符向量进来，名字跟着出去 ——
+     `nchar` 出的是整数向量（`RNIVEC`），别的出字符向量（`RNSTRV`）。 */
+  if (fn !== null && NAME_KEEP_STR.has(fn)) {
+    const k = NAME_KEEP_STR.get(fn);
+    const ps = posArgs(x);
+    if (ps.length > k && isNamedStr(typeOfExpr(ps[k], types))) {
+      return fn === 'nchar' ? RNIVEC : RNSTRV;
+    }
+  }
   /* R 自己的 C 那一族回的都是 `double` —— 这是 nmath 的形状，不是我们的选择。
      第一格实参是向量时逐元素，于是回的是一格向量（`sqrt(xs)` / `round(xs, 1)`）。 */
   if (fn !== null && RMATH.has(fn)) {

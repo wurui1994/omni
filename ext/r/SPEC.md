@@ -344,6 +344,14 @@ R 那侧给的每一格 double 实参先存进临时量，谁是缺失就把**�
 
 `%in%` 的左边是一格数时回**三态标量**（那一格能直接进 `if (x %in% t)`），左边是向量时
 逐元素出逻辑向量。`pmax` / `pmin` 是**两头回收**的（有一边零长就出零长）。
+**带名字的字符向量：逐元素那一族把名字带过去**（2026-09-26 接的，那张表是 `NAME_KEEP_STR`）。
+量出来的（`Rscript`）：`nchar` / `toupper` / `tolower` / `casefold` / `trimws` / `substr` /
+`substring` / `strrep` / `chartr` / `sub` / `gsub` **都带**，而 `startsWith` / `endsWith` /
+`grepl` / `grep` **不带**（后四格因此进了 `NAME_DROP_OK`，带名字的向量进来不必退档）。
+名字在哪一格实参上写在那张表里 —— `sub(pattern, repl, x)` 的数据是第 2 格，不是第 0 格。
+类型上 `nchar` 出 `RNIVEC`（整数向量带名字），别的出 `RNSTRV`。
+判据 `ext/r/examples/strvec.R` 末尾那十一行。
+
 **名字跟着"取出来那一格"走 —— 印的时候当场报**（2026-09-26 扫出来的一族静默答错）。
 R 的 `v["a"]` 是一条**长度 1 的带名字向量**，不是一格裸数，所以名字会一路跟着走：
 
