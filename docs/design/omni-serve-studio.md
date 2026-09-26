@@ -359,57 +359,50 @@ PolyDraw 与 EvalDraw 各带一整棵例子树（`polydraw/{examples,ken,tigrou}
 `launcherText`；asy 那条腿的驱动是 `cli.js` 的 `asyModsBuild`，它问的是
 `cap('asy.unitTexts')`，并且**一目录只写一份 `omni_rt.js`**）。
 
-欠的那一刀（下一步，名字与落点都查过了）：
+已落地（2026-09-26），落点与名字：
 
 1. **打包那一格是现成的、而且与语言无关**：`src/core/frontend-asy/link.js:94` 的
-   `asyUnitModules(sections, nameOf, tail)` —— 它只认**核心方言的顶层形式**
-   （`formsOf` 扫签名、按名字把跨单元引用解析成 needs/deps），不认识 asy。
-   EVAL 这边要交出两格 `sections`：`ev_rt`（`gl-rt` / `gfx3-rt` / `gfx-rt` / `graph-rt`
-   那一层的 sx，**内容与脚本无关**）与脚本自己那一份（入口，id 0）。
-2. 出一格 `eval.unitTexts`（照 `src/core/lang/asy.js:363` 的 `asyUnitTexts` 抄形状：
-   回 `{units, reused}`，每份带 `key` / `deps` / `iface`）。
-3. 驱动按语言参数化：`cli.js` 的 `asyModsBuild` 现在写死问 `cap('asy.unitTexts')`，
-   别的都已经是公共的（一目录只写一份 `omni_rt.js`）。
-4. serve 把那一目录当静态文件发，页面 `import` 入口那份启动器 —— `ev_rt.js` 与
-   `omni_rt.js` 由**浏览器按 URL 缓存**，每跑一趟只有入口那几 KB 是新的。
+   `asyUnitModules(sections, nameOf, tail)` —— 它只认**核心方言的顶层形式**，不认识 asy。
+   EVAL 这边交出两格 `sections`：`ev_rt`（`gl-rt` / `gfx3-rt` / `gfx-rt` / `graph-rt` /
+   `text-rt` 那一层的 sx，**内容与脚本无关**）与脚本自己那一份（入口，id 0）。
+2. 切法在 `ext/polydraw/units.js`（`evalUnitTexts`）：`evalToIR` 顺手把运行时那一层的名字
+   记在模块上（`mod.rtNames` —— 那些名字本来就是 `glFnDecls()` 这几格产的，不靠前缀猜），
+   `lower()` **只跑一趟**，回来的 `(module …)` 文本按顶层项切条（`sxForms`），
+   名字在 `rtNames` 里的归 `ev_rt`、其余归入口，`(main …)` 拆成语句（`sxDoStmts`）归入口。
+3. 驱动是**公共的**（`build/modules.js` 的 `buildUnits`，见 9.4），登记在 `lower/langs.js`
+   那张表的 `units` 上；`cli.js` 的入口是 `emit js --units`（印一行账）。
+4. 三样东西都**按内容起名**：`ev_rt_<哈希>` / `<基名>_<哈希>` / `omni_rt_<哈希>.js`
+   （最后那一份留一格三十字节的 `omni_rt.js` 转口 —— 每份单元产物头上那句
+   `import './omni_rt.js';` 要它）。于是 serve 敢给前两类发 `immutable`，
+   入口与启动器发 `no-cache`。
 
-判据：一趟改一行重跑，"新编 1 份 / 复用 N 份"（与 asy 那条腿同一个口径）+ 过网字节数。
+判据：`tests/serve/run.js` 里那五格（账的**关系**而不是绝对值：第二趟 `made 0`、
+`kept` 等于上一趟两者之和；改一行 -> `made <= 1` 且 `ev_rt` 那个名字不变；
+启动器的大小与内容；两类缓存头；`/api/mod` 那三道闸）。
 
-现在的基线（`polydraw/ken/balls.pss`，`omni serve` 的热工人，2026-09-26 量）：
-每趟 `emit js --gfx host` 头一趟 380ms、之后 **130 / 97ms**；过网 **247KB**
-（`--chunk` 80KB）。切开之后该是"入口那一份几 KB + `ev_rt.js`/`omni_rt.js` 命中浏览器缓存"。
+量到的（`polydraw/ken/balls.pss`，`omni serve` 热工人）：过网 **247KB/趟 -> 换脚本约 5KB、
+重跑同一份 0KB**（模块登记表按 URL 命中）。
 
-`asyUnitModules` 要的 `sections`（照 `link.js` 里的用法记下来，省下一趟翻代码）：
+#### 9.3.1 一趟命中该有多快 —— `built.log`（2026-09-26）
 
-    ids      单元号，**0 是入口**
-    secs     Map<id, {cls, glb, fns, wraps}>  —— 四格都是"顶层项正文"的数组
-    keys     Map<id, {file, imps?}>        —— `nameOf(keys.get(id))` 决定产物名
-    main     入口 `(main …)` **里的那几句**（不带外壳；拼回去时每句缩进四格）
-    weak     生成物（名字只由内容决定的那一族；EVAL 这边是空表）
-    skipped? Map<id, {sigs}>               —— 这一趟不降正文、产物留着的那几份
-    extra?   [{name, key, sigs}]           —— 只剩产物、连单元都不存在的那几份
+切开之后还剩一件白花的活：**就算一份产物都不用重编**（`made 0 / kept 2`），那一趟照旧
+要把脚本整个降一遍才知道单元叫什么名字。热进程里量 `ken/balls.pss`：
+降级 33ms + 切单元 23ms + 其余 60ms = **117ms**，而产物与上一趟逐字节相同。
 
-于是 EVAL 这边是 `ids = [0, 1]`：1 是 `ev_rt`（键固定 —— 只跟我们那几份 rt 源码有关，
-所以换脚本它一定命中），0 是脚本。欠一格"按 decl 印 sx"的印法（asy 那侧对应 `u.parts`）。
+两刀（都在"输入身份 -> 产物名字"这件事上）：
 
-**怎么切最省**（这一条定下来了，别再走别的路）：不在 adapter 里造第二份 IR、也不加
-`OMNI_EVAL_RT` 那种档位（试过，已删）。做法是**在 sx 文本上按名字切**：
+* `build/modules.js` 的 `builtGet` / `builtSet`：一格 `built.log`，键是
+  **源文件内容 + 编译器指纹（`srcStamp()`）+ 这一趟的旗子 + 运行时那一份的名字**，
+  值是"启动器 + 那几个单元名 + 依赖的每一份产物"。命中之前**每一份产物都 stat 一遍** ——
+  少一份（缓存清过、`gc` 扫过）就当没命中、退回慢路。
+  为什么这样不是"缓存了不该缓存的东西"：产物本来就按内容起名，"同一个键 -> 同一批名字"
+  是恒等式，这一格只是把它记下来省一趟计算。
+* `cli.js` 的 `jsRuntimeOnce()`：那 350KB 的 JS 运行时**一进程只出一次、哈希只算一次**
+  —— `hash16` 在它上头要 **47ms**（量出来的），而它在一趟进程里不会变。
 
-1. `evalToIR` 顺手把运行时那一层的名字记在模块上（`mod.rtNames` —— 纯元数据，
-   下游谁都不看它）；那些名字本来就是 `glFnDecls()` / `gfx3GlobalDecls()` 这几格产的，
-   记账不靠前缀猜；
-2. `lower()` **只跑一趟**（97~130ms 那一趟里它是大头，跑两趟纯亏）；
-3. 把它回的那份 `(module …)` 文本按**深度一**的顶层形式切条（`link.js:29` 的 `formsOf`
-   能认名字 —— 它现在**没 export**，要用得先导出，别抄第二份），名字在 `rtNames` 里的
-   归 `ev_rt`、其余归入口，`(main …)` 归入口；
-4. 两格 `sections` 交给 `asyUnitModules` —— 往后 `UnitIndex` 看见 `ev_rt` 那一行的键
-   没变就**连 emit 都不做**，盘上那份 `ev_rt.js` 原样留着。
-
-还有一处要注意（下一格开工前先看）：`sections.main` 要的是**语句行**（拼回去时
-每句缩进四格），而 `sxForms` 切出来的 `(main (do …))` 是整项。所以还欠一格
-"把 `(do …)` 拆成语句"的拆法（与 `sxForms` 同一个深度计数的写法，放在
-`build/modules.js` 里一起）—— 别在 EVAL 那边另写一份。
-
+结果：`emit js --units` 命中那一趟 **117ms -> 2.3ms**（进程内），
+真的 `POST /api/units` **0.2~1.0s -> 3~5ms**（头一趟仍是 161ms：那是工人起锅）。
+机制那一格的判据在 `tests/build`（不跑任何一门语言）。
 ### 9.4 驱动那一格怎么公用（定下来的做法）
 
 `cli.js` 的 `asyModsBuild` 里与 asy 有关的只有四处：`cap(asy.unitTexts)`（单元从哪儿来）、

@@ -14,9 +14,12 @@
 // 而我们改了 `gl-rt.js` 它就自动变成另一份 —— 与 `UnitIndex` 那套"内容定址"同一条纪律。
 
 import { coreSxText } from '../../src/core/lower/drive.js';
-import { sxForms, sxDoStmts, buildUnits } from '../../src/core/build/modules.js';
+import {
+  sxForms, sxDoStmts, buildUnits, builtGet, builtSet,
+} from '../../src/core/build/modules.js';
 import { asyUnitModules } from '../../src/core/frontend-asy/link.js';
 import { hash16 } from '../../src/core/host/hash.js';
+import { readText } from '../../src/core/host/native.js';
 
 /** 空的一格 `secs`（四格都是"顶层项正文"的数组，见 `link.js` 那个循环）。 */
 const emptySec = () => ({ cls: [], glb: [], fns: [], wraps: [] });
@@ -92,19 +95,36 @@ export function evalUnitTexts(path, argv = []) {
  *     身份放在 `extras` 里。
  */
 export function evalUnitsBuild(o) {
+  /* 运行时那一份的名字：调用方给了就用它（它一进程只算一次 —— `hash16` 在那 350KB 上
+     要 47ms），没给才自己算。 */
+  const rtFile = typeof o.runtimeName === 'string' ? o.runtimeName
+    : (typeof o.runtimeText === 'string'
+      ? `omni_rt_${hash16(o.runtimeText).slice(0, 8)}.js`
+      : 'omni_rt.js');
+  /* **快路：这一份输入上一趟编出来的就是答案**（`built.log`，见 `builtGet` 的头注）。
+     Studio 里点一次运行就是一趟这个；不带这道闸的话就算一份产物都不重编，也要把脚本
+     整个降一遍才知道单元叫什么名字（`ken/balls.pss` 热进程里 117ms，产物逐字节相同）。
+     键里有：源文件内容、编译器指纹、这一趟的旗子、运行时那一份的名字。 */
+  const src = readText(o.path);
+  const key = typeof src === 'string' ? hash16([
+    src, o.tool ?? '', (o.argv ?? []).join(' '), rtFile,
+  ].join('\u0000')) : null;
+  if (key !== null) {
+    const hit = builtGet(o.dir, key);
+    if (hit !== null) {
+      return { mainPath: hit.mainPath, made: 0, kept: hit.names.length + 1, names: hit.names };
+    }
+  }
   const r = evalUnitTexts(o.path, o.argv ?? []);
   if (r === null) return null;
   /* 入口那一份的名字由切法算出来（按内容）—— 这儿从单元清单里认它：唯一不是 `ev_rt_…`
      的那一份就是入口。 */
-  const rtFile = typeof o.runtimeText === 'string'
-    ? `omni_rt_${hash16(o.runtimeText).slice(0, 8)}.js`
-    : 'omni_rt.js';
   const entry = [...r.units, ...(r.reused ?? [])]
     .map((u) => u.name).find((n) => !n.startsWith('ev_rt_')) ?? '';
   const rowOf = (u) => (u.name === entry
     ? { self: o.path, incs: [], deps: [], needs: [], extras: [...(u.deps ?? [])] }
     : { self: '', incs: [], deps: [], needs: [], extras: [u.name] });
-  return buildUnits({
+  const built = buildUnits({
     dir: o.dir,
     units: r.units,
     reused: r.reused ?? [],
@@ -119,4 +139,14 @@ export function evalUnitsBuild(o) {
     prelude: [`import './${rtFile}';`],
     tail: ['$js_check_uncaught();', '$flush();'],
   });
+  if (key !== null && built !== null) {
+    builtSet(o.dir, key, {
+      mainPath: built.mainPath,
+      names: built.names,
+      /* 命中之前每一份都要 stat 得到 —— 少一份（缓存清过/`gc` 扫过）就退回慢路。 */
+      files: [`${entry}.js`, ...built.names.map((n) => `${n}.js`),
+        ...(typeof o.runtimeText === 'string' ? ['omni_rt.js', rtFile] : [])],
+    });
+  }
+  return built;
 }

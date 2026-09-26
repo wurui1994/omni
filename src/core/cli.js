@@ -2046,6 +2046,22 @@ function stampSame(a, b) {
  *
  * 胶水在公共层（`build/modules.js` 的 `buildUnits`），切法登记在语言那张表上（`units`）。
  */
+/**
+ * **JS 那份运行时一进程只出一次**（`{text, name}`，名字按内容）。
+ *
+ * 为什么要这一格备忘：`hash16` 在那 350KB 上要 **47ms**（量出来的），而这一格产物在一趟
+ * 进程里不会变（它是编译器自己的输出）。Studio 里点一次运行就是一趟 `emit js --units`，
+ * 那 47ms 从前是每趟都花 —— 服务里那几个工人是常驻的，所以记一格就够。
+ */
+let JS_RT_ONCE = null;
+function jsRuntimeOnce() {
+  if (JS_RT_ONCE === null) {
+    const text = cap('jsgen.runtimeModule')();
+    JS_RT_ONCE = { text, name: `omni_rt_${hash16(text).slice(0, 8)}.js` };
+  }
+  return JS_RT_ONCE;
+}
+
 function emitUnits(path, rest) {
   const units = unitsBuilderOf(path, rest);
   if (units === null) {
@@ -2060,7 +2076,8 @@ function emitUnits(path, rest) {
     tool: srcStamp(),
     textToMod: cap('sx.textToMod'),
     emitEsm: (m) => target('js').emit(m, { esm: true }),
-    runtimeText: cap('jsgen.runtimeModule')(),
+    runtimeText: jsRuntimeOnce().text,
+    runtimeName: jsRuntimeOnce().name,
   });
   if (r === null) return 1;
   vStep(`eval units     新编 ${r.made} 份、复用 ${r.kept} 份  -> ${dir}`);

@@ -10,7 +10,7 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { State } from '../../src/core/build/graph.js';
 import { parseManifest } from '../../src/core/build/manifest.js';
 import { FakeDisk } from '../../src/core/build/plan.js';
@@ -18,7 +18,7 @@ import { build, BuildLog } from '../../src/core/build/run.js';
 import { Builder, toNinja } from '../../src/core/build/script.js';
 import { ContentIds, Index, staleUnits } from '../../src/core/build/modcache.js';
 import {
-  UnitIndex, declRead, declWrite, launcherText,
+  UnitIndex, declRead, declWrite, launcherText, builtGet, builtSet,
 } from '../../src/core/build/modules.js';
 
 let pass = 0;
@@ -286,6 +286,24 @@ throws('两条边造同一格：当场报', () => run([CC,
   declWrite(dir, 'noiface', ['  (fn bar () int)'], null);
   eq('modules：没有 iface 那一段就是 null', declRead(dir, 'noiface').iface, null);
   eq('modules：没这份声明回 null', declRead(dir, 'nobody'), null);
+
+  /* **那一格"这份输入上一趟编出了什么"的小账**（`built.log`）：命中之前每一份产物都要
+     stat 得到 —— 少一份就当没命中（缓存清过 / `gc` 扫过都自动退回慢路）。
+     这一格漏掉的症状最贵：回一个**指到不存在的产物**的答案，页面上是"点了没反应"。 */
+  writeFileSync(join(dir, 'main-e.js'), '//\n');
+  writeFileSync(join(dir, 'e.js'), '//\n');
+  writeFileSync(join(dir, 'rt1.js'), '//\n');
+  eq('modules：没记过 -> 没命中', builtGet(dir, 'K1'), null);
+  builtSet(dir, 'K1', { mainPath: join(dir, 'main-e.js'), names: ['rt1'], files: ['e.js', 'rt1.js'] });
+  eq('modules：记过就命中（回启动器与那几个单元名）',
+    builtGet(dir, 'K1'), { mainPath: join(dir, 'main-e.js'), names: ['rt1'] });
+  eq('modules：换个键 -> 没命中', builtGet(dir, 'K2'), null);
+  rmSync(join(dir, 'rt1.js'));
+  eq('modules：少一份产物 -> 当没命中', builtGet(dir, 'K1'), null);
+  writeFileSync(join(dir, 'rt1.js'), '//\n');
+  eq('modules：产物补回来 -> 又命中', builtGet(dir, 'K1') !== null, true);
+  rmSync(join(dir, 'main-e.js'));
+  eq('modules：启动器自己也在那张 stat 名单里', builtGet(dir, 'K1'), null);
 
   /* 启动器：入口最后跑 */
   const txt = launcherText('main', ['a', 'b'], (n) => `init_${n}`, ["import './rt.js';"], ['done();']);

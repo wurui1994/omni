@@ -349,6 +349,51 @@ export function sxDoStmts(text) {
  * 回 `{ mainPath, made, kept, names }`。**目录要调用方先建**（这一份只碰封闭 ABI 里的
  * `writeText`/`exists`）。`runtimeText` 给了就写一份 `omni_rt.js`（一目录一份，所有产物共用）。
  */
+/**
+ * **"这一份输入上一趟编出了什么"的一格小账**（`built.log`，一行一格）。
+ *
+ * 谁要它：Studio 里点一次运行就是一趟 `emit js --units`。就算一份产物都不用重编
+ * （`made 0 / kept 2`），那一趟照旧要**把脚本整个降一遍**才知道单元叫什么名字 ——
+ * 量过 `ken/balls.pss`（热进程里）：降级 33ms + 切单元 23ms + 其余 60ms = **117ms**，
+ * 而这一趟的产物与上一趟**逐字节相同**。那 117ms 是白花的。
+ *
+ * 所以记一格从**输入身份**（源文件内容 + 编译器指纹 + 这一趟的旗子）到**产物清单**的账：
+ * 命中就直接把上一趟那几个名字回出去，一次降级都不做。
+ *
+ * 为什么这样是安全的（而不是"缓存了不该缓存的东西"）：
+ *   * 键里有编译器指纹（`tool` = `srcStamp()`），改一行编译器就全体失效；
+ *   * 命中之前**每一份产物都 stat 一遍**（`files`），少一份就当没命中 ——
+ *     缓存目录被清过、`gc` 扫过都自动退回慢路；
+ *   * 产物本身按内容起名（`ev_rt_<哈希>` / `<基名>_<哈希>`），所以"同一个键 -> 同一批
+ *     名字"本来就是恒等式，这一格只是把它记下来省一趟计算。
+ */
+export function builtGet(dir, key) {
+  const ix = Index.load(join(dir, 'built.log'));
+  const v = ix.keys.get(key);
+  if (v === undefined) return null;
+  const [main, files, names] = v.split('|');
+  if (typeof main !== 'string' || main === '') return null;
+  for (const f of (files ?? '').split(',')) {
+    if (f !== '' && !exists(join(dir, f))) return null;
+  }
+  return {
+    mainPath: join(dir, main),
+    names: (names ?? '').split(',').filter((s) => s !== ''),
+  };
+}
+
+/** 记一格（`o` = `{mainPath, names, files}`，`files` 是这一格结果**依赖的每一份产物**）。 */
+export function builtSet(dir, key, o) {
+  const path = join(dir, 'built.log');
+  const ix = Index.load(path);
+  const main = o.mainPath.slice(o.mainPath.lastIndexOf('/') + 1);
+  /* 启动器本身也进那张 stat 名单（它是这一格结果的第一份产物）。 */
+  ix.set(key, [main, [main, ...(o.files ?? [])].join(','), (o.names ?? []).join(',')].join('|'));
+  /* 这是一格**缓存**，不是账本：只留最近那 512 行（Map 按插入次序，切尾巴就是留最近的）。 */
+  if (ix.keys.size > 512) ix.keys = new Map([...ix.keys.entries()].slice(-512));
+  ix.save(path);
+}
+
 export function buildUnits(o) {
   const ix = new UnitIndex(o.dir);
   let made = 0;
