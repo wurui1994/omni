@@ -105,3 +105,78 @@ st = Stack()
 st.push(1)
 st.push(2)
 print(st.pop(), st.empty(), len(st.items), st.items)
+
+
+# **字段上那张字典**（`self.tags: dict[str, int]`）—— 方言的字段白名单里从前没有 dict
+# 那一格，于是整个类连声明都过不去，后面每一处 `self.tags` 跟着全红。与"字段是一张表"
+# 同一档：格子里躺一个句柄，与标量同宽。字段的零值是**一张真的空字典**（不是空句柄），
+# 所以 `self.bylen` 那一格不赋值就往里写也走得通。
+class Counter:
+    def __init__(self, xs: list[str], tags: dict[str, int]):
+        self.xs = xs
+        self.tags = tags
+        self.bylen: dict[int, list[str]] = {}
+
+    def add(self, w: str):
+        self.xs.append(w)
+        if w in self.tags:
+            self.tags[w] = self.tags[w] + 1
+        else:
+            self.tags[w] = 1
+        n = len(w)
+        if n not in self.bylen:
+            self.bylen[n] = []
+        self.bylen[n].append(w)
+
+    def extend(self, more: list[str]) -> int:
+        for w in more:
+            self.add(w)
+        return len(self.xs)
+
+
+# **实参位置上的 `[]` / `{}`**：右边答不出元素类型，**形参那一格**说了算 —— 与 `xs = []`
+# 同一条（"空容器的类型从左边来"）。实参位置上压根没处写标注，所以从前 `Counter([], {})`
+# 这种写法就此走不通（报"空表 `[]` 的元素类型推不出来 —— 给它一格标注"）。
+c = Counter([], {})
+print(len(c.xs), len(c.tags), len(c.bylen))
+c.add("fig")
+c.add("fig")
+c.add("kiwi")
+print(c.xs, c.tags, c.bylen)
+print(c.tags["fig"], len(c.bylen[3]))
+print(c.extend([]), c.extend(["plum", "a"]))
+print(c.xs, sorted(c.tags), sorted(c.bylen))
+
+
+# 字段上那张字典的**值是一格类**（`dict[str, Task]`）—— 方言那一侧 44-dicts 就收了
+# （格子里躺一个句柄），这一刀之后从 python 这边够得着了。
+class Task:
+    def __init__(self, name: str, pri: int):
+        self.name = name
+        self.pri = pri
+
+    def __str__(self) -> str:
+        return "%s(p%d)" % (self.name, self.pri)
+
+
+class Board:
+    def __init__(self):
+        self.tasks: dict[str, Task] = {}
+
+    def add(self, t: Task):
+        self.tasks[t.name] = t
+
+    def order(self) -> list[str]:
+        # `key=` 那个 lambda 读得着 `self`
+        return sorted(sorted(self.tasks), key=lambda n: self.tasks[n].pri)
+
+
+bd = Board()
+bd.add(Task("build", 2))
+bd.add(Task("test", 3))
+bd.add(Task("lint", 1))
+print(len(bd.tasks), bd.order())
+for i, tn in enumerate(bd.order(), 1):
+    print(i, bd.tasks[tn], bd.tasks[tn].pri)
+
+

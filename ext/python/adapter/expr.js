@@ -2877,7 +2877,19 @@ export function callOf(x, C) {
     && String(nameOf(kids(argToks[0])[0])) === 'range') {
     return rangeListOf(argToks[0], C);
   }
-  const args = argToks.map((a) => exprOf(a, C));
+  const wants = paramWants(fn, argToks, C);
+  const args = argToks.map((a, k) => {
+    /* **实参位置上的 `[]` / `{}`**：右边答不出元素类型，**形参那一格**说了算 ——
+       与 `xs = []` / `d[k] = []` 同一条（"空容器的类型从左边来"）。
+       从前这一格直接报"空表 `[]` 的元素类型推不出来 —— 给它一格标注"，可实参位置上
+       **压根没处写标注**：`merge([], [1])` 那种写法就此走不通。 */
+    if (['list', 'dict'].includes(tag(a)) && kids(a).length === 0) {
+      const want = (wants ?? [])[k];
+      if (want != null && want.kind === (tag(a) === 'list' ? 'arr' : 'map')) return emptyOf(want);
+    }
+    return exprOf(a, C);
+  });
+
 
   /* `math.sqrt(x)` 那一族 —— 先看它，再看方法（`math` 不是一格值）。 */
   if (tag(fn) === 'attr' && tag(kids(fn)[0]) === 'n' && String(nameOf(kids(fn)[0])) === 'math') {
@@ -2896,11 +2908,43 @@ export function callOf(x, C) {
   return builtinOf(nm, args, argToks, C);
 }
 
+/** 一格空容器（类型已经知道了）。 */
+export function emptyOf(t) {
+  return t.kind === 'arr'
+    ? { kind: 'builtin', name: 'anew', args: [tyArg(t), { kind: 'int', value: 0 }] }
+    : { kind: 'builtin', name: 'dnew', args: [tyArg(t)] };
+}
+
+/**
+ * 这一处调用的**形参各是什么类型** —— 只给"实参位置上的空容器"用（`f([])`）。
+ *
+ * 拿得到就拿，拿不到交 null（那时空容器照旧报它自己那句）。**只在实例唯一时认**：
+ * 几格实例摆在那儿说明这个函数按实参类型单态化过，那时猜哪一格都是错的。
+ */
+function paramWants(fn, argToks, C) {
+  if (!argToks.some((a) => ['list', 'dict'].includes(tag(a)) && kids(a).length === 0)) return null;
+  let list = null;
+  let off = 0;                                   // `self` 占掉的那一格
+  if (tag(fn) === 'n') {
+    const nm = String(nameOf(fn));
+    if (C.records.has(nm)) { list = C.insts.get(`${nm}.__init__`); off = 1; } else list = C.insts.get(nm);
+  } else if (tag(fn) === 'attr') {
+    const rt = tyOfCst(kids(fn)[0], C);
+    if (rt !== null && rt.kind === 'named') {
+      list = C.insts.get(`${rt.name}.${String(leaf(kids(fn)[1]))}`);
+      off = 1;
+    }
+  }
+  if (!Array.isArray(list)) return null;
+  const cands = list.filter((i) => i.params.length === argToks.length + off);
+  if (cands.length !== 1) return null;
+  return argToks.map((_, k) => cands[0].params[k + off].type);
+}
+
 /**
  * `list(range(a, b, step))` —— 实参与 `for … in range(…)` 那一处同一条规矩
  * （1~3 格，步长要是一格非零整数字面量）。
- */
-function rangeListOf(callTok, C) {
+ */function rangeListOf(callTok, C) {
   const as = kids(part(callTok, 'args') ?? { kind: 'list', items: [] });
   if (as.length === 0 || as.length > 3) throw new Error('python->IR: `range()` 收 1~3 格实参');
   const from = as.length === 1 ? { kind: 'int', value: 0 } : exprOf(as[0], C);

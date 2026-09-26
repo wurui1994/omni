@@ -31,7 +31,7 @@ import { INT, STR, BOOL, DYN, arrOf, dictOf, sameType, typeOf, named } from '../
 import { typeToSx } from '../../../src/core/lower/ty.js';
 import {
   exprOf, condOf, nameOf, typeOfAnnot, tyOfCst, tyArg, pyStr, pyRepr, lenOf, hasFields, fstringParts, cmpEq,
-  kwOrder, tupleOf, cmpLt, needOrd, tupleToList, sortByKeyPy,
+  kwOrder, tupleOf, cmpLt, needOrd, tupleToList, sortByKeyPy, emptyOf,
 } from './expr.js';
 import {
   reverseStmts, clearStmts, extendStmts, insertStmts, dropAtStmts, indexOfList,
@@ -1534,13 +1534,6 @@ function assignTo(t, valueTok, C) {
     }
   }
   return writeTo(t, exprOf(valueTok, C), C);
-}
-
-/** 一格空容器（类型已经知道了）。 */
-function emptyOf(t) {
-  return t.kind === 'arr'
-    ? { kind: 'builtin', name: 'anew', args: [tyArg(t), { kind: 'int', value: 0 }] }
-    : { kind: 'builtin', name: 'dnew', args: [tyArg(t)] };
 }
 
 /** 一格目标 ← 一格**算好了**的值。 */

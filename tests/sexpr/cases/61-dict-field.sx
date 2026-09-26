@@ -1,0 +1,61 @@
+;; 字段收一张字典。这一份的存在理由是**类上那格字典字段**：python 里
+;; `self.tags: dict[str, int] = {}` 这么一句，字段白名单里没有 dict 那一格，于是整个类
+;; 连声明都过不去（报"字段 B.tags：这一刀的字段只能是 …"），后面每一处 `fld` 跟着全红。
+;;
+;; 与"字段是一张表"（`(arr T)`，早就收了）是**同一档**：格子里躺一个句柄，与标量同宽，
+;; 布局 / 零值 / 四条腿的字段读写全都是现成的 —— 缺的只有那张白名单。所以这一份判的是
+;; "开了口之后那几条规矩还对不对"，不是一套新实现。
+;;
+;; 两条要紧的规矩：
+;;   1. **零值是一张真的空字典**，不是空句柄 —— 不 `fldset` 就 `dset` / `dlen` 也走得通
+;;      （类字段那一格的零值与 `(dnew …)` 同一档，三条腿一致）。
+;;   2. **引用语义**：`fldset` 装进去之后改源头那张字典，字段上读回来的跟着变；
+;;      值语义的结构体拷一份，拷的也是**那格句柄**（浅拷，与 go 的 `map` 字段同一档）。
+(module
+  (class B (xs (arr int)) (tags (dict string int)) (bylen (dict int (arr string))))
+  (struct S (n int) (m (dict string int)))
+
+  ;; 穿过函数：类是引用，字段上那张字典就地写
+  (fn tag ((b B) (k string) (v int)) void
+    (dset (fld (var b) tags) (var k) (var v)))
+
+  (main
+    (let b B (cnew B))
+    ;; 零值：一张真的空字典
+    (print (dlen (fld (var b) tags)))
+    (dset (fld (var b) tags) (str "a") (int 1))
+    (print (dlen (fld (var b) tags)))
+    (print (dget (fld (var b) tags) (str "a")))
+    (print (dhas (fld (var b) tags) (str "z")))
+
+    (expr (call tag (var b) (str "b") (int 7)))
+    (print (dlen (fld (var b) tags)))
+    (print (dget (fld (var b) tags) (str "b")))
+
+    ;; fldset 装一张**外头的**字典进去：引用语义，改源头字段跟着变
+    (let mm (dict string int) (dnew (dict string int)))
+    (dset (var mm) (str "x") (int 5))
+    (fldset (var b) tags (var mm))
+    (print (dlen (fld (var b) tags)))
+    (dset (var mm) (str "y") (int 6))
+    (print (dlen (fld (var b) tags)))
+    (print (dget (fld (var b) tags) (str "y")))
+
+    ;; 与"字典的值收一张表"那一刀叠起来（60-dict-arr）：字段是 `(dict int (arr string))`
+    (dset (fld (var b) bylen) (int 3) (anew (arr string) (int 0)))
+    (apush (dget (fld (var b) bylen) (int 3)) (str "fig"))
+    (print (alen (dget (fld (var b) bylen) (int 3))))
+    (print (aget (dget (fld (var b) bylen) (int 3)) (int 0)))
+
+    ;; 表字段那一格从前就收 —— 它的零值也是一张真的空表
+    (apush (fld (var b) xs) (int 9))
+    (print (alen (fld (var b) xs)))
+
+    ;; 值语义的结构体上也收：拷的是那格句柄（浅拷）
+    (let s S (new S))
+    (print (dlen (fld (var s) m)))
+    (dset (fld (var s) m) (str "a") (int 1))
+    (let t S (var s))
+    (dset (fld (var t) m) (str "b") (int 2))
+    (print (dlen (fld (var s) m)))
+    (print (dlen (fld (var t) m)))))
