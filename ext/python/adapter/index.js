@@ -396,6 +396,36 @@ function allNodes(x, out = []) {
 const paramsOf = (f) => kids(part(f, 'params') ?? { kind: 'list', items: [] });
 
 /**
+ * 形参的**标注**那一格：`(p (n a) 标注 (default e))` 里的第二格 —— 可是没写标注时
+ * 第二格就是 `(default …)` 本身，照着读会把默认值当标注（量到过）。
+ */
+const annotTok = (p) => {
+  const k = kids(p)[1];
+  return k !== undefined && tag(k) !== 'default' ? k : undefined;
+};
+
+/**
+ * 形参的**默认值**只收字面量。
+ *
+ * 为什么卡这一条：默认值在这一层是**调用点展开**的（`kwOrder` 把缺的那几格补上那棵
+ * 原文树），而 python 的默认值是 `def` 那一刻算一遍、以后**共享同一格**。
+ * 字面量看不出区别；可变的（`def f(xs=[])`）区别是根本性的 —— python 里两次调用改的是
+ * 同一张表。所以那一档当场报，不悄悄换语义。
+ */
+function checkDefault(nm, p) {
+  const d = part(p, 'default');
+  if (d === undefined) return;
+  const e = kids(d)[0];
+  const ok = ['num', 'str', 'true', 'false', 'none'].includes(tag(e))
+    || (tag(e) === 'un' && String(leaf(kids(e)[0])) === '-' && tag(kids(e)[1]) === 'num');
+  if (!ok) {
+    throw new Error(`python->IR: \`def ${nm}\` 的默认值只收字面量（这里是 \`${tag(e)}\`）——`
+      + ' 这一层的默认值是**调用点展开**的，而 python 的默认值 `def` 时算一遍、以后共享'
+      + '同一格；可变的默认值（`def f(xs=[])`）两者差得是根本的');
+  }
+}
+
+/**
  * 从"裹好的那一份模块"里挖出那一棵表达式：找第一格 `(expr E)`，交 E。
  * **不用生成器、不用递归的闭包** —— 这份文件跟着编译器一起被降级，子集越窄越稳。
  */
@@ -422,7 +452,7 @@ function infer(C, tree, scriptStmts) {
     const ps = paramsOf(f);
     for (const p of ps) {
       if (tag(p) !== 'p') throw new Error(`python->IR: \`def ${nm}\` 的形参里有 \`${tag(p)}\` —— 还没接（*args / **kw / 位置标记）`);
-      if (part(p, 'default') !== undefined) throw new Error(`python->IR: \`def ${nm}\` 的形参带默认值 —— 还没接`);
+      checkDefault(nm, p);
     }
     /* 方法的名字是 `<类名>.<方法名>`（`declareClasses` 摆进来的）。它的第一格形参是
        `self`，类型就是那个类 —— 相当于自带一格标注，所以调用点不必推它。 */
@@ -436,7 +466,7 @@ function infer(C, tree, scriptStmts) {
     }
     shells.set(nm, {
       names: ps.map((p) => C.ref(String(nameOf(kids(p)[0])))),
-      annots: ps.map((p, i) => (rec !== null && i === 0 ? rec.type : typeOfAnnot(kids(p)[1], C))),
+      annots: ps.map((p, i) => (rec !== null && i === 0 ? rec.type : typeOfAnnot(annotTok(p), C))),
       retAnnot: typeOfAnnot(kids(part(f, 'ret') ?? { kind: 'list', items: [] })[0], C),
       rec,
     });
@@ -525,33 +555,59 @@ function collectInsts(nm, sh, tree, C) {
 
   /* **连 f-string 里那几棵一起走** —— 那些调用躺在一个 STRING 记号里，
      `allNodes(tree)` 走不到（`pyToIR` 那一趟已经把它们解析出来挂在 `C.fstrTrees` 上）。 */
+  const sweep = (nodes) => {
+    for (const node of nodes) {
+      if (tag(node) !== 'call') continue;
+      const fn = kids(node)[0];
+      /* 命名实参先排回位置上、缺的补默认值（不然按次序取的类型会错位）。 */
+      const args = kwOrder(fn, kids(part(node, 'args') ?? { kind: 'list', items: [] }), C);
+      if (dot < 0) {
+        /* 普通函数：`f(…)`。 */
+        if (tag(fn) === 'n' && String(nameOf(fn)) === nm && args.length === sh.names.length) {
+          take(args, null);
+        }
+        continue;
+      }
+      const cname = nm.slice(0, dot);
+      const mname = nm.slice(dot + 1);
+      /* 造一格：`C(…)` -> `C.__init__(self, …)`。 */
+      if (mname === '__init__' && tag(fn) === 'n' && String(nameOf(fn)) === cname
+        && args.length === sh.names.length - 1) {
+        take(args, sh.annots[0]);
+        continue;
+      }
+      /* 方法：`recv.m(…)`，而 recv 装的正是这个类。 */
+      if (tag(fn) === 'attr' && String(leaf(kids(fn)[1])) === mname
+        && args.length === sh.names.length - 1) {
+        const rt = tyOfCst(kids(fn)[0], C);
+        if (rt !== null && rt.kind === 'named' && rt.name === sh.annots[0].name) take(args, sh.annots[0]);
+      }
+    }
+  };
+
   const nodes = allNodes(tree);
   for (const ft of C.fstrTrees) allNodes(ft, nodes);
-  for (const node of nodes) {
-    if (tag(node) !== 'call') continue;
-    const fn = kids(node)[0];
-    /* 命名实参先排回位置上（不然按次序取的类型会错位）。 */
-    const args = kwOrder(fn, kids(part(node, 'args') ?? { kind: 'list', items: [] }), C);
-    if (dot < 0) {
-      /* 普通函数：`f(…)`。 */
-      if (tag(fn) === 'n' && String(nameOf(fn)) === nm && args.length === sh.names.length) {
-        take(args, null);
-      }
-      continue;
-    }
-    const cname = nm.slice(0, dot);
-    const mname = nm.slice(dot + 1);
-    /* 造一格：`C(…)` -> `C.__init__(self, …)`。 */
-    if (mname === '__init__' && tag(fn) === 'n' && String(nameOf(fn)) === cname
-      && args.length === sh.names.length - 1) {
-      take(args, sh.annots[0]);
-      continue;
-    }
-    /* 方法：`recv.m(…)`，而 recv 装的正是这个类。 */
-    if (tag(fn) === 'attr' && String(leaf(kids(fn)[1])) === mname
-      && args.length === sh.names.length - 1) {
-      const rt = tyOfCst(kids(fn)[0], C);
-      if (rt !== null && rt.kind === 'named' && rt.name === sh.annots[0].name) take(args, sh.annots[0]);
+  sweep(nodes);
+
+  /**
+   * **再按函数体扫一遍，先把形参与局部变量绑进一层作用域**。
+   *
+   * 头一遍是平铺全树的，所以调用点上的**局部变量**在 `tyOfCst` 那儿答 null —— 收不到
+   * 实例。量到的原话：`x = 3` 之后 `dbl(x)` 报"`dbl(int)` 没有对得上的那一格（这份源码里
+   * 生成的是 (x)）"；`b = Box(3)` 之后 `b.area(2)` 报"对不上那一格的形参"。
+   * 也就是说**实参只要是局部变量就不算**，而真的 python 代码里几乎全是局部变量。
+   *
+   * 作用域怎么摆与 `inferRet` 那一处同一条（push / 绑形参 / `scanBinds` 走一遍体）。
+   * 体里的名字**一次全绑上**（不按语句次序），所以同名换了类型的那种会取到后一格 ——
+   * 与推断跑三轮那条口径一致：宁可多收一格实例，也别漏。
+   */
+  for (const [owner, f] of C.fnNodes) {
+    for (const inst of C.insts.get(owner) ?? []) {
+      C.push();
+      for (const p of inst.params) C.bind(p.name, p.type);
+      scanBinds(part(f, 'body'), C);
+      sweep(allNodes(f));
+      C.pop();
     }
   }
 }

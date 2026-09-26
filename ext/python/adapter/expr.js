@@ -2296,42 +2296,78 @@ function pickOf(a, b, op, C, cmp = null) {
 }
 
 /**
- * **命名实参**（`f(b=2, a=1)`）排回位置上。
+ * 调用点认出被调的那棵 `def`，交它的**形参名字与默认值**（原文树）。
+ * 认不出来（内建、箱子里的函数、别处来的）回 `null`。
+ */
+function calleeSig(fn, C) {
+  let key = null;
+  let label = null;
+  if (tag(fn) === 'n') {
+    const nm = String(nameOf(fn));
+    label = nm;
+    key = C.records.has(nm) ? `${nm}.__init__` : nm;
+  } else if (tag(fn) === 'attr') {
+    /* `recv.m(…)` —— 接收者装的是哪个类，就查那个类的那格方法。 */
+    const rt = tyOfCst(kids(fn)[0], C);
+    if (rt === null || rt === undefined || rt.kind !== 'named') return null;
+    const rec = [...C.records.values()].find((r) => r.type.name === rt.name);
+    if (rec === undefined) return null;
+    label = `${rec.name}.${String(leaf(kids(fn)[1]))}`;
+    key = label;
+  } else {
+    return null;
+  }
+  const def = C.fnNodes.get(key);
+  if (def === undefined) return null;
+  const ps = kids(part(def, 'params') ?? { kind: 'list', items: [] }).filter((p) => tag(p) === 'p');
+  /* 方法（含造记录走的 `__init__`）第一格是 self —— 调用点不给它。 */
+  const use = key.includes('.') ? ps.slice(1) : ps;
+  return {
+    label,
+    names: use.map((p) => String(nameOf(kids(p)[0]))),
+    defs: use.map((p) => {
+      const d = part(p, 'default');
+      return d === undefined ? undefined : kids(d)[0];
+    }),
+  };
+}
+
+/**
+ * **命名实参排回位置上，缺的那几格补默认值**（`f(b=2, a=1)` / `f(1)` 而 `def f(a, b=2)`）。
  *
- * 这一层没有"默认值"那一档（`def` 的形参带默认值当场报），所以命名实参只是**换次序**：
- * 按形参名字把它塞回那一格就行，每一格都必须有值。
+ * 默认值是**调用点展开**的：把 `def` 上那棵原文树摆到缺的那一格上。这么办与单态化正好
+ * 合得上 —— `f(1)` 与 `f(1, 5)` 补完都是两格实参，推出来是同一格实例。
+ * 代价说在 `index.js` 的 `checkDefault`：所以默认值只收字面量。
  *
- * 只对**这份源码里定义的函数与类**这么办（形参名字从那棵 `def` 上读）。内建各有各的
- * 规矩（`print(sep=, end=)`、`sorted(reverse=)`），在各自那一处收。
+ * 只对**这份源码里定义的函数、类与方法**这么办。内建各有各的规矩
+ * （`print(sep=, end=)`、`sorted(reverse=)`），在各自那一处收。
  */
 export function kwOrder(fn, toks, C) {
-  if (!toks.some((a) => tag(a) === 'kw')) return toks;
-  if (tag(fn) !== 'n') return toks;
-  const nm = String(nameOf(fn));
-  const def = C.fnNodes.get(C.records.has(nm) ? `${nm}.__init__` : nm);
-  if (def === undefined) return toks;
-  const ps = kids(part(def, 'params') ?? { kind: 'list', items: [] })
-    .filter((p) => tag(p) === 'p')
-    .map((p) => String(nameOf(kids(p)[0])));
-  /* 造一格记录时第一格形参是 self —— 调用点不给它。 */
-  const names = C.records.has(nm) ? ps.slice(1) : ps;
+  const sig = calleeSig(fn, C);
+  if (sig === null) return toks;
+  const { label, names, defs } = sig;
+  const hasKw = toks.some((a) => tag(a) === 'kw');
+  if (!hasKw && toks.length === names.length) return toks;
   const out = toks.filter((a) => tag(a) !== 'kw');
+  if (out.length > names.length) return toks;      // 个数不对，交给下游那句话去报
   for (const a of toks) {
     if (tag(a) !== 'kw') continue;
     const k = String(leaf(kids(a)[0]));
     const at = names.indexOf(k);
     if (at < 0) {
-      throw new Error(`python->IR: \`${nm}()\` 没有叫 \`${k}\` 的形参`
+      throw new Error(`python->IR: \`${label}()\` 没有叫 \`${k}\` 的形参`
         + `（有的是 ${names.join(' / ')}）`);
     }
-    if (out[at] !== undefined) throw new Error(`python->IR: \`${nm}()\` 的 \`${k}\` 给了两回`);
+    if (out[at] !== undefined) throw new Error(`python->IR: \`${label}()\` 的 \`${k}\` 给了两回`);
     out[at] = kids(a)[1];
   }
   for (let i = 0; i < names.length; i += 1) {
-    if (out[i] === undefined) {
-      throw new Error(`python->IR: \`${nm}()\` 的形参 \`${names[i]}\` 没给值`
-        + '（这一层没有默认值那一档）');
+    if (out[i] !== undefined) continue;
+    if (defs[i] === undefined) {
+      /* 没给值又没有默认值 —— 交给下游那句"没有对得上的那一格"去报（个数在那儿更清楚）。 */
+      return toks;
     }
+    out[i] = defs[i];
   }
   return out;
 }

@@ -1,9 +1,13 @@
-# ext/python/examples/kwargs.py —— 命名实参与多目标赋值
+# ext/python/examples/kwargs.py —— 命名实参、默认值、多目标赋值
 #
-# **命名实参只是换个次序**：这一层没有"默认值"那一档（`def` 的形参带默认值当场报），
-# 所以 `f(b=2, a=1)` 按形参名字排回位置上就完事了。三处都要排：建 IR 那一趟、
-# 问类型那一趟（`tyOfCall`）、**收单态化实例那一趟**（`collectInsts`）——
-# 漏掉最后一处的症状是按次序取的类型错位，挑出来的实例是错的那一格。
+# **命名实参与默认值走同一处**（`kwOrder`）：命名的按形参名字排回位置上，缺的那几格
+# 把 `def` 上那棵**默认值的原文树**补上去。三处都要排：建 IR 那一趟、问类型那一趟
+# （`tyOfCall`）、**收单态化实例那一趟**（`collectInsts`）—— 漏掉最后一处的症状是
+# 按次序取的类型错位，挑出来的实例是错的那一格。
+#
+# 默认值是**调用点展开**的，所以它只收**字面量**：python 的默认值是 `def` 那一刻算一遍、
+# 以后**共享同一格**，`def f(xs=[])` 两次调用改的是同一张表 —— 展开就成了两张。
+# 字面量看不出区别，可变的差得是根本的，所以那一档当场报，不悄悄换语义。
 #
 # 内建各有各的规矩，所以不走那条通路：`print(sep=, end=)` 与 `sorted(reverse=)`
 # 在各自那一处收。`sorted(reverse=…)` **只收 True / False 字面量** —— 升序降序
@@ -20,6 +24,27 @@ def area(w: int, h: int) -> int:
 
 def greet(name: str, greeting: str) -> str:
     return greeting + ", " + name
+
+
+def tag(text, mark="!", times=1):
+    return text + mark * times
+
+
+def step(x: int, by: int = 1) -> int:
+    return x + by
+
+
+def dbl(k):
+    return k * 2
+
+
+class Box:
+    def __init__(self, w, h=2):
+        self.w = w
+        self.h = h
+
+    def area(self, k=1):
+        return self.w * self.h * k
 
 
 class Point:
@@ -42,6 +67,23 @@ def main():
 
     # 单态化按实参类型挑实例 —— 乱序之后也要挑对那一格
     print(area(2, 3), area(h=5, w=4))
+
+    # 默认值：不给、给一格、给全、用名字挑着给
+    print(tag("a"), tag("a", "?"), tag("a", "?", 3), tag("a", times=2))
+    print(step(1), step(1, 5), step(by=9, x=2))
+
+    # 类的 __init__ 与方法上的默认值
+    bx = Box(3)
+    by = Box(3, 4)
+    print(bx.w, bx.h, by.w, by.h)
+    print(bx.area(), bx.area(2), by.area(k=2))
+
+    # **实参是局部变量**也要收得到实例（从前这一格漏了：平铺全树扫的时候
+    # 局部变量在 tyOfCst 那儿答 null，于是 `dbl(v)` 报"没有对得上的那一格"）
+    v = 21
+    print(dbl(v), dbl(2), dbl(v * 2))
+    s = "ab"
+    print(dbl(s))
 
     # sorted(reverse=)
     print(sorted([3, 1, 2]), sorted([3, 1, 2], reverse=True))
