@@ -1113,7 +1113,7 @@ const NAMED_OK = new Map([
   ['zapsmall', new Set(['digits'])],
   ['diff', new Set(['lag'])],
   ['casefold', new Set(['upper'])],
-  ['format', new Set(['nsmall', 'width', 'big.mark'])],
+  ['format', new Set(['nsmall', 'width', 'big.mark', 'digits'])],
   ['prettyNum', new Set(['big.mark'])],
   /* `formatC` 改写成 `sprintf`（见 `formatCOf`）—— 那四格都只认字面量。 */
   ['formatC', new Set(['format', 'digits', 'width', 'flag'])],
@@ -6639,7 +6639,25 @@ function callOf(x, types, extra, want, stmtPos) {
           }
           return lglCall('r_padl', asStr(all[0], types, 7), w);
         }
-        return lglCall('r_format1', asReal(ev(0), t), named('nsmall'), w);
+        /**
+         * `digits = k` 就是"**几位有效数字**"—— 与 `print` 那一条同一套（`r_num_str` 的
+         * 那个参数），缺省 7。量出来（2026-09-27）`format(pi, digits=3)` 是 `"3.14"`、
+         * `format(1/3, digits=3)` 是 `"0.333"`、`format(123456, digits=3)` 还是 `"123456"`
+         * （定点那一侧整数位一格都不削）、`format(1e10, digits=3)` 是 `"1e+10"`。
+         * 只认**写着的数**（运行期的位数要把那个参数一路传下去，是另一件事）。
+         */
+        const dgNode = namedArg(x, 'digits');
+        let dg = 7;
+        if (dgNode !== undefined) {
+          const dv = constNumOf(dgNode);
+          if (dv === null || !Number.isInteger(dv) || dv < 1 || dv > 22) {
+            throw new Error('r->IR: format() 的 `digits=` 只认写着的整数 1…22'
+              + '（R 那儿也是这个范围）—— 这儿给的算不出来');
+          }
+          dg = dv;
+        }
+        return lglCall('r_format1', asReal(ev(0), t), named('nsmall'), w, { kind: 'int', value: dg });
+
       }
       case 'Sys.getenv': {
         /**
@@ -8602,10 +8620,11 @@ function strFnDecl(name) {
     return {
       kind: 'fn',
       name,
-      params: [{ name: 'x', type: REAL }, { name: 'ns', type: INT }, { name: 'w', type: INT }],
+      params: [{ name: 'x', type: REAL }, { name: 'ns', type: INT }, { name: 'w', type: INT },
+        { name: 'dg', type: INT }],
       ret: STR,
       body: [
-        { kind: 'let', name: 'o', type: STR, init: { kind: 'call', fn: { kind: 'name', name: useFn(NUM_STR) }, args: [xx, I(7)] } },
+        { kind: 'let', name: 'o', type: STR, init: { kind: 'call', fn: { kind: 'name', name: useFn(NUM_STR) }, args: [xx, nm('dg')] } },
         iff(b('&&', b('>', nm('ns'), I(0)),
           b('&&', fin, b('<', call1('sfind', out, S('e')), I(0)))), [
           letI('k', call1('sfind', out, S('.'))),

@@ -204,3 +204,14 @@ cat(prettyNum(-9876543, big.mark = ","), prettyNum(12, big.mark = ","), prettyNu
 cat(prettyNum(1000, big.mark = ","), prettyNum(999, big.mark = ","), prettyNum(0, big.mark = ","), "\n")
 cat(prettyNum(1234567, big.mark = " "), prettyNum(1234567, big.mark = "_"), "\n")
 pnn <- 45678; cat(prettyNum(pnn, big.mark = ","), nchar(prettyNum(pnn, big.mark = ",")), "\n")
+
+## format(x, digits = k)：k 位有效数字，与 print 同一套 —— 定点那一侧整数位一格都不削
+print(format(pi, digits = 3))
+print(format(1 / 3, digits = 3))
+print(format(123456, digits = 3))
+print(format(1e10, digits = 3))
+print(format(0.000123456, digits = 3))
+print(format(1234.5678, digits = 6))
+print(format(-pi, digits = 4))
+cat(format(pi, digits = 3), format(100, digits = 2), format(0.5, digits = 1), "\n")
+cat(format(2.5, digits = 3), format(pi), format(pi, nsmall = 2, digits = 3), "\n")
