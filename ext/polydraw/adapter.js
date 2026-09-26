@@ -3027,6 +3027,22 @@ function usesGL(x, host) {
   return kids(x).some((k) => usesGL(k, host));
 }
 
+/**
+ * **运行时那一层的名字记在这儿**（`C.rtNames`）—— `gl_*` / `g3_*` / `gfx_*` / `graph_*` /
+ * `noise` 那几族是**每份脚本一字不差**的一层（量过：`02-gl.pss` 的核心方言 129 项里
+ * 118 项是它），所以它该是一格**共用的单元产物**、只编一次只发一次
+ * （`docs/design/omni-serve-studio.md` §9.3：`sxForms` 切条时按这些名字分单元）。
+ *
+ * 为什么记账而不是按名字前缀猜：这几族的名字就是下面那几格 `*Decls()` 产的，
+ * 记下来是事实；前缀是约定，脚本里也允许出现同前缀的名字。
+ */
+function rt(C, list) {
+  for (const d of list) {
+    if (d !== null && d !== undefined && typeof d.name === 'string') C.rtNames.push(d.name);
+  }
+  return list;
+}
+
 export function evalToIR(cst, host, src = '') {
   /* GL 那一族只在设备那条路上有（见 `usesGL` 的头注）。**着色器那一族也在里头** ——
      第四刀之后它与固定管线走的是同一条路（顶点与批在语言这一侧，见 `gl-rt.js`）。 */
@@ -3040,6 +3056,7 @@ export function evalToIR(cst, host, src = '') {
     recGfx: gfxMode() === 'null',
     fns: new Map(),
     globals: new Map(),                 /* 名字 -> 类型（`static`） */
+    rtNames: [],                        /* 运行时那一层的名字（见 `rt()` 的头注） */
     staticInits: [],                    /* `static x = 3;` 的初值：入口里做**一次** */
     staticOwner: new Map(),             /* static 的名字 -> 哪儿声明的（重名时报得清楚） */
     enums: new Map(),                   /* 名字 -> 常量值（`enum`） */
@@ -3295,8 +3312,8 @@ export function evalToIR(cst, host, src = '') {
        `usedGL` 一格不碰：每帧那句 `gl_framebegin` 由 `graph3dFrameStmts` 自己发
        （脚本本身一句 GL 都没写）。 */
     if (C.graph.d3 === true) C.needGL = true;
-    decls.unshift(...graphGlobalDecls());
-    decls.push(...graphFnDecls());
+    decls.unshift(...rt(C, graphGlobalDecls()));
+    decls.push(...rt(C, graphFnDecls()));
     decls.push({
       kind: 'fn',
       name: 'ev$pix',
@@ -3379,8 +3396,8 @@ export function evalToIR(cst, host, src = '') {
   /* **噪声那一族**（`NOISE(x[,y[,z]])` / `NOISE3D`）：照 `polydraw.c:852` 那份算法生成 ——
      纯函数，所以在语言这一侧（见 `noise-rt.js` 的头注），不进设备。 */
   if (C.needNoise) {
-    decls.unshift(...noiseGlobalDecls());
-    decls.push(...noiseFnDecls());
+    decls.unshift(...rt(C, noiseGlobalDecls()));
+    decls.push(...rt(C, noiseFnDecls()));
   }
   /* `static x = 3;` 的初值：**在入口里做一次**（方言的 `(global 名 类型)` 不许带初值 ——
      `lower/lower.js` 那一段写着"要非零初值就让 adapter 在入口里摆一句 set"）。
@@ -3445,12 +3462,12 @@ export function evalToIR(cst, host, src = '') {
          合批，设备只收 `(gfxbatch …)`。一帧的末尾要把攒着的批交出去（`gl_flush`）——
          设备是在 `nextframe` 那一格交图的，交之前批必须已经画下去。 */
       if (C.need3D) {
-        decls.unshift(...gfx3GlobalDecls());
-        decls.push(...gfx3FnDecls(true, C.needGL));
+        decls.unshift(...rt(C, gfx3GlobalDecls()));
+        decls.push(...rt(C, gfx3FnDecls(true, C.needGL)));
       }
       if (C.needGL) {
-        decls.unshift(...glGlobalDecls());
-        decls.push(...glFnDecls());
+        decls.unshift(...rt(C, glGlobalDecls()));
+        decls.push(...rt(C, glFnDecls()));
         mainBody.push({
           kind: 'expr-stmt',
           expr: { kind: 'call', fn: nameRef('gl_flush'), args: [] },
@@ -3493,19 +3510,19 @@ export function evalToIR(cst, host, src = '') {
           body: [{ kind: 'expr-stmt', expr: { kind: 'call', fn: nameRef('eval$frame'), args: [] } }],
         }],
       });
-      return { kind: 'module', decls };
+      return { kind: 'module', decls, rtNames: [...C.rtNames] };
     }
     const W = 320;
     const H = 240;
-    decls.unshift(...gfxGlobalDecls());
-    decls.push(...gfxFnDecls(W, H), gfxPresentDecl(irOutPath()));
+    decls.unshift(...rt(C, gfxGlobalDecls()));
+    decls.push(...rt(C, [...gfxFnDecls(W, H), gfxPresentDecl(irOutPath())]));
     if (C.need3D) {
-      decls.unshift(...gfx3GlobalDecls());
-      decls.push(...gfx3FnDecls(false, C.needGL));
+      decls.unshift(...rt(C, gfx3GlobalDecls()));
+      decls.push(...rt(C, gfx3FnDecls(false, C.needGL)));
     }
     if (C.needGL) {
-      decls.unshift(...glGlobalDecls());
-      decls.push(...glFnDecls());
+      decls.unshift(...rt(C, glGlobalDecls()));
+      decls.push(...rt(C, glFnDecls()));
     }
     mainBody.push({
       kind: 'expr-stmt',
@@ -3513,7 +3530,7 @@ export function evalToIR(cst, host, src = '') {
     });
   }
   decls.push({ kind: 'main', body: [...initStmts, ...voidRets(mainBody)] });
-  return { kind: 'module', decls };
+  return { kind: 'module', decls, rtNames: [...C.rtNames] };
 }
 
 /**
