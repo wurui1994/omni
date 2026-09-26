@@ -1279,6 +1279,77 @@ export function dictEqOf(a0, b0, C, eq, negate) {
   return h.wrap(negate ? { kind: 'unop', op: '!', operand: r } : r);
 }
 
+/**
+ * `int(s)` / `int(s, base)` —— **串转整数**。这一格不用借 CPython 的 C：整数没有
+ * "最短往返"那种讲究（浮点才有），逐位乘加就是精确的。所以现场发一趟循环。
+ *
+ * 照 python 的规矩办：两头的空白许、`+` / `-` 许、数位之间的 `_` 许、
+ * `0x` / `0o` / `0b` 前缀在进制对得上时许；一位有效数字都没有就 ValueError。
+ * `base` 要是编译期的字面量（前缀与数位表都跟着它定）。
+ */
+export function intOfStr(s0, base, C, badMsg) {
+  const h = holder(C);
+  const raw = h.keep(s0, 'is_r');
+  const s = h.decl('is_s', STR, stripOf(raw, true, true, C));
+  const n = h.decl('is_n', INT, call1('slen', [s]));
+  const i = h.decl('is_i', INT, int(0));
+  const neg = h.decl('is_g', BOOL, { kind: 'bool', value: false });
+  const acc = h.decl('is_a', INT, int(0));
+  const got = h.decl('is_k', INT, int(0));
+  const d = h.decl('is_d', INT, int(0));
+  const ch = (at) => call1('ssub', [s, at, int(1)]);
+  /* 报错那句话**先落一格临时量**：下面两处都要用它，直接摆两遍会把里头那几格
+     临时量声明两次（`repr(s)` 自己也会现发几格）。 */
+  const msg = h.decl('is_m', STR, badMsg);
+  const bad = { kind: 'builtin-stmt', name: 'fail', args: [msg] };
+  /* 符号 */
+  h.pre.push({
+    kind: 'if',
+    cond: bin('&&', bin('<', i, n), bin('==', ch(i), str('-'))),
+    then: [{ kind: 'assign', target: neg, value: { kind: 'bool', value: true } }, inc(i)],
+    else_: [{
+      kind: 'if',
+      cond: bin('&&', bin('<', i, n), bin('==', ch(i), str('+'))),
+      then: [inc(i)],
+      else_: null,
+    }],
+  });
+  /* 前缀（`0x` / `0o` / `0b`）—— 进制对得上才吃掉。 */
+  const tag2 = { 16: 'x', 8: 'o', 2: 'b' }[base];
+  if (tag2 !== undefined) {
+    h.pre.push({
+      kind: 'if',
+      cond: bin('&&', bin('<=', bin('+', i, int(2)), n),
+        bin('&&', bin('==', ch(i), str('0')),
+          bin('==', call1('slower', [ch(bin('+', i, int(1)))]), str(tag2)))),
+      then: [{ kind: 'assign', target: i, value: bin('+', i, int(2)) }],
+      else_: null,
+    });
+  }
+  /* 数位：`_` 跳过，别的查数位表（小写了再查，所以 `0xFF` 与 `0xff` 一样）。 */
+  const digits = '0123456789abcdefghijklmnopqrstuvwxyz'.slice(0, base);
+  h.pre.push({
+    kind: 'while',
+    cond: bin('<', i, n),
+    body: [{
+      kind: 'if',
+      cond: bin('==', ch(i), str('_')),
+      then: [inc(i)],
+      else_: [
+        { kind: 'assign', target: d, value: call1('sfind', [str(digits), call1('slower', [ch(i)])]) },
+        { kind: 'if', cond: bin('<', d, int(0)), then: [bad], else_: null },
+        { kind: 'assign', target: acc, value: bin('+', bin('*', acc, int(base)), d) },
+        { kind: 'assign', target: got, value: bin('+', got, int(1)) },
+        inc(i),
+      ],
+    }],
+  });
+  h.pre.push({ kind: 'if', cond: bin('==', got, int(0)), then: [bad], else_: null });
+  return h.wrap({
+    kind: 'ternary', type: INT, cond: neg, then: { kind: 'unop', op: '-', operand: acc }, else_: acc,
+  });
+}
+
 /** `s.startswith(p)` / `s.endswith(p)` —— 比一段（方言里没有这一格算子）。 */
 export function startsEndsOf(s0, p0, atStart, C) {
   const h = holder(C);

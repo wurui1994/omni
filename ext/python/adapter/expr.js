@@ -31,7 +31,7 @@ import {
   containsList, indexOfList, countList, valuesList, dictPopOf, dictSetDefaultOf,
   concatList, repeatList, reversedList, stepSlice, bankRound,
   caseMapOf, charClassOf, rfindOf, copyList, copyDict, charsOf, dictOfPairs,
-  listEqOf, listCmpOf, dictEqOf,
+  listEqOf, listCmpOf, dictEqOf, intOfStr,
 } from './builtins.js';
 
 /** 一格名字节点（`(n x)`）的文本；也收裸记号。 */
@@ -2556,7 +2556,31 @@ function builtinOf(nm, args, argToks, C) {
           kind: 'ternary', type: INT, cond: args[0], then: { kind: 'int', value: 1 }, else_: { kind: 'int', value: 0 },
         };
       }
-      throw new Error(`python->IR: \`int(${t0.kind})\` 还没接（串转数要走 CPython 那份 C）`);
+      /* `int(s)` / `int(s, base)` —— **串转整数不用借 C**：整数逐位乘加就是精确的
+         （"最短往返"那种讲究是浮点才有的）。base 要是编译期的字面量。 */
+      if (t0.kind === 'string') {
+        let base = 10;
+        if (args.length === 2) {
+          if (args[1].kind !== 'int') {
+            throw new Error('python->IR: `int(s, base)` 的 base 要写成一格整数字面量'
+              + '（前缀与数位表都跟着它定）');
+          }
+          base = Number(args[1].value);
+          if (base < 2 || base > 36) {
+            throw new Error(`python->IR: \`int(s, ${base})\` 的 base 收 2..36`
+              + '（python 还许 0 —— 那一档"看前缀猜"还没接）');
+          }
+        } else if (args.length !== 1) {
+          throw new Error('python->IR: `int()` 收一格或两格实参');
+        }
+        const msg = {
+          kind: 'binop', op: '+',
+          left: { kind: 'string', value: `invalid literal for int() with base ${base}: ` },
+          right: pyRepr(args[0], C),
+        };
+        return intOfStr(args[0], base, C, msg);
+      }
+      throw new Error(`python->IR: \`int(${t0.kind})\` 还没接（串与数接了）`);
     case 'float':
       return t0.kind === 'real' ? args[0] : toReal(args[0], C);
     case 'str':
