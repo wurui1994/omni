@@ -356,3 +356,12 @@ nov <- c(a = 3, b = 1, c = 2)
 print(order(nov))
 print(nov[order(nov)])
 cat(order(nov), order(nov, decreasing = TRUE), "\n")
+## 带名字的字符向量上取一格：`[` 名字跟着（印两行）、`[[` 不带（印一行）
+nsg <- c(x = "ab", y = "cd")
+print(nsg["y"])
+print(nsg[2])
+print(nsg[["y"]])
+print(nsg[[1]])
+nsk <- "x"
+print(nsg[nsk])
+cat(nsg["x"], nsg["y"], "\n")

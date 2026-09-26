@@ -322,3 +322,8 @@ print(chartr("a", "A", kab))
 print(startsWith(knv, "p"))
 print(grepl("p", knv, fixed = TRUE))
 cat(nchar(knv), names(nchar(knv)), "\n")
+## `[[i]]` 在字符向量上出一格串（与 `[i]` 同一格值，只是不带名字）
+kdv <- c("ab", "cd")
+print(kdv[[2]])
+print(kdv[2])
+cat(kdv[[1]], kdv[[2]], "\n")

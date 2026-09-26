@@ -385,6 +385,8 @@ const FN_DEPS = new Map([
      两格都要问缺失（碰上就当场报 —— 没有 `NA_character_`）。 */
   /* 字符向量上"只要相等、不要 collation"那一族（`sort` / `order` 照旧当场报）。 */
   ['r_sv1', []],
+  /* `s["名字"]` —— 带名字的字符向量上按名字取一格（找不着当场停，没有 NA_character_）。 */
+  ['r_sat_nm', []],
   /* 字符向量的 `sort(method="radix")` / `order(method="radix")`：按字节比（C locale）。 */
   ['r_sort_str', []],
   ['r_order_str', []],
@@ -1872,6 +1874,15 @@ function typeOfExpr(x, types) {
       if (isSplitCall(kids(x)[0])) return RSTRV;
       const d = typeOfExpr(kids(x)[0], types);
       if (d !== undefined && d.kind === 'map') return d.value;
+      /**
+       * **字符向量上 `[[i]]` 出来是一格串** —— 与 `[i]` 同一格值，只是不带名字。
+       *
+       * 从前这儿落回 `INT`，于是 `print` 那侧照 int 发 `(tostr (call r_sat1 …))`，
+       * 而 `r_sat1` 回的是串 —— 撞在公共层的类型上，而那时**已经过了换档那道门**：
+       * `print(c("ab","cd")[[2]])` 整份源码退出码 1、一行输出都没有（2026-09-27 量出来的硬错，
+       * 判据 `ext/r/examples/strvec.R`）。
+       */
+      if (isStrVec(d)) return STR;
       if (isVecTy(d)) return REAL;
       return INT;
     }
@@ -4049,9 +4060,36 @@ function indexRead(x, types) {
    * 一格**标量串**（没有"长度 1 的带名字的字符向量"那种值）。静默丢掉就少印一行，
    * 所以当场报 —— 先 `unname(v)` 再取（那一档与 R 同解，量出来的 2026-09-26）。
    */
+  /**
+   * **带名字的字符向量上取一格**（`RNSTRV`）：值那一侧与不带名字的字符向量同一条
+   * （出来是一格**标量串**），名字那一行由 `print` 那侧现摆（见 `printValStmt` 的
+   * `sub1` 那一格）—— 2026-09-27 接的，从前整条当场报、白退一趟 libR。
+   *
+   * 下标是**向量**那两档（`s[c("a","b")]` / `s[nchar(s) > 1]`）照旧报：那要一条
+   * "带名字的字符向量"当值，这一层的字符向量装不住名字（名字是跟着**变量**走的）。
+   */
   if (isNamedStr(ot)) {
-    throw new Error('r->IR: 带名字的**字符**向量上取下标还没接 —— R 那儿名字跟着挑出来的'
-      + '那几格走（`v[2]` 印两行），而这一层取一格出的是一格标量串。先 `unname(v)` 再取');
+    const kt = typeOfExpr(keys[0], types);
+    if (kt.kind === 'string') {
+      const ns = namesExprOf(obj, types);
+      if (ns === null) {
+        throw new Error('r->IR: 按名字取下标只在**带名字的向量**上接 —— 这一格推不出名字来');
+      }
+      return lglCall('r_sat_nm', o, ns, exprOf(keys[0], types));
+    }
+    if (kt.kind === 'int' || kt.kind === 'real') {
+      const nk0 = exprOf(keys[0], types);
+      if ((nk0.kind === 'int' || nk0.kind === 'real') && nk0.value === 0) {
+        throw new Error('r->IR: `s[0]` 回的是**零长字符向量**，这一档的标量下标没有那种值');
+      }
+      if (isNegSub(keys[0])) {
+        throw new Error('r->IR: 带名字的字符向量上写负下标（`s[-1]`）还没接 —— '
+          + '出来是一条**带名字的**字符向量，这一层的字符向量装不住名字。先 `unname(s)` 再取');
+      }
+      return lglCall('r_sat1', o, asIntE(nk0, kt));
+    }
+    throw new Error('r->IR: 带名字的**字符**向量上拿一条向量当下标还没接 —— R 那儿名字跟着挑出来的'
+      + '那几格走（出来是一条带名字的字符向量），这一层的字符向量装不住名字。先 `unname(v)` 再取');
   }
   if (isVecTy(ot)) {
     /* 下标本身是**向量**那两档（R 里 `xs[xs > 2]` 与 `xs[c(1,3)]` 都是天天写的形状）：
@@ -7002,8 +7040,11 @@ function printValStmt(node, types) {
     };
   }
   /* `v["a"]` / `v[1]` —— R 的**单**方括号取一格出来名字也跟着（两行版式），`v[["a"]]` 不带。
-     值那一条已经是一格标量了，所以这儿现摆一条长度 1 的向量与一条长度 1 的名字。 */
-  if (tag(node) === 'sub1' && isNamedTy(typeOfExpr(kids(node)[0], types))) {
+     值那一条已经是一格标量了，所以这儿现摆一条长度 1 的向量与一条长度 1 的名字。
+     **带名字的字符向量**（`RNSTRV`）走同一条，只是值那一行带引号（`r_print_named_str`）。 */
+  if (tag(node) === 'sub1'
+      && (isNamedTy(typeOfExpr(kids(node)[0], types)) || isNamedStr(typeOfExpr(kids(node)[0], types)))) {
+    const ot0 = typeOfExpr(kids(node)[0], types);
     const keys = kids(node).slice(1).map((a) => kids(a)[0]).filter((k) => k !== undefined);
     if (keys.length !== 1) throw new Error('r->IR: 多维下标（x[i, j]）还没接');
     const ns = namesExprOf(kids(node)[0], types);
@@ -7028,12 +7069,18 @@ function printValStmt(node, types) {
           target: { kind: 'index', obj: { kind: 'name', name: nn }, index: { kind: 'int', value: 0 } },
           value: one,
         },
-        {
-          kind: 'expr-stmt',
-          expr: lglCall('r_print_named', lglCall('r_vec1', exprOf(node, types)),
-            { kind: 'name', name: nn },
-            { kind: 'string', value: zeroName(typeOfExpr(kids(node)[0], types)) }),
-        },
+        isNamedStr(ot0)
+          ? {
+            kind: 'expr-stmt',
+            expr: lglCall('r_print_named_str', lglCall('r_sv1', exprOf(node, types)),
+              { kind: 'name', name: nn }),
+          }
+          : {
+            kind: 'expr-stmt',
+            expr: lglCall('r_print_named', lglCall('r_vec1', exprOf(node, types)),
+              { kind: 'name', name: nn },
+              { kind: 'string', value: zeroName(ot0) }),
+          },
       ],
     };
   }
@@ -8390,7 +8437,7 @@ const STRV_FNS = new Set([
   /* base 那四条字符向量常量 + `strrep` 在字符向量上那一格。 */
   'r_sv_letters', 'r_sv_upper', 'r_sv_month', 'r_sv_mabb', 'r_strrep_v', 'r_chartr_v',
   'r_rep_str_times', 'r_str2num_v', 'r_as_str_v', 'r_as_str_lv', 'r_as_lgl_sv', 'r_eq_sv', 'r_ne_sv', 'r_eq_svv', 'r_ne_svv',
-  'r_sv1', 'r_sort_str', 'r_order_str', 'r_any_dup_str', 'r_uniq_str', 'r_dup_str', 'r_match_str', 'r_in_str', 'r_in1_str',
+  'r_sv1', 'r_sat_nm', 'r_sort_str', 'r_order_str', 'r_any_dup_str', 'r_uniq_str', 'r_dup_str', 'r_match_str', 'r_in_str', 'r_in1_str',
   'r_union_str', 'r_isect_str', 'r_sdiff_str', 'r_head_str', 'r_tail_str',
   'r_app_str', 'r_app_str_e', 'r_app_sv',
 ]);
@@ -9927,6 +9974,36 @@ function strvFnDecl(name) {
           args: [{ kind: 'string', value: 's[i]: 下标越界（或者是 0 / 负数）—— R 回的是 NA_character_ 或者零长字符向量，这一档两种值都没有' }],
         }]),
         { kind: 'return', values: [svGet(v, b('-', nm('i'), I(1)))] },
+      ],
+    };
+  }
+  if (name === 'r_sat_nm') {
+    /**
+     * `s["名字"]` —— **带名字的字符向量**上按名字取一格（值那一侧）。
+     *
+     * 与数那一侧的 `r_at_name` 同形，只差**找不着那个名字**那一档：那儿 R 回 `NA`
+     * （double 装得下），这儿 R 回的是 **`NA_character_`**，这一层没有那种值
+     * （见 SPEC 第四节），所以**报**。报的是这句话，说清是哪个名字、R 那边是什么。
+     *
+     * 写着的串在编译期看不出在不在名字那一条里（名字是跟着变量走的影子变量），
+     * 所以这一格只能在运行期停。
+     */
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RSTRV }, { name: 'ns', type: RSTRV }, { name: 'k', type: STR }],
+      ret: STR,
+      body: [
+        letI('n', svLen(nm('ns'))),
+        loop([
+          iff(b('==', svGet(nm('ns'), i), nm('k')), [{ kind: 'return', values: [svGet(v, i)] }]),
+        ], nm('n')),
+        {
+          kind: 'builtin-stmt',
+          name: 'fail',
+          args: [{ kind: 'string', value: 's["名字"]: 名字那一条里没有这个名字 —— R 回的是 NA_character_，这一档没有那种值' }],
+        },
+        { kind: 'return', values: [S('')] },
       ],
     };
   }
