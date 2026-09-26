@@ -1279,6 +1279,25 @@ function gfxArr(name, args, blk) {
   const a2 = Number(args[2]);
   const n = blk === undefined || blk === null ? 0 : blk.length;
   if (glWant()) need(320, 240);
+  /**
+   * **整行像素**（`setrow y x0 数 0 行`，2D graphing modes 那一族）：一行一次宿主调用 ——
+   * 320×240 那是 240 次，不是 76800 次（`ext/polydraw/graph-rt.js` 的头注）。
+   * 一格一个打包好的 0xRRGGBB，写的是**宿主那一层**（GL 那一档里它盖在 GPU 那层上头）。
+   */
+  if (nm === 'setrow') {
+    need(320, 240);
+    const y = Math.trunc(a0);
+    if (y < 0 || y >= D.h) return 0;
+    const x0 = Math.trunc(a1);
+    const cnt = Math.min(Math.trunc(a2), n);
+    for (let i = 0; i < cnt; i++) {
+      const x = x0 + i;
+      if (x < 0 || x >= D.w) continue;
+      D.fb[y * D.w + x] = Math.trunc(blk[i]) & 0xffffff;
+    }
+    D.dirty = true;
+    return 0;
+  }
   /* **一整张矩阵一句**（`batchmvp16` / `batchmv16`，列主序 16 个数）：与四句
      `batchmvp`/`batchmv` **逐字等价**，只是少 7 句宿主调用（见 `ext/polydraw/gl-rt.js`
      里那段话）。数组短于 16 格就当没发（不该发生，这一层不猜）。 */

@@ -1042,8 +1042,30 @@ double omni_gfx_arr(omni_str name, double a0, double a1, double a2, double a3,
     int got = g_gl.gettex((int)a0, (int)a1, (int)a2, n, items);
     return got < 0 ? -1.0 : 0.0;
   }
+  /**
+   * **整行像素**（`setrow y x0 数 0 行`，2D graphing modes 那一族）：一行一次宿主调用 ——
+   * 320×240 那是 240 次，不是 76800 次（`ext/polydraw/graph-rt.js` 的头注）。
+   * 一格一个打包好的 0xRRGGBB，写的是**宿主那一层**（GL 那一档里它盖在 GPU 那层上头）。
+   * 与 `host/gfx-cpu.js` 的 `gfxArr` 逐句相同。
+   */
+  if (strcmp(nm, "setrow") == 0) {
+    gfx_need();
+    int64_t y = (int64_t)a0;
+    if (y < 0 || y >= g_gh) return 0.0;
+    int64_t x0 = (int64_t)a1;
+    int64_t cnt = (int64_t)a2;
+    if (cnt > n) cnt = n;
+    for (int64_t i = 0; i < cnt; i++) {
+      int64_t x = x0 + i;
+      if (x < 0 || x >= g_gw) continue;
+      g_gfb[y * g_gw + x] = ((int64_t)items[i]) & 0xffffff;
+    }
+    g_gdirty = 1;
+    return 0.0;
+  }
   /* 别的名字：这一层不认 —— 与 `(gfxcall …)` 那条路同一句话，说清这一档有的是哪几族。 */
-  omni_errorf("gfxarr: 不认识 '%s'（有的是 gluniform{1..4}{f,i}v / glgettex）", nm);
+  omni_errorf("gfxarr: 不认识 '%s'（有的是 setrow / gluniform{1..4}{f,i}v / glgettex）", nm);
+
   return 0.0;
 }
 

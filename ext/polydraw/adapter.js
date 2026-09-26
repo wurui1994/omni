@@ -34,6 +34,9 @@ import { POLYDRAW_GL, GL_CONSTS, glGlobalDecls, glFnDecls } from './gl-rt.js';
 import { gfx3FnDecls, gfx3GlobalDecls } from './gfx3-rt.js';
 import { glslAlign } from './glsl.js';
 import { NOISE_FNS, noiseGlobalDecls, noiseFnDecls } from './noise-rt.js';
+import {
+  graphGlobalDecls, graphFnDecls, graphInitStmts, graphFrameStmts,
+} from './graph-rt.js';
 import { env } from '../../src/core/host/native.js';
 
 /**
@@ -393,6 +396,13 @@ function exprOf(x, C, want = 'val') {
        读它们就是问设备一句 —— 每帧都可能不一样，所以不能折成常量。 */
     if (C.gfxHost && HOST_VARS.includes(n)) {
       C.needGfx = true;
+      /* **graphing mode 那一档的 `frameinit`**：那儿它是"每帧多调一次的那一趟"
+         （`evaldraw.txt:1428`），不是设备那格"第一帧才是 1"—— 循环在语言这一侧，
+         所以读的是生成出来那格量（见 `graph-rt.js`）。 */
+      if (n === 'frameinit' && C.graph !== null) {
+        const g = nameRef('ev_fi');
+        return want === 'cond' ? truthy(g) : g;
+      }
       /* `HOST_FRAME` 那四格走语言这一侧的量（每帧开头盖一次，见 `HOST_WRITABLE` 的头注）。 */
       if (HOST_FRAME.includes(n)) {
         C.hostFrame.add(n);
@@ -2809,6 +2819,44 @@ function paramOne(p, C, register) {
 }
 
 /**
+ * **主函数那张形参表就是"哪一档 graphing mode"**（`evaldraw.txt:1237` 那张表）。
+ * 回 `{ t, col }`（2D 那四档）；`()` 回 null；**该出图而我们还没接的那几档当场报**。
+ *
+ * 为什么必须报而不是"跑一趟算了"：从前有形参的主函数被当成"形参是零值的局部量"
+ * 跑一趟就完了 —— 于是 `demos/ceilflor.kc` 这种每像素调一次的脚本**一个像素都不画**，
+ * 而且退出码是 0，扫描那张表把它记成 ok（"两边都不画"那种白拿分，见记忆里那条纪律）。
+ *
+ * 1D 声音那两档（`(x,t,te)` / `(a[16])`）不在这儿报：它们出的是**声音**不是图，
+ * 这条腿上压根没有音频设备 —— "语言这一半通了"就是它们眼下的全部意思。
+ */
+function graphModeOf(infos, C) {
+  const ps = infos.filter((p) => !p.name.endsWith(OFF_SUFFIX));
+  if (ps.length === 0) return null;
+  const names = ps.map((p) => p.name);
+  const reals = ps.filter((p) => p.type !== ARR).length;
+  const key = names.join(',');
+  /* 2D 那四档：`(x,y)` / `(x,y,t)` / `(x,y,&r,&g,&b)` / `(x,y,t,&r,&g,&b)`。 */
+  if (key === 'x,y' && reals === 2) return { t: false, col: false };
+  if (key === 'x,y,t' && reals === 3) return { t: true, col: false };
+  if (key === 'x,y,r,g,b' && reals === 2) return { t: false, col: true };
+  if (key === 'x,y,t,r,g,b' && reals === 3) return { t: true, col: true };
+  /* 该出图、可这条腿还没接的那几档 —— 名字写清楚（`evaldraw.txt:1237` 那张表）。 */
+  if (key === 'x' || key === 'x,t') {
+    throw new Error(`eval->IR: 主函数 \`(${key})\` 是 **1D 画曲线**那一档`
+      + '（evaldraw.txt:1245），这条腿还没接 —— 接住的是 `()` 与 2D 那四档');
+  }
+  if (key === 'x,y,z,r,g,b' || key === 'x,y,z,t,r,g,b') {
+    throw new Error(`eval->IR: 主函数 \`(${key.replace(/,([rgb])/g, ',&$1')})\` 是`
+      + ' **3D 体素**那一档（evaldraw.txt:1311），这条腿还没接');
+  }
+  /* 别的（`(a[16])` 那种乐器、或者随便起的形参名）照旧：形参当零值的局部量。 */
+  return null;
+}
+
+/* 收整块的形参后头那格偏移形参的后缀（见 `offName`）。 */
+const OFF_SUFFIX = '$o';
+
+/**
  * **形参与别处的数组/结构体重名就改名**（`demos/planpos.kc`：`vec` 既是文件级的
  * `dpoint3d vec`、又是 `getobjectspos` 的形参 `dpoint3d vec[11]`）。
  *
@@ -2894,6 +2942,8 @@ export function evalToIR(cst, host, src = '') {
     blockNames: new Set(),              /* 函数体里那些"本来就成块"的名字（`auto a[3]` / 带类型的） */
     valParams: new Set(),               /* 当前函数**按值**收的形参（`&x` 碰上它要报） */
     gotoActive: [],                     /* 正在降哪几格标号前头那一段（`goto` 的旗子名） */
+    /* **哪一档 graphing mode**（`null` = `()` 那一档；见 `graphModeOf`）。 */
+    graph: null,
     /* **块里头那些标号**（名字 -> 那一段原文语句）：外层的 `goto` 跳进来时照抄一份，
        见 `stmtOf1` 的 `goto` 那一格与 `stmtsOf` 头上那段。`expanding` 是防自套的记号。 */
     innerLabels: new Map(),
@@ -3097,10 +3147,12 @@ export function evalToIR(cst, host, src = '') {
     });
   }
 
-  /* 主函数：EVAL 里它的形参是宿主传进来的（PolyDraw 不传，`()` 是常态）——
-     有形参就在入口里当零值的局部量。 */
+  /* 主函数：EVAL 里它的形参是宿主传进来的 —— **形参表就是"哪一档 graphing mode"**
+     （`evaldraw.txt:1237`，见 `graphModeOf`）。`()` 那一档（也是常态）照旧"有形参就在
+     入口里当零值的局部量"；2D 那四档落成**每像素调一次**（循环在语言这一侧）。 */
   const mainInfos = paramInfos(kids(mainNode)[0], C);
   const mainPs = mainInfos.map((p) => p.name);
+  C.graph = graphModeOf(mainInfos, C);
   /* 按值那一族才算 `valParams`（`&x` 取地址要据此在入口里开箱子）—— 收整块的那个不算。 */
   C.valParams = new Set(mainInfos.filter((p) => p.type !== ARR).map((p) => p.name));
   C.boxed = boxedFor(mainNode, C);
@@ -3108,11 +3160,34 @@ export function evalToIR(cst, host, src = '') {
      所以这儿的偏移永远是 0，不用登记。 */
   C.offs = new Map();
   C.innerLabels = new Map();
-  const mainBody = [
-    ...mainInfos.flatMap((p) => (p.type === ARR ? instrumentDecl(p.name, C)
-      : [{ kind: 'let', name: p.name, type: REAL }])),
+  /* graphing mode 那一档：形参是**真形参**（宿主每像素喂一组），别在体里补 `let`。 */
+  let mainBody = [
+    ...(C.graph !== null ? [] : mainInfos.flatMap((p) => (p.type === ARR
+      ? instrumentDecl(p.name, C) : [{ kind: 'let', name: p.name, type: REAL }]))),
     ...bodyOf(kids(mainNode)[1], mainPs, C, '主函数'),
   ];
+  /**
+   * **2D graphing 那四档**（`(x,y)` / `(x,y,t)` / 带 `&r,&g,&b` 的那两档）：
+   * 主体落成 `ev$pix`（每像素调一次），帧体换成"`frameinit` 一趟 + 两层循环 + 整行交出去"
+   * （`graph-rt.js`）。循环在语言这一侧 —— 设备只收**整行**，不收每像素一句。
+   */
+  if (C.graph !== null) {
+    if (!C.gfxHost) {
+      throw new Error('eval->IR: 2D graphing 那一档（每像素调一次）要走**宿主设备**那条路'
+        + ' —— `--gfx ir`（产物自带光栅器）上没有整行那一格 `setrow`');
+    }
+    C.needGfx = true;
+    decls.unshift(...graphGlobalDecls());
+    decls.push(...graphFnDecls());
+    decls.push({
+      kind: 'fn',
+      name: 'ev$pix',
+      params: mainInfos.map((p) => ({ name: p.name, type: p.type })),
+      ret: REAL,
+      body: [...mainBody, { kind: 'return', values: [num(0)] }],
+    });
+    mainBody = graphFrameStmts('ev$pix', C.graph);
+  }
   /**
    * **每帧的 GL 初态**：PolyDraw 的宿主在调脚本之前会把 GL 摆回去
    * （`polydraw.c:3572-3579`：清 color/depth/stencil、开深度测试、
@@ -3208,6 +3283,8 @@ export function evalToIR(cst, host, src = '') {
       target: C.boxed.has(s.name) ? boxRef(s.name) : nameRef(s.name),
       value: exprOf(s.init, C),
     })),
+    /* 2D graphing 那一档：网格摆成默认（`setgrid(-4,3,4,-3)`）+ 颜色那三格箱子开出来。 */
+    ...(C.graph !== null ? graphInitStmts(C.graph.col) : []),
   ];
   /* **用过画图那一族就把设备带上**（`gfx-rt.js` 生成的那十几格函数 + 一块帧缓冲），
      并在入口末尾补一句 `gfx_present()` —— EvalDraw 的脚本多半不自己调 `refresh()`

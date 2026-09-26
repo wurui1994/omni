@@ -1116,7 +1116,29 @@ function arrIn(name, args, blk) {
     f.call(gl, e.loc, v);
     return 0;
   }
-  throw new Error(`这格设备（WebGL2）上没有 '${nm}'（有的是 gluniform{1..4}{f,i}v）`);
+  /**
+   * **整行像素**（`setrow y x0 数 0 行`，2D graphing modes 那一族，一格一个 0xRRGGBB）。
+   * 这一档没有平面帧缓冲，所以一格像素还是**一格 1×1 的四边形**（与 `setpix` 同一手）——
+   * 一行 320 格就是 320 个四边形，攒在同一批里交出去。
+   */
+  if (nm === 'setrow') {
+    const y = Math.trunc(Number(args[0]));
+    const x0 = Math.trunc(Number(args[1]));
+    let cnt = Math.trunc(Number(args[2]));
+    if (cnt > blk.length) cnt = blk.length;
+    const keep = D.col;
+    for (let i = 0; i < cnt; i++) {
+      const v = Math.trunc(blk[i]) & 0xffffff;
+      D.col = [((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255];
+      const x = x0 + i;
+      tri(x, y, x + 1, y, x, y + 1);
+      tri(x + 1, y, x, y + 1, x + 1, y + 1);
+    }
+    D.col = keep;
+    return 0;
+  }
+  throw new Error(`这格设备（WebGL2）上没有 '${nm}'（有的是 setrow / gluniform{1..4}{f,i}v）`);
+
 }
 
 export function installGlDevice(canvas, w = 320, h = 240) {
