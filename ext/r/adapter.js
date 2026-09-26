@@ -878,9 +878,31 @@ function numLit(text) {
   }
   if (t.endsWith('i')) throw new Error(`r->IR: 复数还没接：${t}`);
   if (t.endsWith('L')) return { kind: 'int', value: Number(t.slice(0, -1)) };
-  if (/^0[xX]/.test(t)) return { kind: 'int', value: Number(t) };
-  if (t.includes('.') || /[eE]/.test(t)) return { kind: 'real', value: Number(t) };
-  return { kind: 'int', value: Number(t) };
+  /**
+   * **不带 `L` 的数字字面量一律按 double 算**（2026-09-26 改的）—— R 就是这么定的：
+   * `typeof(100000)` 是 `"double"`，只有 `100000L` 才是 `"integer"`。
+   *
+   * 从前这儿按写法分：带小数点或指数的是 real，剩下的（`5` / `100000`）是 int。
+   * 那条规矩在**印法**上与 R 分家：double 的印法是"定点与科学记数按哪个短挑"
+   * （见 `numFmtStmts`），而整数就是十进制那一串。于是（量出来的，2026-09-26）
+   *
+   *     print(100000)                R: 1e+05        从前: 100000
+   *     cat(100000)                  R: 1e+05        从前: 100000
+   *     print(120000000)             R: 1.2e+08      从前: 120000000
+   *     print(100000001)             R: 1e+08        从前: 100000001
+   *     s <- 0; 加到 4.5e12; cat(s)   R: 4.500002e+12 从前: 4500001500000
+   *
+   * 全是**静默答错**，而且最后那一格最难查：起头的 `0` 决定了后面整条账的印法。
+   *
+   * int 这一档还在，只是只从两处来：`42L` 那种写法，与 `1:n` / `seq_len` / `which` /
+   * `order` 那几格**真的回整数向量**的内建（`RIVEC`）。下标与循环量照旧是 int ——
+   * `for (v in a:b)` 那一档 `forNames` 直接按 INT 记（不问字面量），上下界在 `forOf`
+   * 里按循环量的类型掰回去；`x[2]` 那一格 `asIntE` 折一次（字面量在方言那侧就折掉了）。
+   *
+   * 代价量过：一段 300 万圈的 `s <- s + i` 从 26ms 到 51ms（Rscript 是 650ms）——
+   * 累加量真的是 double 了，这正是 R 的算法。
+   */
+  return { kind: 'real', value: Number(t) };
 }
 
 /**
@@ -3191,6 +3213,19 @@ function exprOf(x, types, want, stmtPos) {
       if (types !== undefined && types.get(nm) === undefined && baseVar(nm) !== undefined) {
         return baseVarExpr(baseVar(nm));
       }
+      /**
+       * **这一段里没定义过的名字当场报。**
+       *
+       * 从前是照原样发一格 `(var 那个名字)`，于是 `print(Recall)`（R 里它是 base 的一个
+       * 函数对象）在公共层才报"未声明的变量"—— 那时**已经过了换档那道门**，整份源码
+       * 退出码 1、什么都没印，而不是退到 libR 让 R 自己把那个函数印出来（量出来的，
+       * 2026-09-26）。函数名当值用那一档由 `nameToLambda` 先改写过，所以这儿放它过去。
+       */
+      if (types !== undefined && types.get(nm) === undefined
+          && !globalTys.has(nm) && !fnFormals.has(nm)) {
+        throw new Error(`r->IR: 名字 \`${nameOf(x)}\` 这一段里没定义过 —— `
+          + '如果它是 base 里的一格值或者某个包里的东西，那一档是 libR（见 SPEC 第五节）');
+      }
       return { kind: 'name', name: nm };
     }
     case 'paren': return exprOf(kids(x)[0], types, want, stmtPos);
@@ -4363,13 +4398,30 @@ function callOf(x, types, extra, want, stmtPos) {
          */
         const named = namedArg(x, 'times');
         const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        /**
+         * `times` / `each` 只接**一格数**。R 里 `times` 还可以是一条与 `x` 同长的向量
+         * （`rep(1:2, times = c(2, 3))` 是 `1 1 2 2 2`）—— 那一档没接，**当场报**。
+         *
+         * 这一句是补的：从前 `asIntE` 对一条向量发的是 `(toint 那条向量)`，一路发到公共层
+         * 才报"toint 的实参要是数" —— 那时**已经过了换档那道门**，整份源码退出码 1、
+         * 什么都没印，而不是退到 libR 让 R 自己答（量出来的，2026-09-26）。
+         */
+        const scalarCnt = (node, what) => {
+          const ct = typeOfExpr(node, types);
+          if (isVecTy(ct) || isStrVec(ct)) {
+            throw new Error(`r->IR: rep() 的 \`${what}\` 是一条向量 —— R 那一档是`
+              + '"每格各重复几次"，这一层还没接（只接一格数）');
+          }
+          return asIntE(exprOf(node, types), ct);
+        };
         let cnt = null;
-        if (named !== undefined) cnt = asIntE(exprOf(named, types), typeOfExpr(named, types));
-        else if (n >= 2) cnt = asIntE(ev(1), typeOfExpr(all[1], types));
+        if (named !== undefined) cnt = scalarCnt(named, 'times');
+        else if (n >= 2 && all[1] !== null) cnt = scalarCnt(all[1], 'times');
+        else if (n >= 2) cnt = asIntE(ev(1), REAL);
         const eachNode = namedArg(x, 'each');
         const each = eachNode === undefined
           ? { kind: 'int', value: 1 }
-          : asIntE(exprOf(eachNode, types), typeOfExpr(eachNode, types));
+          : scalarCnt(eachNode, 'each');
         if (cnt === null && eachNode === undefined) {
           throw new Error('r->IR: rep() 要 `times` 或者 `each`（`length.out=` 没接）');
         }
@@ -5316,10 +5368,15 @@ function forOf(x, types) {
   const name = { kind: 'name', name: v };
   /* **循环量可能被推成 double**：同一个名字在这一段里还当过"在向量上遍历"的那种循环量
      （`for (i in seq_along(xs))` 里元素是 double），而一个名字只有一种类型。
-     那时计数这一档的 1 / 上下界都要按 double 摆 —— 不然方言那侧报"两边要同型"。 */
+     那时计数这一档的 1 / 上下界都要按 double 摆 —— 不然方言那侧报"两边要同型"。
+     反过来也要管：上下界写的是**大整数字面量**（`for (i in 1:200000)`）时那一格落的是
+     real（见 `numLit` 里那条印法的账），循环量却是 int —— 所以这儿按循环量的类型把
+     两边都掰过去，两个方向都掰（量出来的，2026-09-26）。 */
   const vt = types.get(v) ?? INT;
   const one = vt.kind === 'real' ? { kind: 'real', value: 1 } : { kind: 'int', value: 1 };
-  const cnt = (e) => (vt.kind === 'real' ? asReal(exprOf(e, types), typeOfExpr(e, types)) : exprOf(e, types));
+  const cnt = (e) => (vt.kind === 'real'
+    ? asReal(exprOf(e, types), typeOfExpr(e, types))
+    : asIntE(exprOf(e, types), typeOfExpr(e, types)));
   const step = { kind: 'assign', target: name, value: b('+', name, one) };
 
   /* `a:b` 那一档：R 最常见的循环头，直接落成"从 a 数到 b"。 */

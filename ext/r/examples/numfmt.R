@@ -15,8 +15,12 @@
 #     于是印 `1e+06`。离零舍入会得 `1000001`（nsig = 7），印出来就不一样了。
 #
 # 抄的是 `src/main/format.c` 的 `scientific()` + `formatReal()`，账在
-# `ext/r/adapter.js` 的 `numFmtStmts()`。整数写法的字面量（`5` / `42L`）在这一档是
-# `int`，不走这条路 —— 见 SPEC 第四节第 8 条。
+# `ext/r/adapter.js` 的 `numFmtStmts()`。
+#
+# **不带 `L` 的数字字面量一律是 double**（2026-09-26 改的）—— R 就是这么定的
+# （`typeof(100000)` 是 "double"、只有 `100000L` 是 "integer"），所以它们都走这条路。
+# 从前这一档按写法分（`5` / `100000` 落 int），而整数的印法是十进制那一串 ——
+# 于是 `print(100000)` 印 `100000` 而 R 印 `1e+05`（静默答错）。见 SPEC 第四节第 4 条。
 
 cat(0.0, "\n", sep = "")
 cat(1.0, "\n", sep = "")
@@ -139,3 +143,34 @@ cat(sprintf("%.17g", .Machine$double.xmax), "\n")
 cat(sprintf("%.17g", .Machine$double.xmin), "\n")
 print(1 + .Machine$double.eps > 1)
 print(1 + .Machine$double.eps / 2 > 1)
+
+# **不带 `L` 的字面量一律按 double 印**（2026-09-26 改的）。从前整数写法的落 int，
+# 于是 `print(100000)` / `cat(100000)` 印 `100000` —— 而 R 两处都是 `1e+05`（静默答错）。
+# 最难查的是最后那一格：起头的 `s <- 0` 决定了整条账的印法。带 `L` 的那一侧照旧是整数。
+print(100000)
+print(100000L)
+print(1000000)
+print(120000000)
+print(100000001)
+print(123456)
+print(1234567)
+print(99999)
+print(-100000)
+print(2147483647L)
+cat(100000, "\n")
+cat(100000L, "\n")
+cat(100000, 99999, 123456, "\n")
+print(c(100000, 1))
+print(format(100000))
+print(as.character(100000))
+# 下标与循环量那一侧要照旧（`for (v in a:b)` 的循环量是 int，上下界掰回去）
+s <- 0
+for (i in 1:100000) s <- s + 1
+cat(s, "\n")
+s2 <- 0
+for (i in 1:1000) s2 <- s2 + i
+cat(s2, "\n")
+bigv <- numeric(100000)
+bigv[100000] <- 7
+cat(bigv[100000], length(bigv), "\n")
+cat(sum(1:100000), "\n")
