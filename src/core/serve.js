@@ -231,7 +231,10 @@ async function runRequest(root, body, verb, extra, pool) {
       : `__new/live.${lang || 'txt'}`;
     path = putEdit(root, rel, body.text);
   } else if (typeof path === 'string') {
-    path = editedAbs(root, path) ?? path;
+    /* 改过就编镜像里那一份；没改过**过一遍白名单再落成绝对路径** —— 挂载点那几棵
+       （`polydraw/ken/balls.pss`，见 `studio/shared.js` 的 `mounts()`）在仓库里不存在，
+       不映射的话编译器当场说"读不到"。 */
+    path = editedAbs(root, path) ?? safePath(root, path) ?? path;
   }
   if (!path) return { stdout: '', stderr: 'path 和 text 至少给一格', code: 1 };
   const argv = extra !== undefined
@@ -248,11 +251,18 @@ async function runRequest(root, body, verb, extra, pool) {
   if (typeof body.format === 'string' && RUN_FORMATS.has(body.format)) {
     argv.push('-f', body.format);
   }
+  /* **`--gfx <档>`：哪一台图形设备**。Studio 那一页在 EVAL 两门上要 `host` ——
+     画图落成 `(gfxcall …)`，产物交给**页面**那台 WebGL2 设备去画（见
+     `src/studio/eval-live.js` 的头注）。白名单同上：从网上进来的字符串要拼进 argv。 */
+  if (typeof body.gfx === 'string' && RUN_GFX.has(body.gfx)) argv.push('--gfx', body.gfx);
   return runOmni(root, argv, body.timeout ?? 30, pool);
 }
 
 /** `/api/run` 认的出口 —— `asy_builtins.asy` 里现有的那两条（EPS 与 SVG）。 */
 const RUN_FORMATS = new Set(['eps', 'svg']);
+
+/** `--gfx` 认的那几档（`src/core/cli.js` 的那张表）。 */
+const RUN_GFX = new Set(['host', 'ir', 'cpu', 'null', 'gl']);
 
 
 /* ------------------------------------------------------------ 控制台的会话

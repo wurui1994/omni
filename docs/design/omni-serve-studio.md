@@ -321,3 +321,51 @@ stdout / stderr / 阶段耗时分栏）。同一份数据两种印法 —— 与
 * **原生那一档在浏览器里做不到** —— 见 §5，这是事实不是欠账。
 * `cli.js` 那个巨型 `switch` 与模块级全局：子进程那一刀把并发这个维度**绕开了**
   （每趟一份新的全局）。哪天要进程内重入，账还在这儿。
+
+## 9. 例子目录是**目录映射**，EVAL 两门在页面上跑（2026-09-26）
+
+### 9.1 例子不进我们的源码目录
+
+PolyDraw 与 EvalDraw 各带一整棵例子树（`polydraw/{examples,ken,tigrou}` 86 份 210KB、
+`evaldraw/**` 142 份 880KB）。**不拷进 `ext/<语言>/examples`**：那是别人的语料；
+"挑几份摆上首页"也不是"全部例子"（首页是策展的一屏卡片，摆一堆实时 GL 小窗只会把页面拖死）。
+
+落法是**目录映射**（`src/core/studio/shared.js` 的 `mounts()` / `mountPath()`）：树上多两棵根，
+路径就是 `polydraw/ken/balls.pss`，结构与正本一模一样。
+
+* 从哪儿来：`OMNI_MOUNTS`（`前缀=绝对路径`，逗号隔开）；没写就试 `OMNI_PSS_DIR` /
+  `OMNI_KC_DIR`（与 `tests/eval/scan.js` 同一格环境变量）。目录不在就当没有这一格。
+* 闸照旧（`safePath`）：不许绝对路径、不许 `..`、后缀要在白名单里（素材 `.png`/`.wav` 不进树）。
+* `/api/run` 与 `/api/emit` 收到挂载点上的路径时先映射成真绝对路径 —— 不映射的话编译器
+  当场说"读不到"（`serve.js` 的 `runRequest`）。
+
+### 9.2 实时那一档：编译在服务端、跑在页面的 WebGL2 上
+
+`omni serve` 那一档从前是"产物在 node 那侧的工人里跑完，页面取回一帧表面贴上" ——
+那是一张**静态图**，而这两门语言的正事是实时。现在页面自己装一台 WebGL2 设备
+（`gfx-gl.js` 的 `installGlDevice`），服务端只负责**编**（`emit js --gfx host`），
+页面把产物跑起来（`src/studio/eval-live.js`）：帧函数交给设备之后帧循环是 rAF。
+
+### 9.3 每跑一趟该过网多少 —— 用 `build/modules.js` 那套机制，别自己造
+
+量过（`02-gl.pss`）：整份 `emit js` = **264KB**，其中
+
+* prelude + 两张派发表（`jsgen.runtimeModule`）**所有程序共用**；
+* 去掉它（`emit js --chunk`）还有 **98KB**，而里头 22 个 `s_gl_*`（GL 状态机在语言这一侧）
+  **每份脚本一个字节不差**，脚本自己只有 `s_eval$frame` + `omni_main` 两格。
+
+所以 EVAL 这两门要走**已有的按单元产物机制**（`src/core/build/modules.js` —— 它不认识任何
+一门语言：`moduleDir` / `UnitIndex`（`index.log` + `ids.log`）/ `declWrite` 接口 /
+`launcherText`；asy 那条腿的驱动是 `cli.js` 的 `asyModsBuild`，它问的是
+`cap('asy.unitTexts')`，并且**一目录只写一份 `omni_rt.js`**）。
+
+欠的那一刀（下一步）：
+
+1. 给 EVAL 出一格 `eval.unitTexts`：回两份单元 —— `ev_rt`（`gl-rt` / `gfx3-rt` / `gfx-rt` /
+   `graph-rt` 那一层的 sx，**内容与脚本无关**，键只跟我们自己那几份 rt 源码有关）与
+   脚本自己那一份（`deps: ['ev_rt']`）；
+2. 驱动那一格按语言参数化（`asyModsBuild` 现在只认 asy 的 capability 名字）；
+3. serve 把那一目录当静态文件发，页面 `import` 入口那份启动器 —— `ev_rt.js` 与
+   `omni_rt.js` 由**浏览器按 URL 缓存**，每跑一趟只有入口那几 KB 是新的。
+
+判据：一趟改一行重跑，"新编 1 份 / 复用 N 份"（与 asy 那条腿同一个口径）+ 过网字节数。

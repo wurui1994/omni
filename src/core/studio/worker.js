@@ -56,9 +56,34 @@ process.stderr.write = (s) => { ERR.push(asText(s)); return true; };
 /* 装编译器（这一趟就是那 110ms —— 一格工人一辈子只付一次）。 */
 const { runCli } = await import('../cli.js');
 
-/** 一行协议帧（`writeSync` 直接走 fd 1，绕开上面那个收集器）。 */
+/**
+ * 一行协议帧（`writeSync` 直接走 fd 1，绕开上面那个收集器）。
+ *
+ * **必须自己把它写完**：fd 1 是一格管道，管道是**非阻塞**的 —— 一趟 `writeSync` 最多
+ * 写进管道缓冲那么多（macOS 上 64KB），再写就 `EAGAIN` 抛出来。从前这儿是一句
+ * `fs.writeSync(1, 整帧)`：**产物一过 64KB 这一趟就既不回帧也不报错**（`emit js` 那一族
+ * 动辄两三百 KB），池子那侧只看得见"这一趟把工人跑挂了（或者超了时限）"。
+ * 所以按块写、`EAGAIN` 就睡 1ms 再接着写（`Atomics.wait`，不空转烧 CPU）。
+ */
+const NAP = new Int32Array(new SharedArrayBuffer(4));
+function writeFrame(text) {
+  const buf = Buffer.from(text, 'utf8');
+  let off = 0;
+  while (off < buf.length) {
+    try {
+      off += fs.writeSync(1, buf, off, Math.min(65536, buf.length - off));
+    } catch (e) {
+      if (e !== null && e !== undefined && (e.code === 'EAGAIN' || e.code === 'EWOULDBLOCK')) {
+        Atomics.wait(NAP, 0, 0, 1);
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
 function reply(obj) {
-  fs.writeSync(1, `${JSON.stringify(obj)}\n`);
+  writeFrame(`${JSON.stringify(obj)}\n`);
 }
 
 let served = 0;

@@ -12,8 +12,69 @@
  * 服务那边 `native.js` 去问文件系统，页面那边 `browser.js` 去问内联的表。
  */
 
-import { exists, readDir, isDir } from '../host/native.js';
+import { exists, readDir, isDir, env } from '../host/native.js';
 import { join } from '../host/path.js';
+
+/**
+ * **目录映射（挂载点）** —— 仓库外的例子按**它自己的结构**挂进这棵树。
+ *
+ * 为什么不是"把例子拷进 `ext/<语言>/examples`"：PolyDraw 与 EvalDraw 各自带着一整棵
+ * 例子树（`polydraw/ken`、`polydraw/tigrou`、`evaldraw/demos` …，两边合起来两百多份）。
+ * 那是**别人的语料**，不该躺在我们的源码目录里，而"挑几份摆上首页"又不是"全部例子" ——
+ * 所以树上多两棵根，路径就是 `polydraw/ken/balls.pss`，结构与正本一模一样。
+ *
+ * 从哪儿来（`.env` 也管）：
+ *   * `OMNI_MOUNTS`：`前缀=绝对路径` 用 `,` 隔开，几棵都行，后缀不挑；
+ *   * 没写就试那两格默认（`OMNI_PSS_DIR` / `OMNI_KC_DIR` —— 与 `tests/eval/scan.js`
+ *     同一格环境变量，所以扫语料与看语料是同一份路径）。
+ *
+ * **目录不在就当没有这一格**：别的机器上没有这份语料，树上少两棵根而已，不报错。
+ */
+export function mounts() {
+  const out = [];
+  const add = (name, prefix, dir, exts) => {
+    if (typeof dir !== 'string' || dir.length === 0 || !isDir(dir)) return;
+    out.push({ name, path: prefix, dir, exts, mount: true });
+  };
+  const spec = env('OMNI_MOUNTS');
+  if (typeof spec === 'string' && spec.length > 0) {
+    for (const part of spec.split(',')) {
+      const i = part.indexOf('=');
+      if (i <= 0) continue;
+      const prefix = part.slice(0, i).trim();
+      add(prefix, prefix, part.slice(i + 1).trim(), null);
+    }
+    return out;
+  }
+  const home = env('HOME') ?? '';
+  add('PolyDraw 例子', 'polydraw', env('OMNI_PSS_DIR') ?? `${home}/Documents/polydraw`, ['.pss']);
+  add('EvalDraw 例子', 'evaldraw', env('OMNI_KC_DIR') ?? `${home}/Downloads/evaldraw`, ['.kc']);
+  return out;
+}
+
+/** 一格虚拟路径落在哪个挂载点上（不在就 null）。 */
+export function mountOf(rel) {
+  for (const m of mounts()) {
+    if (rel === m.path || rel.startsWith(`${m.path}/`)) return m;
+  }
+  return null;
+}
+
+/**
+ * 挂载点上的虚拟路径 -> **真绝对路径**（不在挂载点上或者后缀不收就 null）。
+ *
+ * 目录本身也回（树要走它）；文件要过后缀白名单 —— 那棵树上几十份 `.png`/`.wav` 素材
+ * 不该进树（跑起来那一侧照旧按脚本旁边的相对路径找它们）。
+ */
+export function mountPath(rel) {
+  const m = mountOf(rel);
+  if (m === null) return null;
+  const sub = rel === m.path ? '' : rel.slice(m.path.length + 1);
+  const abs = sub === '' ? m.dir : join(m.dir, sub);
+  if (!exists(abs)) return null;
+  if (!isDir(abs) && m.exts !== null && !m.exts.includes(extOf(abs))) return null;
+  return abs;
+}
 
 /**
  * 虚拟文件树的**白名单**：只有这几棵子树对外可见。
@@ -74,6 +135,10 @@ export const langOf = (p) => LANG_OF[extOf(p)] ?? 'text';
 export function safePath(root, rel) {
   if (typeof rel !== 'string' || rel.length === 0) return null;
   if (rel.startsWith('/') || rel.includes('..') || rel.includes('\0')) return null;
+  /* 挂载点那几棵（`polydraw/…`、`evaldraw/…`）：映射到真目录，闸照旧（不许绝对路径、
+     不许 `..`、后缀要在白名单里）。 */
+  const mp = mountPath(rel);
+  if (mp !== null) return mp;
   const ok = TREE_ROOTS.some((r) => rel === r.path || rel.startsWith(`${r.path}/`));
   if (!ok) return null;
   const abs = join(root, rel);
@@ -89,9 +154,12 @@ export function safePath(root, rel) {
  * ⚠️ 这一段里**不许写"星号紧跟斜杠"**：那会把这个块注释提前关掉
  * （见 memory 里"注释里的定界符会把宿主文件切开"那一条 —— 踩过两次）。
  */
-function walk(root, rel, spec, depth) {
-  const abs = join(root, rel);
+function walk(root, rel, spec, depth, prefix = '') {
+  const abs = rel === '' ? root : join(root, rel);
   if (depth > 6) return null;
+  /** 报出去的路径：挂载点那几棵要带前缀（`polydraw` + `/ken/balls.pss`）。 */
+  const vpath = prefix === '' ? rel : (rel === '' ? prefix : `${prefix}/${rel}`);
+  const nameOf = () => (rel === '' ? prefix : rel.slice(rel.lastIndexOf('/') + 1));
   /** `only` 收一格名字或一串名字（`['cases', 'draw']`）—— 归一到数组再问。 */
   const onlyList = spec.only === undefined ? null
     : (Array.isArray(spec.only) ? spec.only : [spec.only]);
@@ -101,23 +169,23 @@ function walk(root, rel, spec, depth) {
     /* `only` 那一格也管**文件**：`tests/all.js` 是判据的跑手，不是一格例子。
        判据是"路径里有没有那一层"（`tests` 某个腿 `cases` 底下）。 */
     if (onlyList !== null && !onlyList.some((o) => rel.includes(`/${o}/`))) return null;
-    return { name: rel.slice(rel.lastIndexOf('/') + 1), path: rel, kind: 'file', lang: langOf(rel) };
+    return { name: nameOf(), path: vpath, kind: 'file', lang: langOf(rel) };
   }
   const kids = [];
   for (const nm of readDir(abs)) {
     if (nm.startsWith('.')) continue;
-    const sub = `${rel}/${nm}`;
+    const sub = rel === '' ? nm : `${rel}/${nm}`;
     /* `only`：在第二层上只放行那几个名字的目录（`ext/go/examples`、`tests/asy/draw`）。 */
     if (onlyList !== null && isDir(join(root, sub))) {
       const parts = sub.split('/');
       if (parts.length === 3 && !onlyList.includes(nm)) continue;
     }
-    const k = walk(root, sub, spec, depth + 1);
+    const k = walk(root, sub, spec, depth + 1, prefix);
     if (k !== null) kids.push(k);
   }
   if (kids.length === 0) return null;
   kids.sort(byIdeOrder);
-  return { name: rel.slice(rel.lastIndexOf('/') + 1), path: rel, kind: 'dir', children: kids };
+  return { name: nameOf(), path: vpath, kind: 'dir', children: kids };
 }
 
 /**
@@ -162,6 +230,12 @@ export function buildTree(root) {
   for (const spec of TREE_ROOTS) {
     const t = walk(root, spec.path, spec, 0);
     if (t !== null) out.push({ ...t, name: spec.name });
+  }
+  /* 挂载点那几棵（见 `mounts()` 的头注）：**根是那个真目录**，报出来的路径带上前缀，
+     于是树上看见的就是正本自己的结构（`polydraw/ken/…`）。 */
+  for (const m of mounts()) {
+    const t = walk(m.dir, '', { exts: m.exts }, 0, m.path);
+    if (t !== null) out.push({ ...t, name: m.name, path: m.path });
   }
   return { roots: out };
 }

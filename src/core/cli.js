@@ -6720,6 +6720,14 @@ function main(argv) {
     }
     case 'emit-js': {
       const { mod } = compile(path, rest);
+      /* **`--chunk`：只发「按源码长起来的那一段」**（不带 prelude、不带派发表、末尾不调
+         入口）。运行时那一份是**所有程序共用的同一段**（`emit js-runtime` / 服务那侧的
+         `/api/js-runtime`，三十几万字节），一份脚本自己那段只有几千字节 ——
+         Studio 在 serve 那一档就是这么发的：运行时取一次、以后每跑一趟只过来那几 KB。 */
+      if (rest.includes('--chunk')) {
+        stdout(target('js').emit(mod, { chunk: true }));
+        return 0;
+      }
       stdout(target('js').emit(mod, { trim: !NO_TRIM }));
       return 0;
     }

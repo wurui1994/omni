@@ -473,7 +473,16 @@ uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开
           brief: '（c）把这一份当**一个自足的模块**发：.h 只有接口、.c 装实现' },
         { name: '--fat', arity: 0, brief: '把所有语言都编进核心（默认是薄核心 + plugins/）' },
         F_NO_TRIM,
+        { name: '--chunk', arity: 0,
+          brief: '（js）只发「按源码长起来的那一段」—— 运行时那份大家共用，另外取一次' },
         { name: '--bytes', arity: 0, brief: '（mir）印大小与每个函数的内容哈希' },
+        /* `--gfx`：**哪一档设备是编译期的事**（画图落成 `(gfxcall …)` 还是生成出来的
+           光栅器），所以 `emit` 也要认它 —— Studio 在 serve 那一档就是
+           `emit js --gfx host`，产物交给**页面**那台 WebGL2 设备去跑
+           （见 `src/studio/eval-live.js`）。 */
+        { name: '--gfx', arity: 1, value: 'D',
+          brief: '（EVAL）哪一档设备：host（设备在宿主/页面）| ir（生成出来的光栅器，默认）'
+            + ' | gl | null' },
         { name: '--kernel', arity: 1, value: 'NAME', brief: '（spirv）哪一个 kernel' }],
     },
     {
