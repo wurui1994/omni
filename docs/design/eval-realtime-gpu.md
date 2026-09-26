@@ -3237,3 +3237,31 @@ clock / texture / funky / tree / captest / 25_offscreen 六份出图，clock 的
 不是 `node src/core/cli.js serve` —— 按后者 `pkill` 杀不掉它，于是我"重启了三回"
 其实一直在跟 04:28 那个旧进程说话，编译器那侧的改动一个都没生效。
 认进程要用 `lsof -nP -iTCP:<端口> -sTCP:LISTEN`。
+
+### 35.8 那个"扫描一趟一个样"其实**不是抖动**：单件表串味（2026-09-27）
+
+§35.6 里记的"一半的全黑是假的"，根因查出来了，**不是等得不够**：
+
+`$fnOnes`（ADR-0010 那份"具名函数当值用"的薄适配器单件表）按**名字**记，记住的适配器
+**闭着上一个程序那份模块的作用域**；而运行时那一份（`omni_rt_<哈希>.js`）在一页里
+**按 URL 只有一份**。于是第二份脚本的 `omni_mk_ref_gt_moveto` 拿到的是第一份的适配器。
+
+判它的时候差点又栽一次：**串味的样子不是"一个像素都不画"** —— 量出来 `draw2d.kc`
+之后跑 `text.kc`，`setpix` 是 **200**，那正是 draw2d 自己的数（text.kc 该是 181）。
+也就是说第二份脚本**画出了第一份的图**。只判"画了没有"是判不出来的。
+
+修法：prelude 出一格 `$fnOnesReset()`，`src/studio/eval-live.js` 在装下一份产物之前调。
+判据 `tests/lower/run.js --only fnone`：**先立尺子**（text.kc 单独跑的 setpix 数），
+再跑"draw2d 之后的 text.kc"，两个数必须相同。
+
+修完之后整轮扫描里那五份假红（drawsph / drawsph_asm / creepers_asm / curvybuild /
+drawcone2）一起没了 —— 所以那把尺子现在是可信的。
+
+### 35.9 `ken/orthoglobe.pss` 那一格全黑**不是我们的缺口**
+
+它的几何摆在 `z = mousy/yres*4` 上：没有鼠标事件时 `mousy` 是 0 ⇒ 顶点落在 z=0（眼睛
+那一点）⇒ 透视投影下退化、什么都不剩。真 Chrome 里把鼠标移到画布上（`mousemove`），
+同一份脚本立刻 **20444 个亮像素**。
+
+⇒ 这一族（`showmouse` / `orthoglobe` / 那批读 `bstatus`/`mousx` 的）在**离屏探针**里
+天生画不出东西，判它们只能带输入。别再把这一格记成"设备缺一格"。
