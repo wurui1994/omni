@@ -780,6 +780,21 @@ R 那一门（ADR-0045/0046/0047，`r-lang` 分支）已经把这条路走通过
   但报的话换了地方：从前那一格字段被静静摘掉、下一层说"`Holder` 没有字段 `v`（一格都
   没有）"，现在 `inferFields` 就地说清"在几处造出来时装的是 int / arr —— 合不成一格"。
 
+* **`map` / `filter`** —— 又一次"先问能不能在编译期展开"：两格都铺开成一趟循环，
+  与 `key=lambda` 同一条办法（那一处的机器本来就在，这一刀是把它抽成
+  `applyPer` / `applyTy` 两条，三处共用）。可调用的那一格只收**编译期定得下来的三档**：
+  lambda 字面量 / 这份源码里的 `def` / 一格内建（`str` / `int` / `len` / `abs` …）。
+  顺带**`key=` 也松了口**：从前只收 lambda 字面量，现在 def 与内建都收
+  （`sorted(ws, key=len)` / `sorted(ws, key=shout)`）。
+  单态化那一侧补了一格：`map(f, xs)` / `filter(f, xs)` / `key=f` 里那个 f **不是一处调用**，
+  所以 `collectInsts` 原先一格实例都收不到（报"\`dbl(int)\` 没有对得上的那一格"）——
+  现在按**元素类型**单独收一格（`takeTys` / `elemOfCst`）。
+  判据：`builtins.py` 那一段（`list(map(…))` / `for v in map(…)` / `sum(map(…))` /
+  `",".join(map(…))` / `filter(None, …)` / 串与字典上的 map）三条腿与 python3 逐字节相同。
+  **明说的不足**（python 交的是懒迭代器，我们交一张真表）：`print(map(f, xs))` 在 python
+  里印 `<map object at 0x…>`（里头有地址，逐字节比不了，所以不判）；迭代器**只能走一遍**，
+  我们两次都满。多路的 `map(f, a, b)` 还没接。
+
 ### 下一刀，按顺序
 
 1. **箱子里的函数拆出来调**（`(asfn …)` 那一格 —— 于是 `f = g` 之后 `f()` 走得通，

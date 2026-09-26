@@ -627,6 +627,19 @@ function tyOfCall(x, C) {
     return t.elem;
   }
   if (nm === 'round') return args.length >= 2 ? REAL : INT;
+  /* `map(f, xs)` / `filter(f, xs)` 交的是一张**真表**（编译期铺开，见 `mapPy`）——
+     `filter` 交的元素还是原来那一档，`map` 得问一声"应用一遍交什么"。 */
+  if (nm === 'map' || nm === 'filter') {
+    if (args.length !== 2) return null;
+    const st0 = argTys[1];
+    if (st0 === null || st0 === undefined) return null;
+    const el = st0.kind === 'arr' ? st0.elem
+      : (st0.kind === 'string' ? STR : (st0.kind === 'map' ? st0.key : null));
+    if (el === null) return null;
+    if (nm === 'filter') return arrOf(el);
+    const rt = applyTy(args[0], el, C);
+    return rt === null ? null : arrOf(rt);
+  }
   if (nm === 'list' || nm === 'sorted' || nm === 'reversed') {
     const t = argTys[0];
     if (t === null || t === undefined) return null;
@@ -1186,35 +1199,78 @@ export function needOrd(t, C, what) {
 }
 
 /**
- * `key=` 那一格 —— **lambda 在这一层是"就地展开"的**：把它的体按元素算一遍、攒成一张
- * "键表"，排序时两张表一起挪。所以 `key=` 只收 **lambda 字面量**（一格形参、不带默认值）；
- * 真把函数当值传要 `(asfn …)` 那一层，还没有。
+ * **把一格"可调用的东西"按元素铺开** —— `map` / `filter` / `key=` 共用这一条。
+ *
+ * 只收**编译期定得下来**的三档：
+ *   1. lambda 字面量（一格形参、不带默认值）—— 体就地展开；
+ *   2. 这份源码里的 `def` —— 按元素类型挑那一格单态实例，落成一句调用；
+ *   3. 一格内建（`str` / `int` / `len` / `abs` …）—— 走 `builtinOf` 那条老路。
+ * 真把函数装进变量再传（`f = g` 之后把 `f` 递出去）要 `(asfn …)` 那一层，还没有。
+ */
+function applyPer(fnTok, arg, elemTy, C) {
+  if (tag(fnTok) === 'lambda') {
+    const ps = kids(part(fnTok, 'params') ?? { kind: 'list', items: [] });
+    if (ps.length !== 1 || tag(ps[0]) !== 'p' || part(ps[0], 'default') !== undefined) {
+      throw new Error('python->IR: 这一处的 lambda 收一格形参、不带默认值');
+    }
+    const undo = C.alias(String(nameOf(kids(ps[0])[0])), arg.name);
+    try {
+      return exprOf(kids(fnTok)[1], C);
+    } finally {
+      undo();
+    }
+  }
+  if (tag(fnTok) !== 'n') {
+    throw new Error(`python->IR: 这一处要一格 lambda / 函数名 / 内建，给的是 ${tag(fnTok)}`);
+  }
+  const nm = String(nameOf(fnTok));
+  if (C.insts.has(nm)) {
+    const inst = C.resolveFn(nm, [elemTy]);
+    if (inst === null) {
+      throw new Error(`python->IR: \`${nm}(${elemTy.kind})\` 没有对得上的那一格`
+        + '（单态化是按调用点收的，而这一处是按元素类型调的）');
+    }
+    return { kind: 'call', fn: { kind: 'name', name: inst.mangled }, args: [arg] };
+  }
+  return builtinOf(nm, [arg], [], C);
+}
+
+/** 上面那一条的类型侧：按元素类型问"应用一遍交什么"。 */
+function applyTy(fnTok, elemTy, C) {
+  if (tag(fnTok) === 'lambda') {
+    const ps = kids(part(fnTok, 'params') ?? { kind: 'list', items: [] });
+    if (ps.length !== 1) return null;
+    const pv = C.fresh('ap_t');
+    C.bind(pv, elemTy);
+    const undo = C.alias(String(nameOf(kids(ps[0])[0])), pv);
+    try {
+      return tyOfCst(kids(fnTok)[1], C);
+    } finally {
+      undo();
+    }
+  }
+  if (tag(fnTok) !== 'n') return null;
+  const nm = String(nameOf(fnTok));
+  if (C.insts.has(nm)) return C.resolveFn(nm, [elemTy])?.ret ?? null;
+  if (nm === 'abs') return elemTy;
+  return BUILTIN_RET.get(nm) ?? null;
+}
+
+/**
+ * `key=` 那一格 —— 键按元素算一遍、攒成一张"键表"，排序时两张表一起挪。
  *
  * 形参那个名字用 `C.alias` 临时指到一格新名上（与推导式那一处同一条办法），
  * 发完指回去 —— 于是 `key=lambda v: …` 写在一个已经有 `v` 的函数里也不会撞。
  */
 function keyListOf(src, keyTok, C) {
-  if (tag(keyTok) !== 'lambda') {
-    throw new Error('python->IR: `key=` 只收一格 lambda 字面量（`key=lambda v: …`）——'
-      + ' 把函数当值传要 `(asfn …)` 那一层，还没有');
-  }
-  const ps = kids(part(keyTok, 'params') ?? { kind: 'list', items: [] });
-  if (ps.length !== 1 || tag(ps[0]) !== 'p' || part(ps[0], 'default') !== undefined) {
-    throw new Error('python->IR: `key=lambda …` 收一格形参、不带默认值');
-  }
   const st = ty(src, C);
   if (st.kind !== 'arr') throw new Error(`python->IR: \`key=\` 的接收者要是一格表（这里是 ${st.kind}）`);
   const pre = [];
   const pv = C.fresh('ky_p');
   C.bind(pv, st.elem);
   pre.push({ kind: 'let', name: pv, type: st.elem, init: null });
-  const undo = C.alias(String(nameOf(kids(ps[0])[0])), pv);
-  let body;
-  try {
-    body = exprOf(kids(keyTok)[1], C);
-  } finally {
-    undo();
-  }
+  const body = applyPer(keyTok, { kind: 'name', name: pv }, st.elem, C);
+
   const kt = arrOf(ty(body, C));
   const kn = C.fresh('ky_o');
   C.bind(kn, kt);
@@ -1244,6 +1300,109 @@ export function sortByKeyPy(box, keyTok, C, desc) {
   const got = keyListOf(box, keyTok, C);
   needOrd(ty(got.keys, C).elem, C, '.sort(key=…)');
   return [...got.pre, ...sortByKeyStmts(box, got.keys, C, desc)];
+}
+
+/**
+ * 走一遍的那一格**归一成一张表** —— 串一格一个字符、字典走键（与 `for k in d` 一条）。
+ * `map` / `filter` / `sorted` 都按这一条看它们的第二个实参。
+ */
+function iterArrOf(e, C) {
+  const t = ty(e, C);
+  if (t.kind === 'string') return charsOf(e, C);
+  if (t.kind === 'map') return { kind: 'builtin', name: 'dkeys', args: [e] };
+  return e;
+}
+
+/**
+ * `map(f, xs)` / `filter(f, xs)` —— **编译期铺开成一趟循环**，交的是一张**真表**。
+ *
+ * python 那边交的是懒的迭代器，所以有两处说不上一样，都是明说的不足：
+ *   1. `print(map(f, xs))` 在 python 里印 `<map object at 0x…>`（里头有地址），我们印一张表；
+ *   2. 迭代器**只能走一遍**（`m = map(…)` 之后两次 `list(m)`，第二次是空的），我们两次都满。
+ * 真代码里几乎总是 `list(map(…))` / `for v in map(…)` / `sum(map(…))` 那几种写法，
+ * 那几种两边逐字节相同。
+ */
+function mapPy(fnTok, xsTok, C, keep = false) {
+  const src0 = iterArrOf(exprOf(xsTok, C), C);
+  const st = ty(src0, C);
+  if (st.kind !== 'arr') {
+    throw new Error(`python->IR: \`${keep ? 'filter' : 'map'}(f, xs)\` 的第二格要能走一遍`
+      + `（表 / 串 / 字典），这里是 ${st.kind}`);
+  }
+  const pre = [];
+  /* 源表先钉成一格临时量：下面那趟循环要读它两次（`alen` 与逐格取），
+     而它可能是一句带副作用的话（`map(f, s.split(","))`）。 */
+  const sn = C.fresh('mp_s');
+  C.bind(sn, st);
+  pre.push({ kind: 'let', name: sn, type: st, init: src0 });
+  const src = { kind: 'name', name: sn };
+  const pv = C.fresh('mp_p');
+  C.bind(pv, st.elem);
+  pre.push({ kind: 'let', name: pv, type: st.elem, init: null });
+  const arg = { kind: 'name', name: pv };
+  const applied = applyPer(fnTok, arg, st.elem, C);
+  /* `filter` 交的是**原元素**（f 只管留不留），`map` 交的是算出来那一格。 */
+  const outT = arrOf(keep ? st.elem : ty(applied, C));
+  const on = C.fresh('mp_o');
+  C.bind(on, outT);
+  pre.push({
+    kind: 'let', name: on, type: outT,
+    init: { kind: 'builtin', name: 'anew', args: [{ kind: 'type', type: outT }, { kind: 'int', value: 0 }] },
+  });
+  const iv = C.fresh('mp_i');
+  C.bind(iv, INT);
+  pre.push({ kind: 'let', name: iv, type: INT, init: { kind: 'int', value: 0 } });
+  const i = { kind: 'name', name: iv };
+  const out = { kind: 'name', name: on };
+  const push = { kind: 'builtin-stmt', name: 'apush', args: [out, keep ? arg : applied] };
+  pre.push({
+    kind: 'while',
+    cond: { kind: 'binop', op: '<', left: i, right: { kind: 'builtin', name: 'alen', args: [src] } },
+    body: [
+      { kind: 'assign', target: arg, value: { kind: 'index', obj: src, index: i } },
+      ...(keep ? [{ kind: 'if', cond: condOfExpr(applied, C), then: [push], else_: [] }] : [push]),
+      { kind: 'assign', target: i, value: { kind: 'binop', op: '+', left: i, right: { kind: 'int', value: 1 } } },
+    ],
+  });
+  return { kind: 'block-expr', stmts: pre, value: out };
+}
+
+/** `filter(None, xs)` —— 留下真值那几格（python 的 `filter(None, …)` 就这一条）。 */
+function filterNonePy(xsTok, C) {
+  const src0 = iterArrOf(exprOf(xsTok, C), C);
+  const st = ty(src0, C);
+  if (st.kind !== 'arr') throw new Error(`python->IR: \`filter(None, xs)\` 的第二格要能走一遍，这里是 ${st.kind}`);
+  const pre = [];
+  const sn = C.fresh('fn_s');
+  C.bind(sn, st);
+  pre.push({ kind: 'let', name: sn, type: st, init: src0 });
+  const src = { kind: 'name', name: sn };
+  const on = C.fresh('fn_o');
+  C.bind(on, st);
+  pre.push({
+    kind: 'let', name: on, type: st,
+    init: { kind: 'builtin', name: 'anew', args: [{ kind: 'type', type: st }, { kind: 'int', value: 0 }] },
+  });
+  const iv = C.fresh('fn_i');
+  C.bind(iv, INT);
+  pre.push({ kind: 'let', name: iv, type: INT, init: { kind: 'int', value: 0 } });
+  const i = { kind: 'name', name: iv };
+  const out = { kind: 'name', name: on };
+  const cell = { kind: 'index', obj: src, index: i };
+  pre.push({
+    kind: 'while',
+    cond: { kind: 'binop', op: '<', left: i, right: { kind: 'builtin', name: 'alen', args: [src] } },
+    body: [
+      {
+        kind: 'if',
+        cond: condOfExpr(cell, C),
+        then: [{ kind: 'builtin-stmt', name: 'apush', args: [out, cell] }],
+        else_: [],
+      },
+      { kind: 'assign', target: i, value: { kind: 'binop', op: '+', left: i, right: { kind: 'int', value: 1 } } },
+    ],
+  });
+  return { kind: 'block-expr', stmts: pre, value: out };
 }
 
 /** `sorted(xs)` —— 先问一声"元素怎么比"，再把比法递给那趟插入排序。串按一格一个字符排。 */
@@ -2876,6 +3035,19 @@ export function callOf(x, C) {
     && tag(argToks[0]) === 'call' && tag(kids(argToks[0])[0]) === 'n'
     && String(nameOf(kids(argToks[0])[0])) === 'range') {
     return rangeListOf(argToks[0], C);
+  }
+  /* `map(f, xs)` / `filter(f, xs)` —— **也要在算实参之前拦**：第一格实参是个函数名，
+     当值算它就报"把函数当值传要 `(asfn …)`"了。这两格是**编译期铺开**的（见 `mapPy`）。 */
+  if (tag(fn) === 'n' && ['map', 'filter'].includes(String(nameOf(fn)))) {
+    const mf = String(nameOf(fn));
+    if (argToks.length !== 2) {
+      throw new Error(`python->IR: \`${mf}(f, xs)\` 收两格实参（多路的 \`map\` 还没接）`);
+    }
+    /* `None` 在 CST 里是自己一格（`none`），不是名字。 */
+    if (mf === 'filter' && tag(argToks[0]) === 'none') {
+      return filterNonePy(argToks[1], C);
+    }
+    return mapPy(argToks[0], argToks[1], C, mf === 'filter');
   }
   const wants = paramWants(fn, argToks, C);
   const args = argToks.map((a, k) => {

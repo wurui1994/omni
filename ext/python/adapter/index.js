@@ -626,10 +626,26 @@ function mkInst(nm, sh, types) {
  * 形参带标注的那几格听标注（调用点只补没标注的）。一组都收不到、而形参又没标全的，
  * 这一轮就先空着 —— 三轮之后还空着的在 `infer` 末尾当场报。
  */
+/** 走一遍那一格的**元素**装什么（表的元素 / 串的一格字符 / 字典的键）。 */
+function elemOfCst(tok, C) {
+  const t = tyOfCst(tok, C);
+  if (t === null || t === undefined) return null;
+  if (t.kind === 'arr') return t.elem;
+  if (t.kind === 'string') return STR;
+  if (t.kind === 'map') return t.key;
+  return null;
+}
+
 function collectInsts(nm, sh, tree, C) {
   if (sh.annots.every((a) => a !== null)) return;      // 全标注了，不看调用点
   const list = C.insts.get(nm);
   const dot = nm.indexOf('.');
+  /** 形参那几格的类型**直接给**（不从调用点的实参 CST 认）。 */
+  const takeTys = (types) => {
+    if (types.some((t) => t === null || t === undefined)) return;
+    const key = tyKey(types);
+    if (!list.some((i) => i.key === key)) list.push(mkInst(nm, sh, types));
+  };
   /** 一格调用点的实参类型（`self` 那一格由 `sh.annots[0]` 给）。 */
   const take = (args, selfTy) => {
     const types = sh.names.map((_, i) => {
@@ -637,9 +653,7 @@ function collectInsts(nm, sh, tree, C) {
       const k = selfTy === null ? i : i - 1;
       return sh.annots[i] ?? tyOfCst(args[k], C);
     });
-    if (types.some((t) => t === null)) return;
-    const key = tyKey(types);
-    if (!list.some((i) => i.key === key)) list.push(mkInst(nm, sh, types));
+    takeTys(types);
   };
 
   /* **连 f-string 里那几棵一起走** —— 那些调用躺在一个 STRING 记号里，
@@ -654,6 +668,23 @@ function collectInsts(nm, sh, tree, C) {
         /* 普通函数：`f(…)`。 */
         if (tag(fn) === 'n' && String(nameOf(fn)) === nm && args.length === sh.names.length) {
           take(args, null);
+        }
+        /* **f 被"按元素"调的那几处**：`map(f, xs)` / `filter(f, xs)` / `key=f` ——
+           这儿看到的**不是**一处对 f 的调用（f 是实参），可 `applyPer` 那一侧会按元素类型
+           挑实例，所以得单独收一格。只管"一格形参、没标注"那一档（`applyPer` 也只铺这一档）。 */
+        if (sh.names.length === 1 && sh.annots[0] === null) {
+          const raw = kids(part(node, 'args') ?? { kind: 'list', items: [] });
+          const isMe = (t) => t !== undefined && tag(t) === 'n' && String(nameOf(t)) === nm;
+          const fname = tag(fn) === 'n' ? String(nameOf(fn)) : null;
+          const seqs = [];
+          if (['map', 'filter'].includes(fname) && raw.length === 2 && isMe(raw[0])) seqs.push(raw[1]);
+          const kw = raw.find((a) => tag(a) === 'kw' && String(leaf(kids(a)[0])) === 'key');
+          if (kw !== undefined && isMe(kids(kw)[1])) {
+            /* `xs.sort(key=f)` 的序列是接收者；`sorted(xs, key=f)` / `min` / `max` 是第一格。 */
+            if (tag(fn) === 'attr') seqs.push(kids(fn)[0]);
+            else if (raw.length > 0 && tag(raw[0]) !== 'kw') seqs.push(raw[0]);
+          }
+          for (const s of seqs) takeTys([elemOfCst(s, C)]);
         }
         continue;
       }

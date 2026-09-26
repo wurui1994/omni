@@ -110,3 +110,38 @@ print(int("z", 36), int("Z", 36), int("10", 36))
 print(ord("A"), ord("a"), ord("0"), ord(" "))
 print(chr(ord("a") + 1), ord("a") - ord("A"), [ord(c) for c in "abc"])
 
+# ---- map / filter ------------------------------------------------------------
+# 两格都是**编译期铺开**成一趟循环的（与 `key=lambda` 同一条办法）：可调用的那一格只收
+# 编译期定得下来的三档 —— lambda 字面量 / 这份源码里的 def / 一格内建。真把函数装进变量
+# 再传（`f = g` 之后把 `f` 递出去）要 `(asfn …)` 那一层，还没有。
+#
+# **明说的不足**（python 那边交的是懒的迭代器，我们交一张真表）：
+#   1. `print(map(f, xs))` 在 python 里印 `<map object at 0x…>`（里头有地址），所以不判它；
+#   2. 迭代器只能走一遍（`m = map(…)` 之后两次 `list(m)` 第二次是空的），我们两次都满。
+# 下面一律写成 `list(map(…))` / `for v in map(…)` / `sum(map(…))` —— 那几种两边逐字节相同。
+
+
+def shout(s):
+    return s.upper() + "!"
+
+
+def is_long(s):
+    return len(s) > 3
+
+
+ws = ["fig", "apple", "kiwi"]
+print(list(map(shout, ws)))
+for w in map(shout, ws):
+    print(w)
+print(sum(map(len, ws)), ",".join(map(shout, ws)))
+print(list(filter(is_long, ws)), len(list(filter(is_long, ws))))
+print(list(map(lambda v: v * 2, [1, 2, 3])))
+print(list(filter(lambda v: v > 1, [1, 2, 3])))
+# 内建也算一格可调用的：str / int / len / abs 都走 `builtinOf` 那条老路
+print(list(map(str, [1, 2])), list(map(int, "3,1,2".split(","))), list(map(abs, [-1, 2])))
+# 走一遍的那一格归一成表：串一格一个字符、字典走键（与 `for k in d` 一条）
+print(list(map(len, "abc")), list(map(len, {"a": 1, "bb": 2})))
+# `filter(None, xs)` —— 留下真值那几格
+print(list(filter(None, [0, 1, 2, 0])), list(filter(None, ["", "x"])))
+# `key=` 也跟着松了口：从前只收 lambda 字面量，现在 def 与内建都收
+print(sorted(ws, key=len), sorted(ws, key=shout))
