@@ -289,6 +289,160 @@ function zeroLike(t) {
   throw new Error(`python->IR: \`.pop()\` 交 ${t.kind} 还没接`);
 }
 
+/* ─── 表上的拼接与重复（`+` / `*`），以及 `reversed()` ─────────────────────── */
+
+/**
+ * `xs + ys` —— python 里这是**新造一张表**（两边都不动）。方言的 `+` 只认数与串，
+ * 所以现场发两趟循环抄过去。
+ *
+ * 元素类型要合得上（`unify` 由调用方给的 `elemT` 定）；装箱那一下也在调用方 ——
+ * 异质的两张表拼起来是 `(arr dyn)`，那时两边各自要先装箱。
+ */
+export function concatList(xs0, ys0, elemT, C, box) {
+  const h = holder(C);
+  const xs = h.keep(xs0, 'ct_xs');
+  const ys = h.keep(ys0, 'ct_ys');
+  const t = arrOf(elemT);
+  const out = h.decl('ct_o', t, call1('anew', [{ kind: 'type', type: t }, int(0)]));
+  const one = (src, p) => {
+    const i = h.decl(p, INT, int(0));
+    h.pre.push({
+      kind: 'while',
+      cond: bin('<', i, call1('alen', [src])),
+      body: [
+        {
+          kind: 'builtin-stmt', name: 'apush',
+          args: [out, box(src, { kind: 'index', obj: src, index: i })],
+        },
+        inc(i),
+      ],
+    });
+  };
+  one(xs, 'ct_i');
+  one(ys, 'ct_j');
+  return h.wrap(out);
+}
+
+/**
+ * `xs * n`（`n * xs` 同）—— 新造一张表，把 xs 抄 n 遍。
+ * **n <= 0 给空表**（python 的规矩），所以外层那格循环的条件天然管住了。
+ */
+export function repeatList(xs0, n0, C) {
+  const h = holder(C);
+  const xs = h.keep(xs0, 'rp_xs');
+  const n = h.keep(n0, 'rp_n', INT);
+  const t = C.tyOfIR(xs);
+  const out = h.decl('rp_o', t, call1('anew', [{ kind: 'type', type: t }, int(0)]));
+  const k = h.decl('rp_k', INT, int(0));
+  const i = h.decl('rp_i', INT, int(0));
+  h.pre.push({
+    kind: 'while',
+    cond: bin('<', k, n),
+    body: [
+      { kind: 'assign', target: i, value: int(0) },
+      {
+        kind: 'while',
+        cond: bin('<', i, call1('alen', [xs])),
+        body: [
+          { kind: 'builtin-stmt', name: 'apush', args: [out, { kind: 'index', obj: xs, index: i }] },
+          inc(i),
+        ],
+      },
+      inc(k),
+    ],
+  });
+  return h.wrap(out);
+}
+
+/**
+ * `reversed(xs)` —— python 交的是个迭代器，我们交**倒过来的一张新表**
+ * （原表不动，与 `.reverse()` 正相反）。`list(reversed(xs))` 那种写法两边一样。
+ */
+export function reversedList(xs0, C) {
+  const h = holder(C);
+  const xs = h.keep(xs0, 'rr_xs');
+  const t = C.tyOfIR(xs);
+  const out = h.decl('rr_o', t, call1('anew', [{ kind: 'type', type: t }, int(0)]));
+  const i = h.decl('rr_i', INT, bin('-', call1('alen', [xs]), int(1)));
+  h.pre.push({
+    kind: 'while',
+    cond: bin('>=', i, int(0)),
+    body: [
+      { kind: 'builtin-stmt', name: 'apush', args: [out, { kind: 'index', obj: xs, index: i }] },
+      { kind: 'assign', target: i, value: bin('-', i, int(1)) },
+    ],
+  });
+  return h.wrap(out);
+}
+
+/**
+ * 带步长的切片 `xs[a:b:step]` / `s[a:b:step]`。**step 要是字面量** —— 与
+ * `range(a, b, step)` 同一条理由：往上走还是往下走得在编译期知道，收运行期的值
+ * 就要发两条循环。`s[::-1]`（整条倒过来）是最常见的那一格。
+ *
+ * `start` 与 `bound` 由调用方算好（两头都已经夹在合法范围里）：
+ * 正步长时从 `start` 走到 `bound`（不含），负步长时从 `start` 往下走到 `bound`（含）。
+ */
+export function stepSlice(box, start, bound, step, isStr, C) {
+  const h = holder(C);
+  const src = h.keep(box, 'sp_s');
+  const down = step < 0;
+  const t = isStr ? STR : C.tyOfIR(src);
+  const out = h.decl('sp_o', t, isStr
+    ? str('')
+    : call1('anew', [{ kind: 'type', type: t }, int(0)]));
+  const i = h.decl('sp_i', INT, start);
+  const at = isStr
+    ? call1('ssub', [src, i, int(1)])
+    : { kind: 'index', obj: src, index: i };
+  h.pre.push({
+    kind: 'while',
+    cond: down ? bin('>=', i, bound) : bin('<', i, bound),
+    body: [
+      isStr
+        ? { kind: 'assign', target: out, value: bin('+', out, at) }
+        : { kind: 'builtin-stmt', name: 'apush', args: [out, at] },
+      { kind: 'assign', target: i, value: bin('+', i, int(step)) },
+    ],
+  });
+  return h.wrap(out);
+}
+
+/**
+ * python 的 `round()` 是**半数取偶**（`round(0.5)` 是 0、`round(1.5)` 是 2、
+ * `round(2.5)` 是 2、`round(-2.5)` 是 -2）。C 的 `round()` 是"远离零"，所以 `.5`
+ * 那一档两边不一样 —— 量出来的：`round(2.5)` 从前我们交 3、python 交 2。
+ *
+ * 这一格**不给方言加算子**（`nearbyint` 要五条腿各写一遍，而 JS 的 `Math.round`
+ * 也不是半数取偶）—— 用已有的 `floor` / `fmod` 拼出来：
+ *   f = floor(x)、d = x - f；d > 0.5 → f+1；d < 0.5 → f；正好 0.5 → f 是偶数就 f、否则 f+1。
+ */
+export function bankRound(x0, C) {
+  const h = holder(C);
+  const x = h.keep(x0, 'br_x', REAL);
+  const f = h.decl('br_f', REAL, { kind: 'rmath', fn: 'floor', args: [x] });
+  const out = h.decl('br_o', REAL, f);
+  const d = h.decl('br_d', REAL, bin('-', x, f));
+  const one = { kind: 'real', value: 1 };
+  const half = { kind: 'real', value: 0.5 };
+  const up = [{ kind: 'assign', target: out, value: bin('+', f, one) }];
+  const odd = bin('!=',
+    { kind: 'rmath', fn: 'fmod', args: [f, { kind: 'real', value: 2 }] },
+    { kind: 'real', value: 0 });
+  h.pre.push({
+    kind: 'if',
+    cond: bin('>', d, half),
+    then: up,
+    else_: [{
+      kind: 'if',
+      cond: bin('==', d, half),
+      then: [{ kind: 'if', cond: odd, then: up, else_: null }],
+      else_: null,
+    }],
+  });
+  return h.wrap(out);
+}
+
 /* ─── 表上那几个"找"与"改"（`in` / index / count / insert / remove / …）─────── */
 
 /**

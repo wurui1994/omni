@@ -29,6 +29,7 @@ import {
   sumOf, pickList, anyAllOf, sortedOf, rangeList,
   joinOf, splitOf, stripOf, replaceOf, startsEndsOf, justOf,
   containsList, indexOfList, countList, valuesList, dictPopOf,
+  concatList, repeatList, reversedList, stepSlice, bankRound,
 } from './builtins.js';
 
 /** 一格名字节点（`(n x)`）的文本；也收裸记号。 */
@@ -244,6 +245,7 @@ export function numValue(text) {
 const BUILTIN_RET = new Map([
   ['len', INT], ['int', INT], ['float', REAL], ['str', STR], ['bool', BOOL],
   ['ord', INT], ['chr', STR], ['input', STR], ['print', null],
+  ['repr', STR], ['hex', STR], ['oct', STR], ['bin', STR],
 ]);
 
 /** 方法交出来的类型（按接收者装的东西分）。 */
@@ -439,10 +441,13 @@ function tyOfCall(x, C) {
   if (nm === 'any' || nm === 'all') return BOOL;
   if (nm === 'sum') {
     const t = argTys[0];
-    return t === null || t === undefined ? null : (t.kind === 'arr' ? t.elem : null);
+    if (t === null || t === undefined || t.kind !== 'arr') return null;
+    /* `sum(xs, start)` —— 起点与元素合成一格（int 与 real 混着来就是 real）。 */
+    if (args.length >= 2) return unify([t.elem, argTys[1]]);
+    return t.elem;
   }
   if (nm === 'round') return args.length >= 2 ? REAL : INT;
-  if (nm === 'list' || nm === 'sorted') {
+  if (nm === 'list' || nm === 'sorted' || nm === 'reversed') {
     const t = argTys[0];
     return t === null || t === undefined ? null : (t.kind === 'arr' ? t : null);
   }
@@ -1010,7 +1015,29 @@ function binOf(x, C) {
     throw new Error(`python->IR: 串上的 '${o}' 没有这一格（python 里只有 + 与 *）`);
   }
   if (ta.kind === 'arr' || tb.kind === 'arr') {
-    throw new Error(`python->IR: 表上的 '${o}' 还没接（拼接与重复都要走一遍循环）`);
+    /* `xs + ys` —— python 里是**新造一张表**。元素合不上就两边各自装箱（`(arr dyn)`）。 */
+    if (o === '+') {
+      if (ta.kind !== 'arr' || tb.kind !== 'arr') {
+        throw new Error(`python->IR: \`表 + ${ta.kind === 'arr' ? tb.kind : ta.kind}\``
+          + ' —— python 里也不成（只有表跟表能拼）');
+      }
+      const et = unify([ta.elem, tb.elem]);
+      if (et === null) {
+        throw new Error(`python->IR: \`表 + 表\` 的元素是 ${ta.elem.kind} 与 ${tb.elem.kind}`
+          + ' —— 合不成一格（装不进 dyn 那格箱子的那几档，见 `dyn.js`）');
+      }
+      const box = (src, e) => (isDyn(et) && !isDyn(ty(src, C).elem) ? boxOf(e, C) : e);
+      return concatList(a, b, et, C, box);
+    }
+    /* `xs * n` / `n * xs` —— 抄 n 遍；n <= 0 给空表。 */
+    if (o === '*') {
+      const [xs, n] = ta.kind === 'arr' ? [a, b] : [b, a];
+      if (ty(n, C).kind !== 'int') {
+        throw new Error(`python->IR: \`表 * ${ty(n, C).kind}\` —— python 里乘数要是整数`);
+      }
+      return repeatList(xs, n, C);
+    }
+    throw new Error(`python->IR: 表上的 '${o}' 没有这一格（python 里只有 + 与 *）`);
   }
   if (ta.kind === 'bool' || tb.kind === 'bool') {
     throw new Error(`python->IR: 布尔当数用（\`True + 1\`）还没接`);
@@ -1471,9 +1498,19 @@ function indexOf(x, C) {
  */
 function sliceOf(box, sliceTok, C) {
   const parts = kids(sliceTok);
-  if (parts.length > 2) throw new Error('python->IR: 带步长的切片（`xs[::2]`）还没接');
   const t = ty(box, C);
   if (t.kind !== 'string' && t.kind !== 'arr') throw new Error(`python->IR: 切 ${t.kind} 还没接`);
+  /* 步长那一格**要写成字面量**（与 `range(a, b, step)` 同一条理由：往上走还是往下走
+     得在编译期知道，收运行期的值就要发两条循环）。`s[::-1]` 是最常见的那一格。 */
+  let step = 1;
+  if (parts.length > 2 && parts[2] !== undefined && tag(parts[2]) !== null) {
+    const sv = exprOf(parts[2], C);
+    if (sv.kind !== 'int' || sv.value === 0n) {
+      throw new Error('python->IR: 切片的步长要是一格非零整数字面量 —— '
+        + '不然"往上还是往下"只有跑起来才知道（那要两条循环）');
+    }
+    step = Number(sv.value);
+  }
 
   const pre = [];
   const keep = (e, p, kty = INT) => {
@@ -1483,7 +1520,11 @@ function sliceOf(box, sliceTok, C) {
     pre.push({ kind: 'let', name: n, type: kty, init: e });
     return { kind: 'name', name: n };
   };
-  const hi = keep(lenOf(box, C), 'sl_len');
+  /* **先把被切的那一格钉住**：下面要读它好几遍（长度、逐格取），而它自己可能是个
+     block-expr（表字面量就是），重复发一遍就把里头那格 `let` 发了两次。
+     量到的原话：`[1, 2, 3, 4][::2]` 报 "'list81' 在这一层已经声明过了"。 */
+  const src = keep(box, 'sl_x', t);
+  const hi = keep(lenOf(src, C), 'sl_len');
   /** `max(0, min(e, hi))` —— e 要用三遍，所以先落一格。 */
   const clamp = (e, p) => {
     const v = keep(e, p);
@@ -1501,10 +1542,10 @@ function sliceOf(box, sliceTok, C) {
   };
   const from = keep(parts[0] === undefined || tag(parts[0]) === null
     ? { kind: 'int', value: 0 }
-    : clamp(wrapIndex(box, exprOf(parts[0], C), C), 'sl_a'), 'sl_from');
+    : clamp(wrapIndex(src, exprOf(parts[0], C), C), 'sl_a'), 'sl_from');
   const to = keep(parts[1] === undefined || tag(parts[1]) === null
     ? hi
-    : clamp(wrapIndex(box, exprOf(parts[1], C), C), 'sl_b'), 'sl_to');
+    : clamp(wrapIndex(src, exprOf(parts[1], C), C), 'sl_b'), 'sl_to');
   /** `max(0, to - from)`。 */
   const count = {
     kind: 'ternary', type: INT,
@@ -1513,8 +1554,28 @@ function sliceOf(box, sliceTok, C) {
     else_: { kind: 'int', value: 0 },
   };
 
+  /* 步长不是 1 —— 走一趟循环（`builtins.js` 的 `stepSlice`）。
+     负步长这一格**只收两头都省掉的写法**（`s[::-1]` / `xs[::-2]`）：python 里负步长的
+     默认两头是反过来的（从 len-1 走到 -1），而带了显式两头之后还要另一套夹法
+     （`s[5:-10:-1]` 那一族），猜一个会静默给出错的一段。 */
+  if (step !== 1) {
+    const isStr = t.kind === 'string';
+    const given = (k) => parts[k] !== undefined && tag(parts[k]) !== null;
+    if (step < 0) {
+      if (given(0) || given(1)) {
+        throw new Error('python->IR: 负步长的切片只接两头都省掉的写法（`s[::-1]`）—— '
+          + '带显式两头的那一族（`s[5:1:-1]`）还没接');
+      }
+      const start = { kind: 'binop', op: '-', left: hi, right: { kind: 'int', value: 1 } };
+      const down = stepSlice(src, start, { kind: 'int', value: 0 }, step, isStr, C);
+      return pre.length === 0 ? down : { kind: 'block-expr', stmts: pre, value: down };
+    }
+    const up = stepSlice(src, from, to, step, isStr, C);
+    return pre.length === 0 ? up : { kind: 'block-expr', stmts: pre, value: up };
+  }
+
   if (t.kind === 'string') {
-    const value = { kind: 'builtin', name: 'ssub', args: [box, from, count] };
+    const value = { kind: 'builtin', name: 'ssub', args: [src, from, count] };
     return pre.length === 0 ? value : { kind: 'block-expr', stmts: pre, value };
   }
   const out = C.fresh('slice');
@@ -1536,7 +1597,7 @@ function sliceOf(box, sliceTok, C) {
         body: [
           {
             kind: 'builtin-stmt', name: 'apush',
-            args: [{ kind: 'name', name: out }, { kind: 'index', obj: box, index: { kind: 'name', name: i } }],
+            args: [{ kind: 'name', name: out }, { kind: 'index', obj: src, index: { kind: 'name', name: i } }],
           },
           {
             kind: 'assign', target: { kind: 'name', name: i },
@@ -1667,6 +1728,14 @@ function rangeListOf(callTok, C) {
 }
 
 /** 内建函数与用户函数。 */
+/** 一格 int 表达式要读**两遍**（三元的两支里各一次）时先落成临时量。 */
+function keepInt(e, prefix, C) {
+  if (isPure(e)) return { pre: [], v: e };
+  const n = C.fresh(prefix);
+  C.bind(n, INT);
+  return { pre: [{ kind: 'let', name: n, type: INT, init: e }], v: { kind: 'name', name: n } };
+}
+
 function builtinOf(nm, args, argToks, C) {
   const t0 = args.length > 0 ? ty(args[0], C) : null;
   switch (nm) {
@@ -1702,8 +1771,53 @@ function builtinOf(nm, args, argToks, C) {
       return best;
     }
     case 'sum': {
-      if (args.length !== 1) throw new Error('python->IR: `sum(xs, start)` 的第二格还没接');
-      return sumOf(args[0], C);
+      if (args.length === 1) return sumOf(args[0], C);
+      if (args.length !== 2) throw new Error('python->IR: `sum()` 收一格表或者表加一格起点');
+      /* `sum(xs, start)` —— 起点加上去就是（合型那一下交给 `+`，与源码里写
+         `start + sum(xs)` 逐字同一条）。 */
+      const s = sumOf(args[0], C);
+      const st = ty(args[1], C);
+      const acc = ty(s, C);
+      if (st.kind === 'real' && acc.kind === 'int') {
+        return { kind: 'binop', op: '+', left: args[1], right: toReal(s, C) };
+      }
+      if (st.kind === 'int' && acc.kind === 'real') {
+        return { kind: 'binop', op: '+', left: toReal(args[1], C), right: s };
+      }
+      return { kind: 'binop', op: '+', left: args[1], right: s };
+    }
+    /* `reversed(xs)` —— 交倒过来的**一张新表**（原表不动）。 */
+    case 'reversed': {
+      if (args.length !== 1) throw new Error('python->IR: `reversed()` 收一格表');
+      if (t0.kind !== 'arr') throw new Error(`python->IR: \`reversed(${t0.kind})\` 还没接（表接了）`);
+      return reversedList(args[0], C);
+    }
+    /* `repr(x)` —— `str()` 那一侧已经有了，这一格只差把串加上引号（`pyRepr`）。 */
+    case 'repr': {
+      if (args.length !== 1) throw new Error('python->IR: `repr()` 收一格实参');
+      return pyRepr(args[0], C);
+    }
+    /* `hex/oct/bin` —— 方言的 `(sbase E 进制)` 就是它，只差前缀与负号。
+       `sbase` 把位当**无符号 64 位**读，所以负数要自己拆成 `-` 加上取反那一格
+       （量过：`hex(-255)` python 交 `-0xff`，直接 sbase 会交 16 个 f 那一串）。 */
+    case 'hex': case 'oct': case 'bin': {
+      if (args.length !== 1) throw new Error(`python->IR: \`${nm}()\` 收一格实参`);
+      if (t0.kind !== 'int') throw new Error(`python->IR: \`${nm}(${t0.kind})\` —— python 里也要整数`);
+      const base = { hex: 16, oct: 8, bin: 2 }[nm];
+      const pre = { hex: '0x', oct: '0o', bin: '0b' }[nm];
+      const v = keepInt(args[0], `${nm}_v`, C);
+      const digits = (e) => ({ kind: 'builtin', name: 'sbase', args: [e, { kind: 'int', value: base }] });
+      const cat = (l, r) => ({ kind: 'binop', op: '+', left: l, right: r });
+      return {
+        kind: 'block-expr', stmts: v.pre,
+        value: {
+          kind: 'ternary', type: STR,
+          cond: { kind: 'binop', op: '<', left: v.v, right: { kind: 'int', value: 0 } },
+          then: cat({ kind: 'string', value: `-${pre}` },
+            digits({ kind: 'unop', op: '-', operand: v.v })),
+          else_: cat({ kind: 'string', value: pre }, digits(v.v)),
+        },
+      };
     }
     case 'any': case 'all': {
       if (args.length !== 1) throw new Error(`python->IR: \`${nm}()\` 收一格表`);
@@ -1721,10 +1835,34 @@ function builtinOf(nm, args, argToks, C) {
       throw new Error(`python->IR: \`list(${t.kind})\` 还没接（\`list(range(…))\` 接了）`);
     }
     case 'round': {
-      /* python 的 `round` 是**银行家舍入**（`round(0.5)` 是 0，`round(1.5)` 是 2）——
-         方言的 `(rmath "round")` 是 C 的 round（远离零）。两者在 .5 上不一样，明说记着。 */
-      if (args.length !== 1) throw new Error('python->IR: `round(x, n)` 还没接');
-      return { kind: 'builtin', name: 'toint', args: [{ kind: 'rmath', fn: 'round', args: [toReal(args[0], C)] }] };
+      /* python 的 `round` 是**半数取偶**（`round(0.5)` 是 0、`round(2.5)` 是 2）——
+         `bankRound` 用 floor / fmod 拼出来（方言的 `(rmath "round")` 是 C 的"远离零"，
+         `.5` 那一档差一：量到过 `round(2.5)` 从前交 3）。 */
+      if (args.length === 1) {
+        return { kind: 'builtin', name: 'toint', args: [bankRound(toReal(args[0], C), C)] };
+      }
+      if (args.length !== 2) throw new Error('python->IR: `round()` 收一格或两格实参');
+      /* `round(x, n)` —— 交的是 real（python 也是）。**n 要写成字面量**：10^n 要在
+         编译期算出来（而 n 在实际代码里几乎总是字面量）。先乘上去、半数取偶、再除回来。
+         **明说的不足**（量出来的）：CPython 的两参 `round` 走**十进制**那条路
+         （`_Py_dg_dtoa`），这儿是二进制的乘除 —— `round(2.675, 2)` python 交 2.67、
+         我们交 2.68。根子不在 `bankRound`（`2.675 * 100.0` 在双精度里**真是** 267.5，
+         两边的一参 round 都把它舍成 268），而在"该不该先转十进制"。
+         要对上得把借来的那份 dtoa 反过来用，那是接 `libomnipy` 那一刀的事。 */
+      const n = args[1];
+      if (n.kind !== 'int') {
+        throw new Error('python->IR: `round(x, n)` 的 n 要写成一格整数字面量'
+          + '（10^n 要在编译期算出来）');
+      }
+      const digits = Number(n.value);
+      if (digits < 0 || digits > 15) throw new Error('python->IR: `round(x, n)` 的 n 收 0..15');
+      const scale = { kind: 'real', value: 10 ** digits };
+      const x = toReal(args[0], C);
+      return {
+        kind: 'binop', op: '/',
+        left: bankRound({ kind: 'binop', op: '*', left: x, right: scale }, C),
+        right: scale,
+      };
     }
     case 'range':
       throw new Error('python->IR: `range()` 只在 `for … in range(…)` 里接了（当值用还没接）');
