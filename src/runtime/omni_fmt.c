@@ -645,6 +645,100 @@ static const char *gfx_tex_path(int idx) {
 static unsigned char *g_glpx = NULL;  /* 读回那一格（w*h*4，RGBA） */
 static int64_t *g_gout = NULL;        /* 合成出来的那一帧（0xRRGGBB，喂 omni_gfx_emit） */
 
+/* ── KV6 体素模型（`drawkv6`，与 `src/core/host/kv6.js` 逐句相同）─────────────────
+ *
+ * 格式与"为什么 x/y 要靠两张游程表数出来"写在那份 JS 的头注里（那儿是这一格的正本，
+ * 判据在 `tests/lower/run.js --only kv6`）。这一层只做同一件事的 C 版：
+ * 解开一份、缓存住（脚本每帧都会问一句 `kv6siz`），`kv6read` 一次抄给语言那一侧。
+ *
+ * 不经 GL 插件：KV6 是纯字节，这一格连 `--gfx host` 都该有。
+ */
+typedef struct { char path[1024]; double *vox; long n; int ok; } kv6_cache_t;
+static kv6_cache_t g_kv6 = { { 0 }, NULL, 0, 0 };
+
+static int kv6_decode(const unsigned char *b, long len) {
+  if (b == NULL || len < 32) return 0;
+  if (!(b[0] == 'K' && b[1] == 'v' && b[2] == 'x' && b[3] == 'l')) return 0;
+  int xs = 0, ys = 0, zs = 0, n = 0;
+  float px = 0, py = 0, pz = 0;
+  memcpy(&xs, b + 4, 4); memcpy(&ys, b + 8, 4); memcpy(&zs, b + 12, 4);
+  memcpy(&px, b + 16, 4); memcpy(&py, b + 20, 4); memcpy(&pz, b + 24, 4);
+  memcpy(&n, b + 28, 4);
+  if (!(xs > 0 && ys > 0 && zs > 0 && n > 0)) return 0;
+  long need = 32 + (long)n * 8 + (long)xs * 4 + (long)xs * ys * 2;
+  if (len < need) return 0;
+  double *out = (double *)malloc(sizeof(double) * (size_t)n * 4);
+  if (out == NULL) return 0;
+  long yoff = 32 + (long)n * 8 + (long)xs * 4;
+  long k = 0;
+  for (int x = 0; x < xs; x++) {
+    for (int y = 0; y < ys; y++) {
+      unsigned short cnt = 0;
+      memcpy(&cnt, b + yoff + ((long)x * ys + y) * 2, 2);
+      while (cnt > 0 && k < n) {
+        const unsigned char *v = b + 32 + k * 8;
+        unsigned short z = 0;
+        memcpy(&z, v + 4, 2);
+        out[k * 4 + 0] = (double)x - (double)px;
+        out[k * 4 + 1] = (double)y - (double)py;
+        out[k * 4 + 2] = (double)z - (double)pz;
+        out[k * 4 + 3] = (double)(((unsigned)v[2] << 16) | ((unsigned)v[1] << 8) | (unsigned)v[0]);
+        k++;
+        cnt--;
+      }
+    }
+  }
+  free(g_kv6.vox);
+  g_kv6.vox = out;
+  g_kv6.n = k;
+  return 1;
+}
+
+/* 一份文件整块读进来（回长度，失败回 -1；`*pb` 要调用方 free）。 */
+static long kv6_slurp(const char *p, unsigned char **pb) {
+  FILE *f = fopen(p, "rb");
+  if (f == NULL) return -1;
+  if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
+  long len = ftell(f);
+  if (len <= 0) { fclose(f); return -1; }
+  rewind(f);
+  unsigned char *b = (unsigned char *)malloc((size_t)len);
+  if (b == NULL) { fclose(f); return -1; }
+  long got = (long)fread(b, 1, (size_t)len, f);
+  fclose(f);
+  if (got != len) { free(b); return -1; }
+  *pb = b;
+  return len;
+}
+
+/* `kv6siz(名字下标)`：几格体素（读不到/解不开回 -1）。落点试三处 —— 见 JS 那一份。 */
+static double kv6_size(const char *p) {
+  if (p == NULL) return -1.0;
+  if (strcmp(g_kv6.path, p) == 0) return g_kv6.ok ? (double)g_kv6.n : -1.0;
+  snprintf(g_kv6.path, sizeof(g_kv6.path), "%s", p);
+  g_kv6.ok = 0;
+  char cand[3][1024];
+  int nc = 0;
+  snprintf(cand[nc++], sizeof(cand[0]), "%s", p);
+  const char *slash = strrchr(p, '/');
+  if (slash != NULL) {
+    int dlen = (int)(slash - p);
+    snprintf(cand[nc++], sizeof(cand[0]), "%.*s/../data/%s", dlen, p, slash + 1);
+    snprintf(cand[nc++], sizeof(cand[0]), "%.*s/data/%s", dlen, p, slash + 1);
+  }
+  for (int i = 0; i < nc; i++) {
+    unsigned char *b = NULL;
+    long len = kv6_slurp(cand[i], &b);
+    if (len < 0) continue;
+    int okv = kv6_decode(b, len);
+    free(b);
+    if (okv) { g_kv6.ok = 1; break; }
+  }
+  if (!g_kv6.ok) fprintf(stderr, "#gfx KV6 读不开：%s（也试过 ../data/ 与 data/）\n", p);
+  return g_kv6.ok ? (double)g_kv6.n : -1.0;
+}
+
+
 /* 想不想要 GL 那一档（`OMNI_GFX=gl`）。 */
 static int gfx_gl_want(void) {
   static int w = -1;
@@ -1066,6 +1160,15 @@ double omni_gfx_arr(omni_str name, double a0, double a1, double a2, double a3,
     if (g_gl.picread == NULL || items == NULL || n <= 0) return 0.0;
     return (double)g_gl.picread(items, n);
   }
+  /* **KV6 那一族的第二句**（`kv6read`）：把缓存那份模型抄进来 —— 一格体素四个数
+     `[x, y, z, 0xRRGGBB]`（坐标已减过支点）。回抄了多少**格体素**。
+     **与 `host/gfx-cpu.js` 那一格逐句相同**（三条腿逐字节相同是判据）。 */
+  if (!strcmp(nm, "kv6read")) {
+    if (!g_kv6.ok || g_kv6.vox == NULL || items == NULL || n <= 0) return 0.0;
+    long cnt = g_kv6.n < n / 4 ? g_kv6.n : n / 4;
+    for (long i = 0; i < cnt * 4; i++) items[i] = g_kv6.vox[i];
+    return (double)cnt;
+  }
   /* **一整张矩阵一句**（`batchmvp16` / `batchmv16`，列主序 16 个数）：与四句
      `batchmvp`/`batchmv` **逐字等价**，只是少 7 句宿主调用（理由见
      `ext/polydraw/gl-rt.js` 里那段话）。不够 16 格就当没发。 */
@@ -1445,6 +1548,12 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
   if (!strcmp(nm, "glcapture") && argc == 4) { return 0.0; }
   if (!strcmp(nm, "glcaptureend") && argc <= 1) { return 0.0; }
   if (!strcmp(nm, "mountzip") && argc >= 1 && argc <= 2) { return 0.0; }
+  /* **KV6 那一族的头一句**（`kv6siz 名字下标`）：**不经 GL 插件** —— KV6 是纯字节，
+     所以这一格连 CPU 备选都有（画在语言那一侧，见 `ext/polydraw/gfx3-rt.js`）。
+     路径在这一层拼（目录只有宿主知道），与 `picsiz` 同一手。 */
+  if (!strcmp(nm, "kv6siz") && argc == 1) {
+    return kv6_size(gfx_tex_path((int)a0));
+  }
   if (!strcmp(nm, "glulookat") && argc == 9) { return 0.0; }
   if (!strcmp(nm, "drawspr") && argc == 4) { return 0.0; }
   if (!strcmp(nm, "drawspr") && argc == 5) { return 0.0; }
