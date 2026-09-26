@@ -26,7 +26,9 @@ import {
   stitchFile as cSplitStitch, ppBalance as cSplitPpBalance,
 } from './frontend-c/split.js';
 import { installSrcEvalHook } from './host/src_eval.js';
-import { cacheRoot, scratchDir, dropScratch, cacheList, cacheGc, cacheKept } from './host/cache.js';
+import {
+  cacheRoot, scratchDir, dropScratch, cacheList, cacheGc, cacheKept, treeRoot,
+} from './host/cache.js';
 import { dataPath, dataDir } from './host/data.js';
 import { hash16 } from './host/hash.js';
 import { findCmd, splitArgv, canonicalize, ownsVerbose, renderHelp, renderLegacy } from './cli/tree.js';
@@ -1709,12 +1711,28 @@ function srcStamp() {
       return;
     }
     for (const f of names) {
+      /* **例子不是编译器**：`ext/<语言>/examples/` 里那几百份脚本各自是自己那份产物的
+         输入（行里的 `self`），不该当成"编译器变了"—— 不跳的话改一份例子会让全体失效。
+         点开头的（`.git` / `.omni-cache`）与 `node_modules` 同理。 */
+      if (f === 'examples' || f === 'node_modules' || f.startsWith('.')) continue;
       const p = join(d, f);
       if (isDir(p)) walk(p);
       else parts.push(`${p}:${mtimeMs(p)}:${fileSize(p)}`);
     }
   };
-  walk(join(installDir(), '..'));
+  /**
+   * **编译器 = `src/` 加 `ext/`**（2026-09-26 补上后者）。
+   *
+   * 从前只扫 `src/core`（`installDir()/..`），于是**十一门借来的语言那一摊
+   * （`ext/<语言>/adapter.js` 与它们的运行时）改了不算"编译器变了"** —— 产物照旧命中，
+   * 改动静默不生效。踩出来的样子：给 EvalDraw 补完 `drawspr` 之后，页面上那份脚本
+   * 还是报"没接住 drawspr/4"，而盘上那份产物是半小时前的。
+   * 这正是 `build/modules.js` 头注里那句"少一种文件就少一处会抄错的判据"要防的那类
+   * —— 只不过漏在**印记的范围**上。
+   */
+  const root = treeRoot();
+  if (root === null) walk(join(installDir(), '..'));
+  else { walk(join(root, 'src')); walk(join(root, 'ext')); }
   srcStampMemo = hash16(parts.join('|'));
   return srcStampMemo;
 }

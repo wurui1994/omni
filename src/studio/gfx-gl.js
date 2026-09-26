@@ -50,6 +50,11 @@ const D = {
   pn: 0, psum: 0, pms: 0, pfps: 0, pt0: 0,
   mx: 0, my: 0, bst: 0,           /* 鼠标：canvas 左上角起的像素位置 + 按键位（bit0 左/1 右/2 中） */
   keys: null,                     /* `keystatus[256]`：扫描码 -> 0/1（下面那张表把 code 换成扫描码） */
+  /* **看门狗**（见 `refresh/0` 那段注）：这一趟帧函数是什么时候进去的、里头调了几次
+     `refresh()`、给它多少毫秒。`fbudget` 摆 1500ms：够慢脚本画一帧，又远在浏览器
+     "这一页没响应"那道线之前。 */
+  fstart: 0, refs: 0, fbudget: 1500,
+  gk: 0,                          /* `glklockstart()` 的那个起点（见 call 里那两格） */
 };
 
 /**
@@ -939,8 +944,32 @@ function call(name, args) {
       return Math.round(Math.min(255, Math.max(0, a(0)))) * 65536
         + Math.round(Math.min(255, Math.max(0, a(1)))) * 256
         + Math.round(Math.min(255, Math.max(0, a(2))));
-    /* `refresh()`：把这一帧交出去 —— 这一档就是画掉攒着的顶点（canvas 上就看见了）。 */
-    case 'refresh/0': flush(); return 0;
+    /**
+     * `refresh()`：把这一帧交出去 —— 这一档就是画掉攒着的顶点（canvas 上就看见了）。
+     *
+     * **这一档等不了**：`refresh()` 的正本语义是"交图 + 等 + 查出口"（见
+     * `core/host/gfx-cpu.js` 的那段头注），而页面上帧函数是主线程里**同步**跑的 ——
+     * 真等就是把页面卡死。语料里有二十几份 `.kc` 是**自己在死循环里用 `refresh()` 驱动帧**的
+     * （`geeky/pi.kc` 的 `for(z=1;1;z+=2)`），那一族在这一档会一直不回来。
+     *
+     * 所以摆一道**看门狗**：一趟帧函数里花了超过 `D.fbudget` 毫秒还在 `refresh()`，就抛。
+     * 抛出来的样子是"帧循环停下 + 控制台一句说清为什么"，**不是把浏览器标签页掐死**
+     * （量过：不带这道闸时 `pi.kc` 一跑，整个标签页被浏览器杀掉，连报错都收不到）。
+     * 真要让这一族跑起来得把脚本挪进 Web Worker + OffscreenCanvas —— 那儿
+     * `refresh()` 能真的 `Atomics.wait`，主线程照旧刷新。记在任务 #32 里。
+     */
+    case 'refresh/0': {
+      flush();
+      D.refs += 1;
+      if (D.fstart > 0 && performance.now() - D.fstart > D.fbudget) {
+        throw new Error(`这一份脚本在一趟帧函数里调了 ${D.refs} 次 refresh() 还没回来`
+          + `（超过 ${D.fbudget}ms）—— 它是**自己拿 refresh() 当帧循环**的那一族。`
+          + '浏览器这一档的帧函数在主线程上同步跑，refresh() 没法真等；'
+          + '要跑这一族得把脚本挪进 Web Worker + OffscreenCanvas（任务 #32）。'
+          + ' 本机那两档（omni run --gfx gl / host）现在就能跑它。');
+      }
+      return 0;
+    }
     /**
      * `nextframe`：**这一档一帧都不放过去**（直接回 0）。理由：浏览器里产物是在主线程
      * 同步跑的，`while` 会把页面卡死 —— 所以帧循环交给
@@ -948,6 +977,11 @@ function call(name, args) {
      */
     case 'nextframe/0': flush(); return 0;
     case 'numframes/0': return D.fno > 0 ? D.fno - 1 : 0;
+    /* `glklockstart()` / `glklockelapsed()`（`polydraw.c:2216` 的 GLKLOCK*）：GPU 那一侧的
+       计时，脚本拿它印自己的帧耗时。这一档**收下**：起点记在 `D.gk`、`elapsed` 回毫秒
+       （与 CPU 备选那一档"收下回 0"同一类，只是这儿真答得出来）。 */
+    case 'glklockstart/0': D.gk = performance.now(); return 0;
+    case 'glklockelapsed/0': return D.gk === 0 ? 0 : performance.now() - D.gk;
     case 'klock/0': return (performance.now() - D.t0) / 1000;
     /* `FRAMEINIT`（见 CPU 备选那一份的注）：第一帧 1、之后 0。 */
     case 'frameinit/0': return D.fno <= 1 ? 1 : 0;
@@ -1130,6 +1164,9 @@ function setFrame(f) {
     D.fno += 1;
     const t = performance.now();
     if (D.pt0 === 0) D.pt0 = t;
+    /* 看门狗的零点（见 `refresh/0`）：这一趟帧函数从这儿算起。 */
+    D.fstart = t;
+    D.refs = 0;
     try {
       D.frameFn();
     } catch (e) {
@@ -1177,6 +1214,9 @@ function stop() {
 function step() {
   if (typeof D.frameFn !== 'function') return 0;
   D.fno += 1;
+  /* 看门狗的零点（见 `refresh/0`）—— 单步这一档也要摆，不然那一族脚本单步也回不来。 */
+  D.fstart = performance.now();
+  D.refs = 0;
   D.frameFn();
   flush();
   return D.fno;
@@ -1229,6 +1269,10 @@ function reset() {
   TX.unit = 0;
   /* 文件纹理那几张的状态跟着槽走（槽都删了）—— 下一趟重新取一遍。 */
   FT.st.clear();
+  /* **没接住的那本账也清**：它是"这一趟这份脚本缺哪几格"的账 —— 不清的话下一份脚本
+     背着上一份的债（踩过一次：`drawsph.pss` 的账里挂着上一份的 `drawspr/4`，
+     而它压根没调过 `drawspr`）。 */
+  MISS.clear();
   const gl = D.gl;
   if (gl !== null) {
     gl.clearColor(0, 0, 0, 1);

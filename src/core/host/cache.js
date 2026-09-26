@@ -26,7 +26,7 @@ import { join, dirname } from './path.js';
  * 换用户）暖存就跟着搬家，撞不撞全靠运气。与 data.js 的 `dataRoots()` 同一条规矩：
  * 按布局认，不按层数数。
  */
-function treeRoot() {
+export function treeRoot() {
   let d = installDir();
   for (let i = 0; i < 8; i++) {
     if (exists(join(d, 'package.json')) || exists(join(d, '.git'))) return d;

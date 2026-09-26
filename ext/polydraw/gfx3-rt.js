@@ -111,6 +111,11 @@ export const EVALDRAW_3D = new Map([
   ['playsoundupdate/2', 'g3_nop2'], ['playsoundupdate/3', 'g3_nop3'],
   ['playsoundupdate/4', 'g3_nop4'], ['playsoundupdate/5', 'g3_nop5'],
   ['playsoundupdate/6', 'g3_nop6'],
+  /* **2D 精灵那两档**（`evaldraw.txt:1593`）：`drawspr(x,y,半径,角)` 与
+     `drawspr(x,y,x半径,y半径,角)` —— 拿**当前 `glsettex` 那张纹理**画一格转过角度的四边形。
+     名字带 `gl` 是给 adapter 看的（那条规则按 `g3_gl` 前缀把 GL 那摊运行时也带上）。 */
+  ['drawspr/4', 'g3_glspr4'],
+  ['drawspr/5', 'g3_glspr5'],
 ]);
 
 /* ─── 生成出来的那一摊 ────────────────────────────────────────────────── */
@@ -194,6 +199,46 @@ export function gfx3FnDecls(host = false, withGL = false) {
         ex(call('gl_begin', [nm('mode')])),
         ret(num(0)),
       ]),
+      /**
+       * **2D 精灵**（`drawspr(x,y,半径,角)` / `drawspr(x,y,x半径,y半径,角)`，
+       * `evaldraw.txt:1593`）：拿**当前那张纹理**画一格转过角度的四边形。
+       *
+       * 口径不是猜的：`demos/sprite2d.kc` 自己带了一份等价实现（`mydrawspr`，那份脚本
+       * 按鼠标键在"内建的 drawspr"与"它自己那一份"之间切 —— 两边该长得一样）。照它：
+       *
+       *     四个角 = 中心 + R(角) · (±x半径, ±y半径)
+       *     纹理坐标 (0,0) (1,0) (1,1) (0,1) 按上面那个次序
+       *     画之前关深度测试、画完开回来
+       *
+       * **为什么深度这一格由它自己管**：说明书那句"be sure to handle the Z-buffer"
+       * 听着像脚本的事，可 `sprite2d.kc` 既没 `clz` 也没在 init 里关深度，而它那份
+       * `mydrawspr` 在自己里头关 —— 所以内建那一格必然也是自己关的（判据就是那份脚本
+       * 两个模式要一样）。
+       */
+      fn('g3_glspr5', ['x', 'y', 'xs', 'ys', 'a'], [
+        ex(call('g3_glbegin', [num(7)])),                  /* GL_QUADS */
+        ex(call('gl_disable', [num(0x0b71)])),             /* GL_DEPTH_TEST */
+        letR('c', rm('cos', [nm('a')])),
+        letR('s', rm('sin', [nm('a')])),
+        /* 角 = 中心 + R(a)·(px,py)，R(a)·(px,py) = (px·c − py·s, px·s + py·c)。 */
+        ...[[-1, -1, 0, 0], [1, -1, 1, 0], [1, 1, 1, 1], [-1, 1, 0, 1]].flatMap(
+          ([sx, sy, u, v]) => ([
+            ex(call('gl_texcoord2', [num(u), num(v)])),
+            ex(call('gl_vertex2', [
+              bin('+', nm('x'), bin('-', bin('*', bin('*', num(sx), nm('xs')), nm('c')),
+                bin('*', bin('*', num(sy), nm('ys')), nm('s')))),
+              bin('+', nm('y'), bin('+', bin('*', bin('*', num(sx), nm('xs')), nm('s')),
+                bin('*', bin('*', num(sy), nm('ys')), nm('c')))),
+            ])),
+          ]),
+        ),
+        ex(call('gl_end', [])),
+        ex(call('gl_enable', [num(0x0b71)])),
+        ret(num(0)),
+      ]),
+      fn('g3_glspr4', ['x', 'y', 'r', 'a'], [
+        ret(call('g3_glspr5', [nm('x'), nm('y'), nm('r'), nm('r'), nm('a')])),
+      ]),
     ] : []),
     /** 第一次用 3D 那一族时把相机摆成"在原点、朝 +z"、视口按画布中心。 */
     fn('g3_need', [], [
@@ -211,6 +256,7 @@ export function gfx3FnDecls(host = false, withGL = false) {
     ]),
     /* `clz(d)`：这一档没有 z 缓冲（见头注第 2 条）—— 收下记着不用。 */
     fn('g3_clz', ['d'], [ex(call('g3_need', [])), ret(num(0))]),
+    fn('g3_nop0', [], [ret(num(0))]),
     fn('g3_nop1', ['a'], [ret(num(0))]),
     fn('g3_nop2', ['a', 'b'], [ret(num(0))]),
     fn('g3_nop3', ['a', 'b', 'c'], [ret(num(0))]),

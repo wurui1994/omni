@@ -293,6 +293,9 @@ throws('两条边造同一格：当场报', () => run([CC,
   writeFileSync(join(dir, 'main-e.js'), '//\n');
   writeFileSync(join(dir, 'e.js'), '//\n');
   writeFileSync(join(dir, 'rt1.js'), '//\n');
+  /* 这一格账**每趟从空的开始**：`.omni-cache/test-modules/` 是留着的目录，不清的话第二趟
+     跑判据时 `K1` 已经记着了，"没记过 -> 没命中"那一条必红（第一趟绿第二趟红，最难查）。 */
+  writeFileSync(join(dir, 'built.log'), '# omni module index v1\n');
   eq('modules：没记过 -> 没命中', builtGet(dir, 'K1'), null);
   builtSet(dir, 'K1', { mainPath: join(dir, 'main-e.js'), names: ['rt1'], files: ['e.js', 'rt1.js'] });
   eq('modules：记过就命中（回启动器与那几个单元名）',
