@@ -95,3 +95,41 @@ print(sprintf("%s", c(TRUE, FALSE)))
 print(sprintf("%d", integer(0)))
 print(sprintf("[%-4s]", ns))
 cat(sprintf("%03d", 7), "\n")
+
+# `formatC(x, format=, digits=, width=, flag=)`（2026-09-26 接了）——
+# **改写成一格 `sprintf`**（R 的 `formatC` 本来就是"照 C 的 sprintf 排版"），所以旗子 /
+# 宽度 / 精度那一大段只有一份实现。缺省值是量出来的（`?formatC` 的 "Default: 2 for
+# integer, 4 for real numbers"）：double 缺省 `format="g"` + `digits=4`、整数缺省
+# `format="d"`、串缺省 `format="s"`。
+cat(formatC(3.14159, digits = 3, format = "f"), "|\n")
+cat(formatC(3.14159, format = "f"), "|\n")
+cat(formatC(3.14159, digits = 2, format = "e"), "|\n")
+cat(formatC(3.14159, digits = 3, format = "g"), "|\n")
+cat(formatC(42, width = 8), "|\n")
+cat(formatC(42, width = 8, flag = "0"), "|\n")
+cat(formatC(42, width = 8, flag = "-"), "|\n")
+cat(formatC("ab", width = 5), "|\n")
+cat(formatC("ab", width = 5, flag = "-"), "|\n")
+cat(formatC(42L, format = "d"), "|\n")
+cat(formatC(3.14159, width = 10, digits = 2, format = "f"), "|\n")
+cat(formatC(0.000123, format = "e", digits = 1), "|\n")
+cat(formatC(c(1, 10, 100), width = 5), "|\n")
+cat(formatC(42), "|\n")
+cat(formatC(3.14159), "|\n")
+cat(formatC(-2.5, digits = 1, format = "f"), "|\n")
+cat(formatC(1e10, format = "g", digits = 3), "|\n")
+cat(formatC(c(1.5, 2.25), format = "f", digits = 1), "|\n")
+print(formatC(c("a", "bb"), width = 4))
+cat(formatC(7L, width = 3, flag = "0"), "|\n")
+cat(nchar(formatC(42, width = 8)), "\n")
+# `format = "d"` 收一格 double 时**当场报**（R 那儿是四舍到整数，而这一层的 `%d` 朝零截）
+# —— 所以要整数得先 `as.integer(…)`。`big.mark=` / `mode=` 也还没接。
+cat(formatC(as.integer(2.7), format = "d"), "|\n")
+# `%*d` 那一格宽度从实参里取（R 也收）—— 格式串是**编译期**拆开的，所以那一格只认
+# **整数字面量**；不是字面量就当场报（不给一个"宽度当 0"的答案）。
+cat(sprintf("[%*d]", 6, 42L), "\n")
+cat(sprintf("[%*s]", 8, "ab"), "\n")
+cat(sprintf("[%-*d]", 6, 42L), "\n")
+cat(sprintf("[%*.2f]", 9, 3.14159), "\n")
+cat(sprintf("[%0*d]", 5, 7L), "\n")
+cat(sprintf("%*d %*d", 3, 1L, 4, 22L), "\n")

@@ -947,6 +947,8 @@ const NAMED_OK = new Map([
   ['diff', new Set(['lag'])],
   ['casefold', new Set(['upper'])],
   ['format', new Set(['nsmall', 'width'])],
+  /* `formatC` 改写成 `sprintf`（见 `formatCOf`）—— 那四格都只认字面量。 */
+  ['formatC', new Set(['format', 'digits', 'width', 'flag'])],
   ['trimws', new Set(['which'])],
   ['nchar', new Set(['type'])],
   /* `sort` 上**没有** `na.rm=` —— R 自己都报"参数没有用(na.rm = TRUE)"（它的默认
@@ -1003,7 +1005,7 @@ const BUILTINS = new Set([
      查出来 —— **只管 ASCII**（见 SPEC 第四节第 12 条）。 */
   'toupper', 'tolower', 'substr', 'substring', 'trimws', 'sprintf', 'startsWith', 'endsWith',
   /* `casefold` 是那两格的别名（S 兼容）；`strrep` 是方言的 `(srep …)`。 */
-  'casefold', 'strrep', 'chartr', 'format',
+  'casefold', 'strrep', 'chartr', 'format', 'formatC',
   /* 环境变量与"这是个函数吗"—— 后者在这一档是编译期常量（名字表里查得到就是）。 */
   'Sys.getenv', 'is.function',
   /* `strsplit` 只接两种形状（见 `splitOf`）：`strsplit(s, sep)[[1]]` 与
@@ -1663,6 +1665,12 @@ function applyTy(fn, x, types) {
       return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RSTRV : STR;
     /* `format()` 这一档只接标量 —— 回一格串（向量那一侧见 `callOf` 里那段账）。 */
     case 'format': return STR;
+    /* `formatC` 改写成 `sprintf`（见 `formatCOf`），所以形状跟 `sprintf` 同一条：
+       实参是向量 → 一整条字符向量，一格数/串 → 一格串。 */
+    case 'formatC': {
+      const t = args.length > 0 ? typeOfExpr(args[0], types) : REAL;
+      return isVecTy(t) || isStrVec(t) ? RSTRV : STR;
+    }
     /* `Sys.getenv(名字)` 回一格串；`is.function` 回编译期算出来的真假。 */
     case 'Sys.getenv': return STR;
     case 'is.function': return BOOL;
@@ -2385,6 +2393,74 @@ const cstSym = (nm) => cstList('sym', { kind: 'atom', value: nm });
 const cstCall = (fnName, argVals) => cstList(
   'call', cstSym(fnName), ...argVals.map((v) => cstList('arg', v)),
 );
+/** 一格串字面量的 CST 节点（`formatC` 改写成 `sprintf` 时要合成格式串）。 */
+const cstStr = (s) => cstList('str', { kind: 'atom', value: s });
+
+/**
+ * `formatC(x, format=, digits=, width=, flag=)` —— **改写成一格 `sprintf`**。
+ *
+ * R 的 `formatC` 本来就是"照 C 的 `sprintf` 排版"（`?formatC` 原话），所以这一格不另写
+ * 一份排版：把那四个参数拼成一个格式串，再拿合成的 `sprintf(fmt, x)` 递归下来 ——
+ * 旗子 / 宽度 / 精度那一大段只有一份实现（与向量那一档同一条路，见 `sprintfOf`）。
+ *
+ * 缺省值是量出来的（`Rscript`，2026-09-26，`?formatC` 的 "Default: 2 for integer,
+ * 4 for real numbers"）：
+ *
+ *     formatC(3.14159)                 3.142      double 缺省 format="g"、digits=4
+ *     formatC(3.14159, format="f")     3.1416     digits 还是 4
+ *     formatC(42L)                     42         整数缺省 format="d"
+ *     formatC(42, width=8)            "      42"  %8.4g
+ *     formatC(42, width=8, flag="0")  "00000042"
+ *     formatC("ab", width=5)          "   ab"     串缺省 format="s"
+ *
+ * 四处**当场报**（不猜）：那四个参数不是字面量、`format` 不在认得的那几个里、
+ * `big.mark=` / `mode=` / `preserve.width=` 这些还没接、以及 `format="d"` 收一格
+ * **double**（R 那儿是**四舍**到整数：`formatC(2.5, format="d")` 是 `2`、
+ * `formatC(2.7, format="d")` 是 `3`，而这一层的 `%d` 是朝零截 —— 那会静默差一格）。
+ */
+function formatCOf(x, types) {
+  const as = posArgs(x);
+  if (as.length < 1) throw new Error('r->IR: formatC() 一格实参都没给');
+  if (as.length > 1) {
+    throw new Error('r->IR: formatC() 的第二格往后要写成命名实参'
+      + '（`format=` / `digits=` / `width=` / `flag=`）—— 位置实参那一套还没接');
+  }
+  const lit = (k, what) => {
+    const node = namedArg(x, k);
+    if (node === undefined) return null;
+    if (tag(node) === 'str') return String(leaf(kids(node)[0]));
+    if (tag(node) === 'num') return String(leaf(kids(node)[0]));
+    throw new Error(`r->IR: formatC() 的 \`${k}=\` 只认字面量（${what}）`);
+  };
+  const fmtL = lit('format', '串');
+  const digL = lit('digits', '整数');
+  const widL = lit('width', '整数');
+  const flgL = lit('flag', '串');
+  const t = typeOfExpr(as[0], types);
+  if (isVecTy(t) || isStrVec(t)) {
+    /* 向量那一侧照 `sprintf` 那条路走（它自己会摊成元素），所以这儿不拦。 */
+  } else if (t.kind === 'map') throw new Error('r->IR: formatC() 的实参是一张 list');
+  const isStr = t.kind === 'string' || isStrVec(t);
+  const isInt = t.kind === 'int' || isIvecTy(t);
+  const conv = fmtL ?? (isStr ? 's' : (isInt ? 'd' : 'g'));
+  if (!['f', 'e', 'E', 'g', 'G', 'd', 's'].includes(conv)) {
+    throw new Error(`r->IR: formatC() 的 \`format = "${conv}"\` 还没接`
+      + '（认的是 f / e / E / g / G / d / s）');
+  }
+  if (conv === 'd' && !isInt && !isStr) {
+    throw new Error('r->IR: formatC() 的 `format = "d"` 收了一格 double —— R 那儿是'
+      + '**四舍**到整数（`formatC(2.7, format="d")` 是 `3`），而这一层的 `%d` 是朝零截，'
+      + '差一格。要整数就先 `as.integer(…)`（那一格照 R 的截法）');
+  }
+  /* `digits` 只对 f / e / E / g / G 管事（R 也是），缺省 4。 */
+  const dig = ['f', 'e', 'E', 'g', 'G'].includes(conv) ? (digL ?? '4') : null;
+  const flag = flgL ?? '';
+  if (!/^[-+0 ]*$/.test(flag)) {
+    throw new Error(`r->IR: formatC() 的 \`flag = "${flag}"\` 还没接（认的是 - + 0 与空格）`);
+  }
+  const fmt = `%${flag}${widL ?? ''}${dig === null ? '' : `.${dig}`}${conv}`;
+  return sprintfOf(cstCall('sprintf', [cstStr(fmt), as[0]]), types);
+}
 
 /**
  * `sprintf(fmt, …)` —— **格式串在编译期就拆开**，落成一串接起来的片段。
@@ -2492,13 +2568,27 @@ function sprintfOf(x, types) {
   for (let i = 0; i < fmt.length; i++) {
     if (fmt[i] !== '%') { lit += fmt[i]; continue; }
     if (fmt[i + 1] === '%') { lit += '%'; i += 1; continue; }
-    const m = /^%([-+0 ]*)(\d*)(?:\.(\d+))?([disfeEgGxXo])/.exec(fmt.slice(i));
+    const m = /^%([-+0 ]*)(\*|\d*)(?:\.(\d+))?([disfeEgGxXo])/.exec(fmt.slice(i));
     if (m === null) {
       throw new Error(`r->IR: sprintf 的 "${fmt.slice(i, i + 4)}" 这一格转换还没接`
-        + '（认的是 %[-+0 ][宽][.精度]{d,i,s,f,e,E,g,G,x,X,o} 与 %%）');
+        + '（认的是 %[-+0 ][宽|*][.精度]{d,i,s,f,e,E,g,G,x,X,o} 与 %%）');
     }
     if (lit !== '') { pieces.push(S(lit)); lit = ''; }
-    const [all, flags, wid, prec, conv] = m;
+    const [all, flags, wid0, prec, conv] = m;
+    /**
+     * **`%*d` 那一格宽度从实参里取**（R 也收这个写法）。这一层的格式串是**编译期**拆开的
+     * （见这个函数头上那段账），所以那一格只认**字面量** —— 不是字面量就当场报，
+     * 而不是给一个"宽度当成 0"的答案（那是静默答错）。
+     */
+    let wid = wid0;
+    if (wid0 === '*') {
+      const wn = nextArg();
+      if (tag(wn) !== 'num' || !/^-?\d+L?$/.test(String(leaf(kids(wn)[0])))) {
+        throw new Error(`r->IR: sprintf("${fmt}") 里 \`%*\` 那一格的宽度只认整数字面量`
+          + '（格式串是编译期拆开的，见 `sprintfOf`）');
+      }
+      wid = String(leaf(kids(wn)[0])).replace(/L$/, '');
+    }
     const dash = flags.includes('-');
     const zero = flags.includes('0');
     const plus = flags.includes('+');
@@ -4862,6 +4952,7 @@ function callOf(x, types, extra, want, stmtPos) {
         if (up) return call1('supper', ev(0));
         return { kind: 'call', fn: { kind: 'name', name: useFn('r_lower') }, args: [ev(0)] };
       }
+      case 'formatC': return formatCOf(x, types);
       case 'format': {
         /**
          * `format(x, nsmall =, width =)` —— **只接标量**。
