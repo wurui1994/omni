@@ -827,6 +827,16 @@ function $str_upper(s) {
   return out;
 }
 
+// (slower S) —— 与 upper **完全对称**：只动 ASCII 的 A-Z（同一条理由，见上头那段）。
+function $str_lower(s) {
+  var out = "";
+  for (var i = 0; i < s.length; i++) {
+    var c = s.charCodeAt(i);
+    out += (c >= 65 && c <= 90) ? String.fromCharCode(c + 32) : s[i];
+  }
+  return out;
+}
+
 const $trunc = (x) => {
   if (!Number.isFinite(x)) $rt_error("cannot convert non-finite real to int");
   const t = Math.trunc(x);

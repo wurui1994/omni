@@ -345,6 +345,16 @@ function asciiUpper(s) {
   return out;
 }
 
+/** `(slower S)`：与 upper **完全对称**（只动 ASCII 的 A-Z）。三条腿同一份。 */
+function asciiLower(s) {
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    out += (c >= 65 && c <= 90) ? String.fromCharCode(c + 32) : s[i];
+  }
+  return out;
+}
+
 /* ---------------------------------------------------------------- 容器与 dynamic */
 
 function keyStr(k) {
@@ -1154,6 +1164,7 @@ export function applyBuiltin(I, e, a) {
     // `(supper S)` —— **只动 ASCII 的 a-z**。不用 toUpperCase()：那是 Unicode 的
     // （"ß" 会变成两个字符），C 那侧的 toupper 还看 locale，两条路对不上。
     case 'str_upper': return asciiUpper(a[0]);
+    case 'str_lower': return asciiLower(a[0]);
     // `(sfix E N)` —— C 的 `%.Nf`，**就近取偶**（不是 JS 的 toFixed，那在恰好一半上进位）。
     // 位数不必是字面量（第二十八刀），所以范围这一条落在这儿查：五条腿同一句话。
     case 'str_fixed':

@@ -1379,7 +1379,19 @@ function methodOf(recvTok, name, args, C) {
       + '（交值的接了 pop / index / count；改原表的那几个当语句用）');
   }
   if (t.kind === 'string') {
+    /**
+     * `.upper()` / `.lower()` —— 方言的 `supper` / `slower` 是**只动 ASCII** 的
+     * （那是它们四条腿能是同一个函数的前提：`toupper` 看 locale，JS 的 `toUpperCase()`
+     * 是 Unicode 的、长度都会变）。
+     *
+     * **这是一处会答错的地方，不是"还没接"**：python 的这两个是 Unicode 的 ——
+     * 量出来 `"äöü".upper()` 我们交 `äöü`（python 交 `ÄÖÜ`）、
+     * `"Straße".upper()` 我们交 `STRAßE`（python 交 `STRASSE`，长度还变了）。
+     * 真要对得上得借 `Objects/unicodeobject.c` 的大小写映射表（SPEC §一 的借用名单里
+     * 本来就有它）—— 在那之前**只有 ASCII 那一档是对的**。
+     */
     if (name === 'upper' && args.length === 0) return { kind: 'builtin', name: 'supper', args: [recv] };
+    if (name === 'lower' && args.length === 0) return { kind: 'builtin', name: 'slower', args: [recv] };
     if (name === 'find' && args.length === 1) return { kind: 'builtin', name: 'sfind', args: [recv, args[0]] };
     /* 下面这几格**现场发一趟循环**（`builtins.js`）—— 方言的串那一族只有五格算子，
        python 的这几个方法是它自己的规矩（空段算一格、去哪几个空白字符）。 */

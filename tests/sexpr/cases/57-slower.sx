@@ -1,0 +1,29 @@
+;; tests/sexpr/cases/57-slower.sx —— **`(slower S)`：与 `supper` 对称的那一格**
+;;
+;; 方言原先只有 `(supper S)`（`%X` 那条分工要它）。`slower` 是它的镜像，只差一对常量：
+;; **只动 ASCII 的 A-Z**。定成 ASCII-only 的理由与 upper 一模一样 ——
+;; `tolower` 看 locale、JS 的 `toLowerCase()` 是 Unicode 的（长度都会变），
+;; ASCII-only 才让四条腿是同一个函数（`omni_str_upper` / `$str_upper` / `asciiUpper`）。
+;;
+;; 谁要它：python 的 `.lower()` —— 大小写不敏感的比较绕不开它。
+;;
+;; 四条判据：换得对、非字母一个不动、空串不炸、与 upper 往返。
+
+(module
+  (main
+    (print (slower (str "Hello, World!")))
+    (print (supper (str "Hello, World!")))
+    ;; 非字母（数字 / 标点 / 空格）一个不动
+    (print (slower (str "A1-B2_C3 d4")))
+    (print (supper (str "a1-b2_c3 D4")))
+    ;; 空串
+    (print (slower (str "")))
+    (print (slen (slower (str ""))))
+    ;; 往返：全大写再全小写，与直接小写一样
+    (print (bin "==" (slower (supper (str "MiXeD"))) (slower (str "MiXeD"))))
+    ;; 与 `(sbase …)` 的分工：sbase 只给小写，要大写裹 supper —— 反过来裹 slower 是恒等
+    (print (slower (sbase (int 255) (int 16))))
+    (print (supper (sbase (int 255) (int 16))))
+    (print (slower (supper (sbase (int 255) (int 16)))))
+  )
+)

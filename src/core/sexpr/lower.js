@@ -2290,6 +2290,14 @@ class CoreLowerer {
       if (s.type.k !== 'string') return this.err(n, `(supper S) 的 S 要是 string，这里是 ${coreTypeText(s.type)}`);
       return { kind: 'Builtin', name: 'str_upper', args: [s], recvType: STRING, type: STRING };
     }
+    /* `(slower S)` —— 与 `supper` **完全对称**（只动 ASCII 的 A-Z）。
+       谁要它：python 的 `.lower()`；大小写不敏感的比较绕不开它。 */
+    if (h === 'slower') {
+      const s = this.expr(n.items[1]);
+      if (s === null) return null;
+      if (s.type.k !== 'string') return this.err(n, `(slower S) 的 S 要是 string，这里是 ${coreTypeText(s.type)}`);
+      return { kind: 'Builtin', name: 'str_lower', args: [s], recvType: STRING, type: STRING };
+    }
     // `(sfix E N)` —— real -> 小数点后**正好 N 位**（ADR-0016 第八刀，C 的 `%.Nf`）。
     //
     // 与 `(tostr E N)` 是两件事：那一条是 `%.Ng`（N 位**有效数字**、去尾随零），这一条是

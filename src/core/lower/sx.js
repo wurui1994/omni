@@ -84,6 +84,8 @@ export const SX_ARITY = {
   brk: [0, 1], cont: [0, 1], print: 1, write: 1,
   /* 字符串那一族 */
   tostr: 1, slen: 1, sfind: 2, ssub: 3, srep: 2, supper: 1,
+  /* `(slower S)` —— 与 `supper` 对称（只动 ASCII 的 A-Z）。python 的 `.lower()` 要它。 */
+  slower: 1,
   /* 环境变量（`(getenv E)`，方言那侧是 `get_env`）：R 的 `Sys.getenv("HOME")` 落这一格。
      没设时回空串 —— 与 R 同解，所以不必再包一层。 */
   getenv: 1,
@@ -228,6 +230,7 @@ export const sfind = (v, x) => op('sfind', v, x);
 export const ssub = (v, a, b) => op('ssub', v, a, b);
 export const srep = (v, n) => op('srep', v, n);
 export const supper = (v) => op('supper', v);
+export const slower = (v) => op('slower', v);
 export const sfix = (v, n) => op('sfix', v, n);
 export const ssci = (v, n) => op('ssci', v, n);
 export const sgen = (v, n, keep = false) => op(keep ? 'sgenk' : 'sgen', v, n);

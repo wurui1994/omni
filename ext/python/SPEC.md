@@ -173,9 +173,8 @@ R 那一门（ADR-0045/0046/0047，`r-lang` 分支）已经把这条路走通过
     赋值那一句再按认出来的类型造一格空的。语句是按次序扫的，够用。
   判据：`ext/python/examples/builtins.py` 三条腿与 python3 逐字节相同（29 行）。
   明说的不足：`.split()` 不带分隔符那一档（按连续空白切、首尾空段不算 —— 与带分隔符
-  是两条规矩）、`.lower()`（方言只有 `supper`，要一格对称的 `slower`）、
-  `round(x, n)`、`int("42")` / `float("2.5")`（串转数要走借来的 `pystrtod`）、
-  `tuple()`（没有元组这一档）。
+  是两条规矩）、`round(x, n)`、`int("42")` / `float("2.5")`（串转数要走借来的
+  `pystrtod`）、`tuple()`（没有元组这一档）。
 
 * **`for i, v in enumerate(xs)` 与 `for a, b in zip(a, b)`**。python 里这两个交的是
   **一串元组**，而这一层没有元组这一档 —— 可这两种写法落下去都只是**一格下标循环**
@@ -207,6 +206,22 @@ R 那一门（ADR-0045/0046/0047，`r-lang` 分支）已经把这条路走通过
   判据：`ext/python/examples/listmut.py` 三条腿与 python3 逐字节相同。
   几条口径是拿 python3 比出来的：`insert` 的下标**夹到 `[0, len]`**（超了就是追加）、
   `index` 找不到是 ValueError（这儿 `(fail …)`）、`zfill` 够宽了原样不截。
+
+* **`(slower S)`** —— 方言加一格，与 `(supper S)` 完全对称（只动 ASCII 的 A-Z，
+  两个函数只差那一对常量）。落在七处：`sexpr/lower.js`、`lower/sx.js` 的 `SX_ARITY` 与
+  构造器、`lower/ty-of.js`、`backend-c` / `backend-js`（含 prelude 的 `$str_lower`）/
+  `interp`（`asciiLower`）/ `backend-llvm` 的符号表、`runtime/omni_str.c` 的
+  `omni_str_lower`。判据：`tests/sexpr/cases/57-slower.sx` 三条腿逐字节相同。
+  python 的 `.lower()` 接到它上面。
+
+  **顺带量出来一处会答错的地方（不是"还没接"）**：`.upper()` / `.lower()` 在
+  **非 ASCII 上与 python 不一样** —— `"äöü".upper()` 我们交 `äöü`（python 交 `ÄÖÜ`）、
+  `"Straße".upper()` 我们交 `STRAßE`（python 交 `STRASSE`，长度还变了）。
+  `.upper()` 这一处是**早就在的**，这一刀只是把它照出来。
+  根因是方言那两格定成 ASCII-only —— 而那正是它们四条腿能是同一个函数的前提
+  （`tolower` 看 locale、JS 的 `toLowerCase()` 是 Unicode 的）。
+  要对得上得借 `Objects/unicodeobject.c` 的大小写映射表（§一 的借用名单里本来就有它）。
+  在那之前**只有 ASCII 那一档是对的**，`listmut.py` 里只钉 ASCII。
 
 ### 下一刀，按顺序
 

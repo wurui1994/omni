@@ -1043,6 +1043,7 @@ class JsEmitter {
       case 'int_trunc': return `$int_trunc(${a[0]}, ${a[1]})`;
       case 'int_sext': return `$int_sext(${a[0]}, ${a[1]})`;
       case 'str_upper': return `$str_upper(${a[0]})`;
+      case 'str_lower': return `$str_lower(${a[0]})`;
       // `(sfix E N)`（ADR-0016 第八刀）—— C 的 %.Nf，就近取偶
       case 'str_fixed': return `$str_fixed(${a[0]}, ${a[1]})`;
       // `(ssci E N)`（第三十刀）—— C 的 %.Ne，同一条舍入

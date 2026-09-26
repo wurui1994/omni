@@ -2898,6 +2898,7 @@ class CEmitter {
       case 'int_trunc': return `omni_int_trunc(${a[0]}, ${a[1]})`;
       case 'int_sext': return `omni_int_sext(${a[0]}, ${a[1]})`;
       case 'str_upper': return `omni_str_upper(${a[0]})`;
+      case 'str_lower': return `omni_str_lower(${a[0]})`;
       // `(sfix E N)`（ADR-0016 第八刀）—— C 的 %.Nf 本身就是那个出处
       case 'str_fixed': return `omni_str_fixed(${a[0]}, ${a[1]})`;
       // `(ssci E N)`（第三十刀）—— C 的 %.Ne，同上：这一条就是出处

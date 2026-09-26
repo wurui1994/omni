@@ -615,6 +615,10 @@ int64_t omni_int_sext(int64_t v, int64_t n);
 /* 只把 ASCII 的 a-z 换成大写（%X 要它）。不是 toupper（看 locale）、也不是 JS 的
    toUpperCase（Unicode 的，长度会变）—— ASCII-only 才让四条腿是同一个函数。 */
 omni_str omni_str_upper(omni_str s);
+/* 只把 ASCII 的 A-Z 换成小写（`(slower S)`）。与 upper 完全对称 —— 同一条理由：
+   不是 tolower（看 locale）、也不是 JS 的 toLowerCase（Unicode 的，长度会变）。
+   谁要它：python 的 `.lower()`（大小写不敏感的比较）。 */
+omni_str omni_str_lower(omni_str s);
 
 /* 指针（ADR-0016）。这两条原生腿用**真指针** —— 与 JS/解释器那三条的 arena 模拟是
    两套实现、一套语义。选真指针的理由是 FFI：arena 里的偏移递不出去给外面的 C 库。

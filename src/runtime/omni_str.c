@@ -138,6 +138,19 @@ omni_str omni_str_upper(omni_str s) {
   return omni_str_new(buf, s.len);
 }
 
+/* `(slower S)` —— 与 upper **完全对称**：只把 ASCII 的 A-Z 换成小写。
+   同一条理由（locale / Unicode 都不行），所以两个函数只差那一对常量。
+   谁要它：python 的 `.lower()`（大小写不敏感的比较靠它）。 */
+omni_str omni_str_lower(omni_str s) {
+  if (s.len == 0) return omni_str_new("", 0);
+  char *buf = omni_alloc_bytes(s.len);
+  for (int64_t i = 0; i < s.len; i++) {
+    char c = s.p[i];
+    buf[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+  }
+  return omni_str_new(buf, s.len);
+}
+
 /* JS 的 String.fromCodePoint 对代理区返回孤立代理，写出去就是 U+FFFD，这里保持一致 */
 omni_str omni_chr(int64_t cp) {
   if (cp < 0 || cp > 0x10ffff) {

@@ -55,3 +55,12 @@ print("hi".rjust(5) + "|")
 print("hi".ljust(5, ".") + "|")
 print("7".zfill(3))
 print("abcdef".zfill(3))
+
+# 大小写：**只有 ASCII 那一档是对的**（方言的 supper / slower 只动 ASCII —— 那是四条腿
+# 能是同一个函数的前提）。python 的这两个是 Unicode 的，所以非 ASCII 会答错：
+# `"äöü".upper()` 我们交 `äöü`、`"Straße".upper()` 我们交 `STRAßE`。
+# 真要对得上得借 `Objects/unicodeobject.c` 的大小写映射表 —— 所以这儿只钉 ASCII。
+print("Hello, World! 123".lower())
+print("Hello, World! 123".upper())
+print("MiXeD".lower() == "mixed")
+print("".lower(), "".upper(), len("".lower()))

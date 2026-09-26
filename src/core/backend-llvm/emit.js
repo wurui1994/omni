@@ -227,6 +227,7 @@ const RT_OPS = new Map([
   ['int_trunc.int', { sym: 'omni_int_trunc', ret: 'i64', params: ['i64', 'i64'] }],
   ['int_sext.int', { sym: 'omni_int_sext', ret: 'i64', params: ['i64', 'i64'] }],
   ['str_upper.string', { sym: 'omni_str_upper', ret: '[2 x i64]', params: ['[2 x i64]'] }],
+  ['str_lower.string', { sym: 'omni_str_lower', ret: '[2 x i64]', params: ['[2 x i64]'] }],
   // 第八刀：C 的 %.Nf（就近取偶）。第三十刀：C 的 %.Ne。
   ['str_fixed.real', { sym: 'omni_str_fixed', ret: '[2 x i64]', params: ['double', 'i64'] }],
   ['str_sci.real', { sym: 'omni_str_sci', ret: '[2 x i64]', params: ['double', 'i64'] }],
