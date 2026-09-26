@@ -727,7 +727,9 @@ const NAME_DROP_OK = new Set([
   /* `duplicated` 量出来 R 自己也丢名字（2026-09-26）—— 从前这张表外，于是带名字的向量上报。 */
   'duplicated',
   'as.character', 'as.numeric', 'as.double', 'as.integer', 'as.logical',
-  'is.numeric', 'is.character', 'is.logical', 'is.double', 'is.integer', 'stop', 'stopifnot',
+  'vector',
+  'is.numeric', 'is.character', 'is.logical', 'is.double', 'is.integer',
+  'typeof', 'class', 'stop', 'stopifnot',
 ]);
 /**
  * **名字跟得住的那几格** —— R 把名字带过去，这一档也带（见 `namesExprOf` 里同一批名字）。
@@ -1072,6 +1074,8 @@ const NAMED_OK = new Map([
   ['seq', new Set(['by', 'length.out'])],
   ['sort', new Set(['decreasing', 'method', 'na.last'])],
   ['order', new Set(['method', 'decreasing'])],
+  /* `vector(mode = , length = )`（`args(vector)` 印的就是这两个名字）。 */
+  ['vector', new Set(['mode', 'length'])],
   ['strtoi', new Set(['base'])],
   /* `Reduce(f, x, accumulate = TRUE)` —— 出的是每一步的中间值（见 `reduceAcc`）。
      `right =`（从右往左折）不在里头：那一档还没接，命名实参那道门会报。 */
@@ -1184,6 +1188,8 @@ function collectNonAscii(node) {
 const BUILTINS = new Set([
   'cat', 'paste', 'paste0', 'c', 'list', 'length', 'nchar', 'return', 'is.null',
   'as.integer', 'as.numeric', 'as.double', 'as.character', 'as.logical', 'abs', 'seq_len', 'is.na', 'is.nan',
+  /* `vector(mode, n)` 就地改写成 numeric/character/logical 那几格（见 `callOf`）。 */
+  'vector',
   'sum', 'mean', 'max', 'min', 'rev', 'seq_along', 'which', 'any', 'all',
   'print', 'invisible', 'xor', 'isTRUE', 'isFALSE', 'ifelse', 'identical', 'strtoi',
   /* base 里"向量进向量出"那一族 + 两格统计量。`seq` 与 `rep` 是造向量的。 */
@@ -1213,7 +1219,7 @@ const BUILTINS = new Set([
   /* 函数当实参那一族 —— **只接就地写的匿名函数**（见 `applyOf`）。 */
   'sapply', 'vapply', 'lapply', 'Reduce', 'Filter', 'mapply',
   /* "这是什么东西"那三问 —— 类型在这一层是**推出来的**，所以答案是编译期常量。 */
-  'is.character', 'is.numeric', 'is.logical', 'is.double', 'is.integer',
+  'is.character', 'is.numeric', 'is.logical', 'is.double', 'is.integer', 'typeof', 'class',
   /* 停下来那一档（落方言的 `(fail …)`，只能摆在语句位上）。 */
   'stop', 'stopifnot',
   /* 分支那一格（落成一条 if 链，见 `switchOf`）。 */
@@ -1983,6 +1989,8 @@ function applyTy(fn, x, types) {
     }
     case 'is.character': case 'is.numeric': case 'is.logical':
     case 'is.double': case 'is.integer': return BOOL;
+    /* `typeof` / `class` 回一格串（编译期就定了，见 `callOf`）。 */
+    case 'typeof': case 'class': return STR;
     case 'toupper': return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RSTRV : STR;
     case 'startsWith': case 'endsWith': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : STR;
@@ -2016,6 +2024,13 @@ function applyTy(fn, x, types) {
       return args.length > 2 && isStrVec(typeOfExpr(args[2], types)) ? RSTRV : STR;
     /* `character(n)` —— 一条 n 格空串的字符向量。 */
     case 'character': return RSTRV;
+    /* `vector(mode, n)` 就地改写成 `numeric(n)` / `character(n)` / …（见 `callOf`），
+       所以类型也照那个 mode 答；mode 不是串字面量时由 `callOf` 当场报。 */
+    case 'vector': {
+      const md = namedArg(x, 'mode') ?? args[0];
+      const lit = md !== undefined && tag(md) === 'str' ? String(leaf(kids(md)[0])) : 'logical';
+      return lit === 'character' ? RSTRV : (lit === 'logical' ? RLGL : (lit === 'integer' ? RIVEC : RVEC));
+    }
     case 'as.numeric': case 'as.double': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : REAL;
       /* 字符向量进 → 一条数值向量出（`r_str2num_v`，见 `callOf` 那段账）。 */
@@ -5114,6 +5129,29 @@ function callOf(x, types, extra, want, stmtPos) {
         if (isVecTy(t)) return vecMap1(ev(0), (e) => call1('rmath', sym, e));
         return call1('rmath', sym, asReal(ev(0), t));
       }
+      case 'vector': {
+        /**
+         * `vector(mode, length)` —— R 的文档就写着它与 `numeric(n)` / `character(n)` /
+         * `logical(n)` 是同一件事，所以**就地改写**成那几格里对应的一个（一条路一份实现）。
+         * `mode` 只认**串字面量**（运行期才知道的 mode 要运行期的类型，这一层没有），
+         * `"list"` / `"complex"` / `"raw"` 那几档也当场报。缺省是 `mode = "logical"`、
+         * `length = 0`（`args(vector)` 印的就是）。
+         */
+        const modeNode = namedArg(x, 'mode') ?? (n >= 1 ? all[0] : undefined);
+        const lenNode = namedArg(x, 'length') ?? (n >= 2 ? all[1] : undefined);
+        const mode = modeNode === undefined ? 'logical'
+          : (tag(modeNode) === 'str' ? String(leaf(kids(modeNode)[0])) : null);
+        if (mode === null) {
+          throw new Error('r->IR: vector() 的 mode 只认串字面量（运行期才知道的 mode 要'
+            + '运行期的类型标签，这一层没有）');
+        }
+        if (!['numeric', 'double', 'integer', 'logical', 'character'].includes(mode)) {
+          throw new Error(`r->IR: vector("${mode}", …) 这一档还没接 —— 认的是 numeric /`
+            + ' double / integer / logical / character 五种（`"list"` 要 R 的异质表，'
+            + '见 ext/r/SPEC.md 第四节第 4 条）');
+        }
+        return callOf(cstCall(mode, lenNode === undefined ? [] : [lenNode]), types, extra, want, stmtPos);
+      }
       case 'numeric': case 'double': case 'integer': case 'logical': case 'character': {
         /* `numeric(n)` —— 一条 n 格的零向量（`numeric()` 是零长）。R 那边也认
            `numeric(length = n)`，所以那个名字也收。逻辑那一档零就是 FALSE，同一份内存。
@@ -6322,6 +6360,34 @@ function callOf(x, types, extra, want, stmtPos) {
       /* 找与换那一族（见 `findOf`）—— pattern 只认串字面量。 */
       case 'grepl': case 'grep': case 'sub': case 'gsub':
         return findOf(fn, x, types);
+      case 'typeof': case 'class': {
+        /**
+         * `typeof(x)` / `class(x)` —— 也是**编译期常量**（与下头那几个 `is.*` 同一条：
+         * 这一层没有运行期的类型标签）。两张名字表不一样，R 的口径量出来是：
+         *
+         *   x        typeof      class
+         *   1        double      numeric
+         *   1L       integer     integer
+         *   "a"      character   character
+         *   TRUE     logical     logical
+         *   c(1,2)   double      numeric     （属性不改这两问）
+         *   list(…)  list        list
+         *
+         * `class` 上**没接"自己设的 class 属性"**（`class(x) <- "foo"`）—— 那一档要运行期的
+         * 属性表；`typeof` 上没接函数值与语言对象那几种（这一层都没有）。
+         */
+        if (n !== 1) throw new Error(`r->IR: ${fn}() 要一格实参（给了 ${n}）`);
+        const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        const lgl = t.kind === 'bool' || isLgl1(t) || isLglTy(t);
+        let nameStr;
+        if (t.kind === 'string' || isStrVec(t)) nameStr = 'character';
+        else if (lgl) nameStr = 'logical';
+        else if (t.kind === 'map') nameStr = 'list';
+        else if (t.kind === 'int' || (isVecTy(t) && isIvecTy(t))) nameStr = 'integer';
+        else if (t.kind === 'real' || isVecTy(t)) nameStr = fn === 'typeof' ? 'double' : 'numeric';
+        else throw new Error(`r->IR: ${fn}() 这一格的类型这一层叫不出名字（推出来是 ${t.kind}）`);
+        return { kind: 'string', value: nameStr };
+      }
       case 'is.character': case 'is.numeric': case 'is.logical':
       case 'is.double': case 'is.integer': {
         /* 类型在这一层是**推出来的**（方言那侧没有运行期的类型标签），所以这几问的答案是

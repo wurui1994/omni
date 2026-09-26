@@ -179,3 +179,15 @@ wk <- 2
 wv <- c(1, 2, 3)
 wv[-wk] <- 7
 print(wv)
+
+## typeof / class / vector(mode, length)：前两格是编译期常量，第三格就地改写
+cat(typeof(1), typeof(1L), typeof("a"), typeof(TRUE), "\n")
+cat(class(1), class(1L), class("a"), class(TRUE), "\n")
+cat(typeof(c(1, 2)), class(c(1, 2)), typeof(c(1L, 2L)), class(1:3), "\n")
+cat(typeof(list(a = 1)), class(list(a = 1)), "\n")
+cat(typeof(sqrt(2)), typeof(nchar("ab")), typeof(length(c(1, 2))), "\n")
+vz <- vector("numeric", 3); cat(vz, length(vz), "\n")
+vs <- vector("character", 2); cat(nchar(vs), length(vs), "\n")
+cat(vector("logical", 2), length(vector()), vector("integer", 2), "\n")
+cat(vector(length = 2), "\n")
+vw <- vector("numeric", 2); vw[1] <- 5; cat(vw, "\n")
