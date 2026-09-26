@@ -730,7 +730,7 @@ const NAME_DROP_OK = new Set([
   'as.character', 'as.numeric', 'as.double', 'as.integer', 'as.logical',
   'vector',
   'is.numeric', 'is.character', 'is.logical', 'is.double', 'is.integer',
-  'typeof', 'class', 'stop', 'stopifnot',
+  'typeof', 'class', 'inherits', 'stop', 'stopifnot',
 ]);
 /**
  * **名字跟得住的那几格** —— R 把名字带过去，这一档也带（见 `namesExprOf` 里同一批名字）。
@@ -1221,6 +1221,7 @@ const BUILTINS = new Set([
   'sapply', 'vapply', 'lapply', 'Reduce', 'Filter', 'mapply',
   /* "这是什么东西"那三问 —— 类型在这一层是**推出来的**，所以答案是编译期常量。 */
   'is.character', 'is.numeric', 'is.logical', 'is.double', 'is.integer', 'typeof', 'class',
+  'inherits',
   /* 停下来那一档（落方言的 `(fail …)`，只能摆在语句位上）。 */
   'stop', 'stopifnot',
   /* 分支那一格（落成一条 if 链，见 `switchOf`）。 */
@@ -1992,6 +1993,8 @@ function applyTy(fn, x, types) {
     case 'is.double': case 'is.integer': return BOOL;
     /* `typeof` / `class` 回一格串（编译期就定了，见 `callOf`）。 */
     case 'typeof': case 'class': return STR;
+    /* `inherits(x, what)` 就是 class 那张表的一次比对（见 `callOf`）。 */
+    case 'inherits': return BOOL;
     case 'toupper': return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RSTRV : STR;
     case 'startsWith': case 'endsWith': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : STR;
@@ -6417,6 +6420,39 @@ function callOf(x, types, extra, want, stmtPos) {
       /* 找与换那一族（见 `findOf`）—— pattern 只认串字面量。 */
       case 'grepl': case 'grep': case 'sub': case 'gsub':
         return findOf(fn, x, types);
+      case 'inherits': {
+        /**
+         * `inherits(x, what)` —— R 的口径是"**`class(x)` 在 `what` 里吗**"，而没有
+         * class 属性的东西用的是**隐式 class**（量出来：`inherits(1, "numeric")` 真、
+         * `inherits(1, "double")` 假、`inherits(1:3, "numeric")` 假而 `"integer"` 真、
+         * `inherits(list(), "list")` 真）。所以这一格就是上头 `class` 那张表的一次比对，
+         * 答案还是编译期常量。
+         *
+         * `what` 只认串字面量或 `c("a", "b")` 那种（多个名字里**有一个对上就真**）；
+         * `which = TRUE`（回位置）与"自己设的 class 属性"都没接。
+         */
+        if (n !== 2) throw new Error(`r->IR: inherits() 要两格实参（给了 ${n}）`);
+        if (namedArg(x, 'which') !== undefined) {
+          throw new Error('r->IR: inherits() 的 `which=` 还没接（R 那儿回的是位置向量）');
+        }
+        const cls = exprOf(cstCall('class', [all[0]]), types);
+        if (cls.kind !== 'string') throw new Error('r->IR: inherits() 的第一格这一层叫不出类名');
+        const wNode = all[1];
+        const names = [];
+        if (wNode !== null && tag(wNode) === 'str') names.push(String(leaf(kids(wNode)[0])));
+        else if (wNode !== null && isList(wNode) && tag(wNode) === 'call'
+            && tag(kids(wNode)[0]) === 'sym' && nameOf(kids(wNode)[0]) === 'c') {
+          for (const a of argsOf(wNode)) {
+            if (a.value === null || tag(a.value) !== 'str') { names.length = 0; break; }
+            names.push(String(leaf(kids(a.value)[0])));
+          }
+        }
+        if (names.length === 0) {
+          throw new Error('r->IR: inherits() 的 what 只认串字面量或 `c("a", "b")` 那种'
+            + '（运行期才知道的类名要运行期的类型标签，这一层没有）');
+        }
+        return { kind: 'bool', value: names.includes(cls.value) };
+      }
       case 'typeof': case 'class': {
         /**
          * `typeof(x)` / `class(x)` —— 也是**编译期常量**（与下头那几个 `is.*` 同一条：

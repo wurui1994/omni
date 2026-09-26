@@ -1284,6 +1284,13 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
     当场报，缺省是 `mode = "logical"` / `length = 0`（`args(vector)` 印的就是）。
     判据 `ext/r/examples/vec.R` 末尾那十行。
 
+    **`inherits(x, what)` 同一天加的**：R 的口径是"`class(x)` 在 `what` 里吗"，没有 class
+    属性的东西用的是**隐式 class** —— 所以它就是上头那张表的一次比对，答案还是编译期常量。
+    量出来的几格：`inherits(1, "numeric")` 真、`inherits(1, "double")` **假**、
+    `inherits(1:3, "numeric")` 假而 `"integer"` 真、`inherits(list(), "list")` 真。
+    `what` 只认串字面量或 `c("a", "b")`（**有一个对上就真**）；`which = TRUE` 与
+    "自己设的 class 属性"都没接。
+
     **`as.logical` 接了**（2026-09-26，判据 `ext/r/examples/na.R` 末尾那一段）：它回的是
     **三态**（所以判据摆在 `na.R` 而不是 `str.R`）。数那一侧 0 假、非零真（`Inf` 也真）、
     缺失 `NA`（走现成的 `r_lgl`，`&&` / `||` 那一族本来就用它）；**串那一侧只认八种写法**
