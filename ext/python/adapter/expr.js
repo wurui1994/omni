@@ -204,17 +204,143 @@ function fstringOf(x, C) {
   return out;
 }
 
+/**
+ * f-string 的**格式说明**（`:>10.3f` / `:05d` / `:^6` / `:x` / `:+.2f`）。
+ *
+ * python 那套微语言的形状是 `[[填充]对齐][符号][#][0][宽度][,][.精度][类型]`。
+ * 这儿收的是其中一块：填充 + 对齐（`< > ^`）、符号（`+` / `-` / 空格）、`0`、
+ * 宽度、`.精度`、类型（`d f s x X o b`）。收不下的**当场报** —— 猜一个出来就是印错。
+ *
+ * 明说没收的：`#`（`0x` 前缀）、`,`（千分位）、`=`（符号后填充）、`e` / `g` / `%` / `n`、
+ * 宽度或精度写成 `{}`（从实参来）。
+ */
+const SPEC_RE = /^(?:(.)?([<>^]))?([+ -])?(0)?(\d+)?(?:\.(\d+))?([a-zA-Z%])?$/;
+
+function fmtSpec(e0, spec, C) {
+  const m = SPEC_RE.exec(spec);
+  if (m === null) throw new Error(`python->IR: f-string 的格式说明 \`:${spec}\` 读不下来`);
+  const [, fill0, align, sign, zero, widthS, precS, type] = m;
+  if (type !== undefined && !'dfsxXob'.includes(type)) {
+    throw new Error(`python->IR: f-string 的格式类型 \`${type}\` 还没接`
+      + '（接了的是 d / f / s / x / X / o / b）');
+  }
+  const width = widthS === undefined ? 0 : Number(widthS);
+  const prec = precS === undefined ? null : Number(precS);
+  const t = ty(e0, C);
+  const numeric = ['int', 'real'].includes(t.kind);
+
+  /* 符号那一格要读两遍（判正负 + 印出来），所以先钉住。 */
+  const pre = [];
+  let e = e0;
+  if (!isPure(e0) && (sign === '+' || sign === ' ')) {
+    const n = C.fresh('fs_v');
+    C.bind(n, t);
+    pre.push({ kind: 'let', name: n, type: t, init: e0 });
+    e = { kind: 'name', name: n };
+  }
+
+  /* 一、正文。 */
+  let s;
+  if (type === 'f') {
+    s = { kind: 'builtin', name: 'sfix', args: [toReal(e, C), { kind: 'int', value: prec ?? 6 }] };
+  } else if (type === 'x' || type === 'X' || type === 'o' || type === 'b') {
+    if (t.kind !== 'int') throw new Error(`python->IR: \`:${type}\` 要整数，这里是 ${t.kind}`);
+    const base = { x: 16, X: 16, o: 8, b: 2 }[type];
+    s = { kind: 'builtin', name: 'sbase', args: [e, { kind: 'int', value: base }] };
+    if (type === 'X') s = { kind: 'builtin', name: 'supper', args: [s] };
+  } else if (type === 'd') {
+    if (t.kind !== 'int') throw new Error(`python->IR: \`:d\` 要整数，这里是 ${t.kind}`);
+    s = { kind: 'builtin', name: 'tostr', args: [e] };
+  } else if (prec !== null && t.kind === 'real') {
+    s = { kind: 'builtin', name: 'sfix', args: [e, { kind: 'int', value: prec }] };
+  } else {
+    s = pyStr(e, C);
+    /* `:.N` 作用在串上是**截到 N 个字符**（python 的规矩）。 */
+    if (prec !== null) {
+      const len = { kind: 'builtin', name: 'slen', args: [s] };
+      s = {
+        kind: 'builtin', name: 'ssub',
+        args: [s, { kind: 'int', value: 0 }, {
+          kind: 'ternary', type: INT,
+          cond: { kind: 'binop', op: '<', left: len, right: { kind: 'int', value: prec } },
+          then: len,
+          else_: { kind: 'int', value: prec },
+        }],
+      };
+    }
+  }
+
+  /* 二、符号（只对数；`-` 就是默认的那一档，不用做）。 */
+  if ((sign === '+' || sign === ' ') && numeric) {
+    const lead = { kind: 'string', value: sign === '+' ? '+' : ' ' };
+    s = {
+      kind: 'ternary', type: STR,
+      cond: {
+        kind: 'binop', op: '<', left: e,
+        right: t.kind === 'real' ? { kind: 'real', value: 0 } : { kind: 'int', value: 0 },
+      },
+      then: s,
+      else_: { kind: 'binop', op: '+', left: lead, right: s },
+    };
+  }
+
+  /* 三、补到宽度。**没写对齐时数右对齐、别的左对齐**（python 的规矩）。 */
+  if (width > 0) {
+    const fill = fill0 ?? (zero !== undefined ? '0' : ' ');
+    const how = align ?? (numeric ? '>' : '<');
+    if (how === '^') s = centerTo(s, width, fill, C);
+    else if (fill === '0' && how === '>' && numeric) s = padTo(s, width, { left: false, zero: true }, C);
+    else s = padFill(s, width, fill, how === '<', C);
+  }
+  return pre.length === 0 ? s : { kind: 'block-expr', stmts: pre, value: s };
+}
+
+/** 补到宽度，填充字符自己给（`padTo` 只会补空格与零）。 */
+function padFill(s, width, ch, left, C) {
+  const n = {
+    kind: 'binop', op: '-', left: { kind: 'int', value: width },
+    right: { kind: 'builtin', name: 'slen', args: [s] },
+  };
+  const pad = { kind: 'builtin', name: 'srep', args: [{ kind: 'string', value: ch }, n] };
+  return left
+    ? { kind: 'binop', op: '+', left: s, right: pad }
+    : { kind: 'binop', op: '+', left: pad, right: s };
+}
+
+/** `:^N` —— 居中。**余数放右边**（python 就是这么摆的）。 */
+function centerTo(s0, width, ch, C) {
+  const pre = [];
+  let s = s0;
+  if (!isPure(s0)) {
+    const n = C.fresh('fc_s');
+    C.bind(n, STR);
+    pre.push({ kind: 'let', name: n, type: STR, init: s0 });
+    s = { kind: 'name', name: n };
+  }
+  const gap = {
+    kind: 'binop', op: '-', left: { kind: 'int', value: width },
+    right: { kind: 'builtin', name: 'slen', args: [s] },
+  };
+  const rep = (cnt) => ({ kind: 'builtin', name: 'srep', args: [{ kind: 'string', value: ch }, cnt] });
+  /* 两边都是 int 时方言的 `/` 就是整除，而这儿的差是非负的 —— 所以不必走 `//`
+     那一套（标准 IR 里压根没有那个算符名）。 */
+  const half = { kind: 'binop', op: '/', left: gap, right: { kind: 'int', value: 2 } };
+  const value = {
+    kind: 'binop', op: '+',
+    left: { kind: 'binop', op: '+', left: rep(half), right: s },
+    right: rep({ kind: 'binop', op: '-', left: gap, right: half }),
+  };
+  return pre.length === 0 ? value : { kind: 'block-expr', stmts: pre, value };
+}
+
 /** 一格替换字段算出来的值 → 串（按 `conv` 与 `spec`）。 */
 function fmtField(e, p, C) {
   if (p.spec !== null) {
-    const m = /^\.(\d+)f$/.exec(p.spec);
-    if (m === null) {
-      throw new Error(`python->IR: f-string 的格式说明 \`:${p.spec}\` 还没接`
-        + '（接了的只有 `:.Nf`）—— 那是一整套微语言（对齐 / 填充 / 千分位 / 进制），'
-        + '猜一个出来就是印错数');
-    }
     if (p.conv !== null) throw new Error('python->IR: f-string 里转换与格式说明一起用还没接');
-    return { kind: 'builtin', name: 'sfix', args: [toReal(e, C), { kind: 'int', value: Number(m[1]) }] };
+    if (/[{}]/.test(p.spec)) {
+      throw new Error('python->IR: f-string 的格式说明里带 `{}`（宽度/精度从实参来）还没接');
+    }
+    return fmtSpec(e, p.spec, C);
   }
   if (p.conv === 'a') {
     throw new Error('python->IR: f-string 的 `!a`（ascii()）还没接 —— 它要按码位转义非 ASCII');
