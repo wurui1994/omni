@@ -59,6 +59,23 @@ R 那一门（ADR-0045/0046/0047，`r-lang` 分支）已经把这条路走通过
 - **`tests/python/run.js`** —— 外部尺子：同一份 .py，我们跑一遍、本机 `python3` 跑一遍，
   **stdout 逐字节相同**才算过。两条腿都量（解释器 + `--mode js`）。
   现在 4 份例子 × 2 条腿 = **8 绿 0 红**（尺子 Python 3.14.7）。
+- **借 CPython 的 C 那一半开工了**（`ext/python/build.js` + `rt/`）。第一批借的是
+  `Python/dtoa.c`（David Gay 的正确舍入转换，2841 行）与 `Python/pystrtod.c`
+  （CPython 的 repr 排版规则，1286 行）—— 两份**一个字都不改**。我们只加三格：
+  * `rt/shim/Python.h` —— 垫一层地板。那两份 `.c` 真正用到的 Python API 是**量出来的**
+    （`grep -o '\b_\?Py[A-Za-z_]*\b'`）：`PyMem_Malloc` / `PyMem_Free`、
+    `PyInterpreterState`（只为了 `->dtoa`）、`PyStatus`、`PyErr_*`、几个字符宏。
+    凡是 CPython 自己有的都走它（`Py_DTSF_*` 用它的公开头、`_PY_SHORT_FLOAT_REPR` 用它的
+    `pycore_pymath.h`）。
+  * `rt/gen-pyconf.js` —— 探本机。名单是**算出来的**：`pyconfig.h.in` 能定义 727 个宏，
+    这几份源码真读到 6 个（两格 double 字节序、`WORDS_BIGENDIAN`、`X87_DOUBLE_ROUNDING`、
+    两格 gcc 内联汇编）。探法照 CPython 的 `configure.ac`（注明行号），
+    **算出来的名字里有一个不认得怎么探的就当场报**。
+  * `rt/gen-pyshim.js` —— 把 `struct Bigint` / `struct _dtoa_state` 从 CPython 自己那份头里
+    **原样切出来**（手抄会与那棵树分叉，症状是运行期越界）。
+  判据：`tests/python/rt.js` —— `repr(float)` 与本机 `python3` 在 **2035 个数**上逐字节相同
+  （35 格手挑的边界 + 2000 格定死的伪随机位模式扫描）。
+  顺带这是 `src/core/build/`（那台 JS 写的 ninja）的第二个生产调用者（第一个是 R 的运行时）。
 
 ### 下一刀，按顺序
 
@@ -69,15 +86,15 @@ R 那一门（ADR-0045/0046/0047，`r-lang` 分支）已经把这条路走通过
    `self` 是第一格实参。
 3. **f-string 的内部结构**（PEP 701）。这要在 `lex.js` 里加一格通用能力：
    一个记号里嵌一段要再解析的文本。现在整份 f-string 是一个 STRING，8 份语料因此没过。
-4. **`ext/python/build.js` + `rt/gen-pyconfig.js`** —— 借 CPython 的 C 那一半。
-   起点只要两格：`dtoa.c`（浮点转串 —— `srepr` 与 CPython 还差指数形式的门槛，
-   `1e15` 我们出 `1e+15`、CPython 出 `1000000000000000.0`）与 `longobject.c`
-   （大整数 —— 现在的 int 是 64 位，python 的没有上界）。
-   `pyconfig.h` 按 `pyconfig.h.in` 一行一行真探一遍，照 `gen-rconfig.js` 那五类分
-   （`HAVE_*_H` 真编、`HAVE_DECL_*` 回 0/1、`HAVE_<FUNC>` 真链、`SIZEOF_*` 真跑、
-   其余进一张显式的表），**表里没有又落不进四类的名字当场报** —— R 那一门的账里，
-   这一条挡住过四个静默答错的坑。
-5. **`try` / `with` / `match` / 生成器 / 闭包 / 装饰器** —— adapter 现在对它们当场报
+4. **把借来的那份 `libomnipy` 接到语言里** —— 现在它编出来了、有判据了，可 adapter 那条路
+   还在用方言的 `(srepr E)`（15/16/17 位里挑第一个能往返的）。那一格与 CPython 差的是
+   指数形式的门槛：`1e15` 我们出 `1e+15`、CPython 出 `1000000000000000.0`。
+   接法照 R 那一门的 `ext/r/rt/ffi.js`：`(lib "libomnipy")` + `(cabi omni_py_float_repr …)`，
+   于是 `str(float)` 走的是 CPython 自己那份 dtoa。
+5. **再借两格**：`Objects/longobject.c`（大整数 —— 现在的 int 是 64 位，python 的没有上界）
+   与 `Modules/_sre/`（正则）。这两格比浮点那一格耦合深，得先有"借来的东西怎么持有对象"
+   那一层。
+6. **`try` / `with` / `match` / 生成器 / 闭包 / 装饰器** —— adapter 现在对它们当场报
    "还没接"，不猜。
 
 ## 三、口径

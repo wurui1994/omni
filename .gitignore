@@ -18,6 +18,10 @@ package-lock.json
 /.omni-build/
 /.omni-cache/
 
+# 那台 JS ninja 的构建日志（`src/core/build/run.js` 往 <cwd>/.omni_log 写，
+# 形状抄的是 ninja 的 .ninja_log）—— 生成物，不进版本库
+/.omni_log
+
 # 产物**只落 dist**：核心 dist/omni、符号表 dist/omni.syms、插件 dist/plugins/、
 # 数据 dist/share/，自举那一套也在里头。全是生成物，不进版本库。
 /dist/
