@@ -420,6 +420,38 @@ if (only.length === 0 || only.some((x) => 'gfx'.includes(x))) {
   rmSync(away, { recursive: true, force: true });
 }
 
+/* ── GLSL 那一层：int/float 混着算时补 `float(…)`（`ext/polydraw/glsl-type.js`）────
+ *
+ * 判两件事，后一件才是这一格的风险：**该补的补上了**，以及**不该补的一个都没补**
+ * （`i/j` 两边都是 `int` 时是整数除法，套上 `float()` 语义就悄悄变了）。
+ */
+if (only.length === 0 || only.some((x) => 'glsl'.includes(x))) {
+  const { glslFloatFix } = await import('../../ext/polydraw/glsl-type.js');
+  /* [源码, 期望：null = 一个字都不许动 / 字符串 = 结果里要有它] */
+  const cases = [
+    ['uniform int n; void main(){ float f=2.0; f = 1.0-f*f*n*(1.0/16.0); }', 'f*float(n)'],
+    ['void main(){ int i=3, j=2; int k = i/j; }', null],
+    ['uniform int n; void main(){ int i = n*2; }', null],
+    ['void main(){ float f = 3; }', 'float(3)'],
+    ['uniform vec2 fibw[45]; void main(){ int b=2; float x = dot(fibw[b],vec2(1.0)); }', null],
+    ['void main(){ int i=1; vec3 v = vec3(1.0); v = v*i; }', 'v*float(i)'],
+    ['void main(){ int i=1; if (i < 2) { } }', null],
+    ['void main(){ int i=2; float f=1.0; if (f > i) f = 0.0; }', 'float(i)'],
+    ['void main(){ for (int i=0;i<4;i++) { } }', null],
+    ['int g(int a){ return a; } void main(){ float x = g(1)*2.0; }', 'float(g(1))'],
+  ];
+  let bad = 0;
+  for (const [src, want] of cases) {
+    const got = glslFloatFix(src, {});
+    const good = want === null ? got === src : got.includes(want);
+    if (!good) {
+      bad += 1;
+      no('GLSL 补 float()', `${src}\n       期望 ${want ?? '原样不动'}\n       得到 ${got}`);
+    }
+  }
+  if (bad === 0) ok(`GLSL int/float 混用补 float()（${cases.length} 格，含"不许动"那几格）`);
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed`
   + '（adapter → 标准 IR → 公共 lower → .sx → 真跑一趟）\n');
 process.exit(fail === 0 ? 0 : 1);

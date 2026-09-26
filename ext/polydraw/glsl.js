@@ -10,6 +10,9 @@
 // 两者的**主体语法是同一套**（`in`/`out`、`texture()`、自己声明的输出变量）—— 差的只有
 // 那一两行头。所以翻译只有**一份**，在这儿；`#version` 那一行由各档设备自己补。
 //
+// int/float 混用那一格在 `glsl-type.js`（那一格要真类型推导，不是替换）。
+import { glslFloatFix } from './glsl-type.js';
+
 // **在哪儿翻**：编译期（`adapter.js` 把 `(gfxdef vert 名字 原文)` 发出去之前）。
 // 于是设备收到的就已经是对齐后的文本 —— 两档设备一个字都不用自己翻。
 // 在设备里各翻一遍就是两份实现，那正是这条规矩要挡住的东西。
@@ -185,6 +188,21 @@ export function glslAlign(kind, src, opt = {}) {
     s = s.replace(/\bgl_FragColor\b/g, 'o_col');
     head.push('out vec4 o_col;', 'uniform mat4 u_mvp;', 'in vec4 v_col0;', 'in vec4 v_tex0;');
   }
+  /* **int/float 混用那一格**（`ext/polydraw/glsl-type.js` 的头注）：脚本是按桌面
+     GLSL 1.20 写的，那一档隐式转换；GLSL ES 3.00 不转。补上的 `float(…)` 在两个
+     目标上都合法、语义也都没变，所以放在公共这一层 —— 两台设备收到的还是同一份文本。
+     注入的那几格名字这一层还没贴上头，所以把类型直接告诉它。 */
+  s = glslFloatFix(s, kind === 'vert'
+    ? {
+      a_pos: 'vec4', a_tex: 'vec4', a_col: 'vec4', a_nrm: 'vec4',
+      u_mvp: 'mat4', u_mv: 'mat4', [vCol]: 'vec4', [vTex]: 'vec4',
+      gl_Position: 'vec4', gl_PointSize: 'float',
+    }
+    : {
+      o_col: 'vec4', u_mvp: 'mat4', v_col0: 'vec4', v_tex0: 'vec4',
+      gl_FragCoord: 'vec4', gl_FragDepth: 'float', gl_PointCoord: 'vec2',
+      gl_FrontFacing: 'bool',
+    });
   return `${head.join('\n')}\n${s}`;
 }
 
