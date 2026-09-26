@@ -396,7 +396,7 @@ function methodType(recvTy, name, argTys, C) {
   }
   if (recvTy.kind === 'string') {
     if (['upper', 'lower', 'title', 'capitalize', 'swapcase', 'strip', 'lstrip', 'rstrip',
-      'replace', 'join', 'ljust', 'rjust', 'zfill', 'center',
+      'replace', 'join', 'ljust', 'rjust', 'zfill', 'center', 'format',
       'removeprefix', 'removesuffix'].includes(name)) return STR;
     if (['find', 'rfind', 'count', 'index', 'rindex'].includes(name)) return INT;
     if (['startswith', 'endswith',
@@ -1974,6 +1974,75 @@ function partitionOf(s0, sep0, C, fromRight) {
   };
 }
 
+/**
+ * `"…{}…".format(a, b)` —— 模板**要是一格串字面量**：替换字段得在编译期拆开
+ * （每一格的格式说明各是一套代码，与 f-string 同一条口径）。
+ *
+ * 认的写法：`{}`（顺着数）、`{0}`（指名第几格）、`{!r}` / `{!s}`、`{:说明}`、
+ * `{{` / `}}` 是转义。格式说明那一套微语言直接借 f-string 那一份（`fmtSpec`）——
+ * 两处本来就是同一套规矩，各写一遍必然对不上。
+ */
+function formatOf(tmpl, args, C) {
+  const out = [];
+  let auto = 0;
+  let lit = '';
+  let i = 0;
+  const flush = () => {
+    if (lit !== '') {
+      out.push({ kind: 'string', value: lit });
+      lit = '';
+    }
+  };
+  while (i < tmpl.length) {
+    const ch = tmpl[i];
+    if ((ch === '{' || ch === '}') && tmpl[i + 1] === ch) {
+      lit += ch;
+      i += 2;
+    } else if (ch === '}') {
+      throw new Error('python->IR: `.format()` 的模板里有个落单的 `}`（要转义写 `}}`）');
+    } else if (ch !== '{') {
+      lit += ch;
+      i += 1;
+    } else {
+      const end = tmpl.indexOf('}', i);
+      if (end < 0) throw new Error('python->IR: `.format()` 的模板里 `{` 没有配对的 `}`');
+      const field = tmpl.slice(i + 1, end);
+      i = end + 1;
+      flush();
+      /* 一格字段拆成 `名字 ! 转换 : 说明` 三截。 */
+      const ci = field.indexOf(':');
+      const head = ci < 0 ? field : field.slice(0, ci);
+      const spec = ci < 0 ? '' : field.slice(ci + 1);
+      const bi = head.indexOf('!');
+      const who = bi < 0 ? head : head.slice(0, bi);
+      const conv = bi < 0 ? '' : head.slice(bi + 1);
+      let at;
+      if (who === '') {
+        at = auto;
+        auto += 1;
+      } else if (/^\d+$/.test(who)) {
+        at = Number(who);
+      } else {
+        throw new Error(`python->IR: \`.format()\` 的 \`{${who}}\` 还没接`
+          + '（接了的是 `{}` 与 `{0}`；按名字取要命名实参那一档）');
+      }
+      if (at >= args.length) {
+        throw new Error(`python->IR: \`.format()\` 要第 ${at} 格实参，可只给了 ${args.length} 格`);
+      }
+      const v = args[at];
+      if (conv !== '' && conv !== 'r' && conv !== 's') {
+        throw new Error(`python->IR: \`.format()\` 的 \`!${conv}\` 还没接（接了 !r 与 !s）`);
+      }
+      /* `!r` 先转成串再按说明摆；没有转换时说明直接作用在值上（数要按数摆）。 */
+      const base = conv === 'r' ? pyRepr(v, C) : v;
+      out.push(spec === '' ? pyStr(base, C) : fmtSpec(base, spec, C));
+    }
+  }
+  flush();
+  if (out.length === 0) return { kind: 'string', value: '' };
+  return out.reduce((l, r) => ({ kind: 'binop', op: '+', left: l, right: r }));
+}
+
 /** `xs[i]` / `d[k]` / `s[i]` / `xs[a:b]` / `s[a:b]`。 */
 function indexOf(x, C) {
   const box = exprOf(kids(x)[0], C);
@@ -2792,6 +2861,14 @@ function methodOf(recvTok, name, args, C) {
     /* `.partition(sep)` / `.rpartition(sep)` —— 交一格**三格的元组**。 */
     if ((name === 'partition' || name === 'rpartition') && args.length === 1) {
       return partitionOf(recv, args[0], C, name === 'rpartition');
+    }
+    /* `.format()` —— 模板要是串字面量（替换字段得在编译期拆，与 f-string 同一条）。 */
+    if (name === 'format') {
+      if (recv.kind !== 'string') {
+        throw new Error('python->IR: `.format()` 的模板要是一格**串字面量** ——'
+          + ' 替换字段得在编译期拆开（每一格的格式说明各是一套代码）');
+      }
+      return formatOf(String(recv.value), args, C);
     }
     if (name === 'startswith' && args.length === 1) return startsEndsOf(recv, args[0], true, C);
     if (name === 'endswith' && args.length === 1) return startsEndsOf(recv, args[0], false, C);
