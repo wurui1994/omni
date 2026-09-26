@@ -444,6 +444,91 @@ export function bankRound(x0, C) {
   return h.wrap(out);
 }
 
+/**
+ * `xs.sort()` / `xs.sort(reverse=True)` —— **就地**排（python 里它交 None，
+ * 与 `sorted()` 正相反：那一格抄一份）。插入排序，与 `sortedOf` 里那一段同一条。
+ */
+export function sortStmts(xs, C, desc = false) {
+  const h = holder(C);
+  const t = C.tyOfIR(xs);
+  if (t.kind !== 'arr') throw new Error('python->IR: `.sort()` 的接收者要是一格表');
+  if (!['int', 'real', 'string'].includes(t.elem.kind)) {
+    throw new Error(`python->IR: \`.sort()\` 的元素是 ${t.elem.kind} —— 还没接（要有"怎么比"）`);
+  }
+  const j = h.decl('so_j', INT, int(1));
+  const k = h.decl('so_k', INT, int(0));
+  const cur = h.decl('so_c', t.elem, { kind: 'index', obj: xs, index: int(0) });
+  h.pre.push({
+    kind: 'while',
+    cond: bin('<', j, call1('alen', [xs])),
+    body: [
+      { kind: 'assign', target: cur, value: { kind: 'index', obj: xs, index: j } },
+      { kind: 'assign', target: k, value: bin('-', j, int(1)) },
+      {
+        kind: 'while',
+        cond: bin('&&', bin('>=', k, int(0)),
+          bin(desc ? '<' : '>', { kind: 'index', obj: xs, index: k }, cur)),
+        body: [
+          {
+            kind: 'assign',
+            target: { kind: 'index', obj: xs, index: bin('+', k, int(1)) },
+            value: { kind: 'index', obj: xs, index: k },
+          },
+          { kind: 'assign', target: k, value: bin('-', k, int(1)) },
+        ],
+      },
+      { kind: 'assign', target: { kind: 'index', obj: xs, index: bin('+', k, int(1)) }, value: cur },
+      inc(j),
+    ],
+  });
+  return h.pre;
+}
+
+/**
+ * `d.update(other)` —— 把 other 的每一格写进 d（键重了就盖掉）。python 里交 None。
+ * 走 other 的键表（`dkeys`），与 `.values()` 那一格同一条。
+ */
+export function dictUpdateStmts(d0, o0, C, box) {
+  const h = holder(C);
+  const d = h.keep(d0, 'du_d');
+  const o = h.keep(o0, 'du_o');
+  const ot = C.tyOfIR(o);
+  if (ot.kind !== 'map') throw new Error(`python->IR: \`.update()\` 收一格字典，这里是 ${ot.kind}`);
+  const ks = h.decl('du_ks', arrOf(ot.key), call1('dkeys', [o]));
+  const i = h.decl('du_i', INT, int(0));
+  const k = { kind: 'index', obj: ks, index: i };
+  h.pre.push({
+    kind: 'while',
+    cond: bin('<', i, call1('alen', [ks])),
+    body: [
+      { kind: 'builtin-stmt', name: 'dset', args: [d, k, box(call1('dget', [o, k]))] },
+      inc(i),
+    ],
+  });
+  return h.pre;
+}
+
+/**
+ * `d.setdefault(k, v)` —— 键在就交那一格、不在就写进去再交。
+ * 交的是**值**，所以是个 block-expr（与 `.pop()` 同一条办法）。
+ */
+export function dictSetDefaultOf(d0, k0, v, both, boxHit, boxNew, C) {
+  const h = holder(C);
+  const d = h.keep(d0, 'sd_d');
+  const k = h.keep(k0, 'sd_k');
+  const out = h.decl('sd_v', both, zeroLike(both));
+  h.pre.push({
+    kind: 'if',
+    cond: call1('dhas', [d, k]),
+    then: [{ kind: 'assign', target: out, value: boxHit(call1('dget', [d, k])) }],
+    else_: [
+      { kind: 'assign', target: out, value: boxNew(v) },
+      { kind: 'builtin-stmt', name: 'dset', args: [d, k, out] },
+    ],
+  });
+  return h.wrap(out);
+}
+
 /* ─── 表上那几个"找"与"改"（`in` / index / count / insert / remove / …）─────── */
 
 /**

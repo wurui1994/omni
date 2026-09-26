@@ -27,7 +27,7 @@
 // `if __name__ == "__main__": main()` 这个惯用写法直接能跑。
 
 import { tag, kids, leaf, part } from '../../../src/core/lower/cst.js';
-import { INT, STR, DYN, arrOf, sameType, typeOf, named } from '../../../src/core/lower/ty-of.js';
+import { INT, STR, BOOL, DYN, arrOf, sameType, typeOf, named } from '../../../src/core/lower/ty-of.js';
 import { typeToSx } from '../../../src/core/lower/ty.js';
 import {
   exprOf, condOf, nameOf, typeOfAnnot, tyOfCst, tyArg, pyStr, pyRepr, lenOf, hasFields, fstringParts, cmpEq,
@@ -35,7 +35,7 @@ import {
 } from './expr.js';
 import {
   reverseStmts, clearStmts, extendStmts, insertStmts, dropAtStmts, indexOfList,
-  dictClearStmts,
+  dictClearStmts, sortStmts, dictUpdateStmts,
 } from './builtins.js';
 import { boxOf, unifyPy } from './dyn.js';
 
@@ -874,8 +874,8 @@ export function stmtsOf(x, C) {
     case 'augassign': return augassignStmt(x, C);
     case 'annot': return annotStmt(x, C);
     case 'if': return [ifStmt(x, C)];
-    case 'while': return [whileStmt(x, C)];
-    case 'for': return [forStmt(x, C)];
+    case 'while': return loopElse(x, whileStmt(x, C), C);
+    case 'for': return loopElse(x, forStmt(x, C), C);
     case 'return': {
       const vs = kids(x);
       if (vs.length === 0) return [{ kind: 'return', values: [] }];
@@ -974,11 +974,21 @@ function exprStmtOf(e, C) {
         const box = exprOf(kids(fn)[0], C);
         const t = typeOfIR(box, C);
         if (t.kind === 'arr') return listMut(m, box, argToks, C);
-        /* 字典的 `.clear()` —— python 里交 None，所以只当语句用。没给方言加算子：
-           走一遍键表逐个 `ddel` 就是（`dictClearStmts`）。 */
+        /* 字典上改原表的那两格 —— python 里都交 None，所以只当语句用。 */
         if (t.kind === 'map' && m === 'clear') {
           if (argToks.length !== 0) throw new Error('python->IR: `.clear()` 不收实参');
           return dictClearStmts(box, C);
+        }
+        if (t.kind === 'map' && m === 'update') {
+          if (argToks.length !== 1) throw new Error('python->IR: `.update()` 只收一格字典');
+          const other = exprOf(argToks[0], C);
+          const ot = typeOfIR(other, C);
+          if (ot.kind !== 'map') throw new Error(`python->IR: \`.update()\` 收一格字典，这里是 ${ot.kind}`);
+          if (!sameType(t.key, ot.key)) {
+            throw new Error(`python->IR: \`.update()\` 两边的键是 ${t.key.kind} 与 ${ot.key.kind}`);
+          }
+          const box2 = (e) => (t.value.kind === 'dyn' && ot.value.kind !== 'dyn' ? boxOf(e, C) : e);
+          return dictUpdateStmts(box, other, C, box2);
         }
       }
     }
@@ -986,8 +996,10 @@ function exprStmtOf(e, C) {
   return [{ kind: 'expr-stmt', expr: exprOf(e, C) }];
 }
 
-/** 表上**改原表**的那几格（python 里它们交 None，所以只当语句用）。 */
-const LIST_MUT = new Set(['append', 'reverse', 'extend', 'clear', 'insert', 'remove', 'pop']);
+/** **改原容器**的那几格（python 里它们交 None，所以只当语句用）。 */
+const LIST_MUT = new Set([
+  'append', 'reverse', 'extend', 'clear', 'insert', 'remove', 'pop', 'sort', 'update',
+]);
 
 /**
  * `xs.append(v)` / `.reverse()` / `.extend(ys)` / `.clear()` / `.insert(i, v)` / `.remove(v)`
@@ -999,6 +1011,23 @@ function listMut(m, box, argToks, C) {
     const v = exprOf(argToks[k], C);
     return et.kind === 'dyn' && typeOfIR(v, C).kind !== 'dyn' ? boxOf(v, C) : v;
   };
+  /* `.sort()` / `.sort(reverse=True)` —— **就地**排（`sorted()` 才抄一份）。
+     `reverse` 与 `sorted(reverse=…)` 同一条口径：只收 True / False 字面量。 */
+  if (m === 'sort') {
+    let desc = false;
+    for (const a of argToks) {
+      if (tag(a) !== 'kw') throw new Error('python->IR: `.sort()` 的实参只收 `reverse=`');
+      const k = String(leaf(kids(a)[0]));
+      if (k !== 'reverse') throw new Error(`python->IR: \`.sort(${k}=…)\` 还没接（接了的是 reverse=）`);
+      const v = kids(a)[1];
+      if (tag(v) !== 'true' && tag(v) !== 'false') {
+        throw new Error('python->IR: `.sort(reverse=…)` 要写成 True / False 字面量'
+          + '（两种比法是两条循环，得在编译期定）');
+      }
+      desc = tag(v) === 'true';
+    }
+    return sortStmts(box, C, desc);
+  }
   if (m === 'append') {
     if (argToks.length !== 1) throw new Error('python->IR: `.append()` 只收一格实参');
     return [{ kind: 'builtin-stmt', name: 'apush', args: [box, arg(0)] }];
@@ -1265,6 +1294,44 @@ function annotStmt(x, C) {
   return writeTo(target, exprOf(v, C), C);
 }
 
+/**
+ * `for … else:` / `while … else:` —— 那一支是"**没 break 就跑**"（不是"循环完就跑"：
+ * 从 `break` 出来的那一回不跑）。
+ *
+ * 落法：一格布尔旗子 —— 进循环前置 true，体里**属于这一层**的每个 `break` 前面补一句
+ * 置 false，循环之后 `if (旗子) { else 那一支 }`。
+ *
+ * "属于这一层"是关键：递归进 `if` / `block` 那几层，**不进**嵌套的 `for` / `while`
+ * （那里头的 break 跳的是里层那一圈，与这一格的 else 无关）。
+ */
+function loopElse(x, made, C) {
+  const els = kids(x).filter((y) => tag(y) === 'else');
+  if (els.length === 0) return [made];
+  /* 刚造出来的那一圈：`forStmt` 可能把它包在一格 block 里（前面还有几句 pre）。 */
+  const loop = made.kind === 'block' ? made.stmts[made.stmts.length - 1] : made;
+  const flag = C.fresh('loop_ok');
+  C.bind(flag, BOOL);
+  const fv = { kind: 'name', name: flag };
+  markBreaks(loop.body, { kind: 'assign', target: fv, value: { kind: 'bool', value: false } });
+  return [
+    { kind: 'let', name: flag, type: BOOL, init: { kind: 'bool', value: true } },
+    made,
+    { kind: 'if', cond: fv, then: els.flatMap((e) => bodyStmts(part(e, 'body') ?? e, C)), else_: null },
+  ];
+}
+
+/** 一串语句里属于这一层的 `break` 前面各补一句（不进嵌套的循环）。 */
+function markBreaks(list, clear) {
+  if (!Array.isArray(list)) return;
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const s = list[i];
+    if (s === null || typeof s !== 'object') continue;
+    if (s.kind === 'break') { list.splice(i, 0, clear); continue; }
+    if (s.kind === 'for' || s.kind === 'while') continue;
+    for (const key of ['then', 'else_', 'body', 'stmts']) markBreaks(s[key], clear);
+  }
+}
+
 function bodyStmts(node, C) {
   return node === undefined ? [] : flatten(kids(node)).flatMap((s) => stmtsOf(s, C));
 }
@@ -1284,9 +1351,6 @@ function ifStmt(x, C) {
 }
 
 function whileStmt(x, C) {
-  if (kids(x).some((y) => tag(y) === 'else')) {
-    throw new Error('python->IR: `while … else:` 还没接（那一支是"没 break 就跑"）');
-  }
   return { kind: 'while', cond: condOf(kids(x)[0], C), body: bodyStmts(part(x, 'body'), C) };
 }
 
@@ -1298,9 +1362,6 @@ function whileStmt(x, C) {
  * 自己摊的话 `continue` 会跳过步进，当场死循环（那一条账写在 `lowerFor` 的注释里）。
  */
 function forStmt(x, C) {
-  if (kids(x).some((y) => tag(y) === 'else')) {
-    throw new Error('python->IR: `for … else:` 还没接（那一支是"没 break 就跑"）');
-  }
   const target = kids(x)[0];
   const iter = kids(part(x, 'in') ?? { kind: 'list', items: [] })[0];
   const pre = [];

@@ -28,7 +28,7 @@ import { splitPercent, percentArity } from './percent.js';
 import {
   sumOf, pickList, anyAllOf, sortedOf, rangeList,
   joinOf, splitOf, stripOf, replaceOf, startsEndsOf, justOf,
-  containsList, indexOfList, countList, valuesList, dictPopOf,
+  containsList, indexOfList, countList, valuesList, dictPopOf, dictSetDefaultOf,
   concatList, repeatList, reversedList, stepSlice, bankRound,
 } from './builtins.js';
 
@@ -245,14 +245,14 @@ export function numValue(text) {
 const BUILTIN_RET = new Map([
   ['len', INT], ['int', INT], ['float', REAL], ['str', STR], ['bool', BOOL],
   ['ord', INT], ['chr', STR], ['input', STR], ['print', null],
-  ['repr', STR], ['hex', STR], ['oct', STR], ['bin', STR],
+  ['repr', STR], ['hex', STR], ['oct', STR], ['bin', STR], ['isinstance', BOOL],
 ]);
 
 /** 方法交出来的类型（按接收者装的东西分）。 */
 function methodType(recvTy, name, argTys) {
   if (recvTy === null) return null;
   if (recvTy.kind === 'arr') {
-    if (['append', 'clear', 'extend', 'reverse', 'insert', 'remove'].includes(name)) return { kind: 'void' };
+    if (['append', 'clear', 'extend', 'reverse', 'insert', 'remove', 'sort'].includes(name)) return { kind: 'void' };
     if (name === 'pop') return recvTy.elem;
     if (name === 'index' || name === 'count') return INT;
     return null;
@@ -280,6 +280,8 @@ function methodType(recvTy, name, argTys) {
       if (argTys.length <= 1) return recvTy.value;
       return unify([recvTy.value, argTys[1]]);
     }
+    if (name === 'setdefault') return recvTy.value;
+    if (name === 'clear' || name === 'update') return { kind: 'void' };
     return null;
   }
   return null;
@@ -1686,10 +1688,70 @@ export function kwOrder(fn, toks, C) {
   return out;
 }
 
+/** `isinstance(x, T)` 里那几个类型名字 → 箱子上的标签（`dtag` 交的那几个词）。 */
+const PY_TY_TAG = new Map([['int', 'int'], ['float', 'real'], ['str', 'string'], ['bool', 'bool']]);
+
+/**
+ * `isinstance(x, T)` —— T 是**类型的名字**（不是一格值），所以调用点要在算实参之前拦。
+ *
+ * 静态的那一档在**编译期**就答得出（这一层的类型是确定的）；一格箱子那一档问
+ * `(dtag …)`。`isinstance(True, int)` 在 python 里是 True（bool 是 int 的子类）——
+ * 这一格照它。
+ *
+ * **明说的不足**：第二格收元组（`isinstance(x, (int, str))`）没接 —— 元组本身还没那一档。
+ */
+function isinstanceOf(valTok, tyTok, C) {
+  if (tag(tyTok) !== 'n') {
+    throw new Error('python->IR: `isinstance(x, T)` 的 T 要写成一格类型的名字'
+      + '（元组那一族还没接）');
+  }
+  const nm = String(nameOf(tyTok));
+  const v0 = exprOf(valTok, C);
+  const t = ty(v0, C);
+  /* 一格记录：这一层没有继承，所以就是"是不是同一个类"。 */
+  if (C.records.has(nm)) {
+    return { kind: 'bool', value: t.kind === 'named' && t.name === C.ref(nm) };
+  }
+  if (nm === 'list') return { kind: 'bool', value: t.kind === 'arr' };
+  if (nm === 'dict') return { kind: 'bool', value: t.kind === 'map' };
+  const want = PY_TY_TAG.get(nm);
+  if (want === undefined) {
+    throw new Error(`python->IR: \`isinstance(x, ${nm})\` 还没接`
+      + '（接了的是 int / float / str / bool / list / dict 与这份源码里的类）');
+  }
+  if (t.kind !== 'dyn') {
+    if (want === 'int') return { kind: 'bool', value: t.kind === 'int' || t.kind === 'bool' };
+    return { kind: 'bool', value: t.kind === want };
+  }
+  /* 箱子：运行期问标签。`int` 那一格要问两个（bool 也算 int）—— 所以先钉住 x。 */
+  const pre = [];
+  let v = v0;
+  if (!isPure(v0)) {
+    const n = C.fresh('ii_x');
+    C.bind(n, t);
+    pre.push({ kind: 'let', name: n, type: t, init: v0 });
+    v = { kind: 'name', name: n };
+  }
+  const isTag = (s) => ({
+    kind: 'binop', op: '==',
+    left: { kind: 'builtin', name: 'dtag', args: [v] },
+    right: { kind: 'string', value: s },
+  });
+  const value = want === 'int'
+    ? { kind: 'binop', op: '||', left: isTag('int'), right: isTag('bool') }
+    : isTag(want);
+  return pre.length === 0 ? value : { kind: 'block-expr', stmts: pre, value };
+}
+
 /** 一格调用：内建、`math.*`、方法、用户函数。 */
 export function callOf(x, C) {
   const [fn, argsTok] = kids(x);
   const argToks = kwOrder(fn, argsTok === undefined ? [] : kids(argsTok), C);
+  /* `isinstance(x, T)` —— T 是类型的名字，不是一格值，要在算实参之前拦。 */
+  if (tag(fn) === 'n' && String(nameOf(fn)) === 'isinstance') {
+    if (argToks.length !== 2) throw new Error('python->IR: `isinstance(x, T)` 收两格实参');
+    return isinstanceOf(argToks[0], argToks[1], C);
+  }
   /* `sorted(xs, reverse=True)` —— 要在**算实参之前**拦（下面那一圈见了 `kw` 就报）。
      `reverse` 只收布尔字面量：两种比法是两条循环，得在编译期定。
      `key=` 没接 —— 那要有"函数当值"那一档。 */
@@ -2091,11 +2153,33 @@ function methodOf(recvTok, name, args, C) {
           : (both.kind === 'real' && dt.kind === 'int' ? toReal(e, C) : e)),
       }, C);
     }
-    if (name === 'clear') {
-      throw new Error('python->IR: `d.clear()` 交 None，所以只当语句用（`d.clear()` 单独一行）');
+    /* `d.setdefault(k, v)` —— 键在就交那一格、不在就写进去再交。合型那一套与 `.get` 同。 */
+    if (name === 'setdefault' && args.length === 2) {
+      const vt = t.value;
+      const dt = ty(args[1], C);
+      const both = unify([vt, dt]);
+      if (both === null) {
+        throw new Error(`python->IR: \`.setdefault(k, v)\` 里字典装 ${vt.kind}、给的是 ${dt.kind}`
+          + ' —— 合不成一格');
+      }
+      if (!sameType(both, vt)) {
+        throw new Error(`python->IR: \`.setdefault(k, v)\` 要写回字典里，所以 v 得装得进`
+          + ` ${vt.kind}（这里是 ${dt.kind}）`);
+      }
+      return dictSetDefaultOf(
+        recv, args[0], args[1], vt,
+        (e) => e,
+        (e) => (isDyn(vt) && !isDyn(dt) ? boxOf(e, C)
+          : (vt.kind === 'real' && dt.kind === 'int' ? toReal(e, C) : e)),
+        C,
+      );
+    }
+    if (name === 'clear' || name === 'update') {
+      throw new Error(`python->IR: \`d.${name}()\` 交 None，所以只当语句用（单独一行）`);
     }
     throw new Error(`python->IR: 字典上的 \`.${name}()\` 还没接`
-      + '（接了的是 get / keys / values / pop / clear；`.items()` 只在 `for k, v in d.items():` 里接）');
+      + '（接了的是 get / keys / values / pop / setdefault / clear / update；'
+      + '`.items()` 只在 `for k, v in d.items():` 里接）');
   }
   throw new Error(`python->IR: \`.${name}()\` 的接收者装的是 ${t.kind} —— 还没接`);
 }

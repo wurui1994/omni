@@ -338,6 +338,22 @@ R 那一门（ADR-0045/0046/0047，`r-lang` 分支）已经把这条路走通过
   `t = (1, 2)` 与 `return a, b` 照旧报"还没接" —— 多目标赋值是把它**绕开**了
   （两边逐格对着走，中间不真造一格元组）。
 
+* **改原容器的那几格、`for…else`、`isinstance`**。`xs.sort()` / `.sort(reverse=True)`
+  （**就地**排，`sorted()` 才抄一份）、`d.update(other)`、`d.setdefault(k, v)`、
+  `for…else` / `while…else`、`isinstance(x, T)`。方言一格新算子都没加。
+  判据：`ext/python/examples/moreops.py` 三条腿与 python3 逐字节相同。
+
+  `for…else` 那一支是"**没 break 就跑**"，不是"循环完就跑"。落法是一格布尔旗子：
+  进循环前置 true，体里**属于这一层**的每个 `break` 前面补一句置 false，出来之后
+  `if 旗子:`。"属于这一层"要紧 —— 递归进 `if` / `block` 那几层，**不进**嵌套的
+  `for` / `while`（那里头的 break 跳的是里层那一圈）。
+
+  `isinstance` 静态的那一档在**编译期**就答得出（这一层的类型是确定的），一格箱子那一档
+  问 `(dtag …)`。`isinstance(True, int)` 照 python 交 True（bool 是 int 的子类）。
+
+  **明说的不足**：`.sort(key=…)` 没接（同 `sorted`）；`isinstance` 的第二格收元组
+  （`isinstance(x, (int, str))`）没接；`type(x)` 没接。
+
 ### 下一刀，按顺序
 
 1. **箱子里的函数拆出来调**（`(asfn …)` 那一格 —— 于是 `f = g` 之后 `f()` 走得通，
