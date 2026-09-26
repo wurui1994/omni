@@ -142,3 +142,28 @@ print(rd[kk])           # 运行期才知道的下标，同一条
 cat(rd[1] + rd[3], "\n")
 print(rd[-1])           # 写着负号那一档是"丢掉那一格"
 print(rd[integer(0)])   # 零长下标 → 零长
+
+# **`v[下标向量] <- 值` 与 `v[掩码] <- 值`**（2026-09-26 接的）。读那一侧早就有了，
+# 写那一侧从前照发一格**标量**下标 —— `(let r_ix int 一条向量)` 一路发到 `.sx` 才撞上
+# "是 int，初值是 real*"，而那时已经过了换档那道门：退出码 1、什么都不印、libR 也接不着。
+# 量出来的口径全在 `r_wset` / `r_wmask` 的注里。下标里有缺失那一格分两种：
+# 右边长度 1 就**跳过**那一格，右边长过 1 就**报错**（R 也是这么分的）。
+wv <- c(1, 2, 3); wv[c(1, 3)] <- 0; print(wv)
+wv <- c(1, 2, 3); wv[c(1, 3)] <- c(9, 8); print(wv)
+wv <- c(1, 2, 3); wv[c(2, 2)] <- c(8, 9); print(wv)
+wv <- c(1, 2, 3); wv[c(0, 2)] <- 5; print(wv)
+wv <- c(1, 2, 3); wv[integer(0)] <- 9; print(wv)
+wv <- c(1, 2); wv[c(1, 5)] <- 7; print(wv)
+wv <- c(1, 2, 3); wv[wv > 1] <- 0; print(wv)
+wv <- c(1, 2, 3); wv[wv > 1] <- c(7, 8); print(wv)
+wv <- c(1, 2, 3); wv[c(TRUE, FALSE)] <- 0; print(wv)
+wv <- c(1, 2); wv[c(TRUE, TRUE, TRUE)] <- 9; print(wv)
+wv <- c(1, 2, 3, 4); wv[wv %% 2 == 0] <- -1; print(wv)
+wv <- c(5, 3, 8); wv[which(wv > 4)] <- 0; print(wv)
+wv <- c(1, 2, 3); wv[1:2] <- c(10, 20); print(wv)
+wv <- c(1, 2, 3); wv[c(TRUE, NA, FALSE)] <- 9; print(wv)
+wv <- c(1, 2, 3); wv[c(1, NA)] <- 9; print(wv)
+wix <- c(1, 3)
+wv <- c(1, 2, 3)
+wv[wix] <- 0
+cat(wv, sum(wv), length(wv), "\n")

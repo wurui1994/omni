@@ -264,6 +264,9 @@ const FN_DEPS = new Map([
   /* `identical` 的向量那一档：数那边要把真 NA 与 NaN 分开，串那边只比相等。 */
   ['r_ident_v', ['r_is_na', 'r_is_nan']],
   ['r_ident_sv', []],
+  /* `v[下标向量] <- 值` / `v[掩码] <- 值`（接长那几格要缺失、掩码里的缺失要当场停）。 */
+  ['r_wset', ['r_na']],
+  ['r_wmask', ['r_na', 'r_is_na']],
   ['r_pick_str', []],
   ['r_sat1', []],
   ['r_nm_pos', []],
@@ -6714,6 +6717,67 @@ function assignOf(x, types) {
     if (isVecTy(ot)) {
       const kv = exprOf(keys[0], types);
       const kt = typeOfExpr(keys[0], types);
+      /**
+       * **写那一侧的下标只接"一格数"**（2026-09-26 补的拦）。R 那儿这四种写法都合法，
+       * 而这一层从前照发、一路发到 `.sx` 或者运行期才死 —— **那时已经过了换档那道门**：
+       * 整份源码退出码 1、什么都不印，libR 那一档也接不着。量出来的四格：
+       *
+       *   v[v > 2] <- 0        发出来是 `(let r_ix int 一条向量)`  → `.sx` 报"是 int，初值是 real*"
+       *   v[c(1,3)] <- c(9,8)  同上
+       *   v[-1] <- 0           运行期 "pointer out of bounds: -1"
+       *   nv["c"] <- 3         发出来是 `(let r_ix int (str "c"))` → `.sx` 报"是 int，初值是 string"
+       *
+       * 读那一侧这四种都接了（`r_vec_pick` / `r_mask_str` / 负下标 / 按名字取）——
+       * 写那一侧要另一套：**掩码与下标向量**得逐格写（值还要回收）、**负下标**是"除了这几格"、
+       * **按名字写**在名字不在时要接长一格并把名字也接上。那是另一刀，报在这儿就退到 libR，
+       * 答案是对的。
+       */
+      /**
+       * **`v[下标向量] <- 值` 与 `v[掩码] <- 值` 接了**（2026-09-26，判据 `vec.R` 末尾）。
+       * 值那一半在 `r_wset` / `r_wmask` 里（那儿的注记着量出来的九条口径：回收、下标 0、
+       * 越界接长、掩码回收与接长、掩码里的缺失当场停）。
+       *
+       * 从前这一格照发一格**标量**下标，于是 `(let r_ix int 一条向量)` 一路发到 `.sx`
+       * 才撞上"是 int，初值是 real*" —— 而那时**已经过了换档那道门**：退出码 1、
+       * 什么都不印、libR 也接不着。
+       *
+       * 只在左边是**一个名字**时接（要重新绑那个变量）；**带名字的向量当场报** ——
+       * 接长时名字那一条也得跟着长，那是另一刀。
+       */
+      if (isVecTy(kt)) {
+        if (tag(obj) !== 'sym') {
+          throw new Error('r->IR: `v[一条向量] <- …` 只在左边是一个名字时接'
+            + '（接长要重新绑那个变量）');
+        }
+        if (isNamedTy(ot)) {
+          throw new Error('r->IR: `带名字的向量[一条向量] <- …` 还没接 ——'
+            + ' 接长时名字那一条也得跟着长（R 给新格的名字是空串），那是另一刀');
+        }
+        const vn2 = mangle(nameOf(obj));
+        const vr2 = { kind: 'name', name: vn2 };
+        const vt3 = typeOfExpr(value, types);
+        const valV = isVecTy(vt3) ? exprOf(value, types)
+          : lglCall('r_vec1', asReal(exprOf(value, types), vt3));
+        return {
+          kind: 'assign',
+          target: vr2,
+          value: lglCall(isLglTy(kt) ? 'r_wmask' : 'r_wset', vr2, kv, valV),
+        };
+      }
+      if (isStrVec(kt)) {
+        throw new Error('r->IR: `v[一条字符向量] <- …` 还没接（按一串名字写）——'
+          + ' 名字不在时要接长并把名字也接上，那是另一刀');
+      }
+      if (kt !== undefined && kt.kind === 'string') {
+        throw new Error('r->IR: `v["名字"] <- …` 还没接 —— 名字在的时候要写那一格、'
+          + '不在的时候要接长一格并把名字也接上（R 的口径），这一层写那一侧只接一格数。'
+          + '读那一侧（`v["a"]`）接了');
+      }
+      if (isNegSub(keys[0])) {
+        throw new Error('r->IR: `v[-k] <- …` 还没接 —— R 那儿负下标是"**除了**这几格"，'
+          + '写那一侧要把别的每一格都写一遍；硬发出去会当成"写第 -k 格"，'
+          + '运行期撞在指针边界上（退 1、什么都不印）');
+      }
       const val = asReal(exprOf(value, types), typeOfExpr(value, types));
       /* **越界就接长**（R 的口径：`x <- c(1,2); x[5] <- 9` 之后 `x` 是 `1 2 NA NA 9`）。
        *
@@ -12145,6 +12209,148 @@ function vecFnDecl(name) {
         },
         { kind: 'return', values: [out] },
       ],
+    };
+  }
+  if (name === 'r_wset' || name === 'r_wmask') {
+    /**
+     * **`v[下标向量] <- 值` 与 `v[掩码] <- 值`**（2026-09-26 接的）。量出来的 R 口径：
+     *
+     *   v[c(1,3)] <- 0          0 2 0        值不够就**回收**
+     *   v[c(1,3)] <- c(9,8)     9 2 8        按 `ix` 的次序配
+     *   v[c(2,2)] <- c(8,9)     1 9 3        同一格写两遍，后写的赢
+     *   v[c(0,2)] <- 5          1 5 3        **下标 0 那一格什么都不写**
+     *   v[integer(0)] <- 9      1 2 3        一格都不写
+     *   v[c(1,5)] <- 7          7 2 NA NA 7  越界就**接长**，中间填缺失
+     *   v[v>1] <- c(7,8)        1 7 8        掩码那一档：值按"选中的次序"回收
+     *   v[c(TRUE,FALSE)] <- 0   0 2 0        掩码**短了从头再来**
+     *   c(1,2)[c(T,T,T)] <- 9   9 9 9        掩码**长了就接长**
+     *
+     * **下标里有缺失**那一格 R 分两种（量出来的，第一版按"一律报错"写，错了）：
+     * 右边**长度 1** 时那一格**跳过**（`v[c(TRUE,NA,FALSE)] <- 9` 出 `9 2 3`、
+     * `v[c(1,NA)] <- 9` 也出 `9 2 3`），右边长过 1 就**报错**
+     * （"NAs are not allowed in subscripted assignments"）。
+     */
+    const mask = name === 'r_wmask';
+    const nm = (s) => ({ kind: 'name', name: s });
+    const vv = { kind: 'name', name: 'v' };
+    const ixv = { kind: 'name', name: 'ix' };
+    const valv = { kind: 'name', name: 'val' };
+    const ov = { kind: 'name', name: 'o' };
+    const jv = { kind: 'name', name: 'j' };
+    const kv2 = { kind: 'name', name: 'k' };
+    const mv = { kind: 'name', name: 'mx' };
+    const I0 = { kind: 'int', value: 0 };
+    const I1 = { kind: 'int', value: 1 };
+    const naE = () => ({ kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] });
+    const naFail = () => ({
+      kind: 'if',
+      cond: b('!=', nm('nv'), I1),
+      then: [{
+        kind: 'builtin-stmt',
+        name: 'fail',
+        args: [{
+          kind: 'string',
+          value: 'v[下标] <- 值：下标里有 NA 而右边不止一格 —— R 那边也报'
+            + '（NAs are not allowed in subscripted assignments）',
+        }],
+      }],
+      else_: null,
+    });
+    /* 先算出结果的长度：下标那一档取 max(n, 最大下标)，掩码那一档取 max(n, 掩码长)。 */
+    const head = [
+      declLen(),
+      { kind: 'let', name: 'm', type: INT, init: vecLen(ixv) },
+      { kind: 'let', name: 'nv', type: INT, init: vecLen(valv) },
+      { kind: 'let', name: 'mx', type: INT, init: len },
+    ];
+    if (mask) {
+      head.push({
+        kind: 'if',
+        cond: b('>', nm('m'), mv),
+        then: [{ kind: 'assign', target: mv, value: nm('m') }],
+        else_: null,
+      });
+    } else {
+      head.push({
+        kind: 'for',
+        init: { kind: 'let', name: 'j', type: INT, init: I0 },
+        cond: b('<', jv, nm('m')),
+        post: { kind: 'assign', target: jv, value: b('+', jv, I1) },
+        body: [{
+          kind: 'if',
+          cond: { kind: 'unop', op: '!', operand: lglCall('r_is_na', vecGet(ixv, jv)) },
+          then: [
+            { kind: 'let', name: 'k', type: INT, init: call1('toint', vecGet(ixv, jv)) },
+            { kind: 'if', cond: b('>', kv2, mv), then: [{ kind: 'assign', target: mv, value: kv2 }], else_: null },
+          ],
+          else_: null,
+        }],
+      });
+    }
+    /* 抄一份（R 的赋值是值语义），接长那几格填缺失。 */
+    const copy = [
+      ...vecNewAs('o', mv),
+      {
+        kind: 'for',
+        init: { kind: 'let', name: 'i', type: INT, init: I0 },
+        cond: b('<', i, mv),
+        post: { kind: 'assign', target: i, value: b('+', i, I1) },
+        body: [vecSet(ov, i, { kind: 'ternary', cond: b('<', i, len), then: vecGet(vv, i), else_: naE() })],
+      },
+    ];
+    const write = mask
+      ? [
+        { kind: 'let', name: 'j', type: INT, init: I0 },
+        {
+          kind: 'for',
+          init: { kind: 'let', name: 'i', type: INT, init: I0 },
+          cond: b('<', i, mv),
+          post: { kind: 'assign', target: i, value: b('+', i, I1) },
+          body: [
+            { kind: 'let', name: 'mk', type: REAL, init: vecGet(ixv, b('%', i, nm('m'))) },
+            {
+              kind: 'if',
+              cond: lglCall('r_is_na', nm('mk')),
+              then: [naFail()],
+              else_: [{
+                kind: 'if',
+                cond: b('!=', nm('mk'), { kind: 'real', value: 0 }),
+                then: [
+                  vecSet(ov, i, vecGet(valv, b('%', jv, nm('nv')))),
+                  { kind: 'assign', target: jv, value: b('+', jv, I1) },
+                ],
+                else_: null,
+              }],
+            },
+          ],
+        },
+      ]
+      : [{
+        kind: 'for',
+        init: { kind: 'let', name: 'j', type: INT, init: I0 },
+        cond: b('<', jv, nm('m')),
+        post: { kind: 'assign', target: jv, value: b('+', jv, I1) },
+        body: [{
+          kind: 'if',
+          cond: lglCall('r_is_na', vecGet(ixv, jv)),
+          then: [naFail()],
+          else_: [
+            { kind: 'let', name: 'k', type: INT, init: call1('toint', vecGet(ixv, jv)) },
+            {
+              kind: 'if',
+              cond: b('>=', kv2, I1),
+              then: [vecSet(ov, b('-', kv2, I1), vecGet(valv, b('%', jv, nm('nv'))))],
+              else_: null,
+            },
+          ],
+        }],
+      }];
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RVEC }, { name: 'ix', type: RVEC }, { name: 'val', type: RVEC }],
+      ret: RVEC,
+      body: [...head, ...copy, ...write, { kind: 'return', values: [ov] }],
     };
   }
   if (name === 'r_ident_v' || name === 'r_ident_sv') {
