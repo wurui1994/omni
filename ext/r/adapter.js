@@ -3022,6 +3022,25 @@ function switchOf(x, types, asStmt, mkStmt) {
         + '（R 那儿名字会被当成"这一格叫什么"而不是分支）');
     }
     if (!stmtMode) {
+      /**
+       * **选择子是个数字面量时这一格编译期就定了**（2026-09-26）：`switch(2, "一","二","三")`
+       * 在 R 里就是第 2 支 —— 位置是按 1 起数的（`do_switch`）。既然编译期知道是哪一支，
+       * 表达式位上也就没有"越界回 NULL"那个问题了，直接发那一支。
+       * 越界（`switch(9, …)`）照旧当场报：那时 R 回的真是 `NULL`。
+       */
+      if (isList(sel) && tag(sel) === 'num') {
+        const k = Number(String(leaf(kids(sel)[0])).replace(/L$/, ''));
+        if (Number.isInteger(k)) {
+          if (k < 1 || k > arms.length) {
+            throw new Error(`r->IR: \`switch(${k}, …)\` 越界（只有 ${arms.length} 支）——`
+              + ' R 那儿越界回的是 `NULL`，而这一层没有那一格');
+          }
+          if (arms[k - 1].value === null) {
+            throw new Error(`r->IR: \`switch(${k}, …)\` 挑中的那一支是空的`);
+          }
+          return body(arms[k - 1].value);
+        }
+      }
       /* 位置那一档**没有"兜底"这个写法**（多写一格就是多一个位置），而越界时 R 回 `NULL`。
          所以表达式位上这一格当场报 —— 回 0 或者"回最后一支"都是静默答错。 */
       throw new Error('r->IR: 表达式位上的 `switch(数, …)` 还没接 —— 越界时 R 回 `NULL`，'

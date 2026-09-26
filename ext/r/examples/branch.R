@@ -96,3 +96,12 @@ swLab2 <- switch("zz", a = { swCnt <- 1; "甲" }, { swCnt <- swCnt + 5; "兜底"
 cat(swLab2, swCnt, "\n")
 swNum <- switch("two", one = { 1 }, two = { swT <- 2; swT * 10 }, 0)
 cat(swNum, "\n")
+
+# **选择子是个数字面量时这一格编译期就定了**（位置按 1 起数）—— 于是表达式位上也没有
+# "越界回 NULL"那个问题了。越界（`switch(9, …)`）照旧当场报。
+cat(switch(2, "一", "二", "三"), "\n")
+cat(switch(1, "甲", "乙"), switch(3, 10, 20, 30), "\n")
+cat(switch(2L, "p", "q"), "\n")
+swPick <- switch(3, "a", "b", "c")
+cat(swPick, "\n")
+cat(nchar(switch(1, "abc", "de")), "\n")
