@@ -1880,6 +1880,29 @@ function constOf(e, C) {
     const v = constOf(kids(e)[0], C);
     return v === null ? null : -v;
   }
+  /**
+   * **一元数学函数也折**（`enum{sq3=1/sqrt(3)}`，`demos/mount.kc:9`）。
+   *
+   * 口径：这几格在这门语言里是**纯函数**（`eval.txt` 的 "1-Param Operators" 那一行），
+   * 而 `enum` 是编译期常量 ⇒ 折出来的值与运行时算出来的必须是同一个 double。
+   * 用的是 JS 的 `Math.*` —— 与我们运行时那一侧（`rmath`）落到的是同一批 libm 函数。
+   * **只折这几格**：名单上没有的照旧回 null 让上头当场报（别默默折出个别的数）。
+   */
+  if (tag(e) === 'call') {
+    const h = kids(e)[0];
+    if (!isList(h) || tag(h) !== 'name' || kids(e).length !== 2) return null;
+    const f = idOf(h);
+    const v = constOf(kids(e)[1], C);
+    if (v === null) return null;
+    const M = {
+      sqrt: Math.sqrt, sin: Math.sin, cos: Math.cos, tan: Math.tan,
+      asin: Math.asin, acos: Math.acos, atan: Math.atan, log: Math.log,
+      exp: Math.exp, abs: Math.abs, floor: Math.floor, ceil: Math.ceil,
+    };
+    if (M[f] === undefined) return null;
+    const r = M[f](v);
+    return Number.isFinite(r) ? r : null;
+  }
   return null;
 }
 

@@ -95,6 +95,11 @@ export const EVALDRAW_3D = new Map([
   ['playsong/1', 'g3_nop1'], ['playsong/2', 'g3_nop2'],
   ['playnote/1', 'g3_nop1'], ['playnote/2', 'g3_nop2'], ['playnote/3', 'g3_nop3'],
   ['playnote/4', 'g3_nop4'],
+  /* `playsoundupdate(句柄, 音量, 频率[, x,y,z])`（`evaldraw.txt:1679` 那一族的"改一改
+     正在响的那一声"）：也收下不响（`demos/roadway.kc` 靠它调轮胎噪声）。 */
+  ['playsoundupdate/2', 'g3_nop2'], ['playsoundupdate/3', 'g3_nop3'],
+  ['playsoundupdate/4', 'g3_nop4'], ['playsoundupdate/5', 'g3_nop5'],
+  ['playsoundupdate/6', 'g3_nop6'],
 ]);
 
 /* ─── 生成出来的那一摊 ────────────────────────────────────────────────── */
@@ -187,6 +192,7 @@ export function gfx3FnDecls(host = false, withGL = false) {
     fn('g3_nop3', ['a', 'b', 'c'], [ret(num(0))]),
     fn('g3_nop4', ['a', 'b', 'c', 'd'], [ret(num(0))]),
     fn('g3_nop5', ['a', 'b', 'c', 'd', 'e'], [ret(num(0))]),
+    fn('g3_nop6', ['a', 'b', 'c', 'd', 'e', 'f'], [ret(num(0))]),
     /**
      * `setcam(x,y,z,hang,vang)`：三个向量照头注第 3 条那一套算。
      * `下 = 前 × 右` 用的是"y 往下为正"那一手（与 2D 画布同向）。
