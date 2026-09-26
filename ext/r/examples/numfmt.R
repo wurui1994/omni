@@ -174,3 +174,26 @@ bigv <- numeric(100000)
 bigv[100000] <- 7
 cat(bigv[100000], length(bigv), "\n")
 cat(sum(1:100000), "\n")
+
+# **`%*` 那一格的宽度也认运行期的值**（2026-09-26）：补空格那三格辅助函数收的本来就是
+# 一格 int 表达式。**负宽度是"靠左"**（C 与 R 同解）—— 字面量那一档在编译期折成 `-` 旗子，
+# 运行期那一档落一格三元。从前 `%*` 只认整数字面量，于是
+# `formatC(s, width = nchar(s) + 2)` 整份退到 libR，而负字面量那一格还静默补错了边。
+fw <- 6
+cat(sprintf("[%*s]", fw, "ab"), "\n")
+cat(sprintf("[%*d]", fw, 42L), "\n")
+cat(sprintf("[%*s]", -fw, "ab"), "\n")
+cat(sprintf("[%*s]", -5, "ab"), "\n")
+cat(sprintf("[%-*s]", fw, "ab"), "\n")
+cat(sprintf("[%0*d]", fw, 42L), "\n")
+cat(sprintf("[%*.2f]", fw + 2, 3.14159), "\n")
+cat(sprintf("[%*s]", 0, "ab"), "\n")
+for (fk in c(2, 4, 6)) cat(sprintf("[%*s]", fk, "z"), "\n")
+fs <- "ab"
+cat("[", formatC(fs, width = nchar(fs) + 2), "]", "\n", sep = "")
+cat("[", formatC("xy", width = fw), "]", "\n", sep = "")
+cat("[", formatC("xy", width = -fw), "]", "\n", sep = "")
+cat("[", formatC(42L, width = fw, flag = "0"), "]", "\n", sep = "")
+cat("[", formatC(3.14159, width = fw, digits = 2, format = "f"), "]", "\n", sep = "")
+fnm <- c("a", "bb", "ccc")
+for (fi in seq_along(fnm)) cat("[", formatC(fnm[fi], width = 5), "]", "\n", sep = "")

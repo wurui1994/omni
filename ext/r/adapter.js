@@ -2805,8 +2805,18 @@ function formatCOf(x, types) {
   };
   const fmtL = lit('format', '串');
   const digL = lit('digits', '整数');
-  const widL = lit('width', '整数');
   const flgL = lit('flag', '串');
+  /**
+   * **`width=` 也认运行期的值**（2026-09-26）：落成 `%*s` 那一档，宽度当**第一个实参**
+   * 交给 `sprintf`（C 的 `%*d` 就是这个口径，我们那份排版本来就认它 —— 判据在
+   * `ext/r/examples/str.R` 的 `sprintf("[%*s]", 8, "ab")` 那几行）。
+   * 从前这一格只认字面量，于是 `formatC(s, width = nchar(s) + 2)` 整份退到 libR。
+   * 负数照旧是"靠左"（R 与 C 在这一条上同解）。
+   */
+  const widNode = namedArg(x, 'width');
+  const widIsLit = widNode !== undefined && (tag(widNode) === 'num' || tag(widNode) === 'str');
+  const widL = widIsLit ? String(leaf(kids(widNode)[0])) : null;
+  const widRun = (widNode !== undefined && !widIsLit) ? widNode : null;
   const t = typeOfExpr(as[0], types);
   if (isVecTy(t) || isStrVec(t)) {
     /* 向量那一侧照 `sprintf` 那条路走（它自己会摊成元素），所以这儿不拦。 */
@@ -2829,8 +2839,9 @@ function formatCOf(x, types) {
   if (!/^[-+0 ]*$/.test(flag)) {
     throw new Error(`r->IR: formatC() 的 \`flag = "${flag}"\` 还没接（认的是 - + 0 与空格）`);
   }
-  const fmt = `%${flag}${widL ?? ''}${dig === null ? '' : `.${dig}`}${conv}`;
-  return sprintfOf(cstCall('sprintf', [cstStr(fmt), as[0]]), types);
+  const fmt = `%${flag}${widRun === null ? (widL ?? '') : '*'}${dig === null ? '' : `.${dig}`}${conv}`;
+  const sargs = widRun === null ? [cstStr(fmt), as[0]] : [cstStr(fmt), widRun, as[0]];
+  return sprintfOf(cstCall('sprintf', sargs), types);
 }
 
 /**
@@ -2947,18 +2958,28 @@ function sprintfOf(x, types) {
     if (lit !== '') { pieces.push(S(lit)); lit = ''; }
     const [all, flags, wid0, prec, conv] = m;
     /**
-     * **`%*d` 那一格宽度从实参里取**（R 也收这个写法）。这一层的格式串是**编译期**拆开的
-     * （见这个函数头上那段账），所以那一格只认**字面量** —— 不是字面量就当场报，
-     * 而不是给一个"宽度当成 0"的答案（那是静默答错）。
+     * **`%*d` 那一格宽度从实参里取**（R 也收这个写法）。字面量那一档编译期就折进去；
+     * **不是字面量也接了**（2026-09-26）—— 补空格那三格辅助函数（`r_padl` / `r_padr` /
+     * `r_pad0`）收的本来就是一格 int **表达式**，所以宽度是运行期的值一样打得出去。
+     * 从前这一格只认字面量，于是 `formatC(s, width = nchar(s) + 2)` 整份退到 libR。
+     *
+     * **负宽度是"靠左"**（C 与 R 同解：`sprintf("[%*s]", -5, "ab")` 出 `[ab   ]`）。
+     * 字面量那一档在这儿就折成 `-` 旗子；运行期那一档落一格三元（宽度与那段串各存进
+     * 一格临时量 —— 两处都要读第二遍）。
      */
     let wid = wid0;
+    let widE = null;
     if (wid0 === '*') {
       const wn = nextArg();
-      if (tag(wn) !== 'num' || !/^-?\d+L?$/.test(String(leaf(kids(wn)[0])))) {
-        throw new Error(`r->IR: sprintf("${fmt}") 里 \`%*\` 那一格的宽度只认整数字面量`
-          + '（格式串是编译期拆开的，见 `sprintfOf`）');
+      const wt = typeOfExpr(wn, types);
+      if (isVecTy(wt) || isStrVec(wt)) {
+        throw new Error(`r->IR: sprintf("${fmt}") 里 \`%*\` 那一格的宽度是一条向量 —— 要一格数`);
       }
-      wid = String(leaf(kids(wn)[0])).replace(/L$/, '');
+      if (tag(wn) === 'num' && /^-?\d+L?$/.test(String(leaf(kids(wn)[0])))) {
+        wid = String(leaf(kids(wn)[0])).replace(/L$/, '');
+      } else {
+        widE = asIntE(exprOf(wn, types), wt);
+      }
     }
     const dash = flags.includes('-');
     const zero = flags.includes('0');
@@ -2996,11 +3017,33 @@ function sprintfOf(x, types) {
         kind: 'ternary', cond: signOf, then: S(plus ? '+' : ' '), else_: S(''),
       }, piece);
     }
-    if (wid !== '') {
-      const w = { kind: 'int', value: Number(wid) };
+    if (widE !== null) {
+      /* 运行期的宽度：负数靠左。宽度与那段串各存进一格临时量（两支都要读）。 */
+      const wv = fresh('pw');
+      const pv = fresh('ps');
+      const vr2 = (nm2) => ({ kind: 'name', name: nm2 });
+      const padName = dash ? 'r_padr' : (zero ? 'r_pad0' : 'r_padl');
+      piece = {
+        kind: 'block-expr',
+        stmts: [
+          { kind: 'let', name: pv, type: STR, init: piece },
+          { kind: 'let', name: wv, type: INT, init: widE },
+        ],
+        value: {
+          kind: 'ternary',
+          cond: b('<', vr2(wv), { kind: 'int', value: 0 }),
+          then: lglCall('r_padr', vr2(pv), b('-', { kind: 'int', value: 0 }, vr2(wv))),
+          else_: lglCall(padName, vr2(pv), vr2(wv)),
+        },
+      };
+    } else if (wid !== '') {
+      /* 字面量那一档：负宽度在这儿就折成"靠左"（C 与 R 同解）。 */
+      const wn2 = Number(wid);
+      const left = dash || wn2 < 0;
+      const w = { kind: 'int', value: Math.abs(wn2) };
       /* `0` 旗子：补零而不是补空格，而且**符号要留在最前**（`%05.1f` 的 -1.5 是 `-01.5`）。
          `-`（左对齐）与 `0` 撞上时 C 里 `-` 赢。 */
-      const helper = dash ? 'r_padr' : (zero ? 'r_pad0' : 'r_padl');
+      const helper = left ? 'r_padr' : (zero ? 'r_pad0' : 'r_padl');
       piece = lglCall(helper, piece, w);
     }
     pieces.push(piece);
