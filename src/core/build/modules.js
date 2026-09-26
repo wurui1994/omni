@@ -311,12 +311,22 @@ export function sxDoStmts(text) {
       cur = [];
       depth = 0;
     }
-    cur.push(ln.trimStart());
-    for (const c of ln) {
-      if (c === '(') depth++;
-      else if (c === ')') depth--;
+    /* **这一行可能装着好几层的收尾**（`…))))` 里后几个右括号是 `do` / `main` /
+       外层 `while` 的）—— 所以按字符数深度，深度回到 0 的那一刻就在那儿把行切断，
+       多出来的那几个右括号不属于这一句。踩过：不切断的话入口那一份括号多出六个，
+       降级器当场报 `unexpected )`。 */
+    let cut = -1;
+    for (let k = 0; k < ln.length; k++) {
+      const c = ln[k];
+      if (c === '(') { depth++; continue; }
+      if (c !== ')') continue;
+      depth--;
+      /* **深度回到 0 才算收尾**（行首那几格空白与第一个左括号之前不算 —— 踩过：
+         从零深度就判的话每一句都被切成空串）。 */
+      if (depth <= 0) { cut = k; break; }
     }
-    if (depth <= 0) {
+    cur.push(cut < 0 ? ln.trimStart() : ln.slice(0, cut + 1).trimStart());
+    if (cut >= 0) {
       out.push(cur.join('\n'));
       cur = null;
     }
