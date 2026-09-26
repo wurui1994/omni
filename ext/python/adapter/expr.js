@@ -632,6 +632,10 @@ function tyOfCall(x, C) {
     if (t === null || t === undefined) return null;
     /* `sorted(串)` / `list(串)` 交的是一张字符表（`reversed` 只收表）。 */
     if (t.kind === 'string' && nm !== 'reversed') return arrOf(STR);
+    /* **字典走的是键**（与 `for k in d` 一条）：发射那一侧早就走 `dkeys` 了，缺的一直是
+       这一格类型 —— 于是 `for k in sorted(d)` 报"用到了没赋过值的名字 'k'"（绑不上）。
+       `print(sorted(d))` 看不出来：那一条路上没人问过类型。 */
+    if (t.kind === 'map' && nm !== 'reversed') return arrOf(t.key);
     /* `list(元组)` —— 逐格合成一格当元素。 */
     if (nm === 'list') {
       const tup = tupleOf(C.recOf(t));

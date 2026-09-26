@@ -1,0 +1,77 @@
+;; 字典的值是一张表。这一份的存在理由是**"字典装一串表"那种分组写法**：python 里
+;; `d[k] = []` 之后 `d[k].append(v)` —— adapter 那一侧从 `d[k].append(v)` 就推得出
+;; `map<int, arr<string>>`，卡的是方言这一侧的口：`(dict K V)` 的值原先**只按原子读**，
+;; 嵌套的类型形根本写不出来（`(arr int)` 是一张表，不是一个词）。
+;;
+;; 这一格与 44-dicts 里"值是一格类"是**同一档**：格子里躺的还是一个句柄（`(arr …)` 是
+;; 引用语义），所以运行时那份表的步长不用动 —— 这也是为什么它能进来、而值语义的结构体
+;; 还不收。`(dict K (dict …))` 也还不收：那一档的零值要新造一张空字典，不只是个空句柄。
+;;
+;; OIR 那一层**一个新节点都不加**：走的还是 dnew/dget/dset/dhas/dlen 那五格。
+;; 判据的要点是**引用语义**：dset 进去之后改源头那张表，从字典里读回来的那一格要跟着变。
+;; 五条腿要逐字节相同：C 那条腿的容器是单态的，`dict<string, arr<int>>` 要连着
+;; `arr<int>` 一起登记进 mod.containers —— 少登记一格，C 那边就是个没声明的类型名。
+(module
+  ;; 字典穿过函数，就地往里头那张表上 push：回来调用方看得见
+  (fn addto ((d (dict string (arr int))) (k string) (v int)) void
+    (apush (dget (var d) (var k)) (var v)))
+
+  (fn sum1 ((xs (arr int))) int
+    (let s int (int 0))
+    (let i int (int 0))
+    (while (bin "<" (var i) (alen (var xs)))
+      (do
+        (set s (bin "+" (var s) (aget (var xs) (var i))))
+        (set i (bin "+" (var i) (int 1)))))
+    (ret (var s)))
+
+  (main
+    (let g (dict string (arr int)) (dnew (dict string (arr int))))
+    (print (dlen (var g)))
+
+    ;; 装一张空表进去：字典长一格，那张表还是空的
+    (dset (var g) (str "a") (anew (arr int) (int 0)))
+    (print (dlen (var g)))
+    (print (alen (dget (var g) (str "a"))))
+
+    ;; 直接往字典里那张表上 push —— `(dget …)` 读回来的是句柄，不是拷贝
+    (apush (dget (var g) (str "a")) (int 1))
+    (apush (dget (var g) (str "a")) (int 2))
+    (print (alen (dget (var g) (str "a"))))
+    (print (aget (dget (var g) (str "a")) (int 0)))
+    (print (aget (dget (var g) (str "a")) (int 1)))
+
+    ;; 引用语义：dset 进去之后改**源头**那张表，字典里那一格跟着变
+    (let xs (arr int) (anew (arr int) (int 0)))
+    (dset (var g) (str "b") (var xs))
+    (apush (var xs) (int 9))
+    (print (alen (dget (var g) (str "b"))))
+    (print (aget (dget (var g) (str "b")) (int 0)))
+
+    ;; 两个键各是各的表：动了 "b" 不许波及 "a"
+    (print (alen (dget (var g) (str "a"))))
+
+    ;; 穿过函数
+    (expr (call addto (var g) (str "a") (int 3)))
+    (print (alen (dget (var g) (str "a"))))
+    (print (call sum1 (dget (var g) (str "a"))))
+    (print (dhas (var g) (str "z")))
+    (print (dlen (var g)))
+
+    ;; 另一种键与另一种元素（int 键 / string 元素）—— C 那条腿要为它另生成两份容器
+    (let h (dict int (arr string)) (dnew (dict int (arr string))))
+    (dset (var h) (int 0) (anew (arr string) (int 0)))
+    (apush (dget (var h) (int 0)) (str "hi"))
+    (apush (dget (var h) (int 0)) (bin "+" (str "the") (str "re")))
+    (print (alen (dget (var h) (int 0))))
+    (print (aget (dget (var h) (int 0)) (int 1)))
+    (print (slen (aget (dget (var h) (int 0)) (int 1))))
+
+    ;; 元素是 real 的那一格
+    (let r (dict string (arr real)) (dnew (dict string (arr real))))
+    (dset (var r) (str "x") (anew (arr real) (int 2)))
+    (aset (dget (var r) (str "x")) (int 1) (real 1.5))
+    (print (alen (dget (var r) (str "x"))))
+    ;; 没写过的那一格是零值（`anew` 铺的那份）—— 这里比而不印，印法是另一份的账
+    (print (bin "==" (aget (dget (var r) (str "x")) (int 0)) (real 0.0)))
+    (print (aget (dget (var r) (str "x")) (int 1)))))

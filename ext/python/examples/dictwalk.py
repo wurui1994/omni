@@ -51,6 +51,29 @@ def sum_values(d: dict[str, int]) -> int:
     return s
 
 
+def group_by_len(words: list[str]) -> dict[int, list[str]]:
+    """字典装一串表。
+
+    卡的从来不是 adapter 这一侧（从 `by_len[n].append(w)` 就认得出
+    `map<int, arr<string>>`），是方言那一侧的口：`(dict K V)` 的值原先**按原子读**，
+    `(arr string)` 是一张表、不是一个词，写都写不出来。
+    """
+    by_len: dict[int, list[str]] = {}
+    for w in words:
+        n = len(w)
+        if n not in by_len:
+            by_len[n] = []
+        by_len[n].append(w)
+    return by_len
+
+
+def total_len(g: dict[str, list[int]]) -> int:
+    s = 0
+    for k in g:
+        s += len(g[k])
+    return s
+
+
 def main():
     ages = {"ann": 31, "bob": 24, "cid": 45}
 
@@ -130,6 +153,42 @@ def main():
     reals = {}
     reals["pi"] = 3.5
     print(reals)
+
+    # 值是一张表：分组那种写法
+    groups = group_by_len(["apple", "fig", "kiwi", "plum", "a"])
+    print(groups)
+    for size in groups:
+        print(size, groups[size], len(groups[size]))
+    print(sorted(groups))
+    print(groups[3][0], groups[4][1])
+
+    # `for k in sorted(d)` —— 排完的键当循环目标（`sorted(d)` 的**类型**从前没给，
+    # 于是那个循环变量绑不上；`print(sorted(d))` 那条路上没人问过类型，所以看不出来）
+    for key in sorted(groups):
+        print(key, groups[key])
+    # `list(d)` 也是键（与 `list(d.keys())` 一条）
+    names = list(ages)
+    print(names, len(names))
+    for nm in list(ages):
+        print(nm)
+
+    # 引用语义：`d[k]` 读回来的是那张表本身，不是抄一份
+    inner = groups[3]
+    inner.append("zzz")
+    print(groups[3], len(groups[3]))
+
+    # 不带标注的那一档：`{}` 的值类型从 `d[k].append(v)` 认
+    bag = {}
+    bag["odd"] = []
+    bag["even"] = []
+    for i in range(6):
+        if i % 2 == 0:
+            bag["even"].append(i)
+        else:
+            bag["odd"].append(i)
+    print(bag, total_len(bag))
+    bag["even"].sort()
+    print(bag["even"], sum(bag["even"]), max(bag["odd"]))
 
 
 main()

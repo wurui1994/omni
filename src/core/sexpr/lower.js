@@ -305,18 +305,29 @@ class CoreLowerer {
     // 走的就是这几格，所以六条腿本来就认得（见 hir/check.js 的 indexGet / membership）。
     if (isList(node) && head(node) === 'dict') {
       const kn = isAtom(node.items[1]) ? node.items[1].value : null;
-      const vn = isAtom(node.items[2]) ? node.items[2].value : null;
+      const vNode = node.items[2];
+      const vn = isAtom(vNode) ? vNode.value : null;
       const k = kn === null ? undefined : BASE_TYPES.get(kn);
       let v = vn === null ? undefined : BASE_TYPES.get(vn);
       /* **值是一格类**（引用语义的记录）：格子里躺一个句柄，与标量同宽 —— 与
          `(arr 类名)` 那一格同一档。go 的 `map[string]*Mesh` 那一族靠这一条。
          值语义的结构体还不收（格子要就地躺一整块，那要动运行时那份表的步长）。 */
       if (v === undefined && vn !== null && this.classes.has(vn)) v = this.classes.get(vn);
+      /* **值是一张表**（`(dict string (arr int))`）—— 与"值是一格类"同一档：格子里躺的还是
+         一个句柄（`(arr …)` 是引用语义），所以运行时那份表的步长不用动。
+         python 的"字典装一串表"那种分组写法（`d[k] = []` 之后 `d[k].append(v)`）卡的就是
+         这一格。注意值那一格从前是**按原子读的** —— 嵌套的类型形根本写不出来。
+         `(dict K (dict …))` 还不收：那一档的零值要新造一张空字典，不只是个空句柄。 */
+      if (v === undefined && isList(vNode) && head(vNode) === 'arr') {
+        const inner = this.ty(vNode, what);
+        if (inner === null) return null;
+        v = inner;
+      }
       if (k !== INT && k !== STRING) {
         return this.err(node, `${what}：(dict K V) 的键只能是 int 或 string`);
       }
       if (v === undefined || v === VOID) {
-        return this.err(node, `${what}：(dict K V) 的值只能是 int / real / bool / string / 类名`);
+        return this.err(node, `${what}：(dict K V) 的值只能是 int / real / bool / string / 类名 / (arr …)`);
       }
       const t = dictType(k, v);
       this.useContainer(t);

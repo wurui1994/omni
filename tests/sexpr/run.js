@@ -145,6 +145,12 @@ const CANT = {
     legs: ['run-llvm'],
     why: '同 44-dicts：LLVM 后端不支持聚合容器（dict / list / set），主语言也一样',
   },
+  '60-dict-arr': {
+    legs: ['run-llvm'],
+    why: '同 44-dicts：LLVM 后端不支持聚合容器（dict / list / set），主语言也一样 —— '
+      + '这一格是"字典的值是一张表"，除了字典本身还叠上 50-arrstruct 那一条'
+      + '（表的元素不是那四份标量单态，它没接）',
+  },
   'dyn-asfn-wrong-tag': {
     legs: ['run-llvm'],
     why: '同 48-dyn：LLVM 后端连一格 dyn 的槽位都落不下去，报的不是这份用例要钉的那句',
