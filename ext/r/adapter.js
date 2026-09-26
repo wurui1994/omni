@@ -2997,14 +2997,23 @@ function switchIsStmt(x) {
  * 表达式位上每一支是**值**，落方言的 `if-expr`（那一格每支自己一个语句槽，所以是懒的 ——
  * R 也只求被选中的那一支）。
  */
-function switchOf(x, types, asStmt) {
+function switchOf(x, types, asStmt, mkStmt) {
   const args = argsOf(x);
   if (args.length < 2) throw new Error(`r->IR: switch() 至少要"选择子 + 一格分支"（给了 ${args.length}）`);
   if (args[0].name !== null) throw new Error('r->IR: switch() 的第一格实参是选择子，不该带名字');
   const sel = args[0].value;
   const arms = args.slice(1);
   const st = typeOfExpr(sel, types);
-  const body = (node) => (asStmt ? stmtOf(node, types) : exprOf(node, types));
+  /**
+   * `mkStmt` 是**目标导向**那一档（`v <- switch(…)`，见 `assignOf`）：每一支自己发一段语句
+   * （前面几格照做、最后一格赋给那个名字）。给了它就按**语句**落 —— if 链的每一支本来就是
+   * 一个语句槽，所以多格 `{ … }` 在这儿摆得下（表达式位上摆不下，见 `exprOf` 的 block）。
+   */
+  const body = (node) => {
+    if (mkStmt !== undefined) return mkStmt(node);
+    return asStmt ? stmtOf(node, types) : exprOf(node, types);
+  };
+  const stmtMode = mkStmt !== undefined || asStmt;
 
   /* 数那一档：按位置配（1 起）。 */
   if (st.kind !== 'string') {
@@ -3012,7 +3021,7 @@ function switchOf(x, types, asStmt) {
       throw new Error('r->IR: switch() 的选择子是数时，分支是**按位置**配的，不该带名字'
         + '（R 那儿名字会被当成"这一格叫什么"而不是分支）');
     }
-    if (!asStmt) {
+    if (!stmtMode) {
       /* 位置那一档**没有"兜底"这个写法**（多写一格就是多一个位置），而越界时 R 回 `NULL`。
          所以表达式位上这一格当场报 —— 回 0 或者"回最后一支"都是静默答错。 */
       throw new Error('r->IR: 表达式位上的 `switch(数, …)` 还没接 —— 越界时 R 回 `NULL`，'
@@ -3056,10 +3065,10 @@ function switchOf(x, types, asStmt) {
   const condOfKeys = (keys) => keys
     .map((k) => b('==', pick, { kind: 'string', value: k }))
     .reduce((acc, c) => b('||', acc, c));
-  let out = dflt === null ? null : (asStmt ? body(dflt) : body(dflt));
+  let out = dflt === null ? null : body(dflt);
   for (let i = groups.length - 1; i >= 0; i--) {
     const cond = condOfKeys(groups[i].keys);
-    if (asStmt) {
+    if (stmtMode) {
       out = { kind: 'if', cond, then: [body(groups[i].value)], else_: out === null ? null : [out] };
     } else {
       if (out === null) {
@@ -3072,7 +3081,7 @@ function switchOf(x, types, asStmt) {
     }
   }
   const decl = { kind: 'let', name: tmp, type: STR, init: exprOf(sel, types) };
-  return asStmt
+  return stmtMode
     ? { kind: 'block', stmts: [decl, out] }
     : { kind: 'block-expr', stmts: [decl], value: out };
 }
@@ -5882,6 +5891,52 @@ function assignOf(x, types) {
   if (t === 'sym') {
     const name = mangle(nameOf(target));
     const want = types.get(name);
+    /** 把一棵表达式树赋给这个名字（对齐那几格类型的活只写一处）。 */
+    const asgOf = (node) => {
+      const nt = typeOfExpr(node, types);
+      let nv = exprOf(node, types, want);
+      /* 名字定成了 double、这一句给的是整数 → 提升。R 里 `t <- 0` 之后 `t <- t + 2.5` 是一回事
+         （那格量一直是 double），而方言那侧一个名字只有一种类型，所以写的时候对齐。 */
+      if (want !== undefined && want.kind === 'real' && nt.kind === 'int') nv = asReal(nv, nt);
+      /* **`x <- TRUE` 之后 `x + 1`**：那格名字被推成 int（`inferRound` 里 bool → int），
+         所以赋进去的 bool 也要摊成 1 / 0（见 `asNumE`）。 */
+      if (want !== undefined && want.kind !== 'bool' && nt.kind === 'bool') {
+        nv = want.kind === 'real' ? asReal(nv, nt) : asNumE(nv, nt);
+      }
+      return { kind: 'assign', target: { kind: 'name', name }, value: nv };
+    };
+    /**
+     * **`v <- switch(…)` 里某一支写成多格 `{ … }`**（2026-09-26）：按**目标导向**落 ——
+     * switch 落成一条 if 链（语句），每一支自己做前面那几格、再把最后一格赋给 `v`。
+     * 表达式位上摆不下那几格（见 `exprOf` 的 block），而 if 链的每一支本来就是语句槽。
+     *
+     * R 里花括号**不开作用域**，所以前面那几格就是这一层的普通语句（`stmtOf`）——
+     * 与 apply 那一族里"体内的 `<-` 是局部量"正相反，那儿是函数体、这儿不是。
+     *
+     * 带名字的向量那一档不走这条路（名字那一条影子跟不住），照旧当场报。
+     */
+    const isSwitchCall = isList(value) && tag(value) === 'call' && isList(kids(value)[0])
+      && tag(kids(value)[0]) === 'sym' && nameOf(kids(value)[0]) === 'switch';
+    const armIsBlock = (a) => a.value !== null && isList(a.value) && tag(a.value) === 'block'
+      && kids(a.value).length > 1;
+    if (isSwitchCall && argsOf(value).slice(1).some(armIsBlock)) {
+      if (isNamedTy(want) || isNamedStr(want)) {
+        throw new Error('r->IR: `v <- switch(…)` 里某一支是多格 `{ … }`，而 `v` 装的是'
+          + '**带名字的向量** —— 名字那一条影子在这条路上跟不住，当场报');
+      }
+      const mk = (node) => {
+        if (!isList(node) || tag(node) !== 'block') return asgOf(node);
+        const ks = kids(node);
+        if (ks.length === 0) {
+          throw new Error('r->IR: `switch(…)` 里有一支是空的 `{ }` —— R 那儿它的值是 `NULL`');
+        }
+        return {
+          kind: 'block',
+          stmts: [...ks.slice(0, -1).map((s) => stmtOf(s, types)), asgOf(ks[ks.length - 1])],
+        };
+      };
+      return switchOf(value, types, true, mk);
+    }
     const vt = typeOfExpr(value, types);
     let v = exprOf(value, types, want);
     /* 名字定成了 double、这一句给的是整数 → 提升。R 里 `t <- 0` 之后 `t <- t + 2.5` 是一回事

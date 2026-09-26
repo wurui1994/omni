@@ -69,3 +69,30 @@ for (i in 1:3) blkT <- blkT + { i * 2 }
 cat(blkT, "\n")
 cat(Reduce(function(a, b) { a + b }, 1:5), "\n")
 cat(unlist(Filter(function(z) { z %% 2 == 0 }, 1:8)), "\n")
+
+# **`v <- switch(…)` 里某一支是多格 `{ … }`**：按**目标导向**落 —— switch 本来就落成一条
+# if 链，每一支自己做前面那几格、再把最后一格赋给 v。表达式位上摆不下那几格，而 if 链的
+# 每一支就是个语句槽。R 里花括号**不开作用域**，所以前面那几格是这一层的普通语句
+# （与 apply 那一族正相反，那儿是函数体、体里的 `<-` 是局部量）。
+swOps <- c("push", "push", "add", "dup", "mul", "bad", "show")
+swStk <- numeric(0)
+swN <- 0
+for (i in seq_along(swOps)) {
+  swOp <- swOps[i]
+  swR <- switch(swOp,
+    push = { swN <- swN + 1; swStk <- c(swStk, swN); "ok" },
+    add = { swStk <- c(swStk[1], sum(swStk)); "ok" },
+    dup = { swStk <- c(swStk, swStk[length(swStk)]); "ok" },
+    mul = { swStk <- c(prod(swStk)); "ok" },
+    show = { cat("栈:", swStk, "\n"); "ok" },
+    "不认识")
+  cat(i, swOp, swR, "\n")
+}
+swCnt <- 0
+swLab <- switch("b", a = { swCnt <- swCnt + 1; "甲" }, b = { swCnt <- swCnt + 10; "乙" },
+                { swCnt <- 99; "别的" })
+cat(swLab, swCnt, "\n")
+swLab2 <- switch("zz", a = { swCnt <- 1; "甲" }, { swCnt <- swCnt + 5; "兜底" })
+cat(swLab2, swCnt, "\n")
+swNum <- switch("two", one = { 1 }, two = { swT <- 2; swT * 10 }, 0)
+cat(swNum, "\n")
