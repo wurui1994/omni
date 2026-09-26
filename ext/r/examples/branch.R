@@ -105,3 +105,39 @@ cat(switch(2L, "p", "q"), "\n")
 swPick <- switch(3, "a", "b", "c")
 cat(swPick, "\n")
 cat(nchar(switch(1, "abc", "de")), "\n")
+
+# **`for (i in a:b)` 里 `:` 会倒着走** —— `1:0` 是 `c(1, 0)`，不是空的。
+# 从前这一格一律发"从 a 数到 b、每圈 +1"，于是 `m <- 0; for (i in 1:m)` 一圈都不转，
+# 而 R 转**两圈**（i 取 1 再取 0）—— 静默改掉了控制流，比答错一个数更难看出来。
+# 两头都是字面量时方向编译期就定；有一头是运行期的值时上下界各存一格临时量
+# （R 的 `:` 只求值一次），条件写成 `(i - hi) * d <= 0`，一条式子管两个方向。
+m <- 0
+for (i in 1:m) cat("y")
+cat("|", "\n")
+for (i in 1:0) cat(i)
+cat("|", "\n")
+for (i in 3:1) cat(i)
+cat("|", "\n")
+a <- 5
+b <- 2
+for (i in a:b) cat(i)
+cat("|", "\n")
+a <- 2
+b <- 5
+for (i in a:b) cat(i)
+cat("|", "\n")
+lo <- -1
+hi <- -3
+for (i in lo:hi) cat(i, "")
+cat("|", "\n")
+tot <- 0
+for (i in 5:1) { if (i == 3) break; tot <- tot + i }
+cat(tot, "\n")
+tot <- 0
+for (i in 1:5) { if (i %% 2 == 0) next; tot <- tot + i }
+cat(tot, "\n")
+v <- c(1, 2, 3)
+for (i in 1:length(v)) cat(v[i])
+cat("|", "\n")
+for (i in seq_len(0)) cat("z")
+cat("|", "\n")

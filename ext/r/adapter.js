@@ -1040,6 +1040,26 @@ const BYTEWISE = new Set(['nchar', 'substr', 'substring', 'toupper', 'tolower', 
   'sort', 'order']);
 
 /**
+ * **哪几格实参必须真是串** —— 名字 → 要查的位置实参下标。
+ *
+ * R 会替你转（`toupper(123)` 是 `"123"`、`substr(12345, 2, 3)` 是 `"23"`、
+ * `toupper(NA)` 是 `NA_character_`），而这一层**没有那一格**：串与数之间没有转换算子，
+ * `NA_character_` 也没有（见 SPEC 第四节）。从前这几格照发，发出来是
+ * `(call r_lower (call r_na))` 这种 —— 一路到 `.sx` 才撞上，而那时**已经过了换档那道门**：
+ * 整份源码退出码 1、什么都不印，libR 那一档也接不着。所以在这儿当场报
+ * （2026-09-26 扫出来的：`toupper(NA)` / `substr(NA,1,1)` / `trimws(NA)` 三格都是这么死的）。
+ *
+ * `nchar` **不在**这张表里：R 的 `nchar(NA)` 是 **2**（不是缺失），那一格本来就答对。
+ */
+const WANT_STR = new Map([
+  ['toupper', [0]], ['tolower', [0]], ['casefold', [0]],
+  ['substr', [0]], ['substring', [0]], ['trimws', [0]], ['strrep', [0]],
+  ['startsWith', [0, 1]], ['endsWith', [0, 1]],
+  ['strsplit', [0, 1]], ['chartr', [0, 1, 2]],
+  ['grepl', [0, 1]], ['grep', [0, 1]], ['sub', [0, 1, 2]], ['gsub', [0, 1, 2]],
+]);
+
+/**
  * **哪些名字装过非 ASCII 的串**（2026-09-26，量出来的）。
  *
  * `BYTEWISE` 那道门从前只看**调用点上直接写着的**串字面量，于是
@@ -1732,6 +1752,8 @@ function applyTy(fn, x, types) {
   if (fn !== null && (PRED.has(fn) || fn === 'is.na' || fn === 'is.nan')) {
     const t0 = args.length > 0 ? typeOfExpr(args[0], types) : REAL;
     if (isVecTy(t0)) return isNamedTy(t0) ? RNLGL : RLGL;
+    /* 字符向量上 `is.na` 也回一条逻辑向量（这一档全是 FALSE —— 没有 `NA_character_`）。 */
+    if (isStrVec(t0)) return RLGL;
     return BOOL;
   }
   switch (fn) {
@@ -4233,8 +4255,17 @@ function callOf(x, types, extra, want, stmtPos) {
       const nv = useFn(fn === 'is.na' ? 'r_na_v' : 'r_nan_v');
       return { kind: 'call', fn: { kind: 'name', name: nv }, args: [ev(0)] };
     }
-    const name = useFn(fn === 'is.na' ? 'r_is_na' : 'r_is_nan');
-    return { kind: 'call', fn: { kind: 'name', name }, args: [asReal(ev(0), t)] };
+    /**
+     * 串那一侧（2026-09-26）：这一档**没有 `NA_character_`**（见 SPEC 第四节），
+     * 所以一格串永远不是缺失 —— `is.na("NA")` 是 FALSE（R 也是：那是三个字符，
+     * 不是缺失），字符向量上是一条全 FALSE 的逻辑向量。
+     *
+     * 从前这儿照走 `asReal`，发出来是 `(toreal (str "NA"))` —— 方言里串转不成数，
+     * 一路到 `.sx` 才撞上，而那时**已经过了换档那道门**（退 1、什么都不印）。
+     */
+    if (t.kind === 'string') return { kind: 'bool', value: false };
+    if (isStrVec(t)) return lglCall('r_zeros', svLen(ev(0)));
+    return { kind: 'call', fn: { kind: 'name', name: useFn(fn === 'is.na' ? 'r_is_na' : 'r_is_nan') }, args: [asReal(ev(0), t)] };
   }
 
   /* `is.finite` / `is.infinite`：C 回 int，包一格 `!= 0` 成布尔；向量上走生成出来的那格。 */
@@ -4316,6 +4347,22 @@ function callOf(x, types, extra, want, stmtPos) {
             + `（量出来：\`nchar\` 答 6 而 R 答 2、\`substr\` 切出半个字符）。`
             + '见 ext/r/SPEC.md 第四节第 12 条');
         }
+      }
+    }
+    /* 那几格必须真是串的实参（见 `WANT_STR` 那张表的注）：R 会替你转，这一层不会，
+       而发出去就是"过了换档那道门才死"。 */
+    if (fn !== null && WANT_STR.has(fn)) {
+      const ps = posArgs(x);
+      for (const k of WANT_STR.get(fn)) {
+        const a = ps[k];
+        if (a === undefined || a === null) continue;
+        const at2 = typeOfExpr(a, types);
+        if (at2 === undefined || at2 === null) continue;
+        if (at2.kind === 'string' || isStrVec(at2)) continue;
+        throw new Error(`r->IR: ${fn}() 第 ${k + 1} 格实参是 ${isLgl1(at2) ? '缺失/三态逻辑' : at2.kind}`
+          + ' —— R 会先替你转成串（`toupper(123)` 是 `"123"`、`toupper(NA)` 是 `NA_character_`），'
+          + '而这一层串与数之间没有转换算子、也没有 `NA_character_`（见 ext/r/SPEC.md 第四节）。'
+          + '硬发出去会过了换档那道门才死（退 1、什么都不印），所以在这儿报');
       }
     }
     /* **印一条字符向量**时那几行是按"显示宽"补空格的（东亚宽字符占**两列**），而这一层
@@ -6505,15 +6552,62 @@ function forOf(x, types) {
     : asIntE(exprOf(e, types), typeOfExpr(e, types)));
   const step = { kind: 'assign', target: name, value: b('+', name, one) };
 
-  /* `a:b` 那一档：R 最常见的循环头，直接落成"从 a 数到 b"。 */
+  /**
+   * `a:b` 那一档：R 最常见的循环头。
+   *
+   * **`:` 在 R 里会倒着走** —— `1:0` 是 `c(1, 0)`，不是空的。从前这儿一律发
+   * "从 a 数到 b、每圈 +1"，于是 `m <- 0; for (i in 1:m) …` 一圈都不转，而 R 转**两圈**
+   * （i 取 1 再取 0）。那是静默改掉了控制流，比答错一个数更难看出来
+   * （量出来的，2026-09-26）。这个坑 R 自己也认，所以才有 `seq_len`。
+   *
+   * 两头都是**字面量**时方向编译期就定了，照旧发一格 `<=` 或 `>=` 的计数循环。
+   * 有一头是运行期的值时：上下界先各存进一格临时量（**R 的 `:` 只求值一次** ——
+   * 从前 `cnt(hi)` 摆在循环条件里，`for (i in 1:length(v))` 里改了 `v` 的话每圈
+   * 都会重读一遍长度，那也是与 R 不一样的），再存一格步长 `d`（`±1`），
+   * 条件写成 `(i - hi) * d <= 0` —— 一条式子管两个方向，不用分支。
+   */
   if (tag(seq) === 'bin' && String(leaf(kids(seq)[0])) === ':') {
     const [, lo, hi] = kids(seq);
+    const litOf = (e) => {
+      const n2 = exprOf(e, types);
+      return (n2.kind === 'int' || n2.kind === 'real') ? Number(n2.value) : null;
+    };
+    const lv = litOf(lo);
+    const hv = litOf(hi);
+    const ty = vt.kind === 'real' ? REAL : INT;
+    const num = (val) => (vt.kind === 'real' ? { kind: 'real', value: val } : { kind: 'int', value: val });
+    if (lv !== null && hv !== null) {
+      return {
+        kind: 'for',
+        init: { kind: 'assign', target: name, value: cnt(lo) },
+        cond: b(lv <= hv ? '<=' : '>=', name, cnt(hi)),
+        post: { kind: 'assign', target: name, value: b('+', name, num(lv <= hv ? 1 : -1)) },
+        body,
+      };
+    }
+    const loN = fresh('fr');
+    const hiN = fresh('to');
+    const dN = fresh('dir');
+    const vr = (nm) => ({ kind: 'name', name: nm });
     return {
-      kind: 'for',
-      init: { kind: 'assign', target: name, value: cnt(lo) },
-      cond: b('<=', name, cnt(hi)),
-      post: step,
-      body,
+      kind: 'block',
+      stmts: [
+        { kind: 'let', name: loN, type: ty, init: cnt(lo) },
+        { kind: 'let', name: hiN, type: ty, init: cnt(hi) },
+        {
+          kind: 'let',
+          name: dN,
+          type: ty,
+          init: { kind: 'ternary', cond: b('<=', vr(loN), vr(hiN)), then: num(1), else_: num(-1) },
+        },
+        {
+          kind: 'for',
+          init: { kind: 'assign', target: name, value: vr(loN) },
+          cond: b('<=', b('*', b('-', name, vr(hiN)), vr(dN)), num(0)),
+          post: { kind: 'assign', target: name, value: b('+', name, vr(dN)) },
+          body,
+        },
+      ],
     };
   }
   /* `seq_len(n)` 是 `1:n` 的"n 可能是 0"那一版（R 里 `1:0` 会倒着走 —— 那是个真坑）。 */

@@ -110,3 +110,16 @@ idy1 <- 3
 cat(identical(idx1, idy1), identical(idx1, 4), "\n")
 cat(identical(2L, 2L), identical(2L, 3L), "\n")
 cat(identical(-1/0, -1/0), identical(1/0, -1/0), "\n")
+
+# **串那一侧问缺失**：这一档没有 `NA_character_`（见 SPEC 第四节），所以一格串永远不是
+# 缺失 —— `is.na("NA")` 是 FALSE（R 也是：那是三个字符，不是缺失），字符向量上出一条
+# 全 FALSE 的逻辑向量。从前这儿照走 `asReal`，发出来是 `(toreal (str "NA"))`，
+# 一路到 `.sx` 才撞上，而那时已经过了换档那道门（退 1、什么都不印）。
+cat(is.na("NA"), is.na(NA), is.na("a"), is.na(""), "\n")
+cat(is.nan("NA"), is.nan("a"), "\n")
+cat(is.na(c("a", "NA")), is.nan(c("a", "b")), "\n")
+s <- "NA"
+cat(is.na(s), "\n")
+sv <- c("x", "y", "z")
+cat(is.na(sv), length(is.na(sv)), sum(is.na(sv)), any(is.na(sv)), "\n")
+print(is.na(c("a", "b")))
