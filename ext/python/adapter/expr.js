@@ -640,13 +640,13 @@ function tyOfCall(x, C) {
     }
     return t.kind === 'arr' ? t : null;
   }
-  if (nm === 'zip' && argTys.length === 2) {
-    const a = argTys[0];
-    const b = argTys[1];
-    if (a == null || b == null) return null;
-    const ea = a.kind === 'arr' ? a.elem : (a.kind === 'string' ? STR : null);
-    const eb = b.kind === 'arr' ? b.elem : (b.kind === 'string' ? STR : null);
-    return ea === null || eb === null ? null : arrOf(tupleRec([ea, eb], C).type);
+  /* `zip(a, b, …)` —— **N 张表**交一张 N 格元组的表（走到最短的那一张为止）。 */
+  if (nm === 'zip' && argTys.length >= 2) {
+    const es = argTys.map((t) => {
+      if (t == null) return null;
+      return t.kind === 'arr' ? t.elem : (t.kind === 'string' ? STR : null);
+    });
+    return es.some((e) => e === null) ? null : arrOf(tupleRec(es, C).type);
   }
   if (nm === 'enumerate' && argTys.length >= 1) {
     const a = argTys[0];
@@ -1654,8 +1654,24 @@ function compBind(gs, C) {
     for (const g of gs) {
       if (tag(g.target) === 'tuple') {
         const ts = kids(g.target);
-        if (ts.length !== 2 || ts.some((t) => tag(t) !== 'n')) {
-          throw new Error('python->IR: 推导式的目标收一格名字或**两格名字**'
+        if (ts.some((t) => tag(t) !== 'n')) {
+          throw new Error('python->IR: 推导式的目标要是名字（嵌套的拆包还没接）');
+        }
+        /* **N 格目标**：可迭代的元素是一格 N 格的元组（`zip(a, b, c)` 交的就是它）。
+           走法是"按一格元素走，体开头逐格取字段" —— 所以这儿只多记一张拆包表，
+           循环那一侧（`compLoop`）照着摆几句赋值。两格那一档仍走下面的专路（省一张中间表）。 */
+        const et0 = compElem(g.iter, C);
+        const tupN = tupleOf(C.recOf(et0));
+        if (tupN !== null && tupN.length === ts.length) {
+          g.elemT = et0;
+          g.name = C.fresh('cp_t');
+          C.bind(g.name, et0);
+          g.unpack = ts.map((t, k) => ({ nm: one(t, tupN[k]), t: tupN[k] }));
+          continue;
+        }
+        if (ts.length !== 2) {
+          throw new Error('python->IR: 推导式的目标收一格名字、两格名字，'
+            + '或者与一串 N 格元组对上的 N 格名字'
             + '（`for a, b in enumerate(xs) / zip(a, b) / d.items()`）');
         }
         const p = compPair(g.iter, C);
@@ -1719,8 +1735,11 @@ function compLoop(g, body, C) {
   const at = st.kind === 'string'
     ? { kind: 'builtin', name: 'ssub', args: [sv, iv, { kind: 'int', value: 1 }] }
     : { kind: 'index', obj: sv, index: iv };
+  /* N 格目标：体开头把 `_0` … `_{n-1}` 逐格取出来（`compBind` 记下的那张拆包表）。 */
+  const ups = g.unpack === undefined ? [] : g.unpack;
   return [
     { kind: 'let', name: g.name, type: g.elemT, init: null },
+    ...ups.map((u) => ({ kind: 'let', name: u.nm, type: u.t, init: null })),
     { kind: 'let', name: src, type: st, init },
     {
       kind: 'for',
@@ -1730,7 +1749,15 @@ function compLoop(g, body, C) {
         kind: 'assign', target: iv,
         value: { kind: 'binop', op: '+', left: iv, right: { kind: 'int', value: 1 } },
       },
-      body: [{ kind: 'assign', target: { kind: 'name', name: g.name }, value: at }, ...body],
+      body: [
+        { kind: 'assign', target: { kind: 'name', name: g.name }, value: at },
+        ...ups.map((u, k) => ({
+          kind: 'assign',
+          target: { kind: 'name', name: u.nm },
+          value: { kind: 'field', obj: { kind: 'name', name: g.name }, name: `_${k}` },
+        })),
+        ...body,
+      ],
     },
   ];
 }
@@ -2666,30 +2693,27 @@ function pairsList(kind, args, C) {
     ? { kind: 'builtin', name: 'ssub', args: [s.v, iv, { kind: 'int', value: 1 }] }
     : { kind: 'index', obj: s.v, index: iv });
   let cond;
-  let first;
-  let second;
+  /** 逐格要摆进元组的那几个值（`zip` 是 **N 格**，`enumerate` / `items` 是两格）。 */
+  let parts;
   if (kind === 'zip') {
-    const a = pin(args[0], 'pl_a');
-    const b = pin(args[1], 'pl_b');
-    const la = lenOf(a.v, C);
-    const lb = lenOf(b.v, C);
-    cond = {
-      kind: 'binop', op: '<', left: iv,
-      right: {
-        kind: 'ternary', type: INT,
-        cond: { kind: 'binop', op: '<', left: la, right: lb }, then: la, else_: lb,
-      },
-    };
-    first = at(a);
-    second = at(b);
+    /* **N 张表一起走**，走到最短的那一张为止（python 的规矩）。 */
+    const ss = args.map((a, k) => pin(a, `pl_z${k}`));
+    const shortest = ss.map((s) => lenOf(s.v, C)).reduce((l, r) => ({
+      kind: 'ternary', type: INT,
+      cond: { kind: 'binop', op: '<', left: l, right: r }, then: l, else_: r,
+    }));
+    cond = { kind: 'binop', op: '<', left: iv, right: shortest };
+    parts = ss.map(at);
   } else if (kind === 'enumerate') {
     const xs = pin(args[0], 'pl_x');
     const start = args.length === 2 ? args[1] : { kind: 'int', value: 0 };
     cond = { kind: 'binop', op: '<', left: iv, right: lenOf(xs.v, C) };
-    first = start.kind === 'int' && Number(start.value) === 0
-      ? iv
-      : { kind: 'binop', op: '+', left: iv, right: start };
-    second = at(xs);
+    parts = [
+      start.kind === 'int' && Number(start.value) === 0
+        ? iv
+        : { kind: 'binop', op: '+', left: iv, right: start },
+      at(xs),
+    ];
   } else {
     const d = pin(args[0], 'pl_d');
     const ks = C.fresh('pl_ks');
@@ -2704,10 +2728,10 @@ function pairsList(kind, args, C) {
       kind: 'binop', op: '<', left: iv,
       right: { kind: 'builtin', name: 'alen', args: [ksv] },
     };
-    first = { kind: 'index', obj: ksv, index: iv };
-    second = { kind: 'builtin', name: 'dget', args: [d.v, first] };
+    const k = { kind: 'index', obj: ksv, index: iv };
+    parts = [k, { kind: 'builtin', name: 'dget', args: [d.v, k] }];
   }
-  const rec = tupleRec([ty(first, C), ty(second, C)], C);
+  const rec = tupleRec(parts.map((p) => ty(p, C)), C);
   const outT = arrOf(rec.type);
   const on = C.fresh('pl_o');
   C.bind(on, outT);
@@ -2732,7 +2756,7 @@ function pairsList(kind, args, C) {
           kind: 'builtin-stmt', name: 'apush',
           args: [out, {
             kind: 'new-record', type: rec.type, ref: true,
-            fields: [{ name: '_0', value: first }, { name: '_1', value: second }],
+            fields: parts.map((v, k) => ({ name: `_${k}`, value: v })),
           }],
         }],
       },
@@ -3053,7 +3077,7 @@ function builtinOf(nm, args, argToks, C) {
     }
     /* `zip(a, b)` / `enumerate(xs[, start])` **当值用** —— 交一张元组的表。 */
     case 'zip': {
-      if (args.length !== 2) throw new Error('python->IR: `zip()` 收两格（三格以上还没接）');
+      if (args.length < 2) throw new Error('python->IR: `zip()` 至少收两格实参');
       return pairsList('zip', args, C);
     }
     case 'enumerate': {

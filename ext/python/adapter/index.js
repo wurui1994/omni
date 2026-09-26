@@ -700,8 +700,18 @@ function scanOne(s, C, rets) {
         bindTarget(kids(kids(s)[0])[0], pair.t0, C);
         bindTarget(kids(kids(s)[0])[1], pair.t1, C);
       } else {
-        bindTarget(kids(s)[0], elemOf(tyOfCst(iterTok, C), iterTok, C), C);
+        const et0 = elemOf(tyOfCst(iterTok, C), iterTok, C);
+        /* **N 格目标逐格绑**（`for a, b, c in ts`）—— 照 `bindTarget` 的元组那一支会把
+           **整格记录**按到每一格名字上（它不知道这是拆包）。 */
+        const tgt = kids(s)[0];
+        const tup0 = tupleOf(C.recOf(et0));
+        if (tag(tgt) === 'tuple' && tup0 !== null && kids(tgt).length === tup0.length) {
+          kids(tgt).forEach((tt, k) => bindTarget(tt, tup0[k], C));
+        } else {
+          bindTarget(tgt, et0, C);
+        }
       }
+
       scanBinds(part(s, 'body'), C, rets);
       for (const e of kids(s).filter((y) => tag(y) === 'else')) scanBinds(e, C, rets);
       return;
@@ -1607,6 +1617,50 @@ function forStmt(x, C) {
   const pair = pairIter(target, iter, C);
   if (pair !== null) return pairFor(x, pair, once, pre, C);
 
+  /**
+   * **`for a, b, c in ts`** —— ts 装的是一串 **N 格的元组**（`zip(a, b, c)` 交的正是它）。
+   *
+   * 两格那一档走上面的 `pairIter`（那儿另有 enumerate / items / zip 三条专路，省一张中间表）；
+   * 这儿管 N 格：一格下标循环，体开头把 `_0` … `_{n-1}` 逐格取出来。
+   */
+  if (tag(target) === 'tuple') {
+    const ts = kids(target);
+    const et = tyOfCst(iter, C);
+    const tup = et !== null && et !== undefined && et.kind === 'arr'
+      ? tupleOf(C.recOf(et.elem)) : null;
+    if (tup !== null && ts.length === tup.length && ts.every((t) => tag(t) === 'n')) {
+      const box = once(iter, 'iter');
+      const iN = C.fresh('for_i');
+      C.bind(iN, INT);
+      const idx = { kind: 'name', name: iN };
+      const names = ts.map((t) => C.ref(String(nameOf(t))));
+      names.forEach((n, k) => C.bind(n, tup[k]));
+      const cell = { kind: 'index', obj: box, index: idx };
+      return {
+        kind: 'block',
+        stmts: [...pre, {
+          kind: 'for',
+          init: { kind: 'let', name: iN, type: INT, init: { kind: 'int', value: 0 } },
+          cond: {
+            kind: 'binop', op: '<', left: idx,
+            right: { kind: 'builtin', name: 'alen', args: [box] },
+          },
+          post: {
+            kind: 'assign', target: idx,
+            value: { kind: 'binop', op: '+', left: idx, right: { kind: 'int', value: 1 } },
+          },
+          body: [
+            ...names.map((n, k) => ({
+              kind: 'assign',
+              target: { kind: 'name', name: n },
+              value: { kind: 'field', obj: cell, name: `_${k}` },
+            })),
+            ...bodyStmts(part(x, 'body'), C),
+          ],
+        }],
+      };
+    }
+  }
   if (tag(target) !== 'n') throw new Error(`python->IR: \`for\` 的目标是 \`${tag(target)}\` —— 拆包还没接`
     + '（`enumerate(…)` 与 `zip(a, b)` 那两格接了）');
   const name = C.ref(String(nameOf(target)));
