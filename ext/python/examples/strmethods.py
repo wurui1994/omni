@@ -12,8 +12,11 @@
 #   - `.isupper()` 是"**有至少一格大写、而且没有小写**"，不是"每一格都大写" ——
 #     所以 `"A1".isupper()` 是 True，而 `"1".isupper()` 是 False。
 #     `.isalpha()` 那一族反过来：每一格都要在类里，而且串非空。
-#   - **`str.center()` 与 f-string 的 `:^` 摆法不一样**：`'ab'.center(7,'*')` 是
-#     `***ab**`（多的在左），`f"{'ab':*^7}"` 是 `**ab***`（多的在右）。
+#   - **`str.center()` 与 f-string 的 `:^` 摆法不一样**，而且 center 那一格**不是**
+#     一句"多的在左边"：CPython 的原式是 `left = marg // 2 + (marg & width & 1)`，
+#     也就是要看 marg 与 width 的奇偶 —— `'ab'.center(7,'*')` 是 `***ab**`（多的在左），
+#     可 `'a'.center(6,'*')` 是 `**a***`（多的在右）。f-string 的 `:^` 一律多的在右。
+#     从前这儿按"多的在左"写，六种里错三种（量出来的）。现在这一格在 `lib/str.py` 里。
 #   - `.partition()` 找不到分隔符时**两边站的位置不一样**：`partition` 交 `(s, '', '')`，
 #     `rpartition` 交 `('', '', s)` —— 不是对称的。
 #   - `.count()` 数的是**不重叠**的那几段（`"aaa".count("aa")` 是 1），而空的那一段数的是
@@ -54,9 +57,16 @@ def main():
     print("abc".removeprefix("a"), "abc".removesuffix("c"))
     print("abc".removeprefix("z"), "abc".removesuffix("z"))
 
-    # 补宽度
+    # 补宽度（这四格在 `ext/python/lib/str.py` 里 —— 库函数，不是语法）
     print("ab".center(6) + "|", "ab".center(7, "*") + "|", "abcdef".center(3) + "|")
     print("ab".ljust(5, ".") + "|", "ab".rjust(5, ".") + "|", "7".zfill(3))
+    # center 那一格的奇偶（从前六种里错三种）
+    print("a".center(6, "*"), "a".center(4, "*"), "abc".center(6, "-"), "ab".center(5, "-"))
+    print(f"{'ab':*^7}", f"{'a':*^6}")
+    # **宽度不必是字面量了**：库函数收的是一格值（从前 `.center(w)` 要求 w 写成字面量）
+    w = 7
+    for s in ["a", "bb", "ccc"]:
+        print(s.center(w, ".") + "|", s.ljust(w - 2, "_") + "|", s.zfill(w - 3))
 
     # .copy()：浅抄一份，动新的不碰旧的
     xs = [1, 2, 3]

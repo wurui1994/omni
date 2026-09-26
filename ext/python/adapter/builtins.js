@@ -974,48 +974,6 @@ export function dropAtStmts(xs, at, C) {
 
 /* ─── 串上那几格补宽度的 ───────────────────────────────────────────────────── */
 
-/** `s.ljust(w[, ch])` / `s.rjust(w[, ch])` / `s.zfill(w)` —— 不够宽就补，够了原样。 */
-export function justOf(s0, w0, ch, left, C) {
-  const h = holder(C);
-  const s = h.keep(s0, 'ju_s');
-  const w = h.keep(w0, 'ju_w', INT);
-  const fill = call1('srep', [ch, bin('-', w, call1('slen', [s]))]);
-  return h.wrap(left ? bin('+', s, fill) : bin('+', fill, s));
-}
-
-
-/**
- * `s.zfill(w)` —— 与 `rjust(w, "0")` **不是一回事**：开头那一格符号（`+` / `-`）
- * 要留在最前头。python 的原话：`"-7".zfill(4)` 是 `-007`，不是 `00-7`（量出来的）。
- *
- * 空串那一档要当心：**先问长度再取头一格字符**（`ssub(s, 0, 1)` 在空串上是
- * "substring out of range"），所以是两层 `if`，不是一句 `&&`。
- */
-export function zfillOf(s0, w0, C) {
-  const h = holder(C);
-  const s = h.keep(s0, 'zf_s');
-  const w = h.keep(w0, 'zf_w', INT);
-  const n = h.decl('zf_n', INT, call1('slen', [s]));
-  const pad = h.decl('zf_p', STR, call1('srep', [str('0'), bin('-', w, n)]));
-  const out = h.decl('zf_o', STR, bin('+', pad, s));
-  const first = call1('ssub', [s, int(0), int(1)]);
-  h.pre.push({
-    kind: 'if',
-    cond: bin('>', n, int(0)),
-    then: [{
-      kind: 'if',
-      cond: bin('!=', call1('sfind', [str('+-'), first]), int(-1)),
-      then: [{
-        kind: 'assign',
-        target: out,
-        value: bin('+', bin('+', first, pad), call1('ssub', [s, int(1), bin('-', n, int(1))])),
-      }],
-      else_: null,
-    }],
-    else_: null,
-  });
-  return h.wrap(out);
-}
 
 /** `sep.join(xs)` —— 第一段前面不加分隔符。 */
 export function joinOf(sep0, xs0, C) {

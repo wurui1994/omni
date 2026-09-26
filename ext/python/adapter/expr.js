@@ -25,9 +25,10 @@ import {
 } from './dyn.js';
 import { splitFString } from './fstring.js';
 import { splitPercent, percentArity } from './percent.js';
+import { libMethodFor, libFillToks, LIB_METHODS } from './pylib.js';
 import {
   sumOf, pickList, anyAllOf, sortedOf, rangeList,
-  joinOf, splitOf, rsplitOf, zfillOf, splitWsOf, countOf, stripOf, replaceOf, startsEndsOf, justOf,
+  joinOf, splitOf, rsplitOf, splitWsOf, countOf, stripOf, replaceOf, startsEndsOf,
   containsList, indexOfList, countList, valuesList, dictPopOf, dictSetDefaultOf, dropAtStmts,
   concatList, repeatList, reversedList, stepSlice, bankRound,
   caseMapOf, charClassOf, rfindOf, copyList, copyDict, charsOf, dictOfPairs,
@@ -453,9 +454,37 @@ const BUILTIN_RET = new Map([
   ['repr', STR], ['hex', STR], ['oct', STR], ['bin', STR], ['isinstance', BOOL],
 ]);
 
-/** 方法交出来的类型（按接收者装的东西分）。 */
+/**
+ * **一处库函数调用的整串实参类型**（接收者算第一格，少给的按默认值补）。
+ * 发射那一侧与问类型那一侧都要它，所以只写一处。
+ */
+function libArgTys(lib, recvTy, argTys, C) {
+  const fill = libFillToks(lib, argTys.length + 1, C);
+  if (fill === null) return null;
+  return [recvTy, ...argTys, ...fill.map((d) => tyOfCst(d, C))];
+}
+
+/** 库里那格函数交什么（还没收到实例就答 null —— 推断跑三轮，下一轮再来）。 */
+function libRetTy(recvTy, name, argTys, C) {
+  const lib = libMethodFor(recvTy, name);
+  if (lib === null) return null;
+  const all = libArgTys(lib, recvTy, argTys, C);
+  if (all === null) return null;
+  const inst = C.resolveFn(lib, all);
+  return inst === null ? null : inst.ret;
+}
+
+/**
+ * 方法交出来的类型（按接收者装的东西分）。
+ *
+ * **库里有这一格就问库那一份**（`ext/python/lib/*.py`）—— 交什么由那格函数的 `return`
+ * 推出来，不在这儿再抄一遍。这正是"库函数搬到运行时"顺手去掉的那笔重复账：
+ * 从前每加一格方法都要在这张表上写一条、在 `methodOf` 里再写一条实现。
+ */
 function methodType(recvTy, name, argTys, C) {
   if (recvTy === null) return null;
+  const libTy = libRetTy(recvTy, name, argTys, C);
+  if (libTy !== null) return libTy;
   if (recvTy.kind === 'arr') {
     if (['append', 'clear', 'extend', 'reverse', 'insert', 'remove', 'sort'].includes(name)) return { kind: 'void' };
     if (name === 'pop') return recvTy.elem;
@@ -465,7 +494,7 @@ function methodType(recvTy, name, argTys, C) {
   }
   if (recvTy.kind === 'string') {
     if (['upper', 'lower', 'casefold', 'title', 'capitalize', 'swapcase', 'strip', 'lstrip', 'rstrip',
-      'replace', 'join', 'ljust', 'rjust', 'zfill', 'center', 'format', 'expandtabs',
+      'replace', 'join', 'format', 'expandtabs',
       'removeprefix', 'removesuffix'].includes(name)) return STR;
     if (['find', 'rfind', 'count', 'index', 'rindex'].includes(name)) return INT;
     if (['startswith', 'endswith',
@@ -3601,6 +3630,28 @@ function methodOf(recvTok, name, args, C) {
     });
     return { kind: 'call', fn: { kind: 'name', name: inst.mangled }, args: [recv, ...fixed] };
   }
+  /**
+   * **库里有这一格就调库那一份**（`ext/python/lib/*.py`）—— 落成一次真的函数调用，
+   * 不在这儿铺 IR。实例按实参类型挑（与用户函数同一格 `resolveFn`）。
+   */
+  const lib = libMethodFor(t, name);
+  if (lib !== null) {
+    const fill = libFillToks(lib, args.length + 1, C);
+    if (fill === null) {
+      throw new Error(`python->IR: \`.${name}()\` 的实参个数对不上库里那格 \`${lib}\``);
+    }
+    const all = [recv, ...args, ...fill.map((x) => exprOf(x, C))];
+    const inst = C.resolveFn(lib, all.map((a) => ty(a, C)));
+    if (inst === null) {
+      throw new Error(`python->IR: \`.${name}(…)\` 在库里那格 \`${lib}\` 上没有对得上的实例`
+        + `（实参是 ${all.map((a) => ty(a, C).kind).join(', ')}）`);
+    }
+    const fixed = all.map((a, i) => {
+      const want = inst.params[i].type;
+      return want.kind === 'real' && ty(a, C).kind === 'int' ? toReal(a, C) : a;
+    });
+    return { kind: 'call', fn: { kind: 'name', name: inst.mangled }, args: fixed };
+  }
   if (t.kind === 'arr') {
     if (name === 'pop' && args.length === 0) return { kind: 'builtin', name: 'apop', args: [recv] };
     /* `xs.pop(i)` **当值用** —— 先把那一格读出来，再把它抽掉（`apop` 只管末尾那一格）。 */
@@ -3776,30 +3827,15 @@ function methodOf(recvTok, name, args, C) {
         else_: recv,
       };
     }
-    /* 补宽度那三格（`ljust` / `rjust` / `zfill`）—— 不够宽就补，够了原样。 */
-    if ((name === 'ljust' || name === 'rjust') && (args.length === 1 || args.length === 2)) {
-      const ch = args.length === 2 ? args[1] : { kind: 'string', value: ' ' };
-      return justOf(recv, args[0], ch, name === 'ljust', C);
-    }
-    /* `.zfill(w)` 不是 `rjust(w, "0")`：开头那一格符号要留在最前头（`"-7".zfill(4)`
-       是 `-007`）—— 量出来的，从前答 `00-7`。 */
-    if (name === 'zfill' && args.length === 1) return zfillOf(recv, args[0], C);
-    /* `.center(w[, ch])` —— 与 f-string 的 `:^N` 同一格（余数放右边）。
-       宽度要是字面量：`centerTo` 是按编译期的宽度拼的。 */
-    if (name === 'center' && (args.length === 1 || args.length === 2)) {
-      if (args[0].kind !== 'int') {
-        throw new Error('python->IR: `.center(w)` 的 w 要写成一格整数字面量');
-      }
-      const ch = args.length === 2 ? args[1] : { kind: 'string', value: ' ' };
-      if (ch.kind !== 'string') {
-        throw new Error('python->IR: `.center(w, ch)` 的 ch 要写成一格串字面量');
-      }
-      return centerTo(recv, Number(args[0].value), ch.value, C, true);
-    }
+    /* **`.ljust` / `.rjust` / `.zfill` / `.center` 搬到库里了**（`ext/python/lib/str.py`）——
+       这一族在串与整数上算，一个字都不要编译期的类型，所以不该在这儿铺 IR。
+       顺带去掉两条编译期的限制（`.center(w)` 从前要求 w 是字面量）与一处答错
+       （`.center` 多出来那一格填在哪边要看 marg 与 width 的奇偶，见那一份里的原式）。 */
     throw new Error(`python->IR: 串上的 \`.${name}()\` 还没接`
       + '（接了的是 upper / lower / casefold / title / capitalize / swapcase / find / rfind / index /'
       + ' rindex / join / split / rsplit / strip / lstrip / rstrip / replace / startswith / endswith /'
-      + ' removeprefix / removesuffix / ljust / rjust / zfill / center / is*）');
+      + ' removeprefix / removesuffix / is*，外加库里那几格：'
+      + `${[...LIB_METHODS.keys()].filter((k) => k.startsWith('string.')).map((k) => k.slice(7)).join(' / ')}）`);
   }
   if (t.kind === 'map') {
     /* `d.get(k)` —— 键不在里头 python 交 `None`，所以这一格**交的是箱子**（dyn）：

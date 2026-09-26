@@ -38,6 +38,7 @@ import {
   dictClearStmts, sortStmts, dictUpdateStmts, sliceAssignStmts, joinOf, charsOf,
 } from './builtins.js';
 import { boxOf, unifyPy } from './dyn.js';
+import { loadPyLib, libMethodFor, libFillToks } from './pylib.js';
 
 /** 一格已经建好的 IR 表达式装的是什么。 */
 const typeOfIR = (e, C) => typeOf(e, C.tyCtx());
@@ -61,6 +62,9 @@ export function pyToIR(tree, ctx = {}) {
   declareClasses(classNodes, C);
   /* **函数里套的函数**：没有捕获外层名字的那一档**提到模块级**（见 `hoistNested`）。 */
   for (const f of fnNodes) hoistNested(f, C);
+  /* **库函数**（`ext/python/lib/*.py`）—— 用同一张语法表解析，`def` 摆进 `C.fnNodes`，
+     从此与用户函数走同一趟。没人用的一格都不发（单态化按调用点收实例）。 */
+  loadPyLib(C);
   /* **f-string 里那几段表达式先解析出来**。单态化那一趟是从**调用点**收实例的，而
      `f"{twice(n)}"` 里那次调用躺在一个 STRING 记号里 —— `allNodes` 看不见它，于是
      `twice` 一格实例都收不到（量出来的原话：`twice(int)` 没有对得上的那一格）。
@@ -322,6 +326,12 @@ function makeCtx() {
     },
     /** 函数名 → 那棵 `(def …)`。 */
     fnNodes: new Map(),
+    /**
+     * **哪几格是库函数**（`ext/python/lib/*.py` 读进来的那些，见 `pylib.js`）。
+     * 与用户写的函数走同一趟（推断 / 单态化 / 发射），这张名单只用来把话说清楚
+     * （报错时说"库里那格"，而不是让人去源码里找一个他没写过的名字）。
+     */
+    libFns: new Set(),
     /** 模块级变量名 → 类型。 */
     globals: new Map(),
     /**
@@ -635,6 +645,10 @@ function infer(C, tree, scriptStmts) {
   /* 名字：只有一格实例时不加后缀（多数函数是这一档），多格时加类型后缀。
      方法的名字是 `<类名>_<方法名>`（mojo 那一门同一个落点）。 */
   for (const [nm, list] of C.insts) {
+    /* **库里那格没人用就一格都不发**（`ext/python/lib/*.py`）—— 库是"带着走的一份"，
+       这份源码用到哪一格才生成哪一格。不挡这一条的后果是：没人用的库函数形参退到 dyn，
+       而它的体是照着串写的，于是当场报"`len()` 作用在 dyn 上没有这一格"。 */
+    if (list.length === 0 && C.libFns.has(nm)) continue;
     /* 一个调用点都没有、形参又没标注（这份源码里根本没调它）—— 那几格退到 dyn，
        发一格实例出去。从前这儿是当场报"给它一格标注"；不必，`dyn.js` 那条道就是为它来的。 */
     if (list.length === 0) {
@@ -714,6 +728,22 @@ function collectInsts(nm, sh, tree, C) {
       /* 命名实参先排回位置上、缺的补默认值（不然按次序取的类型会错位）。 */
       const args = kwOrder(fn, kids(part(node, 'args') ?? { kind: 'list', items: [] }), C);
       if (dot < 0) {
+        /**
+         * **库函数的调用点长的是"方法"的样子**（`s.zfill(4)` 要的是 `_str_zfill(s, 4)`）——
+         * 所以按那张名字表认（`pylib.js` 的 `LIB_METHODS`）：接收者装的东西 + 方法名
+         * 对上这一格就收一格实例。少给的那几格按默认值补，与发射那一侧同一条。
+         */
+        if (C.libFns.has(nm) && tag(fn) === 'attr') {
+          const rt = tyOfCst(kids(fn)[0], C);
+          if (libMethodFor(rt, String(leaf(kids(fn)[1]))) === nm) {
+            const fill = libFillToks(nm, args.length + 1, C);
+            if (fill !== null) {
+              const types = [rt, ...args.map((a) => tyOfCst(a, C)), ...fill.map((d) => tyOfCst(d, C))];
+              if (types.length === sh.names.length) takeTys(types);
+            }
+          }
+          continue;
+        }
         /* 普通函数：`f(…)`。 */
         if (tag(fn) === 'n' && String(nameOf(fn)) === nm && args.length === sh.names.length) {
           take(args, null);
