@@ -144,6 +144,10 @@ function open(canvas, w, h) {
     alpha: false, antialias: false, preserveDrawingBuffer: true, depth: true,
   });
   if (gl === null) throw new Error('这个浏览器没有 WebGL2 —— 换 --gfx=cpu 那一档');
+  /* 浮点颜色附件（`glgettex` 读 `KGL_FLOAT`/`KGL_VEC4` 那两格要它才够完整）。
+     拿不到就算了 —— 那时 `texGet` 回 -1，不静默当成读到了。 */
+  gl.getExtension('EXT_color_buffer_float');
+  gl.getExtension('OES_texture_float_linear');
   const prog = gl.createProgram();
   gl.attachShader(prog, compile(gl, gl.VERTEX_SHADER, VS));
   gl.attachShader(prog, compile(gl, gl.FRAGMENT_SHADER, FS));
@@ -1494,6 +1498,68 @@ function batchIn(kind, n, verts) {
  * 这一档有的是 `gluniform{1..4}{f,i}v`；`glgettex`（把纹理读回来）在 WebGL2 上没有
  * `glGetTexImage`，要另走一趟离屏 `readPixels` —— 还没做，**当场报**不静默。
  */
+/* ---------------------------------------------------------------- 把纹理读回来
+ *
+ * `glgettex(槽, &数组, 宽, 高, 格)`（§19.1）。口径照本机那一档（`omni_ev_gl_gettex`）：
+ * **最后那格 `coltype` 不看**，一格几个 double 由**这一槽自己的格**说（`KGL_VEC4`
+ * 一像素 4 个 float，别的一像素一格）；回值是写回了几格，出错回 -1。
+ *
+ * WebGL2 没有 `glGetTexImage`，所以走**离屏帧缓冲 + `readPixels`**：把这一槽挂到
+ * 一格常驻 FBO 的 0 号颜色附件上再读。行序对得上 —— 纹理的第 0 行就是帧缓冲最下面
+ * 那一行，`readPixels` 从下往上读，于是出来的顺序与 `glGetTexImage` 相同，不用翻。
+ *
+ * 两格已知的限制（都写在明处）：
+ *   * 3D 与立方体那两档读回还没做（`framebufferTexture2D` 只接 2D 的面）；
+ *   * 浮点那两格（`KGL_FLOAT` / `KGL_VEC4`）要 `EXT_color_buffer_float` 才够完整，
+ *     拿不到就回 -1（`open` 里试着取一次）。
+ *   * **文件纹理刚上路那几帧读到的是 1×1 的占位白**（`glsettex("earth.jpg")` 是异步的）——
+ *     `ken/gspiral.pss` 正好在 `numframes == 0` 里读一次，于是页面这一档拿不到那张图。
+ *     这是页面这一档独有的账，与"头几帧没有图"（见 `PIC` 的头注）同一类。
+ */
+const RB = { fbo: null };
+
+function texGet(slot, w, h, out) {
+  const gl = D.gl;
+  if (gl === null || w < 1 || h < 1) return -1;
+  const t = TX.slots.get(slot);
+  if (t === undefined || t.w === 0) return -1;
+  if (t.tar !== gl.TEXTURE_2D) return miss(`glgettex:${t.tar === gl.TEXTURE_3D ? '3d' : 'cube'}`) - 1;
+  const n = w * h;
+  if (n > t.w * t.h) return -1;
+  const kind = t.fmt & 15;
+  const per = kind === 5 ? 4 : 1;
+  if (n * per > out.length) return -1;
+  flush();
+  if (RB.fbo === null) RB.fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, RB.fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t.id, 0);
+  let wrote = -1;
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE) {
+    if (kind === 0 || kind === 1) {
+      const b = new Uint8Array(n * 4);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, b);
+      if (kind === 0) {
+        /* 一格 double = `0xAARRGGBB`（与参考那一行逐字相同 —— 本机那一档是靠
+           `GL_BGRA` + 小端拿到同一个数的）。 */
+        for (let i = 0; i < n; i++) {
+          out[i] = (((b[i * 4 + 3] << 24) | (b[i * 4] << 16)
+            | (b[i * 4 + 1] << 8) | b[i * 4 + 2]) >>> 0);
+        }
+      } else for (let i = 0; i < n; i++) out[i] = b[i * 4];
+      wrote = n;
+    } else if (kind === 4 || kind === 5) {
+      const f = new Float32Array(n * 4);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.FLOAT, f);
+      if (kind === 4) for (let i = 0; i < n; i++) out[i] = f[i * 4];
+      else for (let i = 0; i < n * 4; i++) out[i] = f[i];
+      wrote = n * per;
+    }
+  }
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, null, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return wrote;
+}
+
 /**
  * **`pic("a.png",x,y)` 那一族**（`evaldraw.txt:1341`）：`picsiz` 问宽高、`picread` 抄整张。
  *
@@ -1623,7 +1689,13 @@ function arrIn(name, args, blk) {
   }
   /* **`pic` 那一族的第二句**（见 `PIC` 的头注）：把整张图抄给脚本。 */
   if (nm === 'picread') return picRead(blk);
-  throw new Error(`这格设备（WebGL2）上没有 '${nm}'（有的是 setrow / picread / gluniform{1..4}{f,i}v）`);
+  /* **把纹理读回来**（`glgettex(槽,&数组,宽,高,格)`，见 `texGet` 的头注）。 */
+  if (nm === 'glgettex') {
+    return texGet(Math.trunc(Number(args[0])), Math.trunc(Number(args[1])),
+      Math.trunc(Number(args[2])), blk);
+  }
+  throw new Error(`这格设备（WebGL2）上没有 '${nm}'（有的是 setrow / picread / glgettex`
+    + ' / gluniform{1..4}{f,i}v）');
 
 }
 
