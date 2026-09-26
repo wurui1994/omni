@@ -619,6 +619,18 @@ export function startServer(opts) {
   return new Promise((ok) => {
     server.listen(port, host, () => {
       const addr = server.address();
+      /* **开机就把编译器热起来**（不挡 listen）：头一趟 `/api/units` 要付三样 ——
+         `import('./cli.js')`（量过 1.2s）、那门语言的 GLR 表、`srcStamp()` 扫源码树，
+         再加一份冷 JIT。摆在这儿之后那几秒花在"服务刚起来、还没人点运行"的空档里：
+         先装模块，再拿仓库里那份最小的 `.pss` 空编一趟（产物按内容起名，编它不脏任何东西）。
+         `opts.pool === false` 那一档是判据用的一次性服务，不必先热。 */
+      if (opts.pool !== false) {
+        Promise.resolve().then(() => import('./cli.js')).then((m) => {
+          CLI_MOD = m;
+          const warm = join(root, 'ext', 'polydraw', 'examples', '01-arith.pss');
+          if (exists(warm)) runInProc(['emit', 'js', '--units', warm]).catch(() => {});
+        }, () => {});
+      }
       ok({
         server,
         pool,
