@@ -256,6 +256,7 @@ const FN_DEPS = new Map([
   ['r_rev_str', []],
   ['r_iota', []],
   ['r_nchar_v', []],
+  ['r_str2num_v', ['r_na']],
   ['r_upper_v', []],
   ['r_lower_v', ['r_lower']],
   ['r_lower', []],
@@ -2016,7 +2017,8 @@ function applyTy(fn, x, types) {
     case 'character': return RSTRV;
     case 'as.numeric': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : REAL;
-      return isVecTy(t) ? RVEC : REAL;
+      /* 字符向量进 → 一条数值向量出（`r_str2num_v`，见 `callOf` 那段账）。 */
+      return isVecTy(t) || isStrVec(t) ? RVEC : REAL;
     }
     /* `as.logical` 出的是**三态**：向量那一侧一条逻辑向量、一格进一格三态标量
        （`as.logical("yes")` 是 `NA`，所以不能回 bool）。 */
@@ -5871,8 +5873,18 @@ function callOf(x, types, extra, want, stmtPos) {
         const wantInt = fn === 'as.integer';
         if (t.kind === 'string' || isStrVec(t)) {
           if (isStrVec(t)) {
-            throw new Error(`r->IR: ${fn}() 收的是一条**字符向量** —— 一格串那一档接了`
-              + '（见下头那段账），逐元素那一档还没接');
+            /* 字符向量：逐元素走**同一条路**（`r_str2num_v`）。`as.integer` 那一侧还没接 ——
+               R 出的是带缺失的整数（`NA_integer_`），这一层没有那种值。 */
+            if (wantInt) {
+              throw new Error('r->IR: as.integer() 收的是一条**字符向量** —— 逐元素那一档'
+                + '出的是带缺失的整数（`NA_integer_`），这一层没有那种值'
+                + '（见 ext/r/SPEC.md 第四节第 11 条）。要数就写 `as.numeric(…)`');
+            }
+            for (const sym of ['omni_r_numdigits', 'omni_r_str2d']) {
+              cabiUsed.add(sym);
+              rmathSig(sym);
+            }
+            return { kind: 'call', fn: { kind: 'name', name: useFn('r_str2num_v') }, args: [ev(0)] };
           }
           /**
            * **一格串 → 数**（2026-09-26 接了）。R 的 `as.numeric` 走它自己的 `R_strtod5`
@@ -7904,7 +7916,7 @@ const STRV_FNS = new Set([
   'r_substr_v', 'r_trim_v', 'r_starts_v', 'r_ends_v',
   /* base 那四条字符向量常量 + `strrep` 在字符向量上那一格。 */
   'r_sv_letters', 'r_sv_upper', 'r_sv_month', 'r_sv_mabb', 'r_strrep_v', 'r_chartr_v',
-  'r_as_str_v', 'r_as_str_lv', 'r_as_lgl_sv', 'r_eq_sv', 'r_ne_sv', 'r_eq_svv', 'r_ne_svv',
+  'r_str2num_v', 'r_as_str_v', 'r_as_str_lv', 'r_as_lgl_sv', 'r_eq_sv', 'r_ne_sv', 'r_eq_svv', 'r_ne_svv',
   'r_sv1', 'r_sort_str', 'r_order_str', 'r_any_dup_str', 'r_uniq_str', 'r_dup_str', 'r_match_str', 'r_in_str', 'r_in1_str',
   'r_union_str', 'r_isect_str', 'r_sdiff_str', 'r_head_str', 'r_tail_str',
   'r_app_str', 'r_app_str_e',
@@ -9446,6 +9458,35 @@ function strvFnDecl(name) {
         letI('n', svLen(v)),
         ...vecNewAs('o', nm('n')),
         loop([vecSet(nm('o'), i, lglCall('r_lgl_s', svGet(v, i)))], nm('n')),
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  if (name === 'r_str2num_v') {
+    /**
+     * `as.numeric(字符向量)` —— 逐元素走与一格串**同一条路**（见 `callOf` 那段量出来的账）：
+     * `omni_r_numdigits` 数有效数字，<= 11 位走 `omni_r_str2d`（正确舍入，与 R 逐 bit
+     * 相同），超了或是十六进制那一档**当场停下来**，不是数照 R 出 `NA`。
+     */
+    const dv = nm('d');
+    return {
+      kind: 'fn',
+      name,
+      params: P,
+      ret: RVEC,
+      body: [
+        letI('n', svLen(v)),
+        ...vecNewAs('o', nm('n')),
+        loop([
+          letI('d', { kind: 'ccall', sym: 'omni_r_numdigits', args: [svGet(v, i)] }),
+          iff(b('==', dv, I(-2)),
+            [{ kind: 'builtin-stmt', name: 'fail', args: [S('as.numeric(字符向量)：十六进制那一档（"0x10"，R 认）还没接')] }]),
+          iff(b('>', dv, I(11)),
+            [{ kind: 'builtin-stmt', name: 'fail', args: [S('as.numeric(字符向量)：这一档只认 11 位以内的有效数字 —— R 的 R_strtod5 是按位累加、不是正确舍入（见 ext/r/rt/omni_rna.h 那段账）')] }]),
+          iff(b('<', dv, I(0)),
+            [vecSet(nm('o'), i, { kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] })],
+            [vecSet(nm('o'), i, { kind: 'ccall', sym: 'omni_r_str2d', args: [svGet(v, i)] })]),
+        ], nm('n')),
         { kind: 'return', values: [nm('o')] },
       ],
     };
