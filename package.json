@@ -53,6 +53,7 @@
     "lint": "tsc --noEmit -p jsconfig.json",
     "test:sched": "node tests/sched/run.js",
     "test:go": "node tests/go/run.js",
+    "test:python": "node tests/python/run.js",
     "bench:go": "node bench/go/run.js"
   },
   "engines": {

@@ -38,6 +38,7 @@ import { chezToIR } from '../../../ext/chez/adapter/index.js';
 import { sbclToIR } from '../../../ext/sbcl/adapter/index.js';
 import { fbToIR } from '../../../ext/freebasic/adapter/index.js';
 import { mojoToIR } from '../../../ext/mojo/adapter/index.js';
+import { pyToIR, PY_HOOKS } from '../../../ext/python/adapter/index.js';
 import { cppToIR } from '../../../ext/cpp/adapter/index.js';
 import { nimToIR, nimImports } from '../../../ext/nim/adapter/index.js';
 import { vlangToIR, vlangImports } from '../../../ext/vlang/adapter/index.js';
@@ -101,6 +102,13 @@ export const LANGS = new Map([
   }],
   ['freebasic', { grammar: 'ext/freebasic/freebasic.grammar', toIR: fbToIR, exts: ['bas', 'bi'] }],
   ['mojo', { grammar: 'ext/mojo/mojo.grammar', toIR: mojoToIR, exts: ['mojo'] }],
+  /* python（CPython 3.16 的语法）。**这一门的类型一格都不写** —— 形参与返回类型从标注或
+     调用点推、模块级变量从初值推，整个扫三轮（口径在 `ext/python/adapter/index.js` 文件头）。
+     `hooks` 里只有一格：数组的零值（公共那张 `zeroOf` 表上没有 `arr`，而这一门把局部量
+     全提到函数体开头零初始化）。 */
+  ['python', {
+    grammar: 'ext/python/python.grammar', toIR: pyToIR, hooks: PY_HOOKS, exts: ['py'],
+  }],
   ['nim', {
     grammar: 'ext/nim/nim.grammar', toIR: nimToIR, imports: nimImports, exts: ['nim'],
   }],

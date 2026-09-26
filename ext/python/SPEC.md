@@ -46,24 +46,39 @@ R 那一门（ADR-0045/0046/0047，`r-lang` 分支）已经把这条路走通过
 - **`src/core/glr/lex.js` 加两个字符类** `ualpha` / `ualnum` —— 标识符许 Unicode
   （PEP 3131），口径照 CPython 的词法（"码点 >= 128 就算"，不查 XID 表）。
   这是通用的一格，别的语言（js / go / nim）也用得上。
+- **`adapter/`（CST → 标准 IR）+ 在 `langs.js` 登记** —— `omni run x.py` 通了。
+  这一门**一个类型标注都不必写**：形参从标注或调用点推、返回类型从函数体的 `return` 推、
+  模块级变量从初值推，整个扫三轮，三轮之后还推不出来的当场报（口径在
+  `adapter/index.js` 文件头）。python 与 C 分道的每一处都按 python 的口径落：
+  `/` 永远出浮点、`//` 向下取整、`%` 的符号跟着除数、`str + 非串`当场报、
+  负下标与切片两头夹到 `[0, len]`、`print(a, b)` 一行空格连、`str(True)` 是 `True`、
+  `str(4.0)` 是 `4.0`、`str([1, 4])` 是 `[1, 4]`、`math.floor` 交 int。
+- **方言加一格 `(srepr E)`** —— 往返无损的 real 文本。三条腿的实现
+  （`omni_repr_real` / `$repr_real` / `reprReal`）本来就在，缺的只是方言这个口；
+  python 的 `str(float)` / `repr(float)` 走 `%.6g` 的话每一处浮点输出都差一截。
+- **`tests/python/run.js`** —— 外部尺子：同一份 .py，我们跑一遍、本机 `python3` 跑一遍，
+  **stdout 逐字节相同**才算过。两条腿都量（解释器 + `--mode js`）。
+  现在 4 份例子 × 2 条腿 = **8 绿 0 红**（尺子 Python 3.14.7）。
 
 ### 下一刀，按顺序
 
-1. **`ext/python/adapter/`** —— CST → 标准 IR，照 `ext/mojo/adapter/` 的形状分
-   `index.js`（语句）+ `expr.js`（表达式）。同一刀里在 `src/core/lower/langs.js`
-   加一行 `['python', {grammar: …, toIR: pyToIR, imports: pyImports, exts: ['py']}]`。
-   先只接"能跑起来"的那一小片（模块级函数、int/float/str、list/dict、for/while/if、
-   print），再按语料扩 —— 与 R 那一门一样，一格一格拿真程序扫。
-2. **f-string 的内部结构**（PEP 701）。这要在 `lex.js` 里加一格通用能力：
+1. **单态化**。现在同一格形参在两处调用里装不同的东西就当场报（`add(2,3)` 与
+   `add(1.5,2.5)`）—— python 的鸭子类型撞上方言的静态类型。出路是按实参类型生成
+   `add_int` / `add_real`，这也是往后 `class` 与容器泛型的地基。
+2. **`class`**。落成方言的 `(class …)` + `<类型>_<方法>`（mojo 那一门的形状），
+   `self` 是第一格实参。
+3. **f-string 的内部结构**（PEP 701）。这要在 `lex.js` 里加一格通用能力：
    一个记号里嵌一段要再解析的文本。现在整份 f-string 是一个 STRING，8 份语料因此没过。
-3. **`ext/python/build.js` + `rt/gen-pyconfig.js`** —— 借 CPython 的 C 那一半。
-   起点只要两格：`dtoa.c`（浮点转串）与 `longobject.c`（大整数），因为这两格是
-   "答得对不对"最先撞上的墙。`pyconfig.h` 按 `pyconfig.h.in` 一行一行真探一遍，
-   照 `gen-rconfig.js` 那五类分（`HAVE_*_H` 真编、`HAVE_DECL_*` 回 0/1、
-   `HAVE_<FUNC>` 真链、`SIZEOF_*` 真跑、其余进一张显式的表），**表里没有又落不进
-   四类的名字当场报** —— R 那一门的账里，这一条挡住过四个静默答错的坑。
-4. **尺子**：`tests/python/oracle.js` —— 每一份例子拿本机 `python3` 跑一遍，
-   两边**逐字节**比 stdout。R 那门的 `tests/r/oracle.js` 是同一个形状。
+4. **`ext/python/build.js` + `rt/gen-pyconfig.js`** —— 借 CPython 的 C 那一半。
+   起点只要两格：`dtoa.c`（浮点转串 —— `srepr` 与 CPython 还差指数形式的门槛，
+   `1e15` 我们出 `1e+15`、CPython 出 `1000000000000000.0`）与 `longobject.c`
+   （大整数 —— 现在的 int 是 64 位，python 的没有上界）。
+   `pyconfig.h` 按 `pyconfig.h.in` 一行一行真探一遍，照 `gen-rconfig.js` 那五类分
+   （`HAVE_*_H` 真编、`HAVE_DECL_*` 回 0/1、`HAVE_<FUNC>` 真链、`SIZEOF_*` 真跑、
+   其余进一张显式的表），**表里没有又落不进四类的名字当场报** —— R 那一门的账里，
+   这一条挡住过四个静默答错的坑。
+5. **`try` / `with` / `match` / 生成器 / 闭包 / 装饰器** —— adapter 现在对它们当场报
+   "还没接"，不猜。
 
 ## 三、口径
 

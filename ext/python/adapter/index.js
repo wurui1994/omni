@@ -1,0 +1,780 @@
+// ext/python/adapter/index.js —— **Python → 标准 IR**（ADR-0044）
+//
+// ## 这一门最特别的地方：**一个类型标注都不必写**
+//
+// 借来的十门里，awk / Scheme / Common Lisp 也不写类型，但它们的值只有"数与串"两档。
+// python 的值有表、字典、浮点、整数、串、布尔 —— 而方言（`.sx`）是静态类型、**不推导只检查**。
+// 所以这一份里最大的一块是**推断**，办法与 R 那一门（`r-lang` 分支）同一条：
+//
+//   1. 形参的类型：**标注优先**（`def f(x: int)`），没标注就**从调用点推**；
+//   2. 返回类型：形参定了之后扫函数体里的 `return`；
+//   3. 模块级变量：从它的初值推；
+//   4. 以上三件互相依赖（`g = f(1)` 要先有 f 的返回类型，而 f 的形参可能来自 `f(g)`），
+//      所以**整个扫三轮**，每轮只填得出来的那几格。三轮之后还推不出来的**当场报**，
+//      并且说清"给它一格标注"—— 不猜一个 int 了事（猜错的症状是跑起来印错数）。
+//
+// ## 入口
+//
+// python 没有 `main` —— **顶层语句就是入口**（与 awk 的 BEGIN、lua 的顶层语句同一档），
+// 所以发 `{ kind: 'main', body }`。顶层赋的那几个名字是**模块级变量**（`(global …)`），
+// 函数体里读得到它们；方言那一层的规矩是"global 不带初值"，所以初值摆成入口里的一句 `set`。
+//
+// `__name__` 预先登记成一格串并在入口里置成 `"__main__"` —— 于是
+// `if __name__ == "__main__": main()` 这个惯用写法直接能跑。
+
+import { tag, kids, leaf, part } from '../../../src/core/lower/cst.js';
+import { INT, STR, sameType, typeOf } from '../../../src/core/lower/ty-of.js';
+import { typeToSx } from '../../../src/core/lower/ty.js';
+import {
+  exprOf, condOf, nameOf, typeOfAnnot, tyOfCst, tyArg, pyStr, lenOf,
+} from './expr.js';
+
+/** 一格已经建好的 IR 表达式装的是什么。 */
+const typeOfIR = (e, C) => typeOf(e, C.tyCtx());
+
+/** 一棵 python 的树（`(module …)`）→ 标准 IR 的模块。 */
+export function pyToIR(tree) {
+  if (tag(tree) !== 'module') throw new Error('python->IR: 这不是 (module …)');
+
+  const C = makeCtx();
+  const top = flatten(kids(tree));
+  const fnNodes = top.filter((s) => tag(s) === 'def');
+  const scriptStmts = top.filter((s) => tag(s) !== 'def');
+
+  for (const f of fnNodes) {
+    const nm = String(nameOf(kids(f).find((y) => tag(y) === 'n')));
+    if (C.fnNodes.has(nm)) throw new Error(`python->IR: \`def ${nm}\` 定义了两遍 —— 还没接（后一个盖前一个）`);
+    C.fnNodes.set(nm, f);
+  }
+  infer(C, tree, scriptStmts);
+
+  /* ---- 发射 ------------------------------------------------------------------ */
+  const decls = [];
+  for (const [name, ty] of C.globals) decls.push({ kind: 'global', name: C.ref(name), type: ty });
+  for (const [nm, node] of C.fnNodes) decls.push(fnDecl(nm, node, C));
+
+  C.push();
+  const body = [
+    { kind: 'assign', target: { kind: 'name', name: C.ref('__name__') }, value: { kind: 'string', value: '__main__' } },
+    ...scriptStmts.flatMap((s) => stmtsOf(s, C)),
+  ];
+  C.pop();
+  decls.push({ kind: 'main', body });
+  return { kind: 'module', decls };
+}
+
+/** `(line a b)` 那一层摊掉 —— 顶层与块体里都是这个形状。 */
+function flatten(items) {
+  return items.flatMap((s) => (tag(s) === 'line' || tag(s) === 'body' ? flatten(kids(s)) : [s]));
+}
+
+/* ─── 上下文 ──────────────────────────────────────────────────────────────── */
+
+function makeCtx() {
+  let tmpN = 0;
+  const names = new Map();
+  const scopes = [];
+  const gdecls = [];
+  const C = {
+    /** 现在在不在函数体里（模块级的赋值是给 `(global …)` 的 `set`，函数里的是 `let`）。 */
+    inFn: false,
+    /** 函数名 → { params: [{name,type}], ret }。签名，推断填。 */
+    fns: new Map(),
+    /** 函数名 → 那棵 `(def …)`。 */
+    fnNodes: new Map(),
+    /** 模块级变量名 → 类型。 */
+    globals: new Map(),
+    /** 记录（class）—— 这一版空着，留着让 `typeOfAnnot` 那条路不必分支。 */
+    records: new Map(),
+    fresh: (p) => { tmpN += 1; return `${p}${tmpN}`; },
+    /** python 的名字 → 方言里那个名字（方言只收 `[A-Za-z0-9_]`）。 */
+    ref: (n) => {
+      if (!names.has(n)) {
+        let s = String(n).replace(/[^A-Za-z0-9_]/g, '_');
+        if (/^[0-9]/.test(s)) s = `_${s}`;
+        names.set(n, s);
+      }
+      return names.get(n);
+    },
+    push: () => { scopes.push(new Map()); gdecls.push(new Set()); },
+    pop: () => { scopes.pop(); gdecls.pop(); },
+    /** `global x` 说过的那几个名字（那时的赋值是写模块级那一格，不是造一格新的局部）。 */
+    markGlobal: (n) => { if (gdecls.length > 0) gdecls[gdecls.length - 1].add(n); },
+    isDeclGlobal: (n) => gdecls.some((s) => s.has(n)),
+    bind: (n, t) => {
+      if (scopes.length === 0) C.globals.set(n, t);
+      else scopes[scopes.length - 1].set(n, t);
+    },
+    /** 这一层里有没有（决定发 `let` 还是 `set`）。 */
+    here: (n) => (scopes.length > 0 && scopes[scopes.length - 1].has(C.ref(n))),
+    /** 这一层登记过的名字与类型（函数体开头那一批 `let` 靠它）。 */
+    localsHere: () => (scopes.length === 0 ? [] : [...scopes[scopes.length - 1]]),
+    /** 名字装的是什么；找不到回 `null`。 */
+    lookup: (n) => {
+      const k = C.ref(n);
+      for (let i = scopes.length - 1; i >= 0; i -= 1) {
+        const v = scopes[i].get(k);
+        if (v !== undefined) return v;
+      }
+      return C.globals.get(n) ?? null;
+    },
+    tyCtx: () => ({
+      env: { get: (n) => C.lookupRef(n) },
+      fns: new Map([...C.fns].map(([k, v]) => [C.ref(k), v])),
+      fields: new Map(),
+    }),
+    /** 按**方言里那个名字**查（`tyCtx().env` 收到的是改过的名字）。 */
+    lookupRef: (n) => {
+      for (let i = scopes.length - 1; i >= 0; i -= 1) {
+        const v = scopes[i].get(n);
+        if (v !== undefined) return v;
+      }
+      for (const [g, t] of C.globals) if (C.ref(g) === n) return t;
+      return undefined;
+    },
+  };
+  return C;
+}
+
+/* ─── 推断（三轮）────────────────────────────────────────────────────────── */
+
+/** 树里所有节点，深度优先。**不用生成器** —— 这份文件跟着编译器一起被降级，子集越窄越稳。 */
+function allNodes(x, out = []) {
+  if (x === null || x === undefined || x.kind !== 'list') return out;
+  out.push(x);
+  for (const k of kids(x)) allNodes(k, out);
+  return out;
+}
+
+/** 一格 `(def …)` 的形参表（`(params (p (n x) [T] …) …)`）。 */
+const paramsOf = (f) => kids(part(f, 'params') ?? { kind: 'list', items: [] });
+
+/**
+ * 形参、返回类型、模块级变量 —— 整个扫三轮，每轮只填得出来的那几格。
+ * 三轮之后还缺的当场报（见文件头那四条）。
+ */
+function infer(C, tree, scriptStmts) {
+  C.globals.set('__name__', STR);
+
+  /* 签名的骨架：名字先摆上，类型第一轮再填（`C.fns` 一有条目，`tyOfCst` 才认得这个调用）。 */
+  for (const [nm, f] of C.fnNodes) {
+    const ps = paramsOf(f);
+    for (const p of ps) {
+      if (tag(p) !== 'p') throw new Error(`python->IR: \`def ${nm}\` 的形参里有 \`${tag(p)}\` —— 还没接（*args / **kw / 位置标记）`);
+      if (part(p, 'default') !== undefined) throw new Error(`python->IR: \`def ${nm}\` 的形参带默认值 —— 还没接`);
+    }
+    C.fns.set(nm, {
+      params: ps.map((p) => ({ name: C.ref(String(nameOf(kids(p)[0]))), type: null })),
+      ret: null,
+      annots: ps.map((p) => typeOfAnnot(kids(p)[1], C)),
+      retAnnot: typeOfAnnot(kids(part(f, 'ret') ?? { kind: 'list', items: [] })[0], C),
+    });
+  }
+
+  for (let round = 0; round < 3; round += 1) {
+    for (const [nm, sig] of C.fns) {
+      sig.params.forEach((p, i) => {
+        if (p.type === null && sig.annots[i] !== null) p.type = sig.annots[i];
+      });
+      if (sig.params.some((p) => p.type === null)) inferParamsFromCalls(nm, sig, tree, C);
+      if (sig.ret === null) {
+        sig.ret = sig.retAnnot !== null ? sig.retAnnot : inferRet(nm, sig, C);
+      }
+    }
+    for (const s of scriptStmts) scanBinds(s, C);
+  }
+
+  for (const [nm, sig] of C.fns) {
+    sig.params.forEach((p, i) => {
+      if (p.type === null) {
+        throw new Error(`python->IR: \`def ${nm}\` 的第 ${i + 1} 格形参 '${p.name}' 的类型推不出来`
+          + ' —— 给它一格标注（`def f(x: int)`），或者在这份源码里调它一次');
+      }
+    });
+    if (sig.ret === null) sig.ret = { kind: 'void' };
+  }
+}
+
+/**
+ * 从调用点推形参：全树找 `f(…)`，把每一格实参的类型收齐。
+ *
+ * **同一格形参在两处收到不同的类型就当场报** —— 那是 python 的鸭子类型撞上方言的静态
+ * 类型：`add(2, 3)` 与 `add(1.5, 2.5)` 在 python 里是同一个函数，在方言里是两个。
+ * 悄悄挑一个的后果是另一处答错（或者被方言那一层拦下来，而那时的报错离根因很远）。
+ * 真正的出路是**单态化**（按实参类型生成 `add_int` / `add_real`），那是下一刀。
+ */
+function inferParamsFromCalls(nm, sig, tree, C) {
+  const seen = sig.params.map(() => []);
+  for (const node of allNodes(tree)) {
+    if (tag(node) !== 'call') continue;
+    const fn = kids(node)[0];
+    if (tag(fn) !== 'n' || String(nameOf(fn)) !== nm) continue;
+    const args = kids(part(node, 'args') ?? { kind: 'list', items: [] });
+    if (args.length !== sig.params.length) continue;
+    args.forEach((a, i) => {
+      const t = tyOfCst(a, C);
+      if (t !== null && !seen[i].some((x) => sameType(x, t))) seen[i].push(t);
+    });
+  }
+  sig.params.forEach((p, i) => {
+    if (p.type !== null || seen[i].length === 0) return;
+    if (seen[i].length > 1) {
+      throw new Error(`python->IR: \`${nm}()\` 的第 ${i + 1} 格形参在几处调用里装的东西不一样`
+        + `（${seen[i].map((t) => t.kind).join(' / ')}）—— 单态化还没接。`
+        + '这一刀里请给它一格标注，并且各处都递同一种东西');
+    }
+    [p.type] = seen[i];
+  });
+}
+
+/** 扫函数体里的 `return` —— 形参都定了才问得出来（一格没定就回 null，下一轮再来）。 */
+function inferRet(nm, sig, C) {
+  if (sig.params.some((p) => p.type === null)) return null;
+  const f = C.fnNodes.get(nm);
+  C.push();
+  for (const p of sig.params) C.bind(p.name, p.type);
+  const rets = [];
+  scanBinds(part(f, 'body'), C, rets);
+  C.pop();
+  if (rets.length === 0) return { kind: 'void' };
+  const known = rets.filter((t) => t !== null);
+  if (known.length !== rets.length) return null;          // 还有推不出来的，下一轮
+  for (const t of known) {
+    if (!sameType(t, known[0])) {
+      throw new Error(`python->IR: \`def ${nm}\` 的几处 return 不同型（${known[0].kind} / ${t.kind}）`
+        + ' —— 方言那一层一格函数只交一种东西');
+    }
+  }
+  return known[0];
+}
+
+/**
+ * **只管绑定与收 return** 的一趟（不建 IR）。推断那三轮反复跑它，所以它必须没有副作用
+ * （除了往当前作用域里 bind —— 那正是它的活）。
+ */
+function scanBinds(x, C, rets = null) {
+  if (x === null || x === undefined) return;
+  for (const s of flatten([x])) scanOne(s, C, rets);
+}
+
+function scanOne(s, C, rets) {
+  switch (tag(s)) {
+    case 'assign': {
+      const t = tyOfCst(kids(s)[kids(s).length - 1], C);
+      for (const g of kids(part(s, 'lhs') ?? { kind: 'list', items: [] })) {
+        bindTarget(kids(g)[0], t, C);
+      }
+      return;
+    }
+    case 'annot': {
+      const t = typeOfAnnot(kids(s)[1], C);
+      if (t !== null) bindTarget(kids(s)[0], t, C);
+      return;
+    }
+    case 'walrus': return;
+    case 'for': {
+      const it = tyOfCst(kids(part(s, 'in') ?? { kind: 'list', items: [] })[0], C);
+      bindTarget(kids(s)[0], elemOf(it, kids(part(s, 'in') ?? { kind: 'list', items: [] })[0]), C);
+      scanBinds(part(s, 'body'), C, rets);
+      for (const e of kids(s).filter((y) => tag(y) === 'else')) scanBinds(e, C, rets);
+      return;
+    }
+    case 'if': case 'while': case 'with': {
+      for (const k of kids(s)) {
+        if (['body', 'else', 'elifs'].includes(tag(k))) scanBinds(k, C, rets);
+        if (tag(k) === null && k.kind === 'list') for (const e of k.items) scanBinds(part(e, 'body'), C, rets);
+      }
+      /* `(elifs (elif C (body …)) …)` 里那几层。 */
+      const el = part(s, 'elifs');
+      if (el !== undefined) for (const e of kids(el)) scanBinds(part(e, 'body'), C, rets);
+      return;
+    }
+    case 'return':
+      if (rets !== null) rets.push(kids(s).length === 0 ? { kind: 'void' } : tyOfCst(kids(s)[0], C));
+      return;
+    default:
+  }
+}
+
+/** 一格可迭代的东西装的元素是什么（`range(…)` 出 int，表出它的元素，串出串）。 */
+function elemOf(it, node) {
+  if (node !== undefined && tag(node) === 'call' && tag(kids(node)[0]) === 'n'
+    && String(nameOf(kids(node)[0])) === 'range') return INT;
+  if (it === null) return null;
+  if (it.kind === 'arr') return it.elem;
+  if (it.kind === 'string') return STR;
+  return null;
+}
+
+/** 一格赋值目标登记进作用域（元组目标逐格登记）。 */
+function bindTarget(t, ty, C) {
+  if (ty === null || ty === undefined) return;
+  if (tag(t) === 'n') {
+    const n = String(nameOf(t));
+    if (C.lookup(n) === null) C.bind(C.ref(n), ty);
+    return;
+  }
+  if (tag(t) === 'tuple') {
+    for (const k of kids(t)) bindTarget(k, ty, C);
+  }
+}
+
+/* ─── 函数体 ──────────────────────────────────────────────────────────────── */
+
+/**
+ * 一格函数。**局部量全提到函数体开头**（一批 `let`），体里的赋值一律是 `set`。
+ *
+ * 为什么必须这样：python 的局部量是**整个函数一格命名空间**（`if c: x = 1` 之后，
+ * 块外头照样读得到 x），而方言的 `(let …)` 归它所在那个 `(do …)`。不提上来的话
+ * `if c: x = 1` 那一句里的 `let` 就锁在 if 的块里 —— 后面读 x 时方言当场报
+ * "未声明的变量"。R 那一门与 lua 那台 VM 都是同一条办法。
+ */
+function fnDecl(nm, node, C) {
+  const sig = C.fns.get(nm);
+  const bodyNode = part(node, 'body') ?? { kind: 'list', items: [] };
+  C.push();
+  const wasIn = C.inFn;
+  C.inFn = true;
+  for (const p of sig.params) C.bind(p.name, p.type);
+  /* 先只走一趟"绑定"（不建 IR）—— 于是局部量的名字与类型在发第一句之前就全知道了。 */
+  scanBinds(bodyNode, C);
+  const pnames = new Set(sig.params.map((p) => p.name));
+  const locals = C.localsHere().filter(([n]) => !pnames.has(n));
+  const stmts = flatten(kids(bodyNode)).flatMap((s) => stmtsOf(s, C));
+  C.inFn = wasIn;
+  C.pop();
+  return {
+    kind: 'fn',
+    name: C.ref(nm),
+    params: sig.params,
+    ret: sig.ret,
+    body: [...locals.map(([n, t]) => ({ kind: 'let', name: n, type: t, init: null })), ...stmts],
+  };
+}
+
+/* ─── 语句 ────────────────────────────────────────────────────────────────── */
+
+export function stmtsOf(x, C) {
+  switch (tag(x)) {
+    case 'line': case 'body': return flatten([x]).flatMap((k) => stmtsOf(k, C));
+    case 'pass': return [];
+    /* import 这一版**丢掉**（`math` 那一族在 adapter 里认名字，不必真读那份模块）。 */
+    case 'import': case 'from': case 'typealias': return [];
+    case 'global': {
+      for (const n of kids(x)) {
+        const nm = String(leaf(n));
+        C.markGlobal(nm);
+        if (!C.globals.has(nm)) {
+          throw new Error(`python->IR: \`global ${nm}\` 可顶层没给它赋过值 —— 还没接`);
+        }
+      }
+      return [];
+    }
+    case 'nonlocal':
+      throw new Error('python->IR: `nonlocal` 还没接（要先有函数里套函数）');
+    case 'expr': return exprStmtOf(kids(x)[0], C);
+    case 'assign': return assignStmt(x, C);
+    case 'augassign': return augassignStmt(x, C);
+    case 'annot': return annotStmt(x, C);
+    case 'if': return [ifStmt(x, C)];
+    case 'while': return [whileStmt(x, C)];
+    case 'for': return [forStmt(x, C)];
+    case 'return': {
+      const vs = kids(x);
+      return [{ kind: 'return', values: vs.length === 0 ? [] : [exprOf(vs[0], C)] }];
+    }
+    case 'break': return [{ kind: 'break', label: null }];
+    case 'continue': return [{ kind: 'continue', label: null }];
+    case 'assert': return [assertStmt(x, C)];
+    /* `raise X("话")` —— 方言里没有异常，落成"印一句 + 停下来"（与 mojo 的 assert 同一手）。 */
+    case 'raise': {
+      const vs = kids(x).filter((y) => tag(y) !== 'from');
+      const msg = vs.length === 0 ? { kind: 'string', value: 'raise' } : raiseText(vs[0], C);
+      return [{ kind: 'builtin-stmt', name: 'fail', args: [msg] }];
+    }
+    case 'def':
+      throw new Error('python->IR: 函数里套函数还没接');
+    case 'class':
+      throw new Error('python->IR: `class` 还没接（下一刀）');
+    case 'try': case 'with': case 'match': case 'del': case 'decorated': case 'async':
+      throw new Error(`python->IR: \`${tag(x)}\` 还没接`);
+    default:
+      throw new Error(`python->IR: 这一格语句还没接：${tag(x)}`);
+  }
+}
+
+/** 语句位置上的一格表达式。`print(…)` 与 `xs.append(v)` 不交值，各自一格。 */
+function exprStmtOf(e, C) {
+  if (tag(e) === 'call') {
+    const [fn, argsTok] = kids(e);
+    const argToks = argsTok === undefined ? [] : kids(argsTok);
+    if (tag(fn) === 'n' && String(nameOf(fn)) === 'print') return printStmt(argToks, C);
+    if (tag(fn) === 'attr' && String(leaf(kids(fn)[1])) === 'append') {
+      const box = exprOf(kids(fn)[0], C);
+      if (argToks.length !== 1) throw new Error('python->IR: `.append()` 只收一格实参');
+      return [{ kind: 'builtin-stmt', name: 'apush', args: [box, exprOf(argToks[0], C)] }];
+    }
+  }
+  return [{ kind: 'expr-stmt', expr: exprOf(e, C) }];
+}
+
+/**
+ * `print(a, b)` —— **一行、空格连、末尾一个换行**（`Lib/builtins` 的默认 sep/end）。
+ * 给了 `end=` 就改走 `write`（那一格不补换行），把 end 拼在后面。`sep=` 还没接。
+ */
+function printStmt(argToks, C) {
+  let end = null;
+  const pos = [];
+  for (const a of argToks) {
+    if (tag(a) === 'kw') {
+      const k = String(leaf(kids(a)[0]));
+      if (k !== 'end') throw new Error(`python->IR: \`print(${k}=…)\` 还没接（只接了 end=）`);
+      end = exprOf(kids(a)[1], C);
+      continue;
+    }
+    if (['star', 'starstar', 'genexp'].includes(tag(a))) {
+      throw new Error(`python->IR: \`print\` 的实参里有 \`${tag(a)}\` —— 还没接`);
+    }
+    pos.push(a);
+  }
+  const parts = pos.map((a) => pyStr(exprOf(a, C), C));
+  let value = parts.length === 0 ? { kind: 'string', value: '' } : parts[0];
+  for (const p of parts.slice(1)) {
+    value = {
+      kind: 'binop', op: '+',
+      left: { kind: 'binop', op: '+', left: value, right: { kind: 'string', value: ' ' } },
+      right: p,
+    };
+  }
+  if (end === null) return [{ kind: 'print', values: [value] }];
+  return [{ kind: 'write', values: [{ kind: 'binop', op: '+', left: value, right: end }] }];
+}
+
+/* ─── 赋值 ────────────────────────────────────────────────────────────────── */
+
+function assignStmt(x, C) {
+  const groups = kids(part(x, 'lhs') ?? { kind: 'list', items: [] });
+  const valueTok = kids(x)[kids(x).length - 1];
+  const targets = groups.map((g) => kids(g)[0]);
+  if (targets.length === 1) return assignTo(targets[0], valueTok, C);
+  /* `a = b = c` —— 右边只算一遍，落一格临时量再各写一次。 */
+  const v = exprOf(valueTok, C);
+  const t = typeOfIR(v, C);
+  const tmp = C.fresh('chain');
+  C.bind(tmp, t);
+  const out = [{ kind: 'let', name: tmp, type: t, init: v }];
+  for (const tt of targets) {
+    if (tag(tt) === 'tuple') throw new Error('python->IR: `a = b, c = …` 这种连写加拆包还没接');
+    out.push(...writeTo(tt, { kind: 'name', name: tmp }, C));
+  }
+  return out;
+}
+
+/** 一格目标 ← 一格**还没算过**的右边（拆包要看右边的形状，所以收的是记号）。 */
+function assignTo(t, valueTok, C) {
+  if (tag(t) === 'tuple') {
+    if (tag(valueTok) !== 'tuple') {
+      throw new Error('python->IR: 拆包赋值的右边要也是个元组（`a, b = f()` 还没接）');
+    }
+    const ts = kids(t);
+    const vs = kids(valueTok);
+    if (ts.length !== vs.length) {
+      throw new Error(`python->IR: 拆包赋值两边格数不一样（左 ${ts.length}、右 ${vs.length}）`);
+    }
+    /* **右边全算完再赋** —— `a, b = b, a` 这个交换靠的正是这一条。 */
+    const out = [];
+    const tmps = vs.map((e) => {
+      const v = exprOf(e, C);
+      const ty = typeOfIR(v, C);
+      const n = C.fresh('unpack');
+      C.bind(n, ty);
+      out.push({ kind: 'let', name: n, type: ty, init: v });
+      return { kind: 'name', name: n };
+    });
+    ts.forEach((tt, i) => out.push(...writeTo(tt, tmps[i], C)));
+    return out;
+  }
+  return writeTo(t, exprOf(valueTok, C), C);
+}
+
+/** 一格目标 ← 一格**算好了**的值。 */
+function writeTo(t, value, C) {
+  if (tag(t) === 'n') {
+    const n = String(nameOf(t));
+    const want = C.lookup(n);
+    const got = typeOfIR(value, C);
+    if (want !== null && !sameType(want, got)) {
+      /* int 装进 real 的格子里是许的（`x = 1` 之后 `x = 1.5` 那种在 python 里合法，
+         而方言里一格变量只有一种类型 —— 所以 int 提到 real，反过来当场报）。 */
+      if (want.kind === 'real' && got.kind === 'int') {
+        return [{ kind: 'assign', target: { kind: 'name', name: C.ref(n) }, value: { kind: 'builtin', name: 'toreal', args: [value] } }];
+      }
+      throw new Error(`python->IR: '${n}' 先装 ${want.kind}、后装 ${got.kind}`
+        + ' —— 方言里一格变量只装一种东西（换个名字，或者两处都写成同一种）');
+    }
+    if (want === null) C.bind(C.ref(n), got);
+    return [{ kind: 'assign', target: { kind: 'name', name: C.ref(n) }, value }];
+  }
+  if (tag(t) === 'index') {
+    const box = exprOf(kids(t)[0], C);
+    const subs = kids(part(t, 'subs') ?? { kind: 'list', items: [] });
+    if (subs.length !== 1) throw new Error('python->IR: 多维下标赋值还没接');
+    if (tag(subs[0]) === 'slice') throw new Error('python->IR: 给切片赋值（`xs[1:3] = …`）还没接');
+    const bt = typeOfIR(box, C);
+    const key = exprOf(subs[0], C);
+    if (bt.kind === 'map') return [{ kind: 'builtin-stmt', name: 'dset', args: [box, key, value] }];
+    if (bt.kind === 'arr') {
+      return [{
+        kind: 'assign',
+        target: { kind: 'index', obj: box, index: wrapIdxForWrite(box, key, C) },
+        value,
+      }];
+    }
+    throw new Error(`python->IR: 往 ${bt.kind} 上按下标写还没接（串在 python 里不可改）`);
+  }
+  if (tag(t) === 'attr') throw new Error('python->IR: 给属性赋值还没接（要先有 class）');
+  if (tag(t) === 'star') throw new Error('python->IR: 带星号的赋值目标（`*rest`）还没接');
+  throw new Error(`python->IR: 赋值的左边是 \`${tag(t)}\` —— 还没接`);
+}
+
+/** 写的那一侧也要管负下标（`xs[-1] = v`）—— 与读那一侧同一条口径。 */
+function wrapIdxForWrite(box, key, C) {
+  if (key.kind === 'int' && key.value < 0n) {
+    return { kind: 'binop', op: '+', left: lenOf(box, C), right: key };
+  }
+  if (key.kind === 'int') return key;
+  return {
+    kind: 'ternary', type: INT,
+    cond: { kind: 'binop', op: '<', left: key, right: { kind: 'int', value: 0 } },
+    then: { kind: 'binop', op: '+', left: lenOf(box, C), right: key },
+    else_: key,
+  };
+}
+
+/* ─── `+=` / 标注 / 分支 / 循环 ────────────────────────────────────────────── */
+
+/** 一格**造出来的** CST 节点（`x += 1` 改写成 `x = x + 1` 要它）。 */
+const mkTok = (...items) => ({
+  kind: 'list',
+  items: items.map((i) => (typeof i === 'string' ? { kind: 'atom', value: i } : i)),
+});
+
+function augassignStmt(x, C) {
+  const [opTok, target, value] = kids(x);
+  const o = String(leaf(opTok)).slice(0, -1);      // `+=` -> `+`
+  if (tag(target) !== 'n' && tag(target) !== 'index') {
+    throw new Error(`python->IR: \`${o}=\` 的左边是 \`${tag(target)}\` —— 还没接`);
+  }
+  return writeTo(target, exprOf(mkTok('bin', o, target, value), C), C);
+}
+
+/** `x: int` / `x: int = 0` / `xs: list[int] = []`。**空容器靠标注才造得出来**。 */
+function annotStmt(x, C) {
+  const [target, annot] = kids(x);
+  const init = part(x, 'init');
+  const t = typeOfAnnot(annot, C);
+  if (t === null) throw new Error(`python->IR: 这一格类型标注还没接（认得 int / float / str / bool / list[T] / dict[K,V]）`);
+  if (tag(target) !== 'n') throw new Error('python->IR: 带标注的赋值目标只接一格名字');
+  const n = String(nameOf(target));
+  if (C.lookup(n) === null) C.bind(C.ref(n), t);
+  if (init === undefined) return [];
+  const v = kids(init)[0];
+  /* `[]` / `{}` 自己推不出元素类型 —— 标注在这儿，按它造。 */
+  if (tag(v) === 'list' && kids(v).length === 0) {
+    if (t.kind !== 'arr') throw new Error(`python->IR: \`[]\` 的标注写的是 ${t.kind}`);
+    return [{
+      kind: 'assign',
+      target: { kind: 'name', name: C.ref(n) },
+      value: { kind: 'builtin', name: 'anew', args: [tyArg(t), { kind: 'int', value: 0 }] },
+    }];
+  }
+  if (tag(v) === 'dict' && kids(v).length === 0) {
+    if (t.kind !== 'map') throw new Error(`python->IR: \`{}\` 的标注写的是 ${t.kind}`);
+    return [{
+      kind: 'assign',
+      target: { kind: 'name', name: C.ref(n) },
+      value: { kind: 'builtin', name: 'dnew', args: [tyArg(t)] },
+    }];
+  }
+  return writeTo(target, exprOf(v, C), C);
+}
+
+function bodyStmts(node, C) {
+  return node === undefined ? [] : flatten(kids(node)).flatMap((s) => stmtsOf(s, C));
+}
+
+function ifStmt(x, C) {
+  const parts = kids(x);
+  const cond = condOf(parts[0], C);
+  const then = bodyStmts(parts[1], C);
+  const elifs = kids(part(x, 'elifs') ?? { kind: 'list', items: [] });
+  const elseTok = kids(x).find((y) => tag(y) === 'else');
+  let els = elseTok === undefined ? null : bodyStmts(kids(elseTok)[0], C);
+  for (let i = elifs.length - 1; i >= 0; i -= 1) {
+    const e = kids(elifs[i]);
+    els = [{ kind: 'if', cond: condOf(e[0], C), then: bodyStmts(e[1], C), else_: els }];
+  }
+  return { kind: 'if', cond, then, else_: els };
+}
+
+function whileStmt(x, C) {
+  if (kids(x).some((y) => tag(y) === 'else')) {
+    throw new Error('python->IR: `while … else:` 还没接（那一支是"没 break 就跑"）');
+  }
+  return { kind: 'while', cond: condOf(kids(x)[0], C), body: bodyStmts(part(x, 'body'), C) };
+}
+
+/**
+ * `for` —— **三种可迭代**：`range(…)`、表、串。
+ *
+ * 落成标准 IR 的 `{ kind: 'for', init, cond, post, body }`（不是自己摊成 while）——
+ * 那一格在 `lower-stmt.js` 里会把体内**属于这一层**的 `continue` 前面补上步进。
+ * 自己摊的话 `continue` 会跳过步进，当场死循环（那一条账写在 `lowerFor` 的注释里）。
+ */
+function forStmt(x, C) {
+  if (kids(x).some((y) => tag(y) === 'else')) {
+    throw new Error('python->IR: `for … else:` 还没接（那一支是"没 break 就跑"）');
+  }
+  const target = kids(x)[0];
+  if (tag(target) !== 'n') throw new Error(`python->IR: \`for\` 的目标是 \`${tag(target)}\` —— 拆包还没接`);
+  const name = C.ref(String(nameOf(target)));
+  const iter = kids(part(x, 'in') ?? { kind: 'list', items: [] })[0];
+  const pre = [];
+  /** 循环前先算一遍并落一格临时量（python 的 range 与容器都只算一次）。 */
+  const once = (e, p) => {
+    const v = exprOf(e, C);
+    if (['int', 'real', 'string', 'bool', 'name'].includes(v.kind)) return v;
+    const n = C.fresh(p);
+    const t = typeOfIR(v, C);
+    C.bind(n, t);
+    pre.push({ kind: 'let', name: n, type: t, init: v });
+    return { kind: 'name', name: n };
+  };
+
+  if (tag(iter) === 'call' && tag(kids(iter)[0]) === 'n' && String(nameOf(kids(iter)[0])) === 'range') {
+    const as = kids(part(iter, 'args') ?? { kind: 'list', items: [] });
+    if (as.length === 0 || as.length > 3) throw new Error('python->IR: `range()` 收 1~3 格实参');
+    const from = as.length === 1 ? { kind: 'int', value: 0 } : once(as[0], 'from');
+    const to = once(as[as.length === 1 ? 0 : 1], 'to');
+    let step = { kind: 'int', value: 1 };
+    let down = false;
+    if (as.length === 3) {
+      const sv = exprOf(as[2], C);
+      if (sv.kind !== 'int' || sv.value === 0n) {
+        throw new Error('python->IR: `range(a, b, step)` 的步长要是一格非零整数字面量 —— '
+          + '不然"往上还是往下"只有跑起来才知道（那要两条循环）');
+      }
+      step = sv;
+      down = sv.value < 0n;
+    }
+    C.bind(name, INT);
+    return {
+      kind: 'block',
+      stmts: [...pre, {
+        kind: 'for',
+        init: { kind: 'assign', target: { kind: 'name', name }, value: from },
+        cond: { kind: 'binop', op: down ? '>' : '<', left: { kind: 'name', name }, right: to },
+        post: {
+          kind: 'assign', target: { kind: 'name', name },
+          value: { kind: 'binop', op: '+', left: { kind: 'name', name }, right: step },
+        },
+        body: bodyStmts(part(x, 'body'), C),
+      }],
+    };
+  }
+
+  const box = once(iter, 'iter');
+  const bt = typeOfIR(box, C);
+  if (bt.kind !== 'arr' && bt.kind !== 'string') {
+    throw new Error(`python->IR: 在 ${bt.kind} 上走一遍还没接（range / 表 / 串接了）`);
+  }
+  const i = C.fresh('for_i');
+  C.bind(i, INT);
+  const item = bt.kind === 'arr'
+    ? { kind: 'index', obj: box, index: { kind: 'name', name: i } }
+    : {
+      /* `(ssub E I N)` 是"从 I 起取 N 个" —— 一格字符就是 N = 1。 */
+      kind: 'builtin', name: 'ssub',
+      args: [box, { kind: 'name', name: i }, { kind: 'int', value: 1 }],
+    };
+  return {
+    kind: 'block',
+    stmts: [...pre, {
+      kind: 'for',
+      init: { kind: 'let', name: i, type: INT, init: { kind: 'int', value: 0 } },
+      cond: { kind: 'binop', op: '<', left: { kind: 'name', name: i }, right: lenOf(box, C) },
+      post: {
+        kind: 'assign', target: { kind: 'name', name: i },
+        value: { kind: 'binop', op: '+', left: { kind: 'name', name: i }, right: { kind: 'int', value: 1 } },
+      },
+      body: [
+        { kind: 'assign', target: { kind: 'name', name }, value: item },
+        ...bodyStmts(part(x, 'body'), C),
+      ],
+    }],
+  };
+}
+
+/* ─── assert / raise ──────────────────────────────────────────────────────── */
+
+/** `assert c[, "话"]` —— 方言里没有 assert，按口径拼：印一句再停下来。 */
+function assertStmt(x, C) {
+  const cond = condOf(kids(x)[0], C);
+  const msg = kids(x)[1];
+  const head = { kind: 'string', value: 'AssertionError' };
+  const line = msg === undefined
+    ? head
+    : {
+      kind: 'binop', op: '+',
+      left: { kind: 'string', value: 'AssertionError: ' },
+      right: pyStr(exprOf(msg, C), C),
+    };
+  return {
+    kind: 'if',
+    cond: { kind: 'unop', op: '!', operand: cond },
+    then: [
+      { kind: 'print', values: [line] },
+      { kind: 'builtin-stmt', name: 'fail', args: [head] },
+    ],
+    else_: null,
+  };
+}
+
+/** `raise ValueError("话")` → 停下来时印的那一句。 */
+function raiseText(v, C) {
+  if (tag(v) === 'call' && tag(kids(v)[0]) === 'n') {
+    const nm = String(nameOf(kids(v)[0]));
+    const as = kids(part(v, 'args') ?? { kind: 'list', items: [] });
+    if (as.length === 0) return { kind: 'string', value: nm };
+    return {
+      kind: 'binop', op: '+',
+      left: { kind: 'string', value: `${nm}: ` },
+      right: pyStr(exprOf(as[0], C), C),
+    };
+  }
+  if (tag(v) === 'n') return { kind: 'string', value: String(nameOf(v)) };
+  throw new Error('python->IR: `raise` 后面那一格还没接（只接了 `raise E` 与 `raise E("话")`）');
+}
+
+/* ─── 语言钩子 ────────────────────────────────────────────────────────────── */
+
+/**
+ * 数组的零值 —— 公共那张表里没有这一格（`lower/ty.js` 的 `zeroOf`），
+ * 而函数体开头那一批 `let` 全是零初始化，所以这儿必须给。
+ */
+export const PY_HOOKS = {
+  zeroOf: (type) => {
+    if (type !== null && typeof type === 'object' && type.kind === 'arr') {
+      return `(anew ${typeToSx(type)} (int 0))`;
+    }
+    return null;
+  },
+};
+
+// ---- 这一批明说的不足（不猜）----------------------------------------------------
+//   1. `class` / `try` / `with` / `match` / 生成器 / 闭包 / 装饰器都没接。
+//   2. 整数是 64 位（python 的 int 没有上界）—— 溢出的那一档要等 `longobject.c` 接上来。
+//   3. 浮点转串走方言的 `tostr`，与 python 的 `repr` 不逐字节相同（那一格要 `dtoa.c`）。
+//   4. `round()` 是 C 的 round（远离零），python 是银行家舍入 —— `.5` 那一格答得不一样。
+//   5. 循环变量不外泄（python 里 `for i in …` 之后还读得到 i）。
+//   6. f-string 里那段表达式、`%` 格式化、`.format()` 都没接。
