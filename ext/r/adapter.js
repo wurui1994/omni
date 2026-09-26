@@ -195,6 +195,7 @@ const FN_DEPS = new Map([
   ['r_cummin', ['r_is_na', 'r_na']],
   ['r_rep_len', []],
   ['r_rep_times', ['r_is_na']],
+  ['r_rep_str_times', ['r_is_na']],
   /* `tabulate`：缺失与非正数与超出 nbins 的那几格都不记，所以要问 `r_is_na`。
      不给 `nbins` 时的那个默认长度是另一格（`r_tab_n` —— R 的默认实参是 `max(1, bin)`）。 */
   ['r_tab_n', ['r_is_na']],
@@ -5679,12 +5680,28 @@ function callOf(x, types, extra, want, stmtPos) {
          */
         const timesNode = named !== undefined ? named : (n >= 2 ? all[1] : undefined);
         if (timesNode !== undefined && timesNode !== null
-            && isVecTy(typeOfExpr(timesNode, types)) && !isStrVec(t) && t.kind !== 'string') {
+            && isVecTy(typeOfExpr(timesNode, types))) {
           if (namedArg(x, 'each') !== undefined) {
             throw new Error('r->IR: rep() 的 `times` 是向量、又给了 `each=` —— 两格叠起来还没接');
           }
+          const tE = exprOf(timesNode, types);
+          /* 字符向量那一侧走同一条账的另一格（`(arr string)` 与 `(ptr real)` 是两种存法）；
+             一格串先摆成长度 1 的字符向量，与 `r_rep_str` 那一档同一个办法。 */
+          if (isStrVec(t)) return lglCall('r_rep_str_times', ev(0), tE);
+          if (t.kind === 'string') {
+            const tmp1 = fresh('rt');
+            const tv1 = { kind: 'name', name: tmp1 };
+            return {
+              kind: 'block-expr',
+              stmts: [
+                { kind: 'let', name: tmp1, type: RSTRV, init: call1('anew', tyArg(RSTRV), { kind: 'int', value: 1 }) },
+                { kind: 'assign', target: svGet(tv1, { kind: 'int', value: 0 }), value: ev(0) },
+              ],
+              value: lglCall('r_rep_str_times', tv1, tE),
+            };
+          }
           const xv = isVecTy(t) ? ev(0) : lglCall('r_vec1', asReal(ev(0), t));
-          return lglCall('r_rep_times', xv, exprOf(timesNode, types));
+          return lglCall('r_rep_times', xv, tE);
         }
         let cnt = null;
         if (named !== undefined) cnt = scalarCnt(named, 'times');
@@ -8235,7 +8252,7 @@ const STRV_FNS = new Set([
   'r_substr_v', 'r_trim_v', 'r_starts_v', 'r_ends_v',
   /* base 那四条字符向量常量 + `strrep` 在字符向量上那一格。 */
   'r_sv_letters', 'r_sv_upper', 'r_sv_month', 'r_sv_mabb', 'r_strrep_v', 'r_chartr_v',
-  'r_str2num_v', 'r_as_str_v', 'r_as_str_lv', 'r_as_lgl_sv', 'r_eq_sv', 'r_ne_sv', 'r_eq_svv', 'r_ne_svv',
+  'r_rep_str_times', 'r_str2num_v', 'r_as_str_v', 'r_as_str_lv', 'r_as_lgl_sv', 'r_eq_sv', 'r_ne_sv', 'r_eq_svv', 'r_ne_svv',
   'r_sv1', 'r_sort_str', 'r_order_str', 'r_any_dup_str', 'r_uniq_str', 'r_dup_str', 'r_match_str', 'r_in_str', 'r_in1_str',
   'r_union_str', 'r_isect_str', 'r_sdiff_str', 'r_head_str', 'r_tail_str',
   'r_app_str', 'r_app_str_e',
@@ -9514,6 +9531,50 @@ function strvFnDecl(name) {
             value: call1('toreal', nm('k')),
           }]
           : []),
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  if (name === 'r_rep_str_times') {
+    /**
+     * `rep(字符向量, times = 一条向量)` —— 与 `r_rep_times` 同一条账（每格各重复几次、
+     * 三条规矩在运行期看），只是落在 `(arr string)` 上，所以用 `apush` 往后接，
+     * 不必先数一趟总长。
+     */
+    const tv = nm('t');
+    const ti = vecGet(tv, i);
+    const failS = (msg) => ({ kind: 'builtin-stmt', name: 'fail', args: [S(msg)] });
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RSTRV }, { name: 't', type: RVEC }],
+      ret: RSTRV,
+      body: [
+        letI('n', svLen(v)),
+        {
+          kind: 'if',
+          cond: b('!=', vecLen(tv), nm('n')),
+          then: [failS("rep(字符向量, times = 向量)：times 的长度与 x 不一样 —— R 那边报 invalid 'times' argument")],
+          else_: null,
+        },
+        { kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), I(0)) },
+        loop([
+          {
+            kind: 'if',
+            cond: b('||', { kind: 'call', fn: { kind: 'name', name: useFn('r_is_na') }, args: [ti] },
+              b('<', ti, { kind: 'real', value: 0 })),
+            then: [failS("rep(字符向量, times = 向量)：times 里有负数或缺失 —— R 那边报 invalid 'times' argument")],
+            else_: null,
+          },
+          letI('k', call1('toint', ti)),
+          {
+            kind: 'for',
+            init: letI('q', I(0)),
+            cond: b('<', nm('q'), nm('k')),
+            post: set('q', b('+', nm('q'), I(1))),
+            body: [{ kind: 'builtin-stmt', name: 'apush', args: [nm('o'), svGet(v, i)] }],
+          },
+        ], nm('n')),
         { kind: 'return', values: [nm('o')] },
       ],
     };

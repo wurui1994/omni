@@ -1470,7 +1470,9 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
       规矩在运行期看 —— `length(times)` 与 `length(x)` 不一样、`times` 里有负数、
       `times` 里有缺失，R 都报 `invalid 'times' argument`，这一层没有它的条件系统，
       所以停下来报我们自己那句。`times` 是向量又给了 `each=` 还没接（R 那儿先 each 再
-      times，叠起来的账没量过）；字符向量那一侧也还没接。判据 `ext/r/examples/vecfn.R`。
+      times，叠起来的账没量过）。**字符向量那一侧同一天也接了**（`r_rep_str_times`，
+      落在 `(arr string)` 上、用 `apush` 往后接，所以不必先数总长），一格串照旧先摆成
+      长度 1 的字符向量。判据 `ext/r/examples/vecfn.R` 与 `ext/r/examples/strvec.R`。
     * **这一段里没定义过的名字**（`print(Recall)`：R 里 `Recall` 是 base 的一格函数
       对象）—— 从前照原样发 `(var Recall)`，公共层报"未声明的变量"。
 

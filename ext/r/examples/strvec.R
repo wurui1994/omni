@@ -301,3 +301,10 @@ for (wk in seq_along(wv)) wv[wk] <- paste0(wk, wv[wk])
 print(wv)
 wv[2.9] <- "trunc"
 cat(wv[2], wv[3], "\n")
+
+## rep(字符向量, times = 一条向量)：与数值那一侧同一条账（落在 (arr string) 上）
+cat(rep(c("a", "b"), times = c(2, 3)), "\n")
+print(rep(c("x", "y"), c(1, 2)))
+cat(rep("z", times = c(3)), length(rep(c("a", "b"), c(0, 0))), "\n")
+cat(nchar(rep(c("ab", "c"), c(2, 1))), "\n")
+cat(paste(rep(c("-", "="), c(3, 2)), collapse = ""), "\n")
