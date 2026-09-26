@@ -491,6 +491,9 @@ typedef void (*gfx_gl_int_fn)(int);
 typedef void (*gfx_gl_mvp_fn)(int, double, double, double, double);
 typedef int (*gfx_gl_tex_fn)(int, int, int, int, int, const double *);
 typedef int (*gfx_gl_texfile_fn)(int, const char *, int);
+/* `pic` 那一族（EvalDraw 的 `pic("a.png",x,y)`）：解码+缓存那一张、把整张抄出来。 */
+typedef int (*gfx_gl_picload_fn)(const char *, int *, int *);
+typedef long (*gfx_gl_picread_fn)(double *, long);
 /* `gluniform*v`（句柄, 分量数, 整数吗, 个数, 数组）与 `glgettex`（槽, 宽, 高, 上限, 出）。 */
 typedef int (*gfx_gl_univ_fn)(double, int, int, long, const double *);
 typedef int (*gfx_gl_gettex_fn)(int, int, int, long, double *);
@@ -522,6 +525,8 @@ static struct {
   gfx_gl_mvp_fn mvp, mv;
   gfx_gl_tex_fn tex;
   gfx_gl_texfile_fn texfile;
+  gfx_gl_picload_fn picload;
+  gfx_gl_picread_fn picread;
   gfx_gl_univ_fn univ;
   gfx_gl_gettex_fn gettex;
   gfx_gl_cap_fn capbegin, capend;
@@ -660,6 +665,8 @@ static int gfx_gl_need(void) {
     g_gl.mv = (gfx_gl_mvp_fn)dlsym(h, "omni_ev_gl_mv");
     g_gl.tex = (gfx_gl_tex_fn)dlsym(h, "omni_ev_gl_tex");
     g_gl.texfile = (gfx_gl_texfile_fn)dlsym(h, "omni_ev_gl_texfile");
+    g_gl.picload = (gfx_gl_picload_fn)dlsym(h, "omni_ev_gl_picload");
+    g_gl.picread = (gfx_gl_picread_fn)dlsym(h, "omni_ev_gl_picread");
     g_gl.univ = (gfx_gl_univ_fn)dlsym(h, "omni_ev_gl_univ");
     g_gl.gettex = (gfx_gl_gettex_fn)dlsym(h, "omni_ev_gl_gettex");
     g_gl.capbegin = (gfx_gl_cap_fn)dlsym(h, "omni_ev_gl_capbegin");
@@ -1014,6 +1021,13 @@ double omni_gfx_arr(omni_str name, double a0, double a1, double a2, double a3,
   if (gfx_gl_want()) gfx_need();
   long n = blk == NULL ? 0 : (long)blk->len;
   double *items = blk == NULL ? NULL : blk->items;
+  /* **`pic` 那一族的整张图**（`picread`）：设备把缓存那张图一格一个 0xRRGGBB 抄进来，
+     回抄了多少格 —— 语言那一侧按 `picsiz` 给的宽高自己算下标。
+     **与 `host/gfx-cpu.js` 的那一格逐句相同**（三条腿逐字节相同是判据）。 */
+  if (!strcmp(nm, "picread")) {
+    if (g_gl.picread == NULL || items == NULL || n <= 0) return 0.0;
+    return (double)g_gl.picread(items, n);
+  }
   /* **一整张矩阵一句**（`batchmvp16` / `batchmv16`，列主序 16 个数）：与四句
      `batchmvp`/`batchmv` **逐字等价**，只是少 7 句宿主调用（理由见
      `ext/polydraw/gl-rt.js` 里那段话）。不够 16 格就当没发。 */
@@ -1339,6 +1353,14 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
     }
     /* **文件纹理**（`glsettexfile 槽 名字下标 colmode`，§20）：路径在这一层拼
        （目录只有宿主知道），解码与上传在设备 —— 与 `host/gfx-cpu.js` 那一格同一手。 */
+    /* **`pic` 那一族**（`evaldraw.txt:1341`）：`picsiz 名字下标` -> 宽*65536+高（-1 = 没有）。
+       路径在这一层拼（目录只有宿主知道），解码与缓存在设备（与文件纹理同一份）。 */
+    if (!strcmp(nm, "picsiz") && argc == 1 && g_gl.picload != NULL) {
+      const char *p = gfx_tex_path((int)a0);
+      int pw = 0, ph = 0;
+      if (p == NULL || g_gl.picload(p, &pw, &ph) != 0) return -1.0;
+      return (double)(pw * 65536 + ph);
+    }
     if (!strcmp(nm, "glsettexfile") && argc == 3 && g_gl.texfile != NULL) {
       const char *p = gfx_tex_path((int)a1);
       if (p == NULL) return 1.0;

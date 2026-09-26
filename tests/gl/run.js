@@ -14,6 +14,7 @@
 //
 // 没有 `OpenGL.framework`（不是 macOS）就整份**跳过**，不算红 —— 与 `omni_r3.c` 那一侧
 // "拿不到插件就回落 CPU"同一条口径。
+import { deflateSync } from 'node:zlib';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -498,6 +499,68 @@ for (const [name, minFill, minColors] of [['04-shader.pss', 0.9, 1000],
       no('.kc 的纹理真贴上了', `红 ${red} 格、蓝 ${blue} 格（都该有一大片 ——`
         + ' 纯白说明内建那对还是平色那一份）');
     }
+  }
+}
+
+/* ── 第九节：**`pic` 那一族**（按像素读一张图，2026-09-26）────────────────────────
+ *
+ * 口径 `evaldraw.txt:1341`：`pic("a.png",x,y)` 回那一格像素（**不插值**）。脚本在每像素的
+ * 循环里调它（`demos/lab3d.kc` 的 `while (pic(…) != …)` —— 没接住时它回常量 ⇒ **死循环**，
+ * 那份脚本先前是"超时"那一类）。落法：设备解码 + 缓存，语言那一侧**一次抄过来**，
+ * 之后全是数组下标（`gfx3-rt.js` 的 `g3_picneed`/`g3_pic3`）。
+ *
+ * 探针自己造一张 2×2 的 PNG（红/蓝对角，`zlib.deflateSync` 拼的），四角各采一次并印出来
+ * —— 这一条同时钉住"解码对了"与"下标/夹边对了"。
+ */
+{
+  const png2x2 = () => {
+    const raw = Buffer.from([
+      0, 255, 0, 0, 0, 0, 255,      /* 第 0 行：滤波 0 + 红 + 蓝 */
+      0, 0, 0, 255, 255, 0, 0,      /* 第 1 行：滤波 0 + 蓝 + 红 */
+    ]);
+    const crc = (b) => {
+      let c = 0xffffffff;
+      for (const x of b) {
+        c ^= x;
+        for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1));
+      }
+      return (c ^ 0xffffffff) >>> 0;
+    };
+    const chunk = (type, data) => {
+      const len = Buffer.alloc(4);
+      len.writeUInt32BE(data.length, 0);
+      const td = Buffer.concat([Buffer.from(type, 'latin1'), data]);
+      const cc = Buffer.alloc(4);
+      cc.writeUInt32BE(crc(td), 0);
+      return Buffer.concat([len, td, cc]);
+    };
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(2, 0);
+    ihdr.writeUInt32BE(2, 4);
+    ihdr[8] = 8;
+    ihdr[9] = 2;
+    return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+      chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+  };
+  const img = join(out, 'pic2.png');
+  writeFileSync(img, png2x2());
+  const probe = join(out, 'pic.kc');
+  writeFileSync(probe, '()\n{\n   printf("%g %g %g %g\\n", pic("pic2.png",0,0),'
+    + ' pic("pic2.png",1,0), pic("pic2.png",0,1), pic("pic2.png",9,9));\n}\n');
+  const rp = spawnSync(process.execPath,
+    [join(ROOT, 'src/cli.js'), 'run', probe, '--backend', 'c'],
+    { encoding: 'utf8', cwd: ROOT, timeout: 180000,
+      env: { ...process.env, OMNI_GFX: 'gl', OMNI_GFX_MODE: 'render' } });
+  const got = (rp.stdout ?? '').split('\n').find((l) => /^[0-9]/.test(l)) ?? '';
+  /* 红 0xff0000 = 16711680、蓝 0x0000ff = 255；(9,9) 出界**夹到边上** ⇒ 与 (1,1) 同 = 红。
+     `%g` 只给六位有效数字（C 的口径），所以红印出来是 `1.67117e+07`。 */
+  const want = '1.67117e+07 255 255 1.67117e+07';
+  if (got.trim() === want) {
+    ok('`pic` 那一族：解码 + 按像素采样 + 出界夹边', got.trim());
+  } else {
+    no('`pic` 那一族：解码 + 按像素采样 + 出界夹边',
+      `印的是 ${JSON.stringify(got.trim())}（该是 ${JSON.stringify(want)}）`
+      + ` ${(rp.stderr ?? '').trim().slice(0, 200)}`);
   }
 }
 

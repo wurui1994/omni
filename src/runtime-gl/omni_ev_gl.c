@@ -860,6 +860,51 @@ static unsigned char *ev_img_find(const char *path, int *w, int *h) {
   return NULL;
 }
 
+/* ── **`pic` 那一族**（EvalDraw 的 `pic("a.png",x,y)`，`evaldraw.txt:1341`）────────
+ *
+ * 那是"按像素读一张图"，不是纹理 —— 脚本在**每像素/每体素**的循环里调它
+ * （`voxes/genglobe.kc` 一帧 64×32768 次）。所以这一层只做两件事：
+ *
+ *   1. `picload(路径)` —— 解码一次并**缓存那一张**（同一个路径再问就不解了），回宽高；
+ *   2. `picread(块)` —— 把整张图抄成"一格一个 0xRRGGBB"交给语言那一侧。
+ *
+ * 采样在语言那一侧（`gfx3-rt.js`）：一次抄过来，之后每次调用都是数组下标 ——
+ * 不是"每像素问设备一句"。解码用的是 `ev_img_find`（与文件纹理同一份，含往上找与
+ * `data/` 那一格）。
+ */
+static unsigned char *g_picpx;
+static int g_picw, g_pich;
+static char g_picpath[1024];
+
+int omni_ev_gl_picload(const char *path, int *w, int *h) {
+  if (path == NULL) return 1;
+  if (g_picpx != NULL && strcmp(g_picpath, path) == 0) {
+    *w = g_picw; *h = g_pich; return 0;
+  }
+  int pw = 0, ph = 0;
+  unsigned char *p = ev_img_find(path, &pw, &ph);
+  if (p == NULL) return 1;
+  if (g_picpx != NULL) free(g_picpx);
+  g_picpx = p;
+  g_picw = pw;
+  g_pich = ph;
+  snprintf(g_picpath, sizeof(g_picpath), "%s", path);
+  *w = pw;
+  *h = ph;
+  return 0;
+}
+
+long omni_ev_gl_picread(double *out, long n) {
+  if (g_picpx == NULL || out == NULL) return 0;
+  long want = (long)g_picw * (long)g_pich;
+  if (want > n) want = n;
+  for (long i = 0; i < want; i++) {
+    const unsigned char *q = g_picpx + i * 4;
+    out[i] = (double)(((int)q[0] << 16) | ((int)q[1] << 8) | (int)q[2]);
+  }
+  return want;
+}
+
 int omni_ev_gl_texfile(int slot, const char *path, int colmode) {
   if (!g_on || path == NULL) return 1;
   CGLSetCurrentContext(g_ctx);

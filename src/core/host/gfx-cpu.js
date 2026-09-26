@@ -849,6 +849,20 @@ export function gfxCall(name, args) {
       if (rc !== 0) stderr(`#gfx 文件纹理没上去：${p}（${G.m.error()}）\n`);
       return rc;
     }
+    /**
+     * **`pic` 那一族**（`evaldraw.txt:1341`：按像素读一张图）。两句话：
+     *   `(gfxcall "picsiz" 名字下标)` -> `宽*65536+高`（读不到回 -1）；
+     *   `(gfxarr "picread" 0 0 0 0 块)` -> 把那张图抄成一格一个 0xRRGGBB。
+     * 采样在**语言那一侧**（一次抄过来，之后全是数组下标）—— 脚本在每像素的循环里调它，
+     * "每像素问设备一句"那种落法慢几十倍。解码借的是 GL 那台设备里那份（ImageIO）。
+     */
+    case 'picsiz/1': {
+      need(320, 240);
+      if (!G.on || typeof G.m.picload !== 'function') return -1;
+      const p = texPath(Math.trunc(a(0)));
+      if (p === null) return -1;
+      return G.m.picload(p);
+    }
     case 'glactivetexture/1': {
       need(320, 240);
       if (!G.on) break;
@@ -1306,6 +1320,16 @@ function gfxArr(name, args, blk) {
     }
     D.dirty = true;
     return 0;
+  }
+  /* **`pic` 那一族的整张图**（`picread`）：设备把缓存那张图一格一个 0xRRGGBB 抄进来。
+     回抄了多少格 —— 语言那一侧按 `picsiz` 给的宽高自己算下标。 */
+  if (nm === 'picread') {
+    need(320, 240);
+    if (!G.on || typeof G.m.picread !== 'function' || n === 0) return 0;
+    const ab = new Float64Array(n);
+    const got = G.m.picread(ab.buffer);
+    for (let i = 0; i < got; i++) blk[i] = ab[i];
+    return got;
   }
   /* **一整张矩阵一句**（`batchmvp16` / `batchmv16`，列主序 16 个数）：与四句
      `batchmvp`/`batchmv` **逐字等价**，只是少 7 句宿主调用（见 `ext/polydraw/gl-rt.js`

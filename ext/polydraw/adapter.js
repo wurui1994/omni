@@ -176,6 +176,12 @@ const SHADER_FNS = new Map([
      PolyDraw 没有一参那一档，所以这两行对它是空的（查不到名字就照旧落到设备调用）。 */
   ['glsettex/1', [0]],
   ['glremovetex/1', []],
+  /* **`pic` 那一族**（`evaldraw.txt:1341`：按像素读一张图）：第 0 格是串。
+     `pic("a.png",x,y)` 与 `pic("a.png",x,y,flags)` 两档 —— 真是串字面量时 `callOf`
+     查的是 `#str0` 那个键（落到 `gfx3-rt.js` 的 `g3_pic3`/`g3_pic4`）。
+     带 `&r,&g,&b` 那一档（`pic/6`）还没接：那要"串 + 三格块"同时配对。 */
+  ['pic/3', [0]],
+  ['pic/4', [0]],
   ['glgetattribloc/1', [0]],
   ['glvertexattrib1f/2', []],
   ['glvertexattrib2f/3', []],
@@ -682,7 +688,15 @@ function callOf(x, C) {
         : undefined;
 
       if (glFn !== undefined) {
-        C.needGL = true;
+        /* 这条路上查出来的名字**两族都可能**：`gl_*`（GL 立即模式）与 `g3_*`
+           （EvalDraw 那套 3D/`pic` 那一族）。带哪一摊运行时要按名字认 ——
+           从前一律记 `needGL`，于是 `pic("a.png",x,y)` 落成 `g3_pic3` 却没人声明它
+           （`demos/lab3d.kc` 报"未声明的函数 g3_pic3"）。 */
+        if (glFn.startsWith('g3_')) C.need3D = true;
+        else C.needGL = true;
+        /* **签名要登记**：格式串那台机器按 `C.fns` 认返回类型，查不到就当 int ⇒
+           `printf("%g", pic(…))` 上会多出一格 `(toreal …)`，方言当场报（踩过）。 */
+        C.fns.set(glFn, { params: as.map(() => REAL), ret: REAL });
         return { kind: 'call', fn: nameRef(glFn), args: as };
       }
       return gfxCallIR(n, as);
@@ -803,6 +817,7 @@ function callOf(x, C) {
        一张图都出不来。 */
     if (C.host.glrt === true && drawFn.startsWith('gl_')) {
       C.needGL = true;
+      C.fns.set(drawFn, { params: args.map(() => REAL), ret: REAL });
       return { kind: 'call', fn: nameRef(drawFn), args };
     }
     /* **3D 那一族永远走生成出来的那一份**（`gfx3-rt.js`）：投影是纯算术，按"只有一个
@@ -812,6 +827,7 @@ function callOf(x, C) {
       /* **`g3_gl…` 是 EvalDraw 的 GL 桥**（`g3_glbegin`）：它一头连相机（g3）、一头连
          立即模式（gl-rt 的 `gl_evproj`/`gl_begin`），所以两摊运行时都要带上。 */
       if (drawFn.startsWith('g3_gl')) { C.needGL = true; C.usedGL = true; }
+      C.fns.set(drawFn, { params: args.map(() => REAL), ret: REAL });
       /* 带数组实参的那几格（`BLOCK_ARGS`）：那一格发两个 —— 块本身 + 偏移。 */
       const blk = BLOCK_ARGS.get(`${n}/${rawArgs.length}`);
       if (blk !== undefined) {

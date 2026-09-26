@@ -32,7 +32,7 @@
 
 import {
   REAL, ARR, num, str, nm, bin, call, bi, rm, set, letR, ret, iff, whil, ex, aset, aget, ix,
-  fn, fnT, glob,
+  fn, fnT, glob, anew,
 } from './ir.js';
 
 /** 相机与视口那几格（名字都带 `g3_` 前缀）。 */
@@ -44,10 +44,15 @@ export const GFX3_GLOBALS = [
   'g3_sx', 'g3_sy', 'g3_sz',
   /* EvalDraw 的 GL 子集：深度测试开过没有（说明书原话是"默认开"，见 `g3_glbegin`）。 */
   'g3_glz',
+  /* `pic` 那一族缓存着的那张图：名字下标 +1（0 = 还没读过）、宽、高。 */
+  'g3_picn', 'g3_picw', 'g3_picy',
 ];
 
+
+
 export function gfx3GlobalDecls() {
-  return GFX3_GLOBALS.map((n) => glob(n));
+  /* `g3_picb` 是 `pic` 那一族缓存着的那一整张图（一格一个 0xRRGGBB）—— 一格 `(arr real)`。 */
+  return [...GFX3_GLOBALS.map((n) => glob(n)), glob('g3_picb', ARR)];
 }
 
 /**
@@ -81,6 +86,10 @@ export const EVALDRAW_3D = new Map([
   /* **读像素那两格**（`evaldraw.txt:1478`/`:1490`）：`getrgb` 是纯算术（拆一格打包好的
      颜色），`getpix` 多一步"问设备要那一格像素"。两个的 `&r,&g,&b` 都按 `BLOCK_ARGS`
      配对着发（块 + 偏移）。 */
+  /* **`pic` 那一族**（`evaldraw.txt:1341`）：`pic("a.png",x,y[,flags])` 按像素读一张图。
+     串那一格由 `SHADER_FNS` 换成名字下标，所以 `callOf` 查的是 `#str0` 那个键。 */
+  ['pic/3#str0', 'g3_pic3'],
+  ['pic/4#str0', 'g3_pic4'],
   ['getrgb/4', 'g3_getrgb4'],
   ['getpix/5', 'g3_getpix5'],
   /* **EvalDraw 的 `glBegin` 走这门自己的相机**（见 `g3_glbegin` 的头注）：那门语言的
@@ -128,6 +137,8 @@ function d2(host) {
        生成出来那条路上它就是 `gfx_col`。EvalDraw 的 `glBegin` 那一族靠它取顶点色
        —— 那门语言**没有 `glColor`**（`evaldraw.txt:1641` 那张表里一格都没有）。 */
     getcol: () => (host ? dev('getcol', []) : nm('gfx_col')),
+    /* `pic` 那一族：**只有宿主设备那一档有解码器**（生成出来那一份回 -1 = 没这张图）。 */
+    picsiz: (ni) => (host ? dev('picsiz', [ni]) : num(-1)),
   };
 }
 
@@ -334,6 +345,56 @@ export function gfx3FnDecls(host = false, withGL = false) {
     fnT('g3_getpicsiz3', [['nam'], ['px', ARR], ['po'], ['py', ARR], ['qo']], [
       ex(call('g3_getpicsiz2', [nm('px'), nm('po'), nm('py'), nm('qo')])),
       ret(num(0)),
+    ]),
+    /**
+     * **`pic` 那一族的那一张图：一次抄过来**（`evaldraw.txt:1341`）。
+     *
+     * 脚本在**每像素**的循环里调 `pic(…)`（`demos/lab3d.kc` 的 `while (pic(…) != …)`、
+     * `voxes/genglobe.kc` 一帧 64×32768 次）—— "每像素问设备一句"那种落法慢几十倍。
+     * 所以这一格问设备两句：`picsiz` 要宽高（它顺手解码并缓存），`picread` 把整张图
+     * 抄进一格 `(arr real)`；之后每次采样都是**数组下标**。
+     *
+     * 缓存一张（`g3_picn` 记着名字下标 +1）：脚本换图就重抄一趟。读不到的图记 `宽 = 0`，
+     * 采样一律回 0 —— 与"没选过图"那一档同一个样子（说明书没说读不到该回什么）。
+     */
+    fn('g3_picneed', ['ni'], [
+      iff(bin('==', nm('g3_picn'), bin('+', nm('ni'), num(1))), [ret(num(0))]),
+      set('g3_picn', bin('+', nm('ni'), num(1))),
+      letR('v', D.picsiz(nm('ni'))),
+      iff(bin('<', nm('v'), num(0)), [
+        set('g3_picw', num(0)), set('g3_picy', num(0)), ret(num(0)),
+      ]),
+      set('g3_picw', rm('floor', [bin('/', nm('v'), num(65536))])),
+      set('g3_picy', bin('-', nm('v'), bin('*', nm('g3_picw'), num(65536)))),
+      iff(bin('<=', bin('*', nm('g3_picw'), nm('g3_picy')), num(0)), [
+        set('g3_picw', num(0)), ret(num(0)),
+      ]),
+      set('g3_picb', anew(bin('*', nm('g3_picw'), nm('g3_picy')))),
+      ex(bi('gfxarr', [str('picread'), num(0), num(0), num(0), num(0), nm('g3_picb')])),
+      ret(num(0)),
+    ]),
+    /**
+     * `pic("a.png",x,y)`：**不插值**（说明书原话 "no interpolation"），回一格打包好的
+     * 0xRRGGBB。出了图的范围**夹到边上**（说明书没说，这是明写偏差 —— 语料里
+     * `demos/lab3d.kc` 拿它当迷宫的地图，夹边正好当墙）。
+     */
+    fn('g3_pic3', ['ni', 'x', 'y'], [
+      ex(call('g3_picneed', [nm('ni')])),
+      iff(bin('<=', nm('g3_picw'), num(0)), [ret(num(0))]),
+      letR('ix', rm('floor', [nm('x')])),
+      letR('iy', rm('floor', [nm('y')])),
+      iff(bin('<', nm('ix'), num(0)), [set('ix', num(0))]),
+      iff(bin('<', nm('iy'), num(0)), [set('iy', num(0))]),
+      iff(bin('>', nm('ix'), bin('-', nm('g3_picw'), num(1))),
+        [set('ix', bin('-', nm('g3_picw'), num(1)))]),
+      iff(bin('>', nm('iy'), bin('-', nm('g3_picy'), num(1))),
+        [set('iy', bin('-', nm('g3_picy'), num(1)))]),
+      ret(aget('g3_picb', bin('+', bin('*', nm('iy'), nm('g3_picw')), nm('ix')))),
+    ]),
+    /* 带 flags 那一档（`PIC_INT24` 默认那几格，`evaldraw.txt:1344`）：**旗子收下不用**
+       —— 我们抄过来的那一份本来就是 24 位 RGB。 */
+    fn('g3_pic4', ['ni', 'x', 'y', 'fl'], [
+      ret(call('g3_pic3', [nm('ni'), nm('x'), nm('y')])),
     ]),
     /**
      * `getrgb(col,&r,&g,&b)`（`evaldraw.txt:1478`）：把一格打包好的颜色拆成三格 0..255，

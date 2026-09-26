@@ -49,6 +49,8 @@ void omni_ev_gl_mv(int col, double m0, double m1, double m2, double m3);
 void omni_ev_gl_blend(int mode);
 int omni_ev_gl_tex(int slot, int w, int h, int d, int fmt, const double *px);
 int omni_ev_gl_texfile(int slot, const char *path, int colmode);
+int omni_ev_gl_picload(const char *path, int *w, int *h);
+long omni_ev_gl_picread(double *out, long n);
 int omni_ev_gl_univ(double h, int comps, int isint, long n, const double *v);
 int omni_ev_gl_gettex(int slot, int w, int h, long cap, double *out);
 int omni_ev_gl_capbegin(int siz);
@@ -235,6 +237,34 @@ static napi_value jsShader(napi_env env, napi_callback_info info) {
   int r = omni_ev_gl_shader((int)n, v);
   free(v);
   return mknum(env, r);
+}
+
+/**
+ * `picload("路径")` —— **`pic` 那一族**（`evaldraw.txt:1341`）：解码一张图并缓存，
+ * 回 `宽*65536 + 高`；读不到/解不开回 **-1**。采样在语言那一侧（一次抄过来）。
+ */
+static napi_value jsPicload(napi_env env, napi_callback_info info) {
+  ARGS(1);
+  char *p = str(env, a[0]);
+  if (p == NULL) return mknum(env, -1);
+  int w = 0, h = 0;
+  int r = omni_ev_gl_picload(p, &w, &h);
+  free(p);
+  if (r != 0) return mknum(env, -1);
+  return mknum(env, (double)(w * 65536 + h));
+}
+
+/** `picread(ArrayBuffer)` —— 把缓存那张图抄成"一格一个 0xRRGGBB"（零拷贝那一手）。 */
+static napi_value jsPicread(napi_env env, napi_callback_info info) {
+  ARGS(1);
+  bool isab = false;
+  void *data = NULL;
+  size_t nb = 0;
+  if (napi_is_arraybuffer(env, a[0], &isab) != omni_napi_ok || !isab) return mknum(env, 0);
+  if (napi_get_arraybuffer_info(env, a[0], &data, &nb) != omni_napi_ok || data == NULL) {
+    return mknum(env, 0);
+  }
+  return mknum(env, (double)omni_ev_gl_picread((double *)data, (long)(nb / sizeof(double))));
 }
 
 /** `texfile(槽, "路径", colmode)` —— 文件纹理（§20）。 */
@@ -538,6 +568,8 @@ napi_value napi_register_module_v1(napi_env env, napi_value exports) {
   PUT("blend", jsBlend);
   PUT("tex", jsTex);
   PUT("texfile", jsTexfile);
+  PUT("picload", jsPicload);
+  PUT("picread", jsPicread);
   PUT("univ", jsUniv);
   PUT("gettex", jsGettex);
   PUT("capbegin", jsCapbegin);
