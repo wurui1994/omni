@@ -368,6 +368,31 @@ export function dynBin(op, a0, b0, C, hooks = {}) {
   }, C);
   const realArm = boxOf({ kind: 'binop', op, left: asNum(a), right: asNum(b) }, C);
   const numArm = { kind: 'ternary', type: DYN, cond: bothInt(a, b), then: intArm, else_: realArm };
+  /* `*` 多一支：**一边是串、一边是整数就重复**（python 里 `"ab" * 3` 与 `3 * "ab"`）。
+     不接这一支的症状不是"还没接"，而是运行期一句
+     `dynamic value is string, expected real` —— `(asnum …)` 把串往数上掰。
+     量到的路子：`v = 1` 之后 `v = "s"`（那一格名字合成 dyn），再 `v * 2`。 */
+  if (op === '*') {
+    const sRep = (s, n) => boxOf({
+      kind: 'builtin',
+      name: 'srep',
+      args: [
+        { kind: 'builtin', name: 'asstr', args: [s] },
+        { kind: 'builtin', name: 'asint', args: [n] },
+      ],
+    }, C);
+    return wrap({
+      kind: 'ternary', type: DYN,
+      cond: { kind: 'binop', op: '&&', left: tagIs(a, 'string'), right: tagIs(b, 'int') },
+      then: sRep(a, b),
+      else_: {
+        kind: 'ternary', type: DYN,
+        cond: { kind: 'binop', op: '&&', left: tagIs(b, 'string'), right: tagIs(a, 'int') },
+        then: sRep(b, a),
+        else_: numArm,
+      },
+    });
+  }
   if (op !== '+') return wrap(numArm);
   /* `+` 多一支：两边都是串就拼起来（python 里 `"a" + "b"`）。 */
   return wrap({

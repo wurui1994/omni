@@ -95,3 +95,19 @@ def g(n):
 
 print(g(1))
 print(g(-1))
+
+
+# 箱子上的 `*`：**一边是串、一边是整数就重复**（python 里 `"ab" * 3`）。
+# 不接这一支的症状不是"还没接"，而是运行期一句 `dynamic value is string, expected real`
+# —— `(asnum …)` 把串往数上掰。量到的路子就是下面这几行（v 先装数、后装串 ⇒ 合成 dyn）。
+v = 1
+print(v * 2)
+v = "ab"
+print(v * 3, 3 * v, v * 0 + "|", v * -1 + "|")
+
+
+def twice(k):
+    return k * 2
+
+
+print(twice(3), twice("xy"), twice(1.5))
