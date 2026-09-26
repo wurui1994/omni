@@ -70,3 +70,20 @@ cat(length(names(tally)), "\n")
 blank <- list()
 cat(length(names(blank)), "\n")
 print(names(blank))
+
+# **`unlist(表)`**：R 交的是一条**带名字**的向量 —— 值按插入序、名字就是键。
+# 键那一条已经在影子变量里了，所以这一格就是"顺着键走一趟、逐格 dget"。
+# 空表那一格 R 交的是 `NULL`（与 `names(空表)` 同一条）。
+cat(unlist(tally), "\n")
+print(unlist(tally))
+cat(sum(unlist(tally)), length(unlist(tally)), "\n")
+cat(max(unlist(tally)), min(unlist(tally)), "\n")
+cat(names(unlist(tally)), "\n")
+cat(sort(unlist(tally), decreasing = TRUE), "\n")
+print(unlist(blank))
+sv <- list()
+sv[["x"]] <- "p"
+sv[["y"]] <- "qq"
+print(unlist(sv))
+cat(unlist(sv), "\n")
+cat(nchar(unname(unlist(sv))), "\n")

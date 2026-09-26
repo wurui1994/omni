@@ -679,7 +679,7 @@ const KEYS_VARS = new Set();
 function collectKeysVars(node) {
   if (node === null || node === undefined || !isList(node)) return;
   if (tag(node) === 'call' && isList(kids(node)[0]) && tag(kids(node)[0]) === 'sym'
-      && nameOf(kids(node)[0]) === 'names') {
+      && (nameOf(kids(node)[0]) === 'names' || nameOf(kids(node)[0]) === 'unlist')) {
     const a0 = argsOf(node)[0];
     if (a0 !== undefined && a0.value !== null && isList(a0.value) && tag(a0.value) === 'sym') {
       KEYS_VARS.add(mangle(nameOf(a0.value)));
@@ -1216,6 +1216,16 @@ function hdrExprOf(x, types) {
 function namesExprOf(x, types) {
   if (!isList(x)) return null;
   if (tag(x) === 'paren') return namesExprOf(kids(x)[0], types);
+  /* `unlist(表)` 的名字就是**那张表的键**（影子变量 `d__ks`，见 `keysVar`）。 */
+  if (tag(x) === 'call' && isList(kids(x)[0]) && tag(kids(x)[0]) === 'sym'
+      && nameOf(kids(x)[0]) === 'unlist') {
+    const a0 = posArgs(x)[0];
+    if (a0 !== undefined && isList(a0) && tag(a0) === 'sym') {
+      const dn = mangle(nameOf(a0));
+      const dt = types === undefined ? undefined : (types.get(dn) ?? globalTys.get(dn));
+      if (wantsKeys(dn, dt)) return { kind: 'name', name: keysVar(dn) };
+    }
+  }
   if (tag(x) === 'sym') {
     const nm = mangle(nameOf(x));
     const t = types.get(nm) ?? globalTys.get(nm);
@@ -1742,6 +1752,12 @@ function applyTy(fn, x, types) {
          带名字的那一档在上头 `NAME_KEEP_NUM` 那一问里已经答过（回 `RNVEC`）。 */
       const t = typeOfExpr(args[0], types);
       if (isVecTy(t) || isStrVec(t)) return t;
+      /* **`unlist(表)`**：R 交的是一条**带名字**的向量 —— 值按插入序、名字就是键。 */
+      if (t !== undefined && t !== null && t.kind === 'map' && t.tbl !== true
+          && isList(args[0]) && tag(args[0]) === 'sym'
+          && wantsKeys(mangle(nameOf(args[0])), t)) {
+        return t.value !== undefined && t.value !== null && t.value.kind === 'string' ? RNSTRV : RNVEC;
+      }
       return INT;
     }
     case 'sapply': case 'vapply': case 'lapply': case 'Reduce': case 'Filter': case 'mapply':
@@ -5315,8 +5331,60 @@ function callOf(x, types, extra, want, stmtPos) {
           const t = typeOfExpr(all[0], types);
           if (isVecTy(t) || isStrVec(t)) return ev(0);
         }
-        throw new Error('r->IR: unlist() 只接一条向量、`unlist(strsplit(s, sep))` 与'
-          + ' `unlist(lapply(v, function(x) …))` 这几种形状（这一层没有"表里装向量"）');
+        /**
+         * **`unlist(表)`**（2026-09-26）：R 交的是一条**带名字**的向量 —— 值按**插入序**、
+         * 名字就是键（量出来的：`unlist(tally)` 印两行 `b a c` / `2 2 1`）。键那一条现在
+         * 拿得到（影子变量 `d__ks`，见 `keysVar`），所以这一格就是"顺着键走一趟、逐格
+         * `dget`"。只认**裸名字**：影子是跟着名字走的。
+         *
+         * 零长那一档 R 交的是 `NULL`（`print(unlist(空表))` 印 `NULL`）—— 与
+         * `names(空表)` 同一条，`print` 那儿单独印。
+         */
+        if (n === 1 && all[0] !== null && isList(all[0]) && tag(all[0]) === 'sym') {
+          const dt = typeOfExpr(all[0], types);
+          const dn = mangle(nameOf(all[0]));
+          if (dt !== undefined && dt !== null && dt.kind === 'map' && dt.tbl !== true
+              && wantsKeys(dn, dt)) {
+            const vt = dt.value ?? REAL;
+            if (vt.kind !== 'real' && vt.kind !== 'int' && vt.kind !== 'string') {
+              throw new Error(`r->IR: unlist(表) 只接值是数或串的表（这一格的值是 ${vt.kind}）`);
+            }
+            const isStr = vt.kind === 'string';
+            const ks = { kind: 'name', name: keysVar(dn) };
+            const lenN = fresh('uln');
+            const iN = fresh('ui');
+            const outN = fresh('uo');
+            const li = { kind: 'name', name: iN };
+            const ln = { kind: 'name', name: lenN };
+            const lo = { kind: 'name', name: outN };
+            const one = { kind: 'int', value: 1 };
+            const got = call1('dget', ev(0), svGet(ks, li));
+            return {
+              kind: 'block-expr',
+              stmts: [
+                { kind: 'let', name: lenN, type: INT, init: svLen(ks) },
+                {
+                  kind: 'let',
+                  name: outN,
+                  type: isStr ? RSTRV : RVEC,
+                  init: isStr ? call1('anew', tyArg(RSTRV), ln) : lglCall('r_zeros', ln),
+                },
+                {
+                  kind: 'for',
+                  init: { kind: 'let', name: iN, type: INT, init: { kind: 'int', value: 0 } },
+                  cond: b('<', li, ln),
+                  post: { kind: 'assign', target: li, value: b('+', li, one) },
+                  body: [isStr
+                    ? { kind: 'assign', target: { kind: 'index', obj: lo, index: li }, value: got }
+                    : vecSet(lo, li, asReal(got, vt))],
+                },
+              ],
+              value: lo,
+            };
+          }
+        }
+        throw new Error('r->IR: unlist() 只接一条向量、一张**键是串的表**、'
+          + '`unlist(strsplit(s, sep))` 与 `unlist(lapply(v, function(x) …))` 这几种形状');
       }
       case 'sapply': case 'vapply': case 'Reduce': case 'Filter': case 'mapply':
         return applyOf(fn, x, types);
@@ -5491,28 +5559,45 @@ function printValStmt(node, types) {
   const t = typeOfExpr(node, types);
   const wr = (s) => ({ kind: 'builtin-stmt', name: 'write', args: [s] });
   /**
-   * **`print(names(表))`：空表那一格 R 印的是 `NULL`**（量出来的，2026-09-26）。
+   * **`print(names(表))` / `print(unlist(表))`：空表那一格 R 印的是 `NULL`**
+   * （量出来的，2026-09-26）。
    *
-   * R 里"没有 names 属性"就是 `NULL`，而一张**空**表永远没有 —— 所以照字符向量印
-   * `character(0)` 是差一行字的静默错。这一层没有 `NULL`，可这一格的形状编译期就看得出来
-   * （`names(<一张表>)`），所以零长那一支单独印 `NULL`、非空那一支照字符向量走。
-   * 别处不受影响：`cat(names(d))` 两边都什么都不印、`length(names(d))` 两边都是 0、
-   * `for (k in names(d))` 两边都不转 —— R 的 `NULL` 在那几格上与零长同解。
+   * R 里"没有 names 属性"就是 `NULL`，而一张**空**表既没有名字也没有元素 —— 所以照向量印
+   * `character(0)` / `named numeric(0)` 都是差一行字的静默错。这一层没有 `NULL`，可这一格的
+   * 形状编译期就看得出来，所以零长那一支单独印 `NULL`、非空那一支照原来的印法走。
+   * 别处不受影响：`cat(…)` 两边都什么都不印、`length(…)` 两边都是 0、`for` 两边都不转 ——
+   * R 的 `NULL` 在那几格上与零长同解。
    */
   if (isList(node) && tag(node) === 'call' && isList(kids(node)[0]) && tag(kids(node)[0]) === 'sym'
-      && nameOf(kids(node)[0]) === 'names') {
+      && (nameOf(kids(node)[0]) === 'names' || nameOf(kids(node)[0]) === 'unlist')) {
+    const which = nameOf(kids(node)[0]);
     const a0 = argsOf(node)[0];
     const at = a0 === undefined || a0.value === null ? undefined : typeOfExpr(a0.value, types);
-    if (at !== undefined && at !== null && at.kind === 'map') {
-      const ksE = exprOf(node, types);
+    const isKeysForm = at !== undefined && at !== null && at.kind === 'map' && at.tbl !== true
+      && (which === 'names' || (isList(a0.value) && tag(a0.value) === 'sym'
+        && wantsKeys(mangle(nameOf(a0.value)), at)));
+    if (isKeysForm) {
+      const valE = exprOf(node, types);
+      const ns = which === 'names' ? valE : namesExprOf(node, types);
+      let full;
+      if (which === 'names') {
+        full = {
+          kind: 'expr-stmt',
+          expr: { kind: 'call', fn: { kind: 'name', name: useFn('r_print_str') }, args: [valE] },
+        };
+      } else if (isNamedStr(t)) {
+        full = { kind: 'expr-stmt', expr: lglCall('r_print_named_str', valE, ns) };
+      } else {
+        full = {
+          kind: 'expr-stmt',
+          expr: lglCall('r_print_named', valE, ns, { kind: 'string', value: zeroName(t) }),
+        };
+      }
       return {
         kind: 'if',
-        cond: b('==', call1('alen', ksE), { kind: 'int', value: 0 }),
+        cond: b('==', call1('alen', which === 'names' ? valE : ns), { kind: 'int', value: 0 }),
         then: [wr({ kind: 'string', value: 'NULL\n' })],
-        else_: [{
-          kind: 'expr-stmt',
-          expr: { kind: 'call', fn: { kind: 'name', name: useFn('r_print_str') }, args: [ksE] },
-        }],
+        else_: [full],
       };
     }
   }
@@ -5857,6 +5942,23 @@ function assignOf(x, types) {
          `list(tol = 0.5)` 之后 `m[["k"]] <- 3` 那个 3 要先加宽成 double，
          不然方言那侧报"dset 的值要是 real，这里是 int"（量出来的）。 */
       const vt2 = typeOfExpr(value, types);
+      /**
+       * **表里的值要是同一种**（2026-09-26 加的，量出来的）：R 的 `list` 可以混装
+       * （`list(name = "alice", age = 30)`），而这一层的表只有一种值类型。
+       * 不拦的话这一句会一路落到 `.sx` 才撞上方言的
+       * `'+' 两边要同型：左是 string，右是 real` —— 那已经过了换档那道门：退 1、
+       * 没有输出、libR 也接不着。所以在这儿报。
+       */
+      if (ot.value !== undefined && ot.value !== null && vt2 !== undefined && vt2 !== null) {
+        const numOk = (k) => k === 'int' || k === 'real' || k === 'bool';
+        const fits = ot.value.kind === vt2.kind
+          || (numOk(ot.value.kind) && numOk(vt2.kind));
+        if (!fits) {
+          throw new Error(`r->IR: 这张表的值是 ${ot.value.kind}，这一句往里写的是 ${vt2.kind}`
+            + ' —— R 的 `list` 可以混装，而这一层的表只有一种值类型'
+            + '（混装要运行期的类型标签，R 的 `SEXPTYPE`，这一档没有）');
+        }
+      }
       const v2 = ot.value !== undefined && ot.value.kind === 'real' && vt2.kind === 'int'
         ? asReal(exprOf(value, types), vt2)
         : exprOf(value, types);
