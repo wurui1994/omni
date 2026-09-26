@@ -109,3 +109,27 @@ tot = 0
 for r in rows:
     tot += r["sq"]
 print(tot)
+
+# **尾随逗号**（格式化工具一律往多行的字面量末尾加的那一个）—— 表、字典、多行那几种、
+# 元组、实参、形参都收。从前这一族**整族都读错**：GLR 那一层"尾随逗号那一支"的动作写的是
+# 光秃秃一格 `$*1`，而套模板那一处只认列表**里头**的 `$*k`，于是那一格成了叫 `$*1` 的原子，
+# 父节点摊不开它 —— 一直漏到 adapter 才报"这一格表达式还没接：null"。
+tc_xs = [1, 2, 3,]
+tc_lines = [
+    "a",
+    "b",
+]
+tc_cfg = {
+    "x": 1,
+    "y": 2,
+}
+tc_t = (1, 2,)
+print(tc_xs, tc_lines, sorted(tc_cfg), tc_t)
+print(len(tc_xs,), sorted([2, 1],), max(1, 2,))
+
+
+def tc_add(a, b,):
+    return a + b
+
+
+print(tc_add(1, 2,), tc_add(b=3, a=4,))

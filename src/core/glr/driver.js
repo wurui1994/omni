@@ -118,7 +118,8 @@ function spanOf(kids) {
 /**
  * 套模板。`$k` 换成第 k 个子节点的值，`$*k` 把第 k 个子节点（必须是列表）的**元素摊开**，
  * 其它原样复制。整个模板就是一个 `$k` 时等于"原样传上去" —— 那是最常见的一条
- * （`(-> (E) $1)`）。
+ * （`(-> (E) $1)`）；整个模板就是一个 `$*k` 时也是"原样传上去"，只是那一格必须是列表
+ * （`(-> (item-list ",") $*1)` —— 尾随逗号那一支，外头没有列表可摊）。
  *
  * `$*k` 是为**列表**加的，而列表是映射标注绕不过去的东西：语句序列、实参表、形参表
  * 都是「左递归攒一串」的形状。没有它，`(-> (Stmts Stmt) ...)` 只能造出右嵌套的链，
@@ -127,6 +128,20 @@ function spanOf(kids) {
  */
 function applyTemplate(tpl, kids, span) {
   if (tpl === null) return null;
+  if (isSpliceHole(tpl)) {
+    /* **整个模板就是一格 `$*k`**：把那格列表原样传上去。
+       这是"尾随逗号那一支"的形状 —— `(-> (item-list ",") $*1)`、`(-> (call-args ",") $*1)`
+       之类，八九门语法里都这么写。外头没有列表可摊，所以它与 `$k` 是同一件事，
+       只多一句"那格必须是列表"（不是列表就与摊开那一处一样留个记号，别静默）。
+       量出来的症状：从前这一支掉到下头"atom 照抄一份"那一句上，于是 `[1, 2,]` 的
+       `item-list` 变成一格叫 `$*1` 的 atom，父节点 `(list $*2)` 摊不开它，
+       最后到 adapter 那儿成了"这一格表达式还没接：null"。 */
+    const got = kids[Number(tpl.value.slice(2)) - 1];
+    if (got === undefined || got === null || got.kind !== 'list') {
+      return { kind: 'atom', value: '$notalist', span };
+    }
+    return got;
+  }
   if (isTemplateHole(tpl)) {
     const i = Number(tpl.value.slice(1)) - 1;
     const got = kids[i];

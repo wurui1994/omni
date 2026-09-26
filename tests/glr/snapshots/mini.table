@@ -1,4 +1,4 @@
-grammar mini: 42 terminals, 13 nonterminals, 55 rules, 106 states
+grammar mini: 42 terminals, 13 nonterminals, 56 rules, 106 states
   r0  Program -> Decls
   r1  Decls -> <empty>
   r2  Decls -> Decls Decl
@@ -54,7 +54,8 @@ grammar mini: 42 terminals, 13 nonterminals, 55 rules, 106 states
   r52  Args -> ArgList
   r53  ArgList -> E
   r54  ArgList -> ArgList "," E
-  r55  $accept -> Program
+  r55  ArgList -> ArgList ","
+  r56  $accept -> Program
 conflicts left to the GLR driver: 20
   state 83 on "==": nonassoc (0 actions)
   state 83 on "!=": nonassoc (0 actions)

@@ -16,6 +16,12 @@ main { if (true) { print 1; } else { print 2; } } ==> (module (main (if (bool tr
 ;; 实参表：(call $1 $*3) 把 ArgList 摊在函数名后面，而不是嵌一层
 main { g(1, 2, 3); }                            ==> (module (main (expr (call g (int 1) (int 2) (int 3)))))
 
+;; **尾随逗号**那一支：动作是光秃秃一格 `$*1`（整个模板就是一格摊开洞 = 那格列表原样
+;; 传上去）。出来的树与不带那个逗号的一模一样。坏掉的时候这儿是 `(call g $notalist)` ——
+;; 也就是说这两条量的正是"整个模板是一格 $*k"那一格。
+main { g(1, 2,); }                              ==> (module (main (expr (call g (int 1) (int 2)))))
+main { g(1,); }                                 ==> (module (main (expr (call g (int 1)))))
+
 ;; 优先级：* 比 + 紧
 main { let x int = 1 + 2 * 3; }                 ==> (module (main (let x int (bin "+" (int 1) (bin "*" (int 2) (int 3))))))
 
