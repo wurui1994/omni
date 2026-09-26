@@ -3214,3 +3214,26 @@ clock / texture / funky / tree / captest / 25_offscreen 六份出图，clock 的
 * **`examples/opengl/28_peaks.pss` 自己是错的**：具名函数定义后面跟一串裸语句不是
   合法脚本（问过真 kasm87：`fun(x,y){…} z=fun(1,2); z` 答 `ERROR: FUN undefined`）。
   主体裹进 `()` `{}`、helper 挪到后面就过了。
+
+### 35.6 这把扫描尺子**一趟一个样**（别拿它判退步）
+
+整轮扫（`/tmp/omni-text/sweep.js`：一份等 0.8s、前后共用同一台设备）里蹦出来的"全黑"
+有**一半是假的** —— `drawsph` / `drawsph_asm` / `creepers_asm` / `curvybuild` / `texture` /
+`drawcone2` 在整轮里报过 `lit=0`，**单跑一份都出图**（76237 / 76800 …）。
+所以：整轮的数只用来找**族**，判某一份退没退步必须单跑那一份再看
+（与 `feedback_scan_colors_not_repro.md` 那一格同一类毛病）。
+
+### 35.7 这一轮补齐的最后两格（int/float 与 glgettex）
+
+* **int/float 混用**：新出一格 `ext/polydraw/glsl-type.js` —— 词法 -> 带源码区间的
+  表达式树 -> **只在"一边浮点一边整型"那一处**套 `float(…)`（那正是 1.20 自己的规则，
+  两边都是 `int` 的运算一个字不动）。判据 `tests/lower/run.js --only glsl` 十格，
+  其中五格是"一个字都不许动" —— 那一半才是这件事的风险。
+* **`glgettex`**：WebGL2 没有 `glGetTexImage`，改走离屏 FBO + `readPixels`（行序天然
+  对得上）。`gspiral` 于是从"帧函数抛了"变成 46 帧、那颗黄金螺旋铺点的贴图地球。
+  浮点那两格要 `EXT_color_buffer_float`；3D 与立方体的读回还没做（记账）。
+
+**一格查错时踩的坑**（记明白）：`omni serve` 的监听进程是 `node src/serve.js`，
+不是 `node src/core/cli.js serve` —— 按后者 `pkill` 杀不掉它，于是我"重启了三回"
+其实一直在跟 04:28 那个旧进程说话，编译器那侧的改动一个都没生效。
+认进程要用 `lsof -nP -iTCP:<端口> -sTCP:LISTEN`。
