@@ -167,7 +167,23 @@ export function sxTextOf(path, argv = [], out = null, opts = {}) {
   if (!load(path, tree)) { stderr(diags.format()); return null; }
 
   try {
-    const ir = lang.toIR(tree, { also, src: mainSrc });
+    /**
+     * **一段表达式源码 → 那棵表达式的树**（jnc 那条先例：`src/core/lang/jnc.js` 的
+     * `jncParseExpr`）。给的是"整块当一格记号、要用时用**同一张表**再解析一遍"这条路 ——
+     * python 的 f-string 里那几段表达式靠它（这套词法器是一张 DFA，没有起始条件也没有栈，
+     * 所以不走 PEP 701 那种 FSTRING_START/MIDDLE/END 三族记号）。
+     *
+     * 收的是**已经裹好的一份合法源码**（怎么裹、怎么从树里挖出那一棵，是各门语言自己的事 ——
+     * 这一层不认识谁的语法）。解析不动答 `null`。
+     */
+    const parseExpr = (wrappedSrc) => {
+      const n0 = diags.errorCount();
+      const toks = lexText(g.lex, new SourceFile(path, wrappedSrc), diags);
+      if (toks === null || diags.errorCount() > n0) return null;
+      const t = glrParse(tb, toks, diags);
+      return t === null || diags.errorCount() > n0 ? null : t;
+    };
+    const ir = lang.toIR(tree, { also, src: mainSrc, parseExpr });
     /* **顺手把"哪些名字是那门语言的运行时层"带出去**（`out.rtNames`，EVAL 两门在用）：
        切单元产物时按它分 —— 运行时那一层是所有脚本共用的一格，只编一次只发一次
        （`docs/design/omni-serve-studio.md` §9.3）。别的语言没这一格就是空表。

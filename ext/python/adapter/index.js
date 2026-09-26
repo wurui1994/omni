@@ -30,7 +30,7 @@ import { tag, kids, leaf, part } from '../../../src/core/lower/cst.js';
 import { INT, STR, DYN, sameType, typeOf, named } from '../../../src/core/lower/ty-of.js';
 import { typeToSx } from '../../../src/core/lower/ty.js';
 import {
-  exprOf, condOf, nameOf, typeOfAnnot, tyOfCst, tyArg, pyStr, lenOf,
+  exprOf, condOf, nameOf, typeOfAnnot, tyOfCst, tyArg, pyStr, lenOf, hasFields, fstringParts,
 } from './expr.js';
 import { boxOf, unifyPy } from './dyn.js';
 
@@ -38,10 +38,11 @@ import { boxOf, unifyPy } from './dyn.js';
 const typeOfIR = (e, C) => typeOf(e, C.tyCtx());
 
 /** 一棵 python 的树（`(module …)`）→ 标准 IR 的模块。 */
-export function pyToIR(tree) {
+export function pyToIR(tree, ctx = {}) {
   if (tag(tree) !== 'module') throw new Error('python->IR: 这不是 (module …)');
 
   const C = makeCtx();
+  C.parseExpr = ctx.parseExpr ?? null;
   const top = flatten(kids(tree));
   const fnNodes = top.filter((s) => tag(s) === 'def');
   const classNodes = top.filter((s) => tag(s) === 'class');
@@ -53,6 +54,14 @@ export function pyToIR(tree) {
     C.fnNodes.set(nm, f);
   }
   declareClasses(classNodes, C);
+  /* **f-string 里那几段表达式先解析出来**。单态化那一趟是从**调用点**收实例的，而
+     `f"{twice(n)}"` 里那次调用躺在一个 STRING 记号里 —— `allNodes` 看不见它，于是
+     `twice` 一格实例都收不到（量出来的原话：`twice(int)` 没有对得上的那一格）。
+     所以在推断之前先解析一遍，把那几棵树挂在 `C.fstrTrees` 上，推断那几趟一起走。 */
+  for (const nd of allNodes(tree)) {
+    if (tag(nd) !== 'str' || !hasFields(nd)) continue;
+    for (const p of fstringParts(nd, C)) if (p.tree !== undefined) C.fstrTrees.push(p.tree);
+  }
   infer(C, tree, scriptStmts);
 
   /* ---- 发射 ------------------------------------------------------------------ */
@@ -214,6 +223,34 @@ function makeCtx() {
   const C = {
     /** 现在在不在函数体里（模块级的赋值是给 `(global …)` 的 `set`，函数里的是 `let`）。 */
     inFn: false,
+    /**
+     * **一段表达式源码 → 那棵表达式的树**（`drive.js` 递进来的那一格）。
+     * f-string 里那几段靠它 —— 整份 f-string 是一个记号，要用时用**同一张 LR 表**
+     * 再解析一遍（`src/core/lang/jnc.js` 的 `jncParseExpr` 是同一条先例）。
+     */
+    parseExpr: null,
+    /** f-string 的分段缓存（记号原文 → 那几段，表达式那几段带解析好的树）。 */
+    fstrCache: new Map(),
+    /** f-string 里那几棵解析出来的表达式树 —— 推断那几趟要连它们一起走。 */
+    fstrTrees: [],
+    /**
+     * 一段 python 表达式的**原文** → 它的 CST。
+     *
+     * 语法只有一个起点（`(start module)`），所以把这段裹成一份合法的模块 ——
+     * 一句"括起来的表达式语句" —— 再从树里把那一格 `(expr …)` 底下的挖出来。
+     * 裹成 `(…)` 而不是裸的一行：那样多行的表达式（`f"{a +\n b}"` 不可能，但
+     * `{d["k"]}` 里有引号与括号）不会被缩进那一层当成两句。
+     */
+    exprTreeOf: (src, why) => {
+      if (C.parseExpr === null) {
+        throw new Error(`python->IR: ${why} 要"再解析一段"那一格，而这一趟没给`
+          + '（`drive.js` 的 `parseExpr` 没递进来）');
+      }
+      const t = C.parseExpr(`(${src})\n`);
+      const dug = t === null ? null : digExpr(t);
+      if (dug === null) throw new Error(`python->IR: ${why} 里这一段解析不了：\`${src}\``);
+      return dug;
+    },
     /** 当前在发的这格函数交出来的类型（`return` 那一句要按它装箱 / 提 real）。 */
     retTy: null,
     /** 函数名 → { params: [{name,type}], ret }。签名，推断填。 */
@@ -334,6 +371,17 @@ function allNodes(x, out = []) {
 const paramsOf = (f) => kids(part(f, 'params') ?? { kind: 'list', items: [] });
 
 /**
+ * 从"裹好的那一份模块"里挖出那一棵表达式：找第一格 `(expr E)`，交 E。
+ * **不用生成器、不用递归的闭包** —— 这份文件跟着编译器一起被降级，子集越窄越稳。
+ */
+function digExpr(tree) {
+  for (const nd of allNodes(tree)) {
+    if (tag(nd) === 'expr' && kids(nd).length > 0) return kids(nd)[0];
+  }
+  return null;
+}
+
+/**
  * 形参、返回类型、模块级变量 —— 整个扫三轮，每轮只填得出来的那几格。
  * 三轮之后还缺的当场报（见文件头那四条）。
  *
@@ -446,11 +494,14 @@ function collectInsts(nm, sh, tree, C) {
     if (!list.some((i) => i.key === key)) list.push(mkInst(nm, sh, types));
   };
 
-  for (const node of allNodes(tree)) {
+  /* **连 f-string 里那几棵一起走** —— 那些调用躺在一个 STRING 记号里，
+     `allNodes(tree)` 走不到（`pyToIR` 那一趟已经把它们解析出来挂在 `C.fstrTrees` 上）。 */
+  const nodes = allNodes(tree);
+  for (const ft of C.fstrTrees) allNodes(ft, nodes);
+  for (const node of nodes) {
     if (tag(node) !== 'call') continue;
     const fn = kids(node)[0];
-    const args = kids(part(node, 'args') ?? { kind: 'list', items: [] });
-    if (dot < 0) {
+    const args = kids(part(node, 'args') ?? { kind: 'list', items: [] });    if (dot < 0) {
       /* 普通函数：`f(…)`。 */
       if (tag(fn) === 'n' && String(nameOf(fn)) === nm && args.length === sh.names.length) {
         take(args, null);

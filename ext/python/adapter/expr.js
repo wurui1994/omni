@@ -23,6 +23,7 @@ import {
 import {
   isDyn, boxOf, unify, dynText, dynTruthy, dynBin, noneOf, isNoneOf,
 } from './dyn.js';
+import { splitFString } from './fstring.js';
 
 /** 一格名字节点（`(n x)`）的文本；也收裸记号。 */
 export const nameOf = (x) => (tag(x) === 'n' ? leaf(kids(x)[0]) : leaf(x));
@@ -94,19 +95,25 @@ const ESC = new Map([
   ['n', '\n'], ['r', '\r'], ['t', '\t'], ['v', '\v'], ['0', '\0'],
 ]);
 
-/** 一格串记号 → 它的正文。原始串（`r"…"`）不解转义；`b` / `f` / `t` 前缀这一版不接。 */
+/** 一格串记号 → 它的正文。原始串（`r"…"`）不解转义；`b` / `t` 前缀这一版不接。 */
 function oneString(text) {
   const { prefix, body } = splitString(text);
   if (prefix.includes('b')) throw new Error('python->IR: bytes 串（b"…"）还没接');
-  if (prefix.includes('f')) {
-    if (/[{}]/.test(body)) {
-      throw new Error('python->IR: f-string 里那段表达式还没接（PEP 701 那一刀）—— '
-        + '现在整份 f-string 是一个记号');
-    }
-    return body;
-  }
   if (prefix.includes('t')) throw new Error('python->IR: 模板串（t"…"）还没接');
+  if (prefix.includes('f')) {
+    /* f-string 走 `fstringOf`（那一侧要的是 IR，不是一段文本）。到得了这儿说明
+       里头没有替换字段 —— `{{` / `}}` 仍要还原成一个花括号。 */
+    return splitFString(body).map((p) => {
+      if (p.lit === undefined) throw new Error('python->IR: 这一格 f-string 走错了路（内部错）');
+      return p.lit;
+    }).join('');
+  }
   if (prefix.includes('r')) return body;
+  return unescapePy(body);
+}
+
+/** python 的转义解一遍（`r` 前缀那一档不走这儿）。 */
+function unescapePy(body) {
   let out = '';
   for (let i = 0; i < body.length; i += 1) {
     if (body[i] !== '\\') { out += body[i]; continue; }
@@ -125,6 +132,87 @@ function oneString(text) {
 /** `(str T1 T2 …)` —— 相邻串自动拼接。 */
 export function strValue(x) {
   return kids(x).map((t) => oneString(String(leaf(t)))).join('');
+}
+
+/** 这一格 `(str …)` 里有 f-string 而且带替换字段吗（那时要走 `fstringOf`）。 */
+export function hasFields(x) {
+  return kids(x).some((t) => {
+    const { prefix, body } = splitString(String(leaf(t)));
+    if (!prefix.includes('f')) return false;
+    return splitFString(body).some((p) => p.lit === undefined);
+  });
+}
+
+/**
+ * 一格 `(str …)` 的 f-string 分段 —— 表达式那几段连**解析好的树**。
+ *
+ * **记在 C 上**（`C.fstrCache`）：推断那几趟（单态化从调用点收实例）与发射那一趟都要它，
+ * 而"再解析一遍"不便宜；而且两趟拿到的必须是同一棵树，不然类型对不上。
+ */
+export function fstringParts(x, C) {
+  const key = kids(x).map((t) => String(leaf(t))).join('\u0000');
+  const hit = C.fstrCache.get(key);
+  if (hit !== undefined) return hit;
+  const out = [];
+  for (const t of kids(x)) {
+    const text = String(leaf(t));
+    const { prefix, body } = splitString(text);
+    if (!prefix.includes('f')) { out.push({ lit: oneString(text) }); continue; }
+    for (const p of splitFString(body)) {
+      if (p.lit !== undefined) {
+        /* 字面那几段照普通串解转义（`f"a\tb"`）—— 原始 f-string（`rf"…"`）不解。 */
+        out.push({ lit: prefix.includes('r') ? p.lit : unescapePy(p.lit) });
+        continue;
+      }
+      out.push({ src: p.src, conv: p.conv, spec: p.spec, tree: C.exprTreeOf(p.src, 'f-string') });
+    }
+  }
+  C.fstrCache.set(key, out);
+  return out;
+}
+
+/**
+ * **f-string → 一格串的 IR**：字面的几段与算出来的几段用 `+` 拼起来。
+ *
+ * 替换字段里那段表达式**用同一张 LR 表再解析一遍**（`C.exprTreeOf`，jnc 的
+ * `jncParseExpr` 是同一条先例）—— 所以 `f"{a + b}"`、`f"{d['k']}"`、`f"{f(x)}"`
+ * 这些都走得通，认的是同一门 python。
+ *
+ * 转换与格式说明：
+ *   * 没写 → `str()` 那一侧（`pyStr`）；
+ *   * `!r` → `repr()` 那一侧（`pyRepr`）；`!s` → `str()`；
+ *   * `:.Nf` → `(sfix v N)`（小数点后定 N 位 —— 最常见的那一格）；
+ *   * 别的格式说明**当场报**：那是一整套微语言（`Python/formatter_unicode.c`），
+ *     对齐 / 填充 / 千分位 / 进制都在里头，猜一个出来就是印错。
+ */
+function fstringOf(x, C) {
+  const pieces = fstringParts(x, C).map((p) => (p.lit !== undefined
+    ? { kind: 'string', value: p.lit }
+    : fmtField(exprOf(p.tree, C), p, C)));
+  if (pieces.length === 0) return { kind: 'string', value: '' };
+  let out = pieces[0];
+  /* 头一段不是串时先补一格空串 —— 方言的 `+` 要两边同型。 */
+  if (ty(out, C).kind !== 'string') out = { kind: 'binop', op: '+', left: { kind: 'string', value: '' }, right: out };
+  for (let i = 1; i < pieces.length; i += 1) out = { kind: 'binop', op: '+', left: out, right: pieces[i] };
+  return out;
+}
+
+/** 一格替换字段算出来的值 → 串（按 `conv` 与 `spec`）。 */
+function fmtField(e, p, C) {
+  if (p.spec !== null) {
+    const m = /^\.(\d+)f$/.exec(p.spec);
+    if (m === null) {
+      throw new Error(`python->IR: f-string 的格式说明 \`:${p.spec}\` 还没接`
+        + '（接了的只有 `:.Nf`）—— 那是一整套微语言（对齐 / 填充 / 千分位 / 进制），'
+        + '猜一个出来就是印错数');
+    }
+    if (p.conv !== null) throw new Error('python->IR: f-string 里转换与格式说明一起用还没接');
+    return { kind: 'builtin', name: 'sfix', args: [toReal(e, C), { kind: 'int', value: Number(m[1]) }] };
+  }
+  if (p.conv === 'a') {
+    throw new Error('python->IR: f-string 的 `!a`（ascii()）还没接 —— 它要按码位转义非 ASCII');
+  }
+  return p.conv === 'r' ? pyRepr(e, C) : pyStr(e, C);
 }
 
 /** 一格数记号 → `{ kind: 'int' | 'real', value }`。 */
@@ -462,7 +550,7 @@ export function exprOf(x, C) {
         ? { kind: 'real', value: v.value }
         : { kind: 'int', value: v.value };
     }
-    case 'str': return { kind: 'string', value: strValue(x) };
+    case 'str': return hasFields(x) ? fstringOf(x, C) : { kind: 'string', value: strValue(x) };
     case 'true': return { kind: 'bool', value: true };
     case 'false': return { kind: 'bool', value: false };
     case 'none': return noneOf();
