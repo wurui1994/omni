@@ -390,3 +390,16 @@ PolyDraw 与 EvalDraw 各带一整棵例子树（`polydraw/{examples,ken,tigrou}
 
 于是 EVAL 这边是 `ids = [0, 1]`：1 是 `ev_rt`（键固定 —— 只跟我们那几份 rt 源码有关，
 所以换脚本它一定命中），0 是脚本。欠一格"按 decl 印 sx"的印法（asy 那侧对应 `u.parts`）。
+
+**怎么切最省**（这一条定下来了，别再走别的路）：不在 adapter 里造第二份 IR、也不加
+`OMNI_EVAL_RT` 那种档位（试过，已删）。做法是**在 sx 文本上按名字切**：
+
+1. `evalToIR` 顺手把运行时那一层的名字记在模块上（`mod.rtNames` —— 纯元数据，
+   下游谁都不看它）；那些名字本来就是 `glFnDecls()` / `gfx3GlobalDecls()` 这几格产的，
+   记账不靠前缀猜；
+2. `lower()` **只跑一趟**（97~130ms 那一趟里它是大头，跑两趟纯亏）；
+3. 把它回的那份 `(module …)` 文本按**深度一**的顶层形式切条（`link.js:29` 的 `formsOf`
+   能认名字 —— 它现在**没 export**，要用得先导出，别抄第二份），名字在 `rtNames` 里的
+   归 `ev_rt`、其余归入口，`(main …)` 归入口；
+4. 两格 `sections` 交给 `asyUnitModules` —— 往后 `UnitIndex` 看见 `ev_rt` 那一行的键
+   没变就**连 emit 都不做**，盘上那份 `ev_rt.js` 原样留着。
