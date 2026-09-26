@@ -93,3 +93,20 @@ print(as.logical(0) || TRUE)
 print(as.logical("T") && as.logical("no"))
 print(is.na(as.logical("yes")))
 print(as.logical(c(a = 1, b = 0)))
+
+# **`identical()` 只接"两边都是一格标量"那一档**：R 先看 `typeof` 一不一样、再看值。
+# 类型那一半编译期就答得出来（不带 L 的字面量是 double、`1L` 是 int）。值那一半 double
+# 要紧的是**把 `NA_real_` 与 `NaN` 分开** —— `r_is_na` 是 R 的 `is.na`（两格都真），
+# 所以"真的 NA"= `is.na(x) && !is.nan(x)`。量出来 `identical(NA, NaN)` 是 FALSE。
+# 向量那一档照旧不接（这一层分不出 integer 向量与 double 向量，见 SPEC 第四节第 13 条）。
+cat(identical(1, 1), identical(1, 1L), identical(1L, 1L), "\n")
+cat(identical("a", "a"), identical("a", "b"), "\n")
+cat(identical(TRUE, TRUE), identical(TRUE, FALSE), identical(TRUE, 1), "\n")
+cat(identical(NA, NA), identical(NaN, NaN), identical(NA, NaN), "\n")
+cat(identical(0, -0), identical(1/0, 1/0), identical(1, 2), "\n")
+cat(identical(NA, 1), identical(NA, TRUE), "\n")
+idx1 <- 3
+idy1 <- 3
+cat(identical(idx1, idy1), identical(idx1, 4), "\n")
+cat(identical(2L, 2L), identical(2L, 3L), "\n")
+cat(identical(-1/0, -1/0), identical(1/0, -1/0), "\n")

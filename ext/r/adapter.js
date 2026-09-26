@@ -149,7 +149,7 @@ const CMP_FNS = new Map([
 ]);
 /** 这一批由 `lglFnDecl` 发（形状都是"几格 real 进、一格 real 出"）。 */
 const LGL_FNS = new Set([
-  'r_lgl', 'r_and', 'r_or', 'r_xor', 'r_not', 'r_cond', 'r_lgl_str', 'r_lgl_s',
+  'r_lgl', 'r_and', 'r_or', 'r_xor', 'r_ident_lgl', 'r_not', 'r_cond', 'r_lgl_str', 'r_lgl_s',
   'r_is_true', 'r_is_false', 'r_ifelse1', ...CMP_FNS.values(),
 ]);
 
@@ -334,6 +334,7 @@ const FN_DEPS = new Map([
   ['r_and', ['r_is_na', 'r_na']],
   ['r_or', ['r_is_na', 'r_na']],
   ['r_xor', ['r_is_na', 'r_na']],
+  ['r_ident_lgl', ['r_is_na']],
   ['r_not', ['r_is_na', 'r_na']],
   ['r_cond', ['r_is_na']],
   ['r_is_true', ['r_is_na']],
@@ -1102,7 +1103,7 @@ const BUILTINS = new Set([
   'cat', 'paste', 'paste0', 'c', 'list', 'length', 'nchar', 'return', 'is.null',
   'as.integer', 'as.numeric', 'as.character', 'as.logical', 'abs', 'seq_len', 'is.na', 'is.nan',
   'sum', 'mean', 'max', 'min', 'rev', 'seq_along', 'which', 'any', 'all',
-  'print', 'invisible', 'xor', 'isTRUE', 'isFALSE', 'ifelse',
+  'print', 'invisible', 'xor', 'isTRUE', 'isFALSE', 'ifelse', 'identical',
   /* base 里"向量进向量出"那一族 + 两格统计量。`seq` 与 `rep` 是造向量的。 */
   'sort', 'cumsum', 'prod', 'range', 'diff', 'head', 'tail', 'var', 'sd', 'rep', 'seq', 'rep_len',
   /* 两条向量的那两格统计量（`var(x, y)` 与 `cov(x, y)` 是同一件事）。 */
@@ -1834,6 +1835,8 @@ function applyTy(fn, x, types) {
     /* `xor` 逐元素；`isTRUE` / `isFALSE` 回两态；`ifelse` 的形状随 test。 */
     case 'xor': return args.some((a) => isVecTy(typeOfExpr(a, types))) ? RLGL : RLGL1;
     case 'isTRUE': case 'isFALSE': return BOOL;
+    /* `identical` 回的是**两态**（它从不回 NA）。 */
+    case 'identical': return BOOL;
     case 'ifelse': {
       const sArgs = posArgs(x);
       /* 两支是串 → 出字符向量（test 是向量）或者一格串（test 是标量）。 */
@@ -5055,6 +5058,71 @@ function callOf(x, types, extra, want, stmtPos) {
             + ' 这一层还没有"问长度再定"的路，所以当场报');
         }
         return lglCall(fn === 'isTRUE' ? 'r_is_true' : 'r_is_false', asLgl(ev(0), t));
+      }
+      /**
+       * **`identical()` 只接"两边都是一格标量"那一档**（2026-09-26）。
+       *
+       * R 的 `identical` 先看 `typeof` 一不一样，再看值 —— 量出来的口径：
+       * `identical(1, 1L)` **FALSE**（double 对 integer）、`identical(TRUE, 1)` **FALSE**、
+       * `identical(NA, NA)` TRUE、`identical(NaN, NaN)` **TRUE**、`identical(NA, NaN)` FALSE、
+       * `identical(0, -0)` TRUE、`identical(Inf, Inf)` TRUE。
+       *
+       * 类型那一半在**编译期**就答得出来（不带 `L` 的字面量是 double、`1L` 是 int，
+       * 见第三节第 4 条；`TRUE` 与 `NA` 都是 logical）。值那一半：
+       * * 串 / 整数 / 逻辑 —— 直接比（逻辑那一档 NA 也要比得出来，两边都缺就是 TRUE）；
+       * * double —— 要把 `NA_real_` 与 `NaN` 分开（R 说它们不 identical），所以先问
+       *   `r_is_na`（看的是 NaN 的载荷）、再问 `x != x`（真 NaN）。
+       *
+       * **向量那一档照旧不接**：`c(1,2,3)` 与 `c(1L,2L,3L)` 在这一层都落 `RVEC`，
+       * 分不出 R 的 integer 向量与 double 向量 —— 照值比会答 TRUE 而 R 答 FALSE，
+       * 那是静默答错（见 ext/r/SPEC.md 第四节第 13 条）。
+       */
+      case 'identical': {
+        if (n !== 2) throw new Error(`r->IR: identical() 要两格实参（给了 ${n}）`);
+        const it = [0, 1].map((k) => (all[k] === null ? REAL : typeOfExpr(all[k], types)));
+        /** 这一格在 R 里的 `typeof`（分不出来的就回 null，那时当场报）。 */
+        const rTy = (t) => {
+          if (t.kind === 'string') return 'character';
+          if (t.kind === 'int') return 'integer';
+          if (t.kind === 'real') return 'double';
+          if (t.kind === 'bool' || isLgl1(t)) return 'logical';
+          return null;
+        };
+        const ta = rTy(it[0]);
+        const tb = rTy(it[1]);
+        if (ta === null || tb === null) {
+          throw new Error('r->IR: identical() 只接两格标量（串 / 整数 / double / 逻辑）——'
+            + ' 向量那一档分不出 R 的 integer 向量与 double 向量，照值比会静默答错'
+            + '（见 ext/r/SPEC.md 第四节第 13 条）');
+        }
+        /* `typeof` 不一样 —— 编译期就定了。 */
+        if (ta !== tb) return { kind: 'bool', value: false };
+        if (ta === 'character' || ta === 'integer') return b('==', ev(0), ev(1));
+        if (ta === 'logical') return lglCall('r_ident_lgl', asLgl(ev(0), it[0]), asLgl(ev(1), it[1]));
+        /* double：`NA_real_` 与 `NaN` 要分开（两边都要用两遍，所以先存起来）。 */
+        const aN = fresh('ida');
+        const bN = fresh('idb');
+        const av = { kind: 'name', name: aN };
+        const bv = { kind: 'name', name: bN };
+        const T = { kind: 'bool', value: true };
+        const F = { kind: 'bool', value: false };
+        /* **`NA_real_` 与 `NaN` 要分开**：`r_is_na` 是 R 的 `is.na`（两格都真），
+           所以"真的 NA"= `is.na(x) && !is.nan(x)`（`r_is_nan` 看的是那个载荷）。
+           量出来 `identical(NA, NaN)` 是 **FALSE**，第一版按 `is.na` 比答了 TRUE。 */
+        const nanA = lglCall('r_is_nan', av);
+        const nanB = lglCall('r_is_nan', bv);
+        const naA = b('&&', lglCall('r_is_na', av), { kind: 'unop', op: '!', operand: nanA });
+        const naB = b('&&', lglCall('r_is_na', bv), { kind: 'unop', op: '!', operand: nanB });
+        const sel = (c, t2, e2) => ({ kind: 'ternary', cond: c, then: t2, else_: e2 });
+        return {
+          kind: 'block-expr',
+          stmts: [
+            { kind: 'let', name: aN, type: REAL, init: asReal(ev(0), it[0]) },
+            { kind: 'let', name: bN, type: REAL, init: asReal(ev(1), it[1]) },
+          ],
+          value: sel(naA, sel(naB, T, F),
+            sel(naB, F, sel(nanA, sel(nanB, T, F), sel(nanB, F, b('==', av, bv))))),
+        };
       }
       case 'ifelse': {
         /* `ifelse(test, yes, no)`：**结果的形状随 test**。test 是向量就逐格挑
@@ -9342,6 +9410,10 @@ function lglFnDecl(name) {
   const fn1 = (retTy, body) => ({
     kind: 'fn', name, params: [{ name: 'x', type: REAL }], ret: retTy, body,
   });
+  /** 两格三态进、回一格别的类型（`identical` 那一格回两态）。 */
+  const fn2b = (retTy, body) => ({
+    kind: 'fn', name, params: [{ name: 'x', type: REAL }, { name: 'y', type: REAL }], ret: retTy, body,
+  });
 
   if (name === 'r_lgl') {
     /* R 的 `as.logical`：`NA` 与 `NaN` 都是 `NA`（`is.na` 对两格都真，一问就够）。 */
@@ -9384,6 +9456,15 @@ function lglFnDecl(name) {
         then: T,
         else_: F,
       }),
+    ]);
+  }
+  if (name === 'r_ident_lgl') {
+    /* `identical(逻辑, 逻辑)`：两边都缺就是 TRUE（R 的口径，量过），一边缺就是 FALSE，
+       都不缺就按真假比。回的是**两态** —— `identical` 从不回 `NA`。 */
+    return fn2b(BOOL, [
+      { kind: 'if', cond: b('&&', isNa(x), isNa(y)), then: [ret({ kind: 'bool', value: true })], else_: null },
+      { kind: 'if', cond: b('||', isNa(x), isNa(y)), then: [ret({ kind: 'bool', value: false })], else_: null },
+      ret(b('==', b('!=', x, F), b('!=', y, F))),
     ]);
   }
   if (name === 'r_is_true' || name === 'r_is_false') {
