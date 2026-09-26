@@ -529,6 +529,176 @@ export function dictSetDefaultOf(d0, k0, v, both, boxHit, boxNew, C) {
   return h.wrap(out);
 }
 
+/* ─── 串上按字符走的那几格（大小写、类别判断）───────────────────────────────── */
+
+/** 这几串是**判类别**用的（方言里没有"码位"那一格，所以只能拿 `sfind` 在一串里找）。 */
+const LOWERS = 'abcdefghijklmnopqrstuvwxyz';
+const UPPERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+const DIGITS = '0123456789';
+const SPACES = ' \t\n\r\u000b\f';
+
+/** 一格字符在不在某一串里。 */
+const inSet = (set, ch) => bin('!=', call1('sfind', [str(set), ch]), int(-1));
+
+/**
+ * `.title()` / `.capitalize()` / `.swapcase()` —— 逐格走，**只动 ASCII**。
+ *
+ * 与 `.upper()` / `.lower()` 同一条口径与同一处不足：非 ASCII 的大小写要借
+ * `Objects/unicodeobject.c` 的映射表，在那之前只有 ASCII 那一档是对的。
+ *
+ * `.title()` 的边界是"**前一格不是字母**"（数字也算边界 —— `"a1b".title()` 是
+ * `A1B`，拿 python3 比出来的）。
+ */
+export function caseMapOf(s0, mode, C) {
+  const h = holder(C);
+  const s = h.keep(s0, 'cm_s');
+  const out = h.decl('cm_o', STR, str(''));
+  const i = h.decl('cm_i', INT, int(0));
+  const ch = h.decl('cm_c', STR, str(''));
+  const add = (v) => ({ kind: 'assign', target: out, value: bin('+', out, v) });
+  const body = [{ kind: 'assign', target: ch, value: call1('ssub', [s, i, int(1)]) }];
+  if (mode === 'swapcase') {
+    body.push({
+      kind: 'if',
+      cond: inSet(LOWERS, ch),
+      then: [add(call1('supper', [ch]))],
+      else_: [{
+        kind: 'if', cond: inSet(UPPERS, ch), then: [add(call1('slower', [ch]))], else_: [add(ch)],
+      }],
+    });
+  } else {
+    const up = h.decl('cm_u', BOOL, { kind: 'bool', value: true });
+    body.push({
+      kind: 'if', cond: up, then: [add(call1('supper', [ch]))], else_: [add(call1('slower', [ch]))],
+    });
+    body.push({
+      kind: 'assign',
+      target: up,
+      value: mode === 'title'
+        ? { kind: 'unop', op: '!', operand: inSet(LOWERS + UPPERS, ch) }
+        : { kind: 'bool', value: false },
+    });
+  }
+  h.pre.push({ kind: 'while', cond: bin('<', i, call1('slen', [s])), body: [...body, inc(i)] });
+  return h.wrap(out);
+}
+
+/**
+ * `.isspace()` / `.isdigit()` / `.isalpha()` / `.isalnum()` / `.isupper()` / `.islower()`
+ * —— 逐格走，**只认 ASCII**（同上一格的理由）。
+ *
+ * 两套规矩，别混：前四个是"**每一格都在那一类里**且串非空"；
+ * `isupper` / `islower` 是"**有至少一格有大小写之分的、而且没有反着的那一格**"——
+ * 所以 `"A1".isupper()` 是 True（数字不碍事），拿 python3 比出来的。
+ */
+export function charClassOf(s0, mode, C) {
+  const CLASS = {
+    isspace: SPACES, isdigit: DIGITS, isalpha: LOWERS + UPPERS, isalnum: LOWERS + UPPERS + DIGITS,
+  };
+  const h = holder(C);
+  const s = h.keep(s0, 'cc_s');
+  const i = h.decl('cc_i', INT, int(0));
+  const ch = h.decl('cc_c', STR, str(''));
+  const n = call1('slen', [s]);
+  const step = [{ kind: 'assign', target: ch, value: call1('ssub', [s, i, int(1)]) }];
+  if (CLASS[mode] !== undefined) {
+    const ok = h.decl('cc_k', BOOL, bin('>', n, int(0)));
+    h.pre.push({
+      kind: 'while',
+      cond: bin('&&', ok, bin('<', i, n)),
+      body: [...step, {
+        kind: 'if',
+        cond: { kind: 'unop', op: '!', operand: inSet(CLASS[mode], ch) },
+        then: [{ kind: 'assign', target: ok, value: { kind: 'bool', value: false } }],
+        else_: null,
+      }, inc(i)],
+    });
+    return h.wrap(ok);
+  }
+  const want = mode === 'isupper' ? UPPERS : LOWERS;
+  const other = mode === 'isupper' ? LOWERS : UPPERS;
+  const seen = h.decl('cc_s1', BOOL, { kind: 'bool', value: false });
+  const bad = h.decl('cc_b', BOOL, { kind: 'bool', value: false });
+  h.pre.push({
+    kind: 'while',
+    cond: bin('&&', { kind: 'unop', op: '!', operand: bad }, bin('<', i, n)),
+    body: [...step, {
+      kind: 'if',
+      cond: inSet(other, ch),
+      then: [{ kind: 'assign', target: bad, value: { kind: 'bool', value: true } }],
+      else_: [{
+        kind: 'if',
+        cond: inSet(want, ch),
+        then: [{ kind: 'assign', target: seen, value: { kind: 'bool', value: true } }],
+        else_: null,
+      }],
+    }, inc(i)],
+  });
+  return h.wrap(bin('&&', seen, { kind: 'unop', op: '!', operand: bad }));
+}
+
+/** `s.rfind(p)` —— 从后往前找（方言的 `sfind` 只从前往后）。找不到交 -1。 */
+export function rfindOf(s0, p0, C) {
+  const h = holder(C);
+  const s = h.keep(s0, 'rf_s');
+  const p = h.keep(p0, 'rf_p');
+  const lp = h.decl('rf_lp', INT, call1('slen', [p]));
+  const at = h.decl('rf_at', INT, bin('-', call1('slen', [s]), lp));
+  const out = h.decl('rf_o', INT, int(-1));
+  h.pre.push({
+    kind: 'while',
+    cond: bin('&&', bin('==', out, int(-1)), bin('>=', at, int(0))),
+    body: [
+      {
+        kind: 'if',
+        cond: bin('==', call1('ssub', [s, at, lp]), p),
+        then: [{ kind: 'assign', target: out, value: at }],
+        else_: null,
+      },
+      { kind: 'assign', target: at, value: bin('-', at, int(1)) },
+    ],
+  });
+  return h.wrap(out);
+}
+
+/** `xs.copy()` / `list(xs)` —— 抄一张新表出来。 */
+export function copyList(xs0, C) {
+  const h = holder(C);
+  const xs = h.keep(xs0, 'cp2_x');
+  const t = C.tyOfIR(xs);
+  const out = h.decl('cp2_o', t, call1('anew', [{ kind: 'type', type: t }, int(0)]));
+  const i = h.decl('cp2_i', INT, int(0));
+  h.pre.push({
+    kind: 'while',
+    cond: bin('<', i, call1('alen', [xs])),
+    body: [
+      { kind: 'builtin-stmt', name: 'apush', args: [out, { kind: 'index', obj: xs, index: i }] },
+      inc(i),
+    ],
+  });
+  return h.wrap(out);
+}
+
+/** `d.copy()` —— 抄一格新字典出来（走键表）。 */
+export function copyDict(d0, C) {
+  const h = holder(C);
+  const d = h.keep(d0, 'cd_d');
+  const t = C.tyOfIR(d);
+  const out = h.decl('cd_o', t, call1('dnew', [{ kind: 'type', type: t }]));
+  const ks = h.decl('cd_ks', arrOf(t.key), call1('dkeys', [d]));
+  const i = h.decl('cd_i', INT, int(0));
+  const k = { kind: 'index', obj: ks, index: i };
+  h.pre.push({
+    kind: 'while',
+    cond: bin('<', i, call1('alen', [ks])),
+    body: [
+      { kind: 'builtin-stmt', name: 'dset', args: [out, k, call1('dget', [d, k])] },
+      inc(i),
+    ],
+  });
+  return h.wrap(out);
+}
+
 /* ─── 表上那几个"找"与"改"（`in` / index / count / insert / remove / …）─────── */
 
 /**
@@ -799,12 +969,14 @@ export function splitOf(s0, sep0, C) {
 }
 
 /** `s.strip()` / `lstrip` / `rstrip` —— 去的是 python 那几个空白字符（`str.strip` 无参那一档）。 */
-export function stripOf(s0, left, right, C) {
+export function stripOf(s0, left, right, C, chars0 = null) {
   const h = holder(C);
   const s = h.keep(s0, 'tr_s');
+  /* 要去掉的那几个字符：没给就是空白那一串（python 的默认）。 */
+  const set = chars0 === null ? str(' \t\n\r\u000b\f') : h.keep(chars0, 'tr_cs', STR);
   const a = h.decl('tr_a', INT, int(0));
   const b = h.decl('tr_b', INT, call1('slen', [s]));
-  const isWs = (i) => bin('!=', call1('sfind', [str(' \t\n\r\u000b\f'), call1('ssub', [s, i, int(1)])]), int(-1));
+  const isWs = (i) => bin('!=', call1('sfind', [set, call1('ssub', [s, i, int(1)])]), int(-1));
   if (left) {
     h.pre.push({
       kind: 'while',

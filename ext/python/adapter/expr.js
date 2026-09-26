@@ -30,6 +30,7 @@ import {
   joinOf, splitOf, stripOf, replaceOf, startsEndsOf, justOf,
   containsList, indexOfList, countList, valuesList, dictPopOf, dictSetDefaultOf,
   concatList, repeatList, reversedList, stepSlice, bankRound,
+  caseMapOf, charClassOf, rfindOf, copyList, copyDict,
 } from './builtins.js';
 
 /** 一格名字节点（`(n x)`）的文本；也收裸记号。 */
@@ -307,8 +308,12 @@ function padFill(s, width, ch, left, C) {
     : { kind: 'binop', op: '+', left: pad, right: s };
 }
 
-/** `:^N` —— 居中。**余数放右边**（python 就是这么摆的）。 */
-function centerTo(s0, width, ch, C) {
+/**
+ * 居中。**`str.center()` 与 f-string 的 `:^` 摆法不一样**（量出来的）：
+ * `'ab'.center(7, '*')` 是 `***ab**`（多的那一格在**左**边），
+ * 而 `f"{'ab':*^7}"` 是 `**ab***`（多的在**右**边）。所以这一格收一个 `leftHeavy`。
+ */
+function centerTo(s0, width, ch, C, leftHeavy = false) {
   const pre = [];
   let s = s0;
   if (!isPure(s0)) {
@@ -324,7 +329,11 @@ function centerTo(s0, width, ch, C) {
   const rep = (cnt) => ({ kind: 'builtin', name: 'srep', args: [{ kind: 'string', value: ch }, cnt] });
   /* 两边都是 int 时方言的 `/` 就是整除，而这儿的差是非负的 —— 所以不必走 `//`
      那一套（标准 IR 里压根没有那个算符名）。 */
-  const half = { kind: 'binop', op: '/', left: gap, right: { kind: 'int', value: 2 } };
+  const half = {
+    kind: 'binop', op: '/',
+    left: leftHeavy ? { kind: 'binop', op: '+', left: gap, right: { kind: 'int', value: 1 } } : gap,
+    right: { kind: 'int', value: 2 },
+  };
   const value = {
     kind: 'binop', op: '+',
     left: { kind: 'binop', op: '+', left: rep(half), right: s },
@@ -380,14 +389,17 @@ function methodType(recvTy, name, argTys, C) {
   if (recvTy.kind === 'arr') {
     if (['append', 'clear', 'extend', 'reverse', 'insert', 'remove', 'sort'].includes(name)) return { kind: 'void' };
     if (name === 'pop') return recvTy.elem;
+    if (name === 'copy') return recvTy;
     if (name === 'index' || name === 'count') return INT;
     return null;
   }
   if (recvTy.kind === 'string') {
-    if (['upper', 'lower', 'strip', 'lstrip', 'rstrip', 'replace', 'join',
-      'ljust', 'rjust', 'zfill', 'center'].includes(name)) return STR;
-    if (['find', 'rfind', 'count', 'index'].includes(name)) return INT;
-    if (['startswith', 'endswith', 'isdigit', 'isalpha'].includes(name)) return BOOL;
+    if (['upper', 'lower', 'title', 'capitalize', 'swapcase', 'strip', 'lstrip', 'rstrip',
+      'replace', 'join', 'ljust', 'rjust', 'zfill', 'center',
+      'removeprefix', 'removesuffix'].includes(name)) return STR;
+    if (['find', 'rfind', 'count', 'index', 'rindex'].includes(name)) return INT;
+    if (['startswith', 'endswith',
+      'isdigit', 'isalpha', 'isalnum', 'isspace', 'isupper', 'islower'].includes(name)) return BOOL;
     if (name === 'split') return arrOf(STR);
     return null;
   }
@@ -408,6 +420,7 @@ function methodType(recvTy, name, argTys, C) {
     }
     if (name === 'setdefault') return recvTy.value;
     if (name === 'items') return arrOf(tupleRec([recvTy.key, recvTy.value], C).type);
+    if (name === 'copy') return recvTy;
     if (name === 'clear' || name === 'update') return { kind: 'void' };
     return null;
   }
@@ -2451,11 +2464,13 @@ function methodOf(recvTok, name, args, C) {
     if (name === 'pop' && args.length === 0) return { kind: 'builtin', name: 'apop', args: [recv] };
     if (name === 'index' && args.length === 1) return indexOfList(recv, args[0], C, (l, r) => cmpOne('==', l, r, C));
     if (name === 'count' && args.length === 1) return countList(recv, args[0], C, (l, r) => cmpOne('==', l, r, C));
-    if (['append', 'reverse', 'extend', 'clear', 'insert', 'remove'].includes(name)) {
+    /* `.copy()` —— 抄一张新表（浅抄，与 python 同）。 */
+    if (name === 'copy' && args.length === 0) return copyList(recv, C);
+    if (['append', 'reverse', 'extend', 'clear', 'insert', 'remove', 'sort'].includes(name)) {
       throw new Error(`python->IR: \`.${name}()\` 不交值（当语句用是接了的）`);
     }
     throw new Error(`python->IR: 表上的 \`.${name}()\` 还没接`
-      + '（交值的接了 pop / index / count；改原表的那几个当语句用）');
+      + '（交值的接了 pop / index / count / copy；改原表的那几个当语句用）');
   }
   if (t.kind === 'string') {
     /**
@@ -2480,12 +2495,60 @@ function methodOf(recvTok, name, args, C) {
       throw new Error('python->IR: `.split()` 不带分隔符那一档还没接'
         + '（它按连续空白切，而且首尾的空段不算 —— 与带分隔符是两条规矩）');
     }
-    if (name === 'strip' && args.length === 0) return stripOf(recv, true, true, C);
-    if (name === 'lstrip' && args.length === 0) return stripOf(recv, true, false, C);
-    if (name === 'rstrip' && args.length === 0) return stripOf(recv, false, true, C);
+    if (name === 'strip' && args.length <= 1) return stripOf(recv, true, true, C, args[0] ?? null);
+    if (name === 'lstrip' && args.length <= 1) return stripOf(recv, true, false, C, args[0] ?? null);
+    if (name === 'rstrip' && args.length <= 1) return stripOf(recv, false, true, C, args[0] ?? null);
     if (name === 'replace' && args.length === 2) return replaceOf(recv, args[0], args[1], C);
     if (name === 'startswith' && args.length === 1) return startsEndsOf(recv, args[0], true, C);
     if (name === 'endswith' && args.length === 1) return startsEndsOf(recv, args[0], false, C);
+    /* 大小写那三格与 upper / lower 同一条口径（**只动 ASCII**，见上面那段话）。 */
+    if (['title', 'capitalize', 'swapcase'].includes(name) && args.length === 0) {
+      return caseMapOf(recv, name, C);
+    }
+    /* 判类别那几格 —— 逐格走，只认 ASCII。两套规矩别混（见 `charClassOf`）。 */
+    if (['isspace', 'isdigit', 'isalpha', 'isalnum', 'isupper', 'islower'].includes(name)
+      && args.length === 0) {
+      return charClassOf(recv, name, C);
+    }
+    /* `rfind` / `rindex` —— 从后往前找（方言的 `sfind` 只从前往后）。 */
+    if (name === 'rfind' && args.length === 1) return rfindOf(recv, args[0], C);
+    /* `.index()` / `.rindex()` —— 与 find / rfind 只差"找不到就报"（python 是 ValueError）。 */
+    if ((name === 'index' || name === 'rindex') && args.length === 1) {
+      const at = name === 'index'
+        ? { kind: 'builtin', name: 'sfind', args: [recv, args[0]] }
+        : rfindOf(recv, args[0], C);
+      const n = C.fresh('si_at');
+      C.bind(n, INT);
+      const v = { kind: 'name', name: n };
+      return {
+        kind: 'block-expr',
+        stmts: [
+          { kind: 'let', name: n, type: INT, init: at },
+          {
+            kind: 'if',
+            cond: { kind: 'binop', op: '<', left: v, right: { kind: 'int', value: 0 } },
+            then: [{ kind: 'builtin-stmt', name: 'fail', args: [{ kind: 'string', value: 'substring not found' }] }],
+            else_: null,
+          },
+        ],
+        value: v,
+      };
+    }
+    /* `removeprefix` / `removesuffix` —— 有那一段就切掉，没有就原样。 */
+    if ((name === 'removeprefix' || name === 'removesuffix') && args.length === 1) {
+      const head = name === 'removeprefix';
+      const lp = { kind: 'builtin', name: 'slen', args: [args[0]] };
+      const ls = { kind: 'builtin', name: 'slen', args: [recv] };
+      const cut = head
+        ? { kind: 'builtin', name: 'ssub', args: [recv, lp, { kind: 'binop', op: '-', left: ls, right: lp }] }
+        : { kind: 'builtin', name: 'ssub', args: [recv, { kind: 'int', value: 0 }, { kind: 'binop', op: '-', left: ls, right: lp }] };
+      return {
+        kind: 'ternary', type: STR,
+        cond: startsEndsOf(recv, args[0], head, C),
+        then: cut,
+        else_: recv,
+      };
+    }
     /* 补宽度那三格（`ljust` / `rjust` / `zfill`）—— 不够宽就补，够了原样。 */
     if ((name === 'ljust' || name === 'rjust') && (args.length === 1 || args.length === 2)) {
       const ch = args.length === 2 ? args[1] : { kind: 'string', value: ' ' };
@@ -2494,9 +2557,22 @@ function methodOf(recvTok, name, args, C) {
     if (name === 'zfill' && args.length === 1) {
       return justOf(recv, args[0], { kind: 'string', value: '0' }, false, C);
     }
+    /* `.center(w[, ch])` —— 与 f-string 的 `:^N` 同一格（余数放右边）。
+       宽度要是字面量：`centerTo` 是按编译期的宽度拼的。 */
+    if (name === 'center' && (args.length === 1 || args.length === 2)) {
+      if (args[0].kind !== 'int') {
+        throw new Error('python->IR: `.center(w)` 的 w 要写成一格整数字面量');
+      }
+      const ch = args.length === 2 ? args[1] : { kind: 'string', value: ' ' };
+      if (ch.kind !== 'string') {
+        throw new Error('python->IR: `.center(w, ch)` 的 ch 要写成一格串字面量');
+      }
+      return centerTo(recv, Number(args[0].value), ch.value, C, true);
+    }
     throw new Error(`python->IR: 串上的 \`.${name}()\` 还没接`
-      + '（接了的是 upper / find / join / split / strip / lstrip / rstrip / replace'
-      + ' / startswith / endswith / ljust / rjust / zfill）');
+      + '（接了的是 upper / lower / title / capitalize / swapcase / find / rfind / index /'
+      + ' rindex / join / split / strip / lstrip / rstrip / replace / startswith / endswith /'
+      + ' removeprefix / removesuffix / ljust / rjust / zfill / center / is*）');
   }
   if (t.kind === 'map') {
     /* `d.get(k)` —— 键不在里头 python 交 `None`，所以这一格**交的是箱子**（dyn）：
@@ -2587,6 +2663,8 @@ function methodOf(recvTok, name, args, C) {
     }
     /* `d.items()` 当值用 —— 交一张元组的表（`for k, v in d.items()` 那一侧不走这儿）。 */
     if (name === 'items' && args.length === 0) return pairsList('items', [recv], C);
+    /* `d.copy()` —— 抄一格新字典（浅抄）。 */
+    if (name === 'copy' && args.length === 0) return copyDict(recv, C);
     if (name === 'clear' || name === 'update') {
       throw new Error(`python->IR: \`d.${name}()\` 交 None，所以只当语句用（单独一行）`);
     }

@@ -391,6 +391,25 @@ R 那一门（ADR-0045/0046/0047，`r-lang` 分支）已经把这条路走通过
   **明说没收的**（都当场报，不猜）：`#`（`0x` 前缀）、`,`（千分位）、`=`（符号后填充）、
   `e` / `g` / `%` / `n`、宽度或精度写成 `{}`（从实参来）。
 
+* **串上剩下那一批方法，加上 `.copy()`**。`.title()` / `.capitalize()` / `.swapcase()`、
+  `.strip(chars)` / `.lstrip(chars)` / `.rstrip(chars)`、`.isalpha()` / `.isdigit()` /
+  `.isalnum()` / `.isspace()` / `.isupper()` / `.islower()`、`.rfind()` / `.index()` /
+  `.rindex()`、`.removeprefix()` / `.removesuffix()`、`.center()`，以及表与字典的 `.copy()`。
+  方言一格新算子都没加。判据：`ext/python/examples/strmethods.py` 三条腿与 python3 逐字节相同。
+
+  **拿 python3 比出来的三条口径**（照着文档写会写错的）：
+  - `.title()` 的边界是"前一格不是**字母**"，数字也算边界 —— `"a1b".title()` 是 `A1B`；
+  - `.isupper()` 是"**有至少一格大写、而且没有小写**"，不是"每一格都大写" ——
+    `"A1".isupper()` 是 True、`"1".isupper()` 是 False。`.isalpha()` 那一族反过来：
+    每一格都要在类里、而且串非空；
+  - **`str.center()` 与 f-string 的 `:^` 摆法不一样**：`'ab'.center(7,'*')` 是 `***ab**`
+    （多的在左），`f"{'ab':*^7}"` 是 `**ab***`（多的在右）。
+
+  **明说的不足**：只动 ASCII（同 `.upper()` / `.lower()`，要借 `unicodeobject.c`）；
+  `.split()` 不带分隔符、`.split(sep, maxsplit)`、`.partition()`、`.format()`、
+  `.encode()`、`.count(sub, start, end)` 那一族带范围的都还没接；
+  `.center(w)` 的 w 要写成字面量。
+
 ### 下一刀，按顺序
 
 1. **箱子里的函数拆出来调**（`(asfn …)` 那一格 —— 于是 `f = g` 之后 `f()` 走得通，
