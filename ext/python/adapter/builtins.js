@@ -1484,6 +1484,58 @@ export function splitLinesOf(s0, C) {
   return h.wrap(out);
 }
 
+/**
+ * `sorted(xs, key=…)` / `xs.sort(key=…)` —— **按另一张表排**：`keys[i]` 是 `xs[i]` 的键，
+ * 两张表**一起挪**，比的只看键。python 的 sort 是稳定的，插入排序也是。
+ *
+ * 为什么不是"递一格比较器进来"：比较要落在 `while` 的条件上，而键那一段算出来常常带
+ * 几格临时量（`block-expr`）—— 摆进条件里每转一圈都要重算，还容易在条件位置上炸。
+ * 先把键**算一遍摆成一张表**，之后就只是两个标量比大小。
+ */
+export function sortByKeyStmts(xs, keys, C, desc = false) {
+  const h = holder(C);
+  const t = C.tyOfIR(xs);
+  const kt = C.tyOfIR(keys);
+  const j = h.decl('sk_j', INT, int(1));
+  const k = h.decl('sk_k', INT, int(0));
+  const cur = h.decl('sk_c', t.elem, { kind: 'index', obj: xs, index: int(0) });
+  const ck = h.decl('sk_ck', kt.elem, { kind: 'index', obj: keys, index: int(0) });
+  const move = (dst, src0) => [
+    {
+      kind: 'assign',
+      target: { kind: 'index', obj: xs, index: dst },
+      value: { kind: 'index', obj: xs, index: src0 },
+    },
+    {
+      kind: 'assign',
+      target: { kind: 'index', obj: keys, index: dst },
+      value: { kind: 'index', obj: keys, index: src0 },
+    },
+  ];
+  h.pre.push({
+    kind: 'while',
+    cond: bin('<', j, call1('alen', [xs])),
+    body: [
+      { kind: 'assign', target: cur, value: { kind: 'index', obj: xs, index: j } },
+      { kind: 'assign', target: ck, value: { kind: 'index', obj: keys, index: j } },
+      { kind: 'assign', target: k, value: bin('-', j, int(1)) },
+      {
+        kind: 'while',
+        cond: bin('&&', bin('>=', k, int(0)),
+          bin(desc ? '<' : '>', { kind: 'index', obj: keys, index: k }, ck)),
+        body: [
+          ...move(bin('+', k, int(1)), k),
+          { kind: 'assign', target: k, value: bin('-', k, int(1)) },
+        ],
+      },
+      { kind: 'assign', target: { kind: 'index', obj: xs, index: bin('+', k, int(1)) }, value: cur },
+      { kind: 'assign', target: { kind: 'index', obj: keys, index: bin('+', k, int(1)) }, value: ck },
+      inc(j),
+    ],
+  });
+  return h.pre;
+}
+
 /** `s.startswith(p)` / `s.endswith(p)` —— 比一段（方言里没有这一格算子）。 */
 export function startsEndsOf(s0, p0, atStart, C) {
   const h = holder(C);

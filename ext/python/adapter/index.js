@@ -31,7 +31,7 @@ import { INT, STR, BOOL, DYN, arrOf, dictOf, sameType, typeOf, named } from '../
 import { typeToSx } from '../../../src/core/lower/ty.js';
 import {
   exprOf, condOf, nameOf, typeOfAnnot, tyOfCst, tyArg, pyStr, pyRepr, lenOf, hasFields, fstringParts, cmpEq,
-  kwOrder, tupleOf, cmpLt, needOrd, tupleToList,
+  kwOrder, tupleOf, cmpLt, needOrd, tupleToList, sortByKeyPy,
 } from './expr.js';
 import {
   reverseStmts, clearStmts, extendStmts, insertStmts, dropAtStmts, indexOfList,
@@ -1131,15 +1131,22 @@ function listMut(m, box, argToks, C) {
     const v = exprOf(argToks[k], C);
     return et.kind === 'dyn' && typeOfIR(v, C).kind !== 'dyn' ? boxOf(v, C) : v;
   };
-  /* `.sort()` / `.sort(reverse=True)` —— **就地**排（`sorted()` 才抄一份）。
-     `reverse` 与 `sorted(reverse=…)` 同一条口径：只收 True / False 字面量。 */
+  /* `.sort()` / `.sort(reverse=True)` / `.sort(key=lambda v: …)` —— **就地**排
+     （`sorted()` 才抄一份）。两个命名实参与 `sorted()` 那一处同一条口径。 */
   if (m === 'sort') {
     let desc = false;
+    let keyTok = null;
     for (const a of argToks) {
-      if (tag(a) !== 'kw') throw new Error('python->IR: `.sort()` 的实参只收 `reverse=`');
+      if (tag(a) !== 'kw') throw new Error('python->IR: `.sort()` 的实参只收 `reverse=` 与 `key=`');
       const k = String(leaf(kids(a)[0]));
-      if (k !== 'reverse') throw new Error(`python->IR: \`.sort(${k}=…)\` 还没接（接了的是 reverse=）`);
       const v = kids(a)[1];
+      if (k === 'key') {
+        keyTok = v;
+        continue;
+      }
+      if (k !== 'reverse') {
+        throw new Error(`python->IR: \`.sort(${k}=…)\` 还没接（接了的是 reverse= 与 key=）`);
+      }
       if (tag(v) !== 'true' && tag(v) !== 'false') {
         throw new Error('python->IR: `.sort(reverse=…)` 要写成 True / False 字面量'
           + '（两种比法是两条循环，得在编译期定）');
@@ -1147,6 +1154,7 @@ function listMut(m, box, argToks, C) {
       desc = tag(v) === 'true';
     }
     const bt = C.tyOfIR(box);
+    if (keyTok !== null) return sortByKeyPy(box, keyTok, C, desc);
     if (bt.kind === 'arr') needOrd(bt.elem, C, '.sort()');
     return sortStmts(box, C, desc, (x, y) => cmpLt(x, y, C));
   }

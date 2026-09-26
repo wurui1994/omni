@@ -31,6 +31,7 @@ import {
   containsList, indexOfList, countList, valuesList, dictPopOf, dictSetDefaultOf,
   concatList, repeatList, reversedList, stepSlice, bankRound,
   caseMapOf, charClassOf, rfindOf, copyList, copyDict, charsOf, dictOfPairs,
+  sortByKeyStmts,
   listEqOf, listCmpOf, dictEqOf, intOfStr, ordOf, expandTabsOf, splitLinesOf,
 } from './builtins.js';
 
@@ -1151,12 +1152,86 @@ export function needOrd(t, C, what) {
   throw new Error(`python->IR: \`${what}\` 的元素是 ${t.kind} —— 还没接（要有"怎么比"）`);
 }
 
+/**
+ * `key=` 那一格 —— **lambda 在这一层是"就地展开"的**：把它的体按元素算一遍、攒成一张
+ * "键表"，排序时两张表一起挪。所以 `key=` 只收 **lambda 字面量**（一格形参、不带默认值）；
+ * 真把函数当值传要 `(asfn …)` 那一层，还没有。
+ *
+ * 形参那个名字用 `C.alias` 临时指到一格新名上（与推导式那一处同一条办法），
+ * 发完指回去 —— 于是 `key=lambda v: …` 写在一个已经有 `v` 的函数里也不会撞。
+ */
+function keyListOf(src, keyTok, C) {
+  if (tag(keyTok) !== 'lambda') {
+    throw new Error('python->IR: `key=` 只收一格 lambda 字面量（`key=lambda v: …`）——'
+      + ' 把函数当值传要 `(asfn …)` 那一层，还没有');
+  }
+  const ps = kids(part(keyTok, 'params') ?? { kind: 'list', items: [] });
+  if (ps.length !== 1 || tag(ps[0]) !== 'p' || part(ps[0], 'default') !== undefined) {
+    throw new Error('python->IR: `key=lambda …` 收一格形参、不带默认值');
+  }
+  const st = ty(src, C);
+  if (st.kind !== 'arr') throw new Error(`python->IR: \`key=\` 的接收者要是一格表（这里是 ${st.kind}）`);
+  const pre = [];
+  const pv = C.fresh('ky_p');
+  C.bind(pv, st.elem);
+  pre.push({ kind: 'let', name: pv, type: st.elem, init: null });
+  const undo = C.alias(String(nameOf(kids(ps[0])[0])), pv);
+  let body;
+  try {
+    body = exprOf(kids(keyTok)[1], C);
+  } finally {
+    undo();
+  }
+  const kt = arrOf(ty(body, C));
+  const kn = C.fresh('ky_o');
+  C.bind(kn, kt);
+  pre.push({
+    kind: 'let', name: kn, type: kt,
+    init: { kind: 'builtin', name: 'anew', args: [{ kind: 'type', type: kt }, { kind: 'int', value: 0 }] },
+  });
+  const iv0 = C.fresh('ky_i');
+  C.bind(iv0, INT);
+  pre.push({ kind: 'let', name: iv0, type: INT, init: { kind: 'int', value: 0 } });
+  const i = { kind: 'name', name: iv0 };
+  const keys = { kind: 'name', name: kn };
+  pre.push({
+    kind: 'while',
+    cond: { kind: 'binop', op: '<', left: i, right: { kind: 'builtin', name: 'alen', args: [src] } },
+    body: [
+      { kind: 'assign', target: { kind: 'name', name: pv }, value: { kind: 'index', obj: src, index: i } },
+      { kind: 'builtin-stmt', name: 'apush', args: [keys, body] },
+      { kind: 'assign', target: i, value: { kind: 'binop', op: '+', left: i, right: { kind: 'int', value: 1 } } },
+    ],
+  });
+  return { keys, pre };
+}
+
+/** `xs.sort(key=…)` —— **就地**排：键表算一遍，两张表一起挪（`sorted` 才抄一份）。 */
+export function sortByKeyPy(box, keyTok, C, desc) {
+  const got = keyListOf(box, keyTok, C);
+  needOrd(ty(got.keys, C).elem, C, '.sort(key=…)');
+  return [...got.pre, ...sortByKeyStmts(box, got.keys, C, desc)];
+}
+
 /** `sorted(xs)` —— 先问一声"元素怎么比"，再把比法递给那趟插入排序。串按一格一个字符排。 */
-function sortedPy(xsE, C, desc) {
+function sortedPy(xsE, C, desc, keyTok = null) {
   const src = ty(xsE, C).kind === 'string' ? charsOf(xsE, C) : xsE;
   const t = ty(src, C);
-  if (t.kind === 'arr') needOrd(t.elem, C, 'sorted()');
-  return sortedOf(src, C, desc, (x, y) => cmpOne('<', x, y, C));
+  if (keyTok === null) {
+    if (t.kind === 'arr') needOrd(t.elem, C, 'sorted()');
+    return sortedOf(src, C, desc, (x, y) => cmpOne('<', x, y, C));
+  }
+  /* `key=`：先抄一份（`sorted` 不动原表），再算一张键表，两张一起挪。 */
+  const pre = [];
+  const outN = C.fresh('sk_o');
+  C.bind(outN, t);
+  pre.push({ kind: 'let', name: outN, type: t, init: copyList(src, C) });
+  const out = { kind: 'name', name: outN };
+  const got = keyListOf(out, keyTok, C);
+  pre.push(...got.pre);
+  needOrd(ty(got.keys, C).elem, C, 'sorted(key=…)');
+  pre.push(...sortByKeyStmts(out, got.keys, C, desc));
+  return { kind: 'block-expr', stmts: pre, value: out };
 }
 
 /**
@@ -2673,27 +2748,32 @@ export function callOf(x, C) {
     if (argToks.length !== 2) throw new Error('python->IR: `isinstance(x, T)` 收两格实参');
     return isinstanceOf(argToks[0], argToks[1], C);
   }
-  /* `sorted(xs, reverse=True)` —— 要在**算实参之前**拦（下面那一圈见了 `kw` 就报）。
-     `reverse` 只收布尔字面量：两种比法是两条循环，得在编译期定。
-     `key=` 没接 —— 那要有"函数当值"那一档。 */
+  /* `sorted(xs, reverse=True)` / `sorted(xs, key=lambda v: …)` —— 要在**算实参之前**拦
+     （下面那一圈见了 `kw` 就报）。`reverse` 只收布尔字面量：两种比法是两条循环，得在
+     编译期定。`key=` 只收 lambda 字面量（就地展开成一张键表）。 */
   if (tag(fn) === 'n' && String(nameOf(fn)) === 'sorted'
     && argToks.some((a) => tag(a) === 'kw')) {
     const pos = argToks.filter((a) => tag(a) !== 'kw');
     if (pos.length !== 1) throw new Error('python->IR: `sorted()` 收一格表');
     let desc = false;
+    let keyTok = null;
     for (const a of argToks.filter((y) => tag(y) === 'kw')) {
       const k = String(leaf(kids(a)[0]));
-      if (k !== 'reverse') {
-        throw new Error(`python->IR: \`sorted(${k}=…)\` 还没接（接了的是 reverse=）`);
-      }
       const v = kids(a)[1];
+      if (k === 'key') {
+        keyTok = v;
+        continue;
+      }
+      if (k !== 'reverse') {
+        throw new Error(`python->IR: \`sorted(${k}=…)\` 还没接（接了的是 reverse= 与 key=）`);
+      }
       if (tag(v) !== 'true' && tag(v) !== 'false') {
         throw new Error('python->IR: `sorted(reverse=…)` 要写成 True / False 字面量'
           + '（两种比法是两条循环，得在编译期定）');
       }
       desc = tag(v) === 'true';
     }
-    return sortedPy(exprOf(pos[0], C), C, desc);
+    return sortedPy(exprOf(pos[0], C), C, desc, keyTok);
   }
   for (const a of argToks) {
     if (['kw', 'star', 'starstar'].includes(tag(a))) {

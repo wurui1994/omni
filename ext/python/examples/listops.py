@@ -82,5 +82,21 @@ def main():
     print({"a": 1} == {"a": 1}, {"a": 1} == {"a": 2}, {"a": 1} == {"b": 1})
     print({"a": 1} == {"a": 1, "b": 2}, {"a": 1} != {"a": 1}, {1: "x"} == {1: "x"})
 
+    # sorted(key=…) / .sort(key=…) —— lambda **就地展开**：键算一遍摆成一张表，两张一起挪
+    print(sorted(xs, key=lambda v: -v), xs)
+    ws = ["bbb", "a", "cc"]
+    print(sorted(ws, key=lambda w: len(w)))
+    print(sorted(ws, key=lambda w: len(w), reverse=True))
+    print(sorted([(2, "b"), (1, "a")], key=lambda p: p[1]))
+    ws.sort(key=lambda w: len(w))
+    print(ws)
+    ws.sort(key=lambda w: len(w), reverse=True)
+    print(ws)
+    # lambda 的形参不漏出去（外头同名的那一格不动）
+    v = 99
+    zs = [2, 1]
+    zs.sort(key=lambda v: v)
+    print(zs, v)
+
 
 main()
