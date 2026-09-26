@@ -323,3 +323,57 @@ export function sxDoStmts(text) {
   }
   return out;
 }
+
+/**
+ * **按单元产物那条胶水**（谁都可以用；asy 与 EVAL 两门是现在的两个调用方）。
+ *
+ * 一趟做四件事，次序就是它们之间的依赖：
+ *
+ *   1. **比印记**：每份单元那一行的键（`UnitIndex.keyOf`）与盘上那一行比 —— 相等且产物还在
+ *      就**连 emit 都不做**（这就是"公共部分不重发"的全部：`ev_rt` 那一份换脚本也命中）；
+ *   2. **发该发的**：`emitJs(unit)` 回那份 ESM 产物文本，落成 `<名字>.js`；
+ *   3. **出接口**：非入口的每一份都写 `<名字>.d.sx`（`declWrite`）—— 下一趟跳过它时靠的就是它；
+ *   4. **写启动器**：`main-<入口>.js`（`launcherText`），并把"这个入口用到哪几份"记进
+ *      索引里入口那一行的 `needs`。
+ *
+ * 回 `{ mainPath, made, kept, names }`。**目录要调用方先建**（这一份只碰封闭 ABI 里的
+ * `writeText`/`exists`）。`runtimeText` 给了就写一份 `omni_rt.js`（一目录一份，所有产物共用）。
+ */
+export function buildUnits(o) {
+  const ix = new UnitIndex(o.dir);
+  let made = 0;
+  let kept = (o.reused ?? []).length;
+  if (typeof o.runtimeText === 'string' && !exists(join(o.dir, 'omni_rt.js'))) {
+    writeText(join(o.dir, 'omni_rt.js'), o.runtimeText);
+  }
+  const rows = new Map();
+  for (const u of o.units) {
+    const jsPath = join(o.dir, `${u.name}.js`);
+    const row = o.rowOf(u);
+    rows.set(u.name, row);
+    const key = ix.keyOf(row, o.tool);
+    const had = ix.row(u.name);
+    if (had !== null && had.key === key && exists(jsPath)) { kept++; continue; }
+    writeText(jsPath, o.emitJs(u));
+    if (u.name !== o.entry) declWrite(o.dir, u.name, u.sigs ?? [], u.iface ?? null);
+    ix.set(u.name, row, o.tool);
+    made++;
+  }
+  /* 启动器里那串名字要**去重**（一份产物可能既在这一趟拼的那批里、又在复用回来的那批里）——
+     重了的话同一个 `omni_init_…` 被 import 两次，node 报 already been declared。 */
+  const seen = new Set([o.entry]);
+  const names = [];
+  for (const u of [...o.units, ...(o.reused ?? [])]) {
+    if (seen.has(u.name)) continue;
+    seen.add(u.name);
+    names.push(u.name);
+  }
+  names.sort();
+  /* 启动器**按入口起名**：这个目录是共用的，叫 main.js 的话两个入口互相盖。 */
+  const mainPath = join(o.dir, `main-${o.entry}.js`);
+  writeText(mainPath, launcherText(o.entry, names, o.unitSym, o.prelude, o.tail));
+  const entryRow = rows.get(o.entry);
+  if (entryRow !== undefined) ix.set(o.entry, { ...entryRow, needs: names }, o.tool);
+  ix.save();
+  return { mainPath, made, kept, names };
+}
