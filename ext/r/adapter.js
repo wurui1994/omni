@@ -261,6 +261,9 @@ const FN_DEPS = new Map([
   ['r_lower', []],
   /* `strtoi` 自己按字符解一遍（要小写那一格与 NA）。 */
   ['r_strtoi', ['r_lower', 'r_na']],
+  /* `identical` 的向量那一档：数那边要把真 NA 与 NaN 分开，串那边只比相等。 */
+  ['r_ident_v', ['r_is_na', 'r_is_nan']],
+  ['r_ident_sv', []],
   ['r_pick_str', []],
   ['r_sat1', []],
   ['r_nm_pos', []],
@@ -2173,8 +2176,21 @@ function applyTy(fn, x, types) {
         return anyNm ? RNLGL : RLGL;
       }
       /* `c(a = 1, b = 2)` / `c(带名字的向量, 4)` —— 带名字的数值向量（见 `namesExprOf`）。 */
-      return argsOf(x).some((a) => a.name !== null)
-        || cargs.some((a) => isNamedTy(typeOfExpr(a, types))) ? RNVEC : RVEC;
+      const anyNmN = argsOf(x).some((a) => a.name !== null)
+        || cargs.some((a) => isNamedTy(typeOfExpr(a, types)));
+      if (anyNmN) return RNVEC;
+      /**
+       * **每一格都是整数就是一条整数向量**（`c(1L, 2L)` / `c(1:2, 3L)`）——
+       * R 的收拢次序里 integer 在 double 下头，所以只有"一格 double 都没有"时才是 integer。
+       * 那个记号要紧的地方有两处：零长印 `integer(0)` 而不是 `numeric(0)`，以及
+       * `identical` 先比 `typeof`（`identical(c(1,2), c(1L,2L))` 在 R 里是 **FALSE**）。
+       * 从前这儿一律落 `RVEC`，两处都会静默差一点（2026-09-26 补的）。
+       */
+      if (cargs.length > 0 && cargs.every((a) => {
+        const t = typeOfExpr(a, types);
+        return t.kind === 'int' || isIvecTy(t);
+      })) return RIVEC;
+      return RVEC;
     }
     /* 名字那几格：`names(v)` 出一条字符向量、`setNames` 出带名字的向量、`unname` 把名字摘掉。 */
     case 'names': return RSTRV;
@@ -5440,6 +5456,35 @@ function callOf(x, types, extra, want, stmtPos) {
       case 'identical': {
         if (n !== 2) throw new Error(`r->IR: identical() 要两格实参（给了 ${n}）`);
         const it = [0, 1].map((k) => (all[k] === null ? REAL : typeOfExpr(all[k], types)));
+        /**
+         * **向量那一档**（2026-09-26）：`identical(bubble(xs), sort(xs))` 那种在真代码里
+         * 常见（手写一个排序再跟 `sort` 对一遍）。
+         *
+         * R 先比 `typeof`，而这一层的向量上那三个记号正好就是 R 的三种：`ivec` →
+         * integer、`lgl` → logical、别的 → double。那三个记号本来是给"零长印什么"用的
+         * （见 `RIVEC`），这儿第二次用上 —— 所以 `identical(1:3, c(1,2,3))` 编译期就是
+         * FALSE（R 也是：一个 integer 一个 double）。值那一半在 `r_ident_v` 里逐格比，
+         * `NA_real_` 与 `NaN` 照标量那一格的口径分开。
+         *
+         * **带名字的当场报**：R 连属性一起比（量出来 `identical(c(a=1), c(1))` 是 FALSE），
+         * 而名字那一条在这一层是影子变量 —— 比它要另摆一层，不静默忽略。
+         */
+        const vTy = (t) => (isIvecTy(t) ? 'integer' : (isLglTy(t) ? 'logical' : 'double'));
+        if (isVecTy(it[0]) && isVecTy(it[1])) {
+          if (isNamedTy(it[0]) || isNamedTy(it[1])) {
+            throw new Error('r->IR: identical() 收了一格**带名字的向量** —— R 连属性一起比'
+              + '（`identical(c(a=1), c(1))` 是 FALSE），而名字那一条在这一层是影子变量，'
+              + '比它要另摆一层。写 `unname(…)` 就只比值');
+          }
+          if (vTy(it[0]) !== vTy(it[1])) return { kind: 'bool', value: false };
+          return lglCall('r_ident_v', ev(0), ev(1));
+        }
+        if (isStrVec(it[0]) && isStrVec(it[1])) {
+          if (isNamedStr(it[0]) || isNamedStr(it[1])) {
+            throw new Error('r->IR: identical() 收了一格**带名字的字符向量** —— 见上一条');
+          }
+          return lglCall('r_ident_sv', ev(0), ev(1));
+        }
         /** 这一格在 R 里的 `typeof`（分不出来的就回 null，那时当场报）。 */
         const rTy = (t) => {
           if (t.kind === 'string') return 'character';
@@ -12066,6 +12111,64 @@ function vecFnDecl(name) {
           body: [vecSet(out, i, call1('toreal', b('+', i, { kind: 'int', value: 1 })))],
         },
         { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_ident_v' || name === 'r_ident_sv') {
+    /**
+     * `identical(向量, 向量)` —— 长度先比，再逐格比。回**两态**（`identical` 从不回 `NA`）。
+     *
+     * 数那一档要把 **`NA_real_` 与 `NaN` 分开**（R 说它们不 identical，量过），口径与标量
+     * 那一格（见 `callOf` 的 `identical`）一字不差："真的 NA" = `is.na(x) && !is.nan(x)`。
+     * 两边都是真 NA、或者两边都是 NaN，都算相等；一边 NA 一边 NaN 就不相等。
+     * `typeof` 那一半在调用点就比完了（`ivec` / `lgl` / 别的三个记号）—— 这儿只管值。
+     */
+    const sv = name === 'r_ident_sv';
+    const av = { kind: 'name', name: 'a' };
+    const bv = { kind: 'name', name: 'b' };
+    const ai = sv ? svGet(av, i) : vecGet(av, i);
+    const bi = sv ? svGet(bv, i) : vecGet(bv, i);
+    const F = { kind: 'bool', value: false };
+    const body = [];
+    if (sv) {
+      body.push({ kind: 'if', cond: b('!=', ai, bi), then: [{ kind: 'return', values: [F] }] });
+    } else {
+      const not = (e) => ({ kind: 'unop', op: '!', operand: e });
+      const nanA = lglCall('r_is_nan', ai);
+      const nanB = lglCall('r_is_nan', bi);
+      const naA = b('&&', lglCall('r_is_na', ai), not(nanA));
+      const naB = b('&&', lglCall('r_is_na', bi), not(nanB));
+      body.push({ kind: 'if', cond: b('!=', naA, naB), then: [{ kind: 'return', values: [F] }] });
+      body.push({
+        kind: 'if',
+        cond: not(naA),
+        then: [
+          { kind: 'if', cond: b('!=', nanA, nanB), then: [{ kind: 'return', values: [F] }] },
+          {
+            kind: 'if',
+            cond: not(nanA),
+            then: [{ kind: 'if', cond: b('!=', ai, bi), then: [{ kind: 'return', values: [F] }] }],
+          },
+        ],
+      });
+    }
+    const lenOf = (e) => (sv ? svLen(e) : vecLen(e));
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'a', type: sv ? RSTRV : RVEC }, { name: 'b', type: sv ? RSTRV : RVEC }],
+      ret: BOOL,
+      body: [
+        { kind: 'let', name: 'n', type: INT, init: lenOf(av) },
+        { kind: 'if', cond: b('!=', len, lenOf(bv)), then: [{ kind: 'return', values: [F] }] },
+        {
+          kind: 'for',
+          init: { kind: 'let', name: 'i', type: INT, init: { kind: 'int', value: 0 } },
+          cond: b('<', i, len),
+          post: { kind: 'assign', target: i, value: b('+', i, { kind: 'int', value: 1 }) },
+          body,
+        },
+        { kind: 'return', values: [{ kind: 'bool', value: true }] },
       ],
     };
   }

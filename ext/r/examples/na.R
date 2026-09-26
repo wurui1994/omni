@@ -123,3 +123,29 @@ cat(is.na(s), "\n")
 sv <- c("x", "y", "z")
 cat(is.na(sv), length(is.na(sv)), sum(is.na(sv)), any(is.na(sv)), "\n")
 print(is.na(c("a", "b")))
+
+# **`identical` 的向量那一档**（手写一个排序再跟 `sort` 对一遍，真代码里常见）。
+# R 先比 `typeof`，而这一层向量上那三个记号正好就是 R 的三种：`ivec` → integer、
+# `lgl` → logical、别的 → double（那三个记号本来是给"零长印什么"用的，这儿第二次用上）。
+# 所以 `identical(1:3, c(1,2,3))` 编译期就是 FALSE —— R 也是（一个 integer 一个 double）。
+# 值那一半逐格比，`NA_real_` 与 `NaN` 照标量那一格的口径分开。带名字的当场报（R 连属性一起比）。
+cat(identical(c(1, 2), c(1, 2)), identical(c(1, 2), c(1, 3)), identical(c(1, 2), c(1, 2, 3)), "\n")
+cat(identical(1:3, c(1, 2, 3)), identical(1:3, 1:3), identical(seq_len(3), 1:3), "\n")
+cat(identical(c(NA, 1), c(NA, 1)), identical(c(NaN, 1), c(NaN, 1)), identical(c(NA, 1), c(NaN, 1)), "\n")
+cat(identical(c("a", "b"), c("a", "b")), identical(c("a"), c("b")), "\n")
+cat(identical(c(TRUE, FALSE), c(TRUE, FALSE)), identical(c(TRUE, FALSE), c(1, 0)), "\n")
+cat(identical(numeric(0), numeric(0)), identical(character(0), character(0)), "\n")
+idxs <- c(5, 2, 9)
+cat(identical(sort(idxs), c(2, 5, 9)), identical(rev(rev(idxs)), idxs), "\n")
+idys <- c(1, NA, 3)
+cat(identical(idys, c(1, NA, 3)), identical(idys, c(1, 2, 3)), "\n")
+# **每一格都是整数就是一条整数向量**（`c(1L, 2L)` / `c(1:2, 3L)`）—— R 的收拢次序里
+# integer 在 double 下头。从前 `c` 一律落"数值向量"，于是这几格会静默差一点：
+# `identical(c(1,2,3), c(1L,2L,3L))` 该 FALSE、`print(c(1L,2L)[0])` 该印 `integer(0)`。
+cat(identical(c(1, 2, 3), c(1L, 2L, 3L)), identical(c(1L, 2L), c(1L, 2L)), "\n")
+cat(identical(c(1L, 2), c(1, 2)), identical(c(1:2, 3L), c(1L, 2L, 3L)), "\n")
+cat(identical(as.integer(c(1.7, 2.7)), c(1L, 2L)), "\n")
+cat(identical(which(c(TRUE, FALSE, TRUE)), c(1L, 3L)), "\n")
+cat(identical(nchar(c("ab", "c")), c(2L, 1L)), "\n")
+cat(identical(order(c(2, 1)), c(2L, 1L)), "\n")
+cat(length(c(1L, 2L)), sum(c(1L, 2L, 3L)), "\n")
