@@ -362,6 +362,7 @@ const FN_DEPS = new Map([
   ['r_padl', []],
   /* `format(一格数)`：底子是 `r_num_str`（7 位），`nsmall=` 那一格要问缺失与无穷。 */
   ['r_format1', ['r_num_str', 'r_is_na']],
+  ['r_bigmark', []],
   ['r_padr', []],
   ['r_pad0', []],
   ['r_trim', []],
@@ -728,7 +729,7 @@ const NAME_DROP_OK = new Set([
   /* `duplicated` 量出来 R 自己也丢名字（2026-09-26）—— 从前这张表外，于是带名字的向量上报。 */
   'duplicated',
   'as.character', 'as.numeric', 'as.double', 'as.integer', 'as.logical',
-  'vector',
+  'vector', 'prettyNum',
   'is.numeric', 'is.character', 'is.logical', 'is.double', 'is.integer',
   'typeof', 'class', 'inherits', 'stop', 'stopifnot',
 ]);
@@ -1063,7 +1064,8 @@ const NAMED_OK = new Map([
   ['zapsmall', new Set(['digits'])],
   ['diff', new Set(['lag'])],
   ['casefold', new Set(['upper'])],
-  ['format', new Set(['nsmall', 'width'])],
+  ['format', new Set(['nsmall', 'width', 'big.mark'])],
+  ['prettyNum', new Set(['big.mark'])],
   /* `formatC` 改写成 `sprintf`（见 `formatCOf`）—— 那四格都只认字面量。 */
   ['formatC', new Set(['format', 'digits', 'width', 'flag'])],
   ['trimws', new Set(['which'])],
@@ -1191,6 +1193,8 @@ const BUILTINS = new Set([
   'as.integer', 'as.numeric', 'as.double', 'as.character', 'as.logical', 'abs', 'seq_len', 'is.na', 'is.nan',
   /* `vector(mode, n)` 就地改写成 numeric/character/logical 那几格（见 `callOf`）。 */
   'vector',
+  /* `prettyNum(x, big.mark=)` = `format` 之后插标记（见 `r_bigmark`）。 */
+  'prettyNum',
   'sum', 'mean', 'max', 'min', 'rev', 'seq_along', 'which', 'any', 'all',
   'print', 'invisible', 'xor', 'isTRUE', 'isFALSE', 'ifelse', 'identical', 'strtoi',
   /* base 里"向量进向量出"那一族 + 两格统计量。`seq` 与 `rep` 是造向量的。 */
@@ -2017,7 +2021,7 @@ function applyTy(fn, x, types) {
     case 'casefold': case 'strrep':
       return args.length > 0 && isStrVec(typeOfExpr(args[0], types)) ? RSTRV : STR;
     /* `format()` 这一档只接标量 —— 回一格串（向量那一侧见 `callOf` 里那段账）。 */
-    case 'format': return STR;
+    case 'format': case 'prettyNum': return STR;
     /* `formatC` 改写成 `sprintf`（见 `formatCOf`），所以形状跟 `sprintf` 同一条：
        实参是向量 → 一整条字符向量，一格数/串 → 一格串。 */
     case 'formatC': {
@@ -6130,6 +6134,28 @@ function callOf(x, types, extra, want, stmtPos) {
         return { kind: 'call', fn: { kind: 'name', name: useFn('r_lower') }, args: [ev(0)] };
       }
       case 'formatC': return formatCOf(x, types);
+      case 'prettyNum': {
+        /**
+         * `prettyNum(x, big.mark = m)` —— R 自己的次序是"**先 `format`，再插标记**"，
+         * 所以这儿就这么办：`format(x)` 出那一串，再交给 `r_bigmark`（插在整数那一段，
+         * 从右往左每三位）。`big.mark` 只认串字面量；别的那几个开关（`small.mark` /
+         * `decimal.mark` / `preserve.width`）与向量那一档都没接。
+         */
+        if (n !== 1) throw new Error(`r->IR: prettyNum() 这一档只接一格数（给了 ${n}）`);
+        const mk = namedArg(x, 'big.mark');
+        if (mk === undefined || tag(mk) !== 'str') {
+          throw new Error('r->IR: prettyNum() 这一档只接 `big.mark = "串字面量"` 那一种');
+        }
+        const t0 = all[0] === null ? REAL : typeOfExpr(all[0], types);
+        if (isVecTy(t0) || isStrVec(t0)) {
+          throw new Error('r->IR: prettyNum() 收的是一条向量 —— R 会逐元素办，这一档只接一格数');
+        }
+        return {
+          kind: 'call',
+          fn: { kind: 'name', name: useFn('r_bigmark') },
+          args: [exprOf(cstCall('format', [all[0]]), types), { kind: 'string', value: String(leaf(kids(mk)[0])) }],
+        };
+      }
       case 'format': {
         /**
          * `format(x, nsmall =, width =)` —— **只接标量**。
@@ -7925,6 +7951,51 @@ function strFnDecl(name) {
           ],
         },
         ret(nm('o')),
+      ],
+    };
+  }
+  if (name === 'r_bigmark') {
+    /**
+     * `prettyNum(x, big.mark = m)` / `format(x, big.mark = m)` 的后半格：**往已经排好的
+     * 那串数字里插分隔符**。R 自己也是这个次序（`prettyNum` 先 `format`，再 `.format.zeros`
+     * 那一路插标记），所以这儿只管插。
+     *
+     * 插在哪儿：**整数那一段**（跳过开头的 `+` / `-`，走到第一个不是数字的字符为止 ——
+     * 于是 `"1234.5"` 的小数点右边、`"1e+10"` 的 `e` 右边都不动）。从右往左每三位一个：
+     * 量出来 `prettyNum(1234567, big.mark = ",")` 是 `1,234,567`、
+     * `prettyNum(1234.5, …)` 是 `1,234.5`、`prettyNum(12, …)` 是 `12`（不到四位不插）。
+     */
+    const ch = (e) => call1('ssub', s, e, I(1));
+    const dig = (e) => b('>=', call1('sfind', S('0123456789'), e), I(0));
+    return {
+      kind: 'fn',
+      name,
+      params: P2,
+      ret: STR,
+      body: [
+        letI('n', call1('slen', s)),
+        letI('a', I(0)),
+        iff(b('||', b('==', ch(I(0)), S('-')), b('==', ch(I(0)), S('+'))), [set('a', I(1))]),
+        letI('e', nm('a')),
+        {
+          kind: 'while',
+          cond: b('&&', b('<', nm('e'), nm('n')), dig(ch(nm('e')))),
+          body: [set('e', b('+', nm('e'), I(1)))],
+        },
+        letI('d', b('-', nm('e'), nm('a'))),
+        { kind: 'let', name: 'o', type: STR, init: call1('ssub', s, I(0), nm('a')) },
+        {
+          kind: 'for',
+          init: letI('k', I(0)),
+          cond: b('<', nm('k'), nm('d')),
+          post: set('k', b('+', nm('k'), I(1))),
+          body: [
+            iff(b('&&', b('>', nm('k'), I(0)), b('==', b('%', b('-', nm('d'), nm('k')), I(3)), I(0))),
+              [set('o', b('+', nm('o'), t))]),
+            set('o', b('+', nm('o'), ch(b('+', nm('a'), nm('k'))))),
+          ],
+        },
+        ret(b('+', nm('o'), call1('ssub', s, nm('e'), b('-', nm('n'), nm('e'))))),
       ],
     };
   }
@@ -13126,7 +13197,7 @@ function vecFnDecl(name) {
   }
   if (name === 'r_substr' || name === 'r_starts' || name === 'r_ends'
       || name === 'r_padl' || name === 'r_padr' || name === 'r_pad0' || name === 'r_lower'
-      || name === 'r_trim' || name === 'r_chartr' || name === 'r_format1'
+      || name === 'r_trim' || name === 'r_chartr' || name === 'r_format1' || name === 'r_bigmark'
       || name === 'r_strtoi') {
     return strFnDecl(name);
   }

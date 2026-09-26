@@ -197,3 +197,10 @@ cat("[", formatC(42L, width = fw, flag = "0"), "]", "\n", sep = "")
 cat("[", formatC(3.14159, width = fw, digits = 2, format = "f"), "]", "\n", sep = "")
 fnm <- c("a", "bb", "ccc")
 for (fi in seq_along(fnm)) cat("[", formatC(fnm[fi], width = 5), "]", "\n", sep = "")
+
+## prettyNum(x, big.mark=)：先 format、再往整数那一段每三位插一个标记
+cat(prettyNum(1234567, big.mark = ","), prettyNum(1234.5, big.mark = ","), "\n")
+cat(prettyNum(-9876543, big.mark = ","), prettyNum(12, big.mark = ","), prettyNum(123, big.mark = ","), "\n")
+cat(prettyNum(1000, big.mark = ","), prettyNum(999, big.mark = ","), prettyNum(0, big.mark = ","), "\n")
+cat(prettyNum(1234567, big.mark = " "), prettyNum(1234567, big.mark = "_"), "\n")
+pnn <- 45678; cat(prettyNum(pnn, big.mark = ","), nchar(prettyNum(pnn, big.mark = ",")), "\n")

@@ -1275,6 +1275,14 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
     **逻辑向量那一档当场报**：`as.character(TRUE)` 是 `"TRUE"`（4 个字符，不是 `"1"`），
     而带缺失的那一格又要 `NA_character_`，两条合起来答不准。判据 `ext/r/examples/str.R`。
 
+    **`prettyNum(x, big.mark = m)` 2026-09-26 接了**：R 自己的次序是"**先 `format`、再插
+    标记**"，所以这一档照办 —— `format(x)` 出那一串，再交给 `r_bigmark` 往**整数那一段**
+    从右往左每三位插一个（跳开头的 `+` / `-`，走到第一个不是数字的字符为止，于是
+    `"1234.5"` 的小数点右边、`"1e+10"` 的 `e` 右边都不动）。量出来的几格：`1234567` →
+    `1,234,567`、`1234.5` → `1,234.5`、`12` → `12`（不到四位不插）、`-9876543` →
+    `-9,876,543`。`big.mark` 只认串字面量；`small.mark` / `decimal.mark` / `preserve.width`
+    与向量那一档都没接。判据 `ext/r/examples/numfmt.R` 末尾那五行。
+
     **`typeof` / `class` / `vector(mode, length)` 2026-09-26 加的三格。** 前两格也是编译期
     常量，两张名字表不一样（量出来的）：`1` 是 `double` / `numeric`、`1L` 与 `1:3` 是
     `integer` / `integer`、`list(…)` 两问都是 `list`、逻辑与串各按自己那格。`class` 上
