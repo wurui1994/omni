@@ -329,3 +329,15 @@ print(wnv)
 wnv <- c(a = 1, b = 2)
 wnv["c"] <- 3
 cat(sum(wnv), wnv[["c"]], "\n")
+
+## append 的名字：插进去那几格自己带名字也算（字面量那一档当场报，见 adapter 那段账）
+apv <- c(a = 3, b = 1)
+apw <- c(z = 9)
+print(append(apv, apw))
+print(append(apv, apw, after = 1))
+cat(names(append(apv, apw)), "\n")
+apu <- c(1, 2)
+print(append(apu, apw))
+apq <- c(y = 8, z = 9)
+print(append(apv, apq))
+print(append(apv, 9))

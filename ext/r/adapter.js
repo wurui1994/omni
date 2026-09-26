@@ -209,6 +209,7 @@ const FN_DEPS = new Map([
   /* `append` 的**名字那一侧**（插进去那几格的名字是空串）—— 与值那一侧一对一。 */
   ['r_app_str', []],
   ['r_app_str_e', ['r_app_str']],
+  ['r_app_sv', []],
   /* `replace(x, k, v)` 就是 `x[k] <- v`，所以越界那一条也接长（借 `r_ext`）。 */
   ['r_replace', ['r_is_na', 'r_ext', 'r_na']],
   ['r_prod', []],
@@ -1550,14 +1551,43 @@ function namesExprOf(x, types) {
   if (fn === 'append') {
     const as = posArgs(x);
     if (as.length < 2) return null;
-    const ns = namesExprOf(as[0], types);
-    if (ns === null) return null;
+    const t0 = typeOfExpr(as[0], types);
     const t1 = typeOfExpr(as[1], types);
+    /**
+     * **插进去那几格自己带名字也算**（`append(c(a=3,b=1), c(z=9))` 在 R 里名字是
+     * `"a" "b" "z"`、`append(c(1,2), c(z=9))` 是 `"" "" "z"`）—— 2026-09-26 之前这儿
+     * 一律插空串，于是那一列印成空的、或者整行名字都不印：**静默少名字**。
+     *
+     * 只在"它是一格名字"时取（`append(v, w)`）：`w` 的名字落在影子变量 `w__nm` 上，
+     * 取它不必把 `w` 再算一遍。写成**字面量**（`append(v, c(z = 9))`）时**当场报** ——
+     * 名字那一侧与值那一侧是各自发代码的，同一棵 `c(z = 9)` 发两遍，两遍里的临时量同名，
+     * 公共层报 "'r_nm0' 在这一层已经声明过了"（量出来的）。报了就退到 libR，答案是对的。
+     */
+    const vNamed = isNamedTy(t1) || isNamedStr(t1);
+    if (vNamed && tag(as[1]) !== 'sym') {
+      throw new Error('r->IR: append() 里插进去那几格带名字、而且是就地写的字面量'
+        + '（`append(v, c(z = 9))`）—— 名字那一侧与值那一侧各发一遍代码，'
+        + '同一棵字面量发两遍会撞名字。先存进一格变量再 append 就接得住');
+    }
+    /* x 那一侧没有名字：两边都没名字才算"没有名字这一条"。插进去那几格有名字时，
+       x 那一侧现摆一条"全是空串"的名字 —— 不能拿 `namesExprOf(x)` 的**零长**那一条顶上，
+       那会让名字比值短一截，印法那道门会报"名字跟丢了一截"。 */
+    let ns = isNamedTy(t0) || isNamedStr(t0) ? namesExprOf(as[0], types) : null;
+    if (ns === null) {
+      if (!vNamed) return null;
+      const len0 = isVecTy(t0) ? vecLen(exprOf(as[0], types)) : { kind: 'int', value: 1 };
+      ns = call1('anew', tyArg(RSTRV), len0);
+    }
     const m = isVecTy(t1) ? vecLen(exprOf(as[1], types)) : { kind: 'int', value: 1 };
     const afterArg = namedArg(x, 'after');
     let at = null;
     if (afterArg !== undefined) at = asIntE(exprOf(afterArg, types), typeOfExpr(afterArg, types));
     else if (as.length >= 3) at = asIntE(exprOf(as[2], types), typeOfExpr(as[2], types));
+    const vns = vNamed ? namesExprOf(as[1], types) : null;
+    if (vns !== null) {
+      const at2 = at === null ? svLen(ns) : at;
+      return { kind: 'call', fn: { kind: 'name', name: useFn('r_app_sv') }, args: [ns, at2, vns] };
+    }
     if (at === null) return { kind: 'call', fn: { kind: 'name', name: useFn('r_app_str_e') }, args: [ns, m] };
     return { kind: 'call', fn: { kind: 'name', name: useFn('r_app_str') }, args: [ns, at, m] };
   }
@@ -2165,11 +2195,20 @@ function applyTy(fn, x, types) {
        *   append(c(TRUE), c(NA))       TRUE NA     （逻辑 —— `NA` 本来就是逻辑）
        *   replace(c(TRUE,TRUE), 1, 2)  2 1         （数值）
        */
-      if (!isLglTy(t)) return t;
       const vi = fn === 'append' ? 1 : 2;
       const vt = args.length > vi ? typeOfExpr(args[vi], types) : REAL;
+      /**
+       * **名字：`append` 上"插进去那几格自己带名字"也算**（2026-09-26 扫出来的）——
+       * `append(c(1, 2), c(z = 9))` 在 R 里印的是带名字那两行（`"" "" "z"`），从前这儿
+       * 只看第一格，于是印成 `[1] 1 2 9`：**静默少一行名字**。`replace` 不一样，
+       * 量出来它**丢掉** values 的名字（`replace(c(1,2,3), 2, c(z=9))` 没有名字那一行），
+       * 所以这一条只给 `append`。
+       */
+      const named = isNamedTy(t) || (fn === 'append' && isNamedTy(vt));
+      if (!isLglTy(t)) return named && !isNamedTy(t) ? RNVEC : t;
       const stillLgl = isLglTy(vt) || vt.kind === 'bool' || isLgl1(vt);
-      return stillLgl ? t : (isNamedTy(t) ? RNVEC : RVEC);
+      if (stillLgl) return named && !isNamedTy(t) ? RNLGL : t;
+      return named ? RNVEC : RVEC;
     }
     case 'range': case 'seq': return RVEC;
     /* 集合与位置那一族：位置回一格 int，别的回向量（`duplicated` 回逻辑向量）。
@@ -8255,7 +8294,7 @@ const STRV_FNS = new Set([
   'r_rep_str_times', 'r_str2num_v', 'r_as_str_v', 'r_as_str_lv', 'r_as_lgl_sv', 'r_eq_sv', 'r_ne_sv', 'r_eq_svv', 'r_ne_svv',
   'r_sv1', 'r_sort_str', 'r_order_str', 'r_any_dup_str', 'r_uniq_str', 'r_dup_str', 'r_match_str', 'r_in_str', 'r_in1_str',
   'r_union_str', 'r_isect_str', 'r_sdiff_str', 'r_head_str', 'r_tail_str',
-  'r_app_str', 'r_app_str_e',
+  'r_app_str', 'r_app_str_e', 'r_app_sv',
 ]);
 
 /** 这一批由 `setFnDecl` 发（集合与位置那一族，见 `FN_DEPS` 上那段账）。 */
@@ -9288,6 +9327,51 @@ function strvFnDecl(name) {
           cond: b('<', nm('j'), mm),
           post: set('j', b('+', nm('j'), I(1))),
           body: [{ kind: 'builtin-stmt', name: 'apush', args: [nm('o'), S('')] }],
+        },
+        {
+          kind: 'for',
+          init: letI('i2', nm('k')),
+          cond: b('<', nm('i2'), nm('n')),
+          post: set('i2', b('+', nm('i2'), I(1))),
+          body: [{ kind: 'builtin-stmt', name: 'apush', args: [nm('o'), svGet(v, nm('i2'))] }],
+        },
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  if (name === 'r_app_sv') {
+    /**
+     * `append(v, vals, after = k)` 的名字那一侧，**插进去那几格自己带名字**那一档
+     * （`append(c(a=3,b=1), c(z=9))` 在 R 里的名字是 `"a" "b" "z"` —— 量出来的，
+     * 2026-09-26 之前这儿一律插空串，于是那一列印成空的：**静默少一个名字**）。
+     * 与 `r_app_str` 只差"插什么"：那一格插 `m` 个空串，这一格插 `w` 里的那几个名字。
+     */
+    const at = nm('at');
+    const w = nm('w');
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RSTRV }, { name: 'at', type: INT }, { name: 'w', type: RSTRV }],
+      ret: RSTRV,
+      body: [
+        letI('n', svLen(v)),
+        letI('k', at),
+        iff(b('<', nm('k'), I(0)), [set('k', I(0))]),
+        iff(b('>', nm('k'), nm('n')), [set('k', nm('n'))]),
+        { kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), I(0)) },
+        {
+          kind: 'for',
+          init: letI('i', I(0)),
+          cond: b('<', i, nm('k')),
+          post: set('i', b('+', i, I(1))),
+          body: [{ kind: 'builtin-stmt', name: 'apush', args: [nm('o'), svGet(v, i)] }],
+        },
+        {
+          kind: 'for',
+          init: letI('j', I(0)),
+          cond: b('<', nm('j'), svLen(w)),
+          post: set('j', b('+', nm('j'), I(1))),
+          body: [{ kind: 'builtin-stmt', name: 'apush', args: [nm('o'), svGet(w, nm('j'))] }],
         },
         {
           kind: 'for',
