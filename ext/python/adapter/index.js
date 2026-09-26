@@ -853,9 +853,11 @@ function scanOne(s, C, rets) {
       const iterTok = kids(part(s, 'in') ?? { kind: 'list', items: [] })[0];
       const pair = pairIter(kids(s)[0], iterTok, C);
       if (pair !== null) {
-        /* `for i, v in enumerate(xs)` / `for a, b in zip(xs, ys)` —— 两格目标各自绑。 */
-        bindTarget(kids(kids(s)[0])[0], pair.t0, C);
-        bindTarget(kids(kids(s)[0])[1], pair.t1, C);
+        /* `for i, v in enumerate(xs)` / `for a, b in zip(xs, ys)` —— 两格目标各自绑。
+           那一格是**一层元组**时逐格绑（`for i, (k, v) in …`）：`bindTarget` 的元组那一支
+           会把**整格记录**按到每一格名字上（它不知道这是拆包）。 */
+        bindPairTarget(kids(kids(s)[0])[0], pair.t0, C);
+        bindPairTarget(kids(kids(s)[0])[1], pair.t1, C);
       } else {
         const et0 = elemOf(tyOfCst(iterTok, C), iterTok, C);
         /* **N 格目标逐格绑**（`for a, b, c in ts`）—— 照 `bindTarget` 的元组那一支会把
@@ -945,7 +947,11 @@ function scanOne(s, C, rets) {
 function pairIter(target, iterTok, C) {
   if (target === undefined || tag(target) !== 'tuple') return null;
   const ts = kids(target);
-  if (ts.length !== 2 || ts.some((t) => tag(t) !== 'n')) return null;
+  /* 两格目标各自可以是**一个名字**，也可以是**一层元组**（`for i, (k, v) in enumerate(…)`）。
+     再套一层的不收（`for a, ((b, c), d) in …`）—— 那一档还没量过，先不猜。 */
+  const oneOk = (t) => tag(t) === 'n'
+    || (tag(t) === 'tuple' && kids(t).length > 0 && kids(t).every((y) => tag(y) === 'n'));
+  if (ts.length !== 2 || !ts.every(oneOk)) return null;
   /* `for a, b in ts`（ts 装的是一串**两格的元组**）—— 与下面那三种一样落成一趟下标循环，
      体开头把两格字段取出来。`list(d.items())` 那种写法就走这一条。 */
   const et = tyOfCst(iterTok, C);
@@ -987,12 +993,47 @@ function pairIter(target, iterTok, C) {
  * `zip` 走到**短的那一张**为止（python 的规矩）；`enumerate(xs, start)` 的第一格
  * 是 `下标 + start`。两格都只走表与串（字典要先有"走一遍键"那一格）。
  */
+/**
+ * 一格循环目标落成**体开头那几句**：
+ *   * 一个名字 —— 一句赋值；
+ *   * 一层元组 —— 先把那一格钉成临时量（右边可能是 `dget(…)` 那种算一遍不便宜的），
+ *     再逐格取 `_k`。`for i, (k, v) in enumerate(d.items())` 走的就是这一条。
+ */
+function loopTargetStmts(tok, value, t, C) {
+  /* **那一格名字声明成箱子时要装箱** —— 同一个名字在一个函数里当过两趟循环的目标、
+     而两趟的元素类型不一样时，`scanBinds` 那一趟把它合成了 dyn（ADR-0008）。
+     不装箱的话发到 `.sx` 那侧报"'v' 是 dynamic，赋的值是 int"（量出来的）。 */
+  const oneName = (y, v, ty) => {
+    const n = C.ref(String(nameOf(y)));
+    const want = C.lookup(n);
+    if (want !== null && want !== undefined && want.kind === 'dyn' && ty.kind !== 'dyn') {
+      return { kind: 'assign', target: { kind: 'name', name: n }, value: boxOf(v, C) };
+    }
+    C.bind(n, ty);
+    return { kind: 'assign', target: { kind: 'name', name: n }, value: v };
+  };
+  if (tag(tok) === 'n') return [oneName(tok, value, t)];
+  const ts = kids(tok);
+  const tup = tupleOf(C.recOf(t));
+  if (tup === null || ts.length !== tup.length) {
+    throw new Error(`python->IR: \`for\` 里那一格拆包对不上 —— 左边 ${ts.length} 格，`
+      + `右边是 ${tup === null ? t.kind : `${tup.length} 格的元组`}`);
+  }
+  const tmp = C.fresh('unp');
+  C.bind(tmp, t);
+  const out = [{ kind: 'let', name: tmp, type: t, init: value }];
+  ts.forEach((y, k) => {
+    out.push(oneName(y, { kind: 'field', obj: { kind: 'name', name: tmp }, name: `_${k}` }, tup[k]));
+  });
+  return out;
+}
+
 function pairFor(x, pair, once, pre, C) {
   const i = C.fresh('for_i');
   C.bind(i, INT);
   const idx = { kind: 'name', name: i };
-  const n0 = C.ref(String(nameOf(kids(kids(x)[0])[0])));
-  const n1 = C.ref(String(nameOf(kids(kids(x)[0])[1])));
+  const t0Tok = kids(kids(x)[0])[0];
+  const t1Tok = kids(kids(x)[0])[1];
   /** 第 i 格（表按下标、串按一个字符）。 */
   const at = (box) => {
     const t = typeOfIR(box, C);
@@ -1044,8 +1085,10 @@ function pairFor(x, pair, once, pre, C) {
     first = at(a);
     second = at(b);
   }
-  C.bind(n0, pair.t0);
-  C.bind(n1, pair.t1);
+  const head = [
+    ...loopTargetStmts(t0Tok, first, pair.t0, C),
+    ...loopTargetStmts(t1Tok, second, pair.t1, C),
+  ];
   return {
     kind: 'block',
     stmts: [...pre, {
@@ -1053,11 +1096,7 @@ function pairFor(x, pair, once, pre, C) {
       init: { kind: 'let', name: i, type: INT, init: { kind: 'int', value: 0 } },
       cond,
       post: { kind: 'assign', target: idx, value: { kind: 'binop', op: '+', left: idx, right: { kind: 'int', value: 1 } } },
-      body: [
-        { kind: 'assign', target: { kind: 'name', name: n0 }, value: first },
-        { kind: 'assign', target: { kind: 'name', name: n1 }, value: second },
-        ...bodyStmts(part(x, 'body'), C),
-      ],
+      body: [...head, ...bodyStmts(part(x, 'body'), C)],
     }],
   };
 }
@@ -1115,6 +1154,19 @@ function bindEmptyDict(target, vt, C) {
   const kt = tyOfCst(subs[0], C);
   if (kt === null || !['int', 'string'].includes(kt.kind)) return;
   C.bind(C.ref(n), dictOf(vt, kt));
+}
+
+/** 循环里两格目标中的一格：名字直接绑，一层元组按格数逐格绑（与 `loopTargetStmts` 一条）。 */
+function bindPairTarget(tok, t, C) {
+  if (tag(tok) === 'tuple') {
+    const tup = tupleOf(C.recOf(t));
+    const ts = kids(tok);
+    if (tup !== null && ts.length === tup.length) {
+      ts.forEach((y, k) => bindTarget(y, tup[k], C));
+      return;
+    }
+  }
+  bindTarget(tok, t, C);
 }
 
 /** 一格赋值目标登记进作用域（元组目标逐格登记）。 */

@@ -157,3 +157,26 @@ print(rs)
 qs = [(1, "b"), (1, "a"), (0, "z"), (1, "c"), (0, "y"), (2, "a")]
 print(sorted(qs))
 print(min(qs), max(qs))
+
+# ---- for 的目标里套一层元组 ---------------------------------------------------
+# `for i, (k, v) in enumerate(d.items())` 那一族。办法与 `a, b = t` 同一条：**先把那一格
+# 钉成临时量**（右边可能是 `dget(…)` 那种算一遍不便宜的），再逐格取 `_k`。
+# 再套一层的（`for a, ((b, c), d) in …`）还不收 —— 那一档还没量过，不猜。
+dd = {"a": 1, "b": 2}
+for i, (dk, dv) in enumerate(dd.items()):
+    print(i, dk, dv)
+nps = [(1, "x"), (2, "y")]
+for i, (pn, psx) in enumerate(nps):
+    print(i, pn, psx)
+for (zn, zs), zi in zip(nps, [10, 20]):
+    print(zn, zs, zi)
+rows = [((1, 2), "a"), ((3, 4), "b")]
+for (ra, rb), rtag in rows:
+    print(ra, rb, rtag)
+
+# 同一个名字当过两趟循环的目标、两趟元素类型不一样 —— 那一格合成 dyn（ADR-0008），
+# 赋的时候要**装箱**（不装箱发到方言那侧报"'q' 是 dynamic，赋的值是 int"）。
+for i, q in enumerate([1, 2]):
+    print(i, q)
+for i, q in enumerate("ab"):
+    print(i, q)
