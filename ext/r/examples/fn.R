@@ -175,3 +175,14 @@ d4 <- function(x, y = x, z = y) x + y + z
 cat(d4(2), d4(2, 3), d4(2, 3, 4), "\n")
 d5 <- function(a = 1, b = 2) a * 10 + b
 cat(d5(), d5(5), d5(5, 6), d5(b = 9), "\n")
+## 体尾是 invisible(…) 的函数：顶层调一次什么都不印，拿它的值用照旧是那格值
+ivf <- function(x) invisible(x)
+ivf(3)
+ivy <- ivf(4)
+print(ivy)
+ivh <- function(x) return(invisible(x + 1))
+ivh(1)
+print(ivh(1))
+## 被印的那一格自己的副作用在 `[1] ` **前头**（先算值、再写前缀）
+ivg <- function(x) { cat("in\n"); x * 2 }
+print(ivg(3))

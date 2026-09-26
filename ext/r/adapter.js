@@ -905,6 +905,32 @@ const useFn = (name) => { needFn.add(name); return name; };
 const fnParams = new Map();
 const fnRets = new Map();
 /**
+ * **这些用户函数的值在 R 里不可见** —— 体尾是 `invisible(…)`（或 `return(invisible(…))`）。
+ *
+ * R 的"顶层自动印"看的是那格值**可见不可见**，而可见性是跟着最后求的那一格走的：
+ * `f <- function(x) invisible(x); f(3)` 一行输出都没有。拿它的值用（`y <- f(3)`）照旧
+ * 是那格值 —— 这张表只管"要不要自动印"。
+ */
+const INVIS_FNS = new Set();
+/** 体尾那一格是不是 `invisible(…)`（`{}` 看最后一句、`return(invisible(x))` 也算）。 */
+function tailInvisible(node) {
+  if (node === null || node === undefined || !isList(node)) return false;
+  const t = tag(node);
+  if (t === 'paren') return tailInvisible(kids(node)[0]);
+  if (t === 'block') {
+    const ks = kids(node);
+    return ks.length > 0 && tailInvisible(ks[ks.length - 1]);
+  }
+  if (t !== 'call') return false;
+  const f = tag(kids(node)[0]) === 'sym' ? nameOf(kids(node)[0]) : null;
+  if (f === 'invisible') return true;
+  if (f === 'return') {
+    const as = posArgs(node);
+    return as.length === 1 && tailInvisible(as[0]);
+  }
+  return false;
+}
+/**
  * **形参默认值**（`function(x, n = 10)`）：名字 → 一排"默认值的树 或 null"。
  *
  * R 里那个默认值是一格 **promise**：在函数体里第一次用到时才求值、而且是在**函数自己的
@@ -2741,6 +2767,10 @@ function inferFns(fns, rest) {
       const cur = fnParams.get(f.name);
       ps.forEach((p, k) => { cur[k] = widenTy(cur[k], local.get(p)); });
       fnRets.set(f.name, returnType(kids(f.node)[1], local) ?? { kind: 'void' });
+      /* **体尾是 `invisible(…)` 的函数，它的值在 R 里不可见** —— 顶层调一次什么都不印
+         （量出来 `f <- function(x) invisible(x); f(3)` 一行输出都没有，而这一层从前照
+         `fnRets` 那条印了 `[1] 3`：静默**多**印一行，2026-09-27 扫出来的）。 */
+      if (tailInvisible(kids(f.node)[1])) INVIS_FNS.add(f.name);
     }
   }
 }
@@ -7204,7 +7234,21 @@ function printValStmt(node, types) {
   const s = t.kind === 'string'
     ? b('+', b('+', { kind: 'string', value: '"' }, exprOf(node, types)), { kind: 'string', value: '"' })
     : asStr(node, types);
-  return { kind: 'block', stmts: [wr({ kind: 'string', value: '[1] ' }), wr(s), wr({ kind: 'string', value: '\n' })] };
+  /**
+   * **先把那格值算出来，再写 `[1] `**。反过来写的话被印的那一格自己的副作用会**插到
+   * 前缀后头**：量出来 `g <- function(x) { cat("in\n"); x * 2 }; print(g(3))` 从前印的是
+   * `[1] in` / `6`，而 R 印 `in` / `[1] 6`（2026-09-27 扫出来的静默答错）。
+   */
+  const pvn = fresh('pv');
+  return {
+    kind: 'block',
+    stmts: [
+      { kind: 'let', name: pvn, type: STR, init: s },
+      wr({ kind: 'string', value: '[1] ' }),
+      wr({ kind: 'name', name: pvn }),
+      wr({ kind: 'string', value: '\n' }),
+    ],
+  };
 }
 
 /** `print(…)` 这一格调用 → 语句。 */
@@ -7235,6 +7279,8 @@ function isAutoPrint(k) {
     const f = tag(kids(k)[0]) === 'sym' ? nameOf(kids(k)[0]) : null;
     if (f === null || NO_AUTOPRINT.has(f)) return false;
     if (BUILTINS.has(f)) return true;
+    /* 体尾是 `invisible(…)` 的用户函数：R 那儿这一格**不可见**，所以不印（见 `INVIS_FNS`）。 */
+    if (INVIS_FNS.has(mangle(f))) return false;
     const rt = fnRets.get(mangle(f));
     return rt !== undefined && rt.kind !== 'void';
   }
@@ -13962,6 +14008,7 @@ export function rToIR(tree) {
   needFn.clear();
   fnParams.clear();
   fnRets.clear();
+  INVIS_FNS.clear();
   fnDefs.clear();
   fnFormals.clear();
   globalTys.clear();
