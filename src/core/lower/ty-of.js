@@ -16,6 +16,15 @@ export const INT = { kind: 'int' };
 export const REAL = { kind: 'real' };
 export const STR = { kind: 'string' };
 export const BOOL = { kind: 'bool' };
+/**
+ * **真动态那一格**：装什么运行期才知道。
+ *
+ * 这不是"推导失败的兜底猜测"，是一档**正经类型** —— 方言那一侧有 `(dyn E)` / `(dtag E)` /
+ * `(as* E)` 一整族（`tests/sexpr/cases/48-dyn.sx` 四条腿已通），C 侧是 `omni_dyn` 那个
+ * 带标签的 24 字节胖值。所以借来的那几门里"一格里装什么写不出来"的地方**退到这一格**，
+ * 不要报错要标注（ADR-0008「异质 ⇒ 统一降为 dynamic」；JS 整门跑的就是这条道）。
+ */
+export const DYN = { kind: 'dyn' };
 export const arrOf = (elem) => ({ kind: 'arr', elem });
 /** 一格字典。**键的类型可以给**（go 的 `map[int]T` 要它；不给就是串键 —— awk / lua 那一族）。 */
 export const dictOf = (value, key = STR) => ({ kind: 'map', key, value });
@@ -131,6 +140,16 @@ function builtinType(e, ctx) {
     case 'anew': return e.args[0].type ?? arrOf(INT);
     case 'dnew': return e.args[0].type ?? dictOf(INT);
     case 'cnew': case 'new': return e.args[0].type ?? INT;
+    /* 真动态那一族：装箱交 dyn、问标签交串、拆箱各交自己那一档
+       （`asfn` / `asdict` 交的是**调用方给的那格类型** —— 箱子里没记签名）。 */
+    case 'dyn': return DYN;
+    case 'dnull': return DYN;
+    case 'dtag': return STR;
+    case 'asint': return INT;
+    case 'asreal': return REAL;
+    case 'asbool': return BOOL;
+    case 'asstr': return STR;
+    case 'asfn': case 'asdict': return e.args[0].type ?? DYN;
     default: return INT;
   }
 }

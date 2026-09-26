@@ -193,6 +193,12 @@ export function sizeOf(t) {
      "一格句柄 id + 字节长度"（见 interp/builtin.js 的 ptrLoad / ptrStore）——
      **两套实现的尺寸与偏移必须一样**，这就是为什么这一层定 16 而不是 8。 */
   if (t.k === 'string') return 16;
+  /* 真动态那一格落进内存：**24 字节**（量出来的，不是算的 —— `_Alignof` 是 8）。
+     C 那边 `omni_dyn` 是 `{int tag; union{bool;int64_t;double;omni_str;omni_s16;void*};}`
+     （omni.h:150-153），而 union 里最大的是 `omni_str`（16）—— 4 + 4 补齐 + 16 = 24。
+     它是**值语义的聚合**，与 vec 同一桶（见下面 `arrIsBlob`）：`(arr dyn)` 于是走按字节
+     那一份，步长就是这 24。写 16 的症状是相邻两格互相踩（标签读出来是上一格的载荷）。 */
+  if (t.k === 'dynamic') return 24;
   /* 函数值落进内存（ADR-0028）：**8 字节**，走的是 ADR-0024 那一格（"引用语义的句柄，
      一个字"），不是 string 那一格。两条原生腿上它本来就是一个字的指针 ——
      C 是 `typedef struct omni_closure_s *omni_fn`（omni.h:135-137），与 arr 那条
@@ -383,10 +389,12 @@ export function cTypeName(t) {
  *  类与**数组**（引用语义，格子里躺一个句柄 —— 步长就是一个指针）。三者共用 blob 是因为
  *  运行时那四份单态是按**元素的 C 类型**生成的，而这几种的 C 类型是逐形状的。
  *  数组元素是多维数组那一刀加的（asy 的 `real[][]`：真 base 里到处是它 —— 量过，
- *  220 个 examples 里 163 个第一个撞的就是它）。 */
+ *  220 个 examples 里 163 个第一个撞的就是它）。
+ *  `dynamic` 是**真动态那一刀**加的（`(arr dyn)`：python / lua 那一族里的异质表）——
+ *  它与 vec 同一条理由（值语义的聚合，24 字节躺在格子里），不是句柄。 */
 export function arrIsBlob(elem) {
   return elem.k === 'vec' || elem.k === 'class' || elem.k === 'arr' || elem.k === 'fn'
-      || elem.k === 'struct' || elem.k === 'enum';
+      || elem.k === 'struct' || elem.k === 'enum' || elem.k === 'dynamic';
 }
 
 /**

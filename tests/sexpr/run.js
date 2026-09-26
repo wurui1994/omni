@@ -127,6 +127,15 @@ const CANT = {
       + '`fieldElem` 里四条 if 之外一律报「llvm 后端目前不支持数组字段的元素类型 struct」。'
       + '**向量元素也一样挡在那儿**，所以这是后端那一侧的既有缺口，不是这一格新欠的',
   },
+  '55-dyn-arr': {
+    legs: ['run-llvm'],
+    why: '同 48-dyn：LLVM 后端不支持 dyn，主语言也一样 —— 这一格是 `(arr dyn)`，'
+      + '除了 dyn 本身还叠上 50-arrstruct 那一条（聚合元素走按字节的 blob，那条路它没接）',
+  },
+  '56-dnull': {
+    legs: ['run-llvm'],
+    why: '同 48-dyn：LLVM 后端连一格 dyn 的槽位都落不下去，`(dnull)` 也是一格 dyn',
+  },
   'dyn-asfn-wrong-tag': {
     legs: ['run-llvm'],
     why: '同 48-dyn：LLVM 后端连一格 dyn 的槽位都落不下去，报的不是这份用例要钉的那句',

@@ -1,0 +1,55 @@
+;; tests/sexpr/cases/56-dnull.sx —— **`(dnull)`：标签是 `"null"` 的那一格 dyn**
+;;
+;; 底下那台机器一格没加：`DynNull` 这个 OIR 节点四条腿本来就都认
+;; （backend-c 的 `omni_dyn_null()`、backend-js 与 interp 的 `null`、MIR 的常量），
+;; 它只是**没有方言这一面的写法** —— `zeroValue(dynamic)` 造得出来，源码里写不出来。
+;; 谁要它：python 的 `None`、lua 的 `nil`，以及"可能没有值"那一族
+;; （一支 return 一格数、一支 return 空 —— 合出来就是 dyn，不必另造 Optional）。
+;;
+;; 为什么不是 `(dyn (null …))`：`(null TYPE)` 要一格**引用类型**（类 / 函数 / 数组），
+;; 而"没有值"不属于哪个类型。
+;;
+;; 四条判据：造得出来、标签问得出来、过得了函数边界、能与别的档换着装。
+
+(module
+  ;; 可能没有值：找到了交那一格，找不到交空
+  (fn pick ((xs (arr int)) (k int)) dyn
+    (let i int (int 0))
+    (while (bin "<" (var i) (alen (var xs)))
+      (do
+        (if (bin "==" (aget (var xs) (var i)) (var k))
+            (ret (dyn (var k))))
+        (set i (bin "+" (var i) (int 1)))))
+    (ret (dnull)))
+
+  (main
+    (print (dtag (dnull)))
+    (let x dyn (dnull))
+    (print (dtag (var x)))
+    ;; 同一格里换一档装（空 -> 数 -> 空）
+    (set x (dyn (int 7)))
+    (print (dtag (var x)) )
+    (print (asint (var x)))
+    (set x (dnull))
+    (print (dtag (var x)))
+
+    (let xs (arr int) (anew (arr int) (int 0)))
+    (apush (var xs) (int 1))
+    (apush (var xs) (int 2))
+    (apush (var xs) (int 3))
+    (print (dtag (call pick (var xs) (int 2))))
+    (print (asint (call pick (var xs) (int 2))))
+    (print (dtag (call pick (var xs) (int 9))))
+
+    ;; 异质的表里也躺得下
+    (let ys (arr dyn) (anew (arr dyn) (int 0)))
+    (apush (var ys) (dyn (int 1)))
+    (apush (var ys) (dnull))
+    (apush (var ys) (dyn (str "a")))
+    (let j int (int 0))
+    (while (bin "<" (var j) (alen (var ys)))
+      (do
+        (print (dtag (aget (var ys) (var j))))
+        (set j (bin "+" (var j) (int 1)))))
+  )
+)

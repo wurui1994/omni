@@ -60,6 +60,10 @@ export function zeroOf(type, hooks = {}) {
     case 'real': return sx.real(0);
     case 'string': return sx.str('');
     case 'map': return sx.dnew(typeToSx(t, hooks));
+    /* 真动态那一格的零值：`(dnull)` —— 标签是 `"null"` 的那一格。
+       这正是"声明了还没赋"该有的意思（python 的 `None`、lua 的 `nil`），
+       而且它是**可观测的**：`(dtag …)` 问得出来，不会被误当成一格 0。 */
+    case 'dyn': return sx.dnull();
     /* 具名的记录：**引用语义造 `cnew`、值语义造 `new`**。
        `if` 当表达式用而两支交的是一格记录时要它（`values.lisp` 量出来的）。 */
     case 'named': return t.ref === true ? sx.cnew(t.name) : sx.newVal(t.name);

@@ -115,6 +115,24 @@ export const SX_ARITY = {
   new: 1, cnew: 1, fld: 2, fldset: 3,
   /* 类型 */
   ptr: 1, tptr: 1, blk: 2, arr: 1, fnty: 2, dict: 2,
+  /* **真动态那一族**（方言那一侧早就有，见 `src/core/sexpr/lower.js` 的 dyn 那一段与
+     `tests/sexpr/cases/48-dyn.sx`）—— 这一层从前没写下它，于是借来的那几门
+     （python / lua / awk / Scheme / CL）一格都用不上，只能在 adapter 里"推不出来就报错"。
+     那是个错结论：**推得出来最好，推不出来退到 dyn**（ADR-0008「异质 ⇒ 统一降为
+     dynamic」；JS 那一门整门都跑在这条道上，而 js→C 是自举主干）。
+
+     `(dyn E)` 装箱、`(dtag E)` 问标签（回串）、`(asint/asreal/asbool/asstr E)` 带检查拆箱。
+     `asfn` / `asdict` **多收一格类型**（箱子里只记着"这是函数/字典"，签名与键值类型
+     得由拆的那一侧给）—— 与 `anew` / `dnew` 同一条先例，类型走 `{ kind: 'type' }`。
+
+     装得进的只有 int / real / bool / string / 函数 / `(dict string dyn)` 六档
+     （`DYN_BOXABLE`）；**没有"动态取属性 / 动态下标 / 动态调用"这三格 op** ——
+     要那些得先拆箱（动态调用 = `(callfn (asfn …) …)`）。算术也一样：dyn 上没有 `+`，
+     要按 `(dtag …)` 分派（这是各门 adapter 自己的账，不是这一层的）。 */
+  dyn: 1, dtag: 1, asint: 1, asreal: 1, asbool: 1, asstr: 1, asfn: 2, asdict: 2,
+  /* `(dnull)` —— 标签是 `"null"` 的那一格 dyn（python 的 `None`、lua 的 `nil`）。
+     **不收参数**："没有值"不属于哪个类型，所以不走 `(null TYPE)` 那一格。 */
+  dnull: 0,
 };
 
 /** 一格算子发出来的文字。元数不对、操作数不是一段代码，**当场炸** —— 那是这一层的全部价值。 */
@@ -244,3 +262,19 @@ export const ptr = (t) => op('ptr', t);
 export const blk = (t, n) => op('blk', t, String(n));
 export const dict = (k, v) => op('dict', k, v);
 export const arr = (t) => op('arr', t);
+
+/* ─── 真动态那一族 ──────────────────────────────────────────────────────── */
+/** 装箱。**再装一次是恒等**（方言那一侧自己认），所以这一层不必先问类型。 */
+export const dyn = (v) => op('dyn', v);
+/** 问标签：回一格串（`"int"` / `"real"` / `"bool"` / `"string"` / `"function"` / …）。 */
+export const dtag = (v) => op('dtag', v);
+export const asint = (v) => op('asint', v);
+export const asreal = (v) => op('asreal', v);
+export const asbool = (v) => op('asbool', v);
+export const asstr = (v) => op('asstr', v);
+/** 拆回函数值：**要给签名**（箱子里只记着"这是函数"）。 */
+export const asfn = (ty, v) => op('asfn', ty, v);
+/** 拆回字典：**要给键值类型**（同上）。 */
+export const asdict = (ty, v) => op('asdict', ty, v);
+/** 标签是 `"null"` 的那一格 dyn（python 的 `None`）。 */
+export const dnull = () => op('dnull');

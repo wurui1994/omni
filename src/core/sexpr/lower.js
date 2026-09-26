@@ -41,6 +41,7 @@
  *         | (new NAME) | (fld E 字段) | (cnew NAME)
  *         | (fnref NAME) | (mkclo NAME E...) | (cap NAME) | (callfn E E...)
  *         | (dyn E) | (dtag E) | (asint E) | (asreal E) | (asbool E) | (asstr E)
+ *         | (dnull)
  *         | (asfn (fnty (TYPE...) TYPE) E)
  *         | (asdict (dict TYPE TYPE) E)
  *
@@ -2933,6 +2934,15 @@ class CoreLowerer {
           + `这里是 ${coreTypeText(t)}`);
       }
       return { kind: t.k === 'fn' ? 'NullFn' : 'NullRef', type: t };
+    }
+    /* `(dnull)` —— **标签是 `"null"` 的那一格 dyn**（python 的 `None`、lua 的 `nil`）。
+       底下那台机器一格没加：`DynNull` 这个 OIR 节点四条腿本来就都认
+       （backend-c 的 `omni_dyn_null()`、backend-js 与 interp 的 `null`、MIR 的常量），
+       它只是**没有方言这一面的写法** —— `zeroValue(dynamic)` 造得出来，源码里写不出来。
+       为什么不是 `(dyn (null …))`：`(null TYPE)` 要一格引用类型，而"没有值"不属于哪个类型。 */
+    if (h === 'dnull') {
+      if (n.items.length !== 1) return this.err(n, '(dnull) 不收参数');
+      return { kind: 'DynNull', type: DYNAMIC };
     }
     return this.operator(n, h);
   }

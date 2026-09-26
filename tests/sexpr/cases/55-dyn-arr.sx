@@ -1,0 +1,43 @@
+;; tests/sexpr/cases/55-dyn-arr.sx —— **`(arr dyn)`：异质的表**
+;;
+;; `48-dyn.sx` 钉的是"一格箱子"与"异质字典"，这一份钉的是**异质的表**。
+;; 为什么单开一格：C 那条腿上数组是按元素的 C 类型走的，而 `omni_dyn` 是个
+;; **值语义的聚合**（24 字节：4 位标签 + 4 补齐 + 16 的 omni_str 那格 union）——
+;; 它得走 `arrIsBlob` 那一桶（按字节，逐形状生成一组 static inline），
+;; 不是"句柄，一个字"。漏掉它的症状是 `arrSuffix: dynamic` 当场抛，
+;; 把尺寸写成 16 的症状是相邻两格互相踩（标签读出来是上一格的载荷）。
+;;
+;; 谁要它：python / lua 那一族里的 `[1, "two", 3.5, True]` —— 表本身还是静态的一格数组,
+;; 动态的是元素。三格判据：装得进、按标签分派读得出、走一遍长度对得上。
+
+(module
+  ;; 一格 dyn 印成文本：按标签分派（python 那一门的 adapter 生成的就是这个形状）
+  (fn show ((v dyn)) string
+    (ret (sel (bin "==" (dtag (var v)) (str "int"))
+              (tostr (asint (var v)))
+              (sel (bin "==" (dtag (var v)) (str "string"))
+                   (asstr (var v))
+                   (sel (bin "==" (dtag (var v)) (str "real"))
+                        (srepr (asreal (var v)))
+                        (sel (bin "==" (dtag (var v)) (str "bool"))
+                             (sel (asbool (var v)) (str "True") (str "False"))
+                             (dtag (var v))))))))
+
+  (main
+    (let xs (arr dyn) (anew (arr dyn) (int 0)))
+    (apush (var xs) (dyn (int 1)))
+    (apush (var xs) (dyn (str "two")))
+    (apush (var xs) (dyn (real 3.5)))
+    (apush (var xs) (dyn (bool true)))
+    (print (alen (var xs)))
+    (let i int (int 0))
+    (while (bin "<" (var i) (alen (var xs)))
+      (do
+        (print (call show (aget (var xs) (var i))))
+        (set i (bin "+" (var i) (int 1)))))
+    ;; 按下标改一格（换一档装）—— 静态类型的数组给不了这件事
+    (aset (var xs) (int 0) (dyn (str "换了")))
+    (print (call show (aget (var xs) (int 0))))
+    (print (dtag (aget (var xs) (int 2))))
+  )
+)
