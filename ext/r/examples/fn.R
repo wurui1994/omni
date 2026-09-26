@@ -156,3 +156,22 @@ banner("hi")
 maybe <- function(x) if (x > 0) print("pos") else print("neg")
 maybe(1)
 maybe(-1)
+
+# **默认值里提到本函数的形参**（`function(s, n = nchar(s))`）—— R 那边默认值是个 promise、
+# 在**被调方**求值，所以 `s` 指的是这一趟传进来的 `s`。这一档在**调用点**填默认值，
+# 那儿没有 `s` 这个名字 —— 但那一格实参的树就在手上，换进去就是同一件事。
+# 两条闸门：换进去的树只许是**字面量或者一个名字**（R 的 promise 只算一次，而换进去是
+# 照抄一份 —— 算出来的表达式会算两遍），提到的形参这一趟得**已经有值**。
+d1 <- function(a, b = a * 2) a + b
+cat(d1(3), d1(3, 1), "\n")
+d2 <- function(s, n = nchar(s)) substr(s, 1, n)
+cat(d2("hello"), d2("hello", 2), "\n")
+dw <- "world"
+cat(d2(dw), "\n")
+d3 <- function(v, k = length(v)) sum(v[1:k])
+dv <- c(1, 2, 3)
+cat(d3(dv), d3(dv, 2), "\n")
+d4 <- function(x, y = x, z = y) x + y + z
+cat(d4(2), d4(2, 3), d4(2, 3, 4), "\n")
+d5 <- function(a = 1, b = 2) a * 10 + b
+cat(d5(), d5(5), d5(5, 6), d5(b = 9), "\n")

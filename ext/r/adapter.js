@@ -911,6 +911,44 @@ const globalTys = new Map();
  * 按顺序填空位，还空着的用默认值）。回一排"实参的树"，`extra` 那一格用 `null` 占位
  * （`|>` 塞到第一位的那个值）。配不上就当场报 —— 不猜。
  */
+/**
+ * **默认值里提到本函数的形参** —— 把那一格换成这个调用点给那个形参的**树**。
+ *
+ * R 那边默认值是个 promise，在**被调方**求值，所以 `function(s, n = nchar(s))` 里的
+ * `s` 指的是这一趟传进来的 `s`。这一档是在**调用点**填默认值，那儿没有 `s` 这个名字 ——
+ * 但那一格实参的树就在手上，换进去就是同一件事（2026-09-26 接的，从前整格当场报）。
+ *
+ * 两条闸门，都是"换进去与 R 同解"才让过：
+ *
+ * * 换进去的那棵树只许是**字面量或者一个名字**。R 的 promise **只算一次**，而换进去是
+ *   照抄一份 —— 算出来的表达式（`f(g(x))` 里的 `g(x)`）会算两遍，那既是白算也可能不同解
+ *   （`f(readline())`）。
+ * * 提到的那个形参这一趟得**已经有值**（前面的位置实参或者前面那一格默认值）。
+ *   提到后头那一格的（`function(a = b, b = 1)`）当场报。
+ */
+function substFormals(node, pnames, bound, fname, pname) {
+  if (!isList(node)) return node;
+  if (tag(node) === 'sym') {
+    const k = pnames.indexOf(mangle(nameOf(node)));
+    if (k < 0) return node;
+    const got = bound[k];
+    if (got === undefined || got === null) {
+      throw new Error(`r->IR: ${fname}() 的形参 \`${pname}\` 的默认值提到了形参`
+        + ` \`${nameOf(node)}\`，而那一格这一趟还没有值 —— R 那边默认值是 promise（被调方`
+        + '求值、还能提到后头的形参），这一档是在调用点换进去的，只能提到前面已经有值的那些');
+    }
+    const t = tag(got);
+    if (t !== 'num' && t !== 'str' && t !== 'sym') {
+      throw new Error(`r->IR: ${fname}() 的形参 \`${pname}\` 的默认值提到了形参`
+        + ` \`${nameOf(node)}\`，而这个调用点给那一格的是**算出来的**表达式 ——`
+        + ' 换进去要算两遍（R 的 promise 只算一次），所以当场报。'
+        + '先把它存进一个名字再传就接得住');
+    }
+    return got;
+  }
+  return { ...node, items: node.items.map((it) => substFormals(it, pnames, bound, fname, pname)) };
+}
+
 function bindArgs(fname, pnames, defs, callNode, hasExtra) {
   const bound = new Array(pnames.length).fill(undefined);
   const as = argsOf(callNode);
@@ -935,7 +973,8 @@ function bindArgs(fname, pnames, defs, callNode, hasExtra) {
       throw new Error(`r->IR: ${fname}() 的形参 \`${pnames[k]}\` 没给值，而它也没有默认值`
         + '（R 那边是"用到才报 argument is missing"，这一档在编译期就报）');
     }
-    bound[k] = d;
+    /* 默认值里提到本函数的形参时把那一格换成这个调用点的树（见 `substFormals`）。 */
+    bound[k] = substFormals(d, pnames, bound, fname, pnames[k]);
   });
   return bound;
 }
@@ -2373,28 +2412,18 @@ function nameToLambda(x, userFns) {
  */
 function inferFns(fns, rest) {
   /* 默认值：形参那一格有第二个孩子就是它（`function(x, n = 10)` 的 `10`）。
-     **不许引用这个函数自己的形参** —— 默认值是在调用点求的，那儿还没有那些名字。 */
-  const defsOf = (node, ps) => kids(kids(node)[0]).map((f) => {
+     默认值里**提到本函数的形参**（`function(s, n = nchar(s))`）也接了 —— 在调用点把那一格
+     换成这一趟传进来的那棵树（见 `substFormals` 那段账与它的两条闸门）。 */
+  const defsOf = (node) => kids(kids(node)[0]).map((f) => {
     const ks = kids(f);
     if (ks.length < 2 || ks[1] === undefined) return null;
-    const bad = [];
-    const walk = (y) => {
-      if (!isList(y)) return;
-      if (tag(y) === 'sym' && ps.includes(mangle(nameOf(y)))) bad.push(nameOf(y));
-      for (const k of kids(y)) walk(k);
-    };
-    walk(ks[1]);
-    if (bad.length > 0) {
-      throw new Error(`r->IR: 形参默认值里引用了这个函数自己的形参（\`${bad[0]}\`）——`
-        + ' 那要真的 promise（R 是在被调方求值的），这一档在调用点填默认值，那儿还没有这个名字');
-    }
     return ks[1];
   });
   const mainBlock = { kind: 'list', items: [{ kind: 'atom', value: 'block' }, ...rest] };
   for (const f of fns) {
     const ps = formalsOf(f.node);
     if (!fnFormals.has(f.name)) fnFormals.set(f.name, ps);
-    if (!fnDefs.has(f.name)) fnDefs.set(f.name, defsOf(f.node, ps));
+    if (!fnDefs.has(f.name)) fnDefs.set(f.name, defsOf(f.node));
     if (!fnParams.has(f.name)) fnParams.set(f.name, ps.map(() => INT));
     if (!fnRets.has(f.name)) fnRets.set(f.name, INT);
   }
