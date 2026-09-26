@@ -103,3 +103,19 @@ print(names(sn))
 cat(sum(sapply(ws, nchar)), "\n")
 # `unlist(lapply(…))` 两边都没有名字
 print(unlist(lapply(ws, nchar)))
+
+# **函数体写成 `{ … }` 且里头两格以上**：前面那几格是"每一趟都要做的事"、最后一格才是
+# 这一趟的值（R 的语义）。表达式位上摆不下它们，可摊开之后**循环体就是那个语句槽**。
+# 体里的 `名字 <- 值` 一律是**局部量**（R 也是这样），所以就地发一格 let —— 外头同名那个
+# 看不见也改不着；同一个名字赋第二遍才是重新赋值。
+cat(sapply(1:4, function(k) { y2 <- k * 2; y2 + 1 }), "\n")
+cat(sapply(c("ab", "c"), function(s) { n2 <- nchar(s); paste0(s, n2) }), "\n")
+cat(sapply(1:4, function(k) { a2 <- k + 1; a2 <- a2 * 2; a2 - 1 }), "\n")
+cat(sapply(1:4, function(k) { if (k > 2) k * 10 else 0 }), "\n")
+cat(vapply(1:3, function(k) { d2 <- k + 0.5; d2 * 2 }, numeric(1)), "\n")
+cat(unlist(lapply(1:3, function(k) { e2 <- k * k; e2 + 1 })), "\n")
+cat(unlist(Filter(function(z) { m2 <- z %% 3; m2 == 0 }, 1:12)), "\n")
+cat(Reduce(function(p2, q2) { t2 <- p2 * q2; t2 + 0 }, 1:5), "\n")
+cat(sapply(1:3, function(k) { b2 <- k > 1; b2 }), "\n")
+out2 <- 99
+cat(sapply(1:2, function(k) { out2 <- k; out2 }), out2, "\n")

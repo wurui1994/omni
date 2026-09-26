@@ -3091,6 +3091,46 @@ function switchOf(x, types, asStmt) {
  * 字符向量出串），函数体的类型再问一遍（于是 `sapply(v, function(x) paste0("#", x))`
  * 出的是一条字符向量）。
  */
+/**
+ * apply 那一族里函数体写成 `{ … }` 且里头**两格以上**时，把它拆成"前面几格 + 最后一格"。
+ *
+ * R 的语义就是这样：前面那几格照做、最后一格是这一趟的值。表达式位上摆不下它们
+ * （见 `exprOf` 的 `block` 那一格），**可这儿有循环体这个语句槽** —— 摊开之后每一趟
+ * 先做前面那几格再算最后一格，与 R 同解。
+ *
+ * 前面那几格里 `名字 <- 值` 一律就地发一格 `let`（**R 的语义**：函数体里的 `<-` 造的是
+ * 局部量，外头同名那个看不见也改不着）。同一个名字在体里赋第二遍才是 `set`。
+ * `<<-` 走 `stmtOf`（那一格才是改外头的）。
+ *
+ * 为什么不看"外层那张表里有没有这个名字"：量出来会错。`Reduce(function(a, b) { t <- a * b; t }, …)`
+ * 里那个 `t` 顶层推断也见过（落成 int），于是走了"重新赋值"那条路 —— `.sx` 那层报
+ * `'t' 是 int，赋的值是 real`，而那已经过了换档那道门。
+ */
+function bodyPre(body, child) {
+  if (!isList(body) || tag(body) !== 'block') return { pre: [], val: body };
+  const ks = kids(body);
+  if (ks.length === 0) return { pre: [], val: body };
+  if (ks.length === 1) return { pre: [], val: ks[0] };
+  const pre = [];
+  const mine = new Set();
+  for (const st of ks.slice(0, -1)) {
+    if (isAssign(st)) {
+      const { target, value, op } = assignParts(st);
+      if (op !== '<<-' && isList(target) && tag(target) === 'sym' && !mine.has(mangle(nameOf(target)))) {
+        const nm = mangle(nameOf(target));
+        const vt = typeOfExpr(value, child);
+        const init = exprOf(value, child, vt);
+        child.set(nm, vt);
+        mine.add(nm);
+        pre.push({ kind: 'let', name: nm, type: vt, init });
+        continue;
+      }
+    }
+    pre.push(stmtOf(st, child));
+  }
+  return { pre, val: ks[ks.length - 1] };
+}
+
 function applyOf(fn, x, types) {
   const args = posArgs(x);
   const vr = (nm) => ({ kind: 'name', name: nm });
@@ -3144,6 +3184,7 @@ function applyOf(fn, x, types) {
     if (accTy.kind !== 'string') accTy = REAL;
     child.set(ps[0], accTy);
     const acc = fresh('acc');
+    const { pre: rpre, val: rval } = bodyPre(body, child);
     const from = initNode === undefined ? I(1) : I(0);
     pre.push({
       kind: 'let',
@@ -3163,10 +3204,11 @@ function applyOf(fn, x, types) {
         body: [
           { kind: 'let', name: ps[0], type: accTy, init: vr(acc) },
           { kind: 'let', name: ps[1], type: elemTy, init: at(vr(idx)) },
+          ...rpre,
           {
             kind: 'assign',
             target: vr(acc),
-            value: accTy.kind === 'string' ? exprOf(body, child) : asReal(exprOf(body, child), typeOfExpr(body, child)),
+            value: accTy.kind === 'string' ? exprOf(rval, child) : asReal(exprOf(rval, child), typeOfExpr(rval, child)),
           },
         ],
       }],
@@ -3178,7 +3220,8 @@ function applyOf(fn, x, types) {
     /* 挑出"函数说真"的那些 —— 出来的还是同一种向量。 */
     const out = fresh('fo');
     const k = fresh('fk');
-    const keep = condOf(body, child);
+    const { pre: fpre, val: fval } = bodyPre(body, child);
+    const keep = condOf(fval, child);
     const stmts = [...pre];
     if (strIn) {
       stmts.push({ kind: 'let', name: out, type: RSTRV, init: call1('anew', tyArg(RSTRV), I(0)) });
@@ -3192,6 +3235,7 @@ function applyOf(fn, x, types) {
       post: { kind: 'assign', target: vr(idx), value: b('+', vr(idx), I(1)) },
       body: [
         { kind: 'let', name: ps[0], type: elemTy, init: at(vr(idx)) },
+        ...fpre,
         {
           kind: 'if',
           cond: keep,
@@ -3268,7 +3312,8 @@ function applyOf(fn, x, types) {
   }
 
   /* `sapply` / `unlist(lapply(…))`：一格进一格出，出来的种类看函数体。 */
-  const bt = typeOfExpr(body, child);
+  const { pre: bpre, val: bval } = bodyPre(body, child);
+  const bt = typeOfExpr(bval, child);
   const strOut = bt.kind === 'string';
   const lglOut = !strOut && (bt.kind === 'bool' || isLgl1(bt));
   const out = fresh('so');
@@ -3285,9 +3330,10 @@ function applyOf(fn, x, types) {
     post: { kind: 'assign', target: vr(idx), value: b('+', vr(idx), I(1)) },
     body: [
       { kind: 'let', name: ps[0], type: elemTy, init: at(vr(idx)) },
+      ...bpre,
       strOut
-        ? { kind: 'assign', target: svGet(vr(out), vr(idx)), value: exprOf(body, child) }
-        : vecSet(vr(out), vr(idx), lglOut ? asLgl(exprOf(body, child), bt) : asReal(exprOf(body, child), bt)),
+        ? { kind: 'assign', target: svGet(vr(out), vr(idx)), value: exprOf(bval, child) }
+        : vecSet(vr(out), vr(idx), lglOut ? asLgl(exprOf(bval, child), bt) : asReal(exprOf(bval, child), bt)),
     ],
   });
   return { kind: 'block-expr', stmts, value: vr(out) };
