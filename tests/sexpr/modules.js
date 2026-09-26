@@ -326,7 +326,18 @@ const mdir = ${JSON.stringify(join(dirname(fileURLToPath(import.meta.url)), '..'
 const mains = fs2.readdirSync(mdir).filter((f) => f.startsWith('main-') && f.endsWith('.js'));
 let shape = null;
 if (mains.length > 0) {
-  const t = loadableText(mdir, 'asy_builtins__d935d217.js');
+  /* **别把内容哈希写死**（2026-09-26）：这儿从前钉的是 asy_builtins__d935d217.js，
+     而那份产物的名字里带的是**内容哈希** —— asy 的 builtins 一改，名字就变成别的
+     （今天盘上那份是 asy_builtins__38eab6d8.js）。于是这一格 readText 直接 ENOENT、
+     整个驱动崩掉，三格判据一起报"驱动没给出 JSON"，而真正要量的东西（装载那一层的形状）
+     根本没量到。按前缀现找。
+     —— 这几行在生成出来的驱动里，所以一个反引号都不能带（会把外面那个模板切开）。 */
+  const bn = fs2.readdirSync(mdir)
+    .filter((f) => f.startsWith('asy_builtins__') && f.endsWith('.js') && !f.endsWith('.load.js'))
+    .map((f) => [f, fs2.statSync(mdir + '/' + f).mtimeMs])
+    .sort((a, b) => b[1] - a[1]);
+  if (bn.length === 0) throw new Error('盘上一份 asy_builtins__*.js 都没有');
+  const t = loadableText(mdir, bn[0][0]);
   const lines = t.split('\\n');
   shape = {
     imports: lines.filter((l) => l.startsWith('import ')).length,
