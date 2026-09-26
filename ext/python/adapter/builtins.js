@@ -1054,6 +1054,117 @@ export function stripOf(s0, left, right, C, chars0 = null) {
   return h.wrap(call1('ssub', [s, a, bin('-', b, a)]));
 }
 
+/**
+ * `s.split()` —— **不带分隔符**那一档，与带分隔符是两条规矩：按**连续空白**切，
+ * 首尾的空段不算（`"  a b  c ".split()` 是三格，`" ".split(" ")` 是两格空串）。
+ * 所以这儿不是"找分隔符"，是"走一遍，攒非空白的那几段"。
+ */
+export function splitWsOf(s0, C, maxsplit = null) {
+  const h = holder(C);
+  const s = h.keep(s0, 'sw_s');
+  const t = arrOf(STR);
+  const out = h.decl('sw_o', t, { kind: 'builtin', name: 'anew', args: [{ kind: 'type', type: t }, int(0)] });
+  const ls = h.decl('sw_l', INT, call1('slen', [s]));
+  const i = h.decl('sw_i', INT, int(0));
+  const a = h.decl('sw_a', INT, int(0));
+  const cut = maxsplit === null || maxsplit < 0 ? null : h.decl('sw_n', INT, int(0));
+  const isWs = (at) => bin('!=', call1('sfind', [str(' \t\n\r\u000b\f'), call1('ssub', [s, at, int(1)])]), int(-1));
+  h.pre.push({
+    kind: 'while',
+    cond: { kind: 'bool', value: true },
+    body: [
+      /* 先跳过空白 */
+      { kind: 'while', cond: bin('&&', bin('<', i, ls), isWs(i)), body: [inc(i)] },
+      { kind: 'if', cond: bin('>=', i, ls), then: [{ kind: 'break', label: null }], else_: null },
+      /* 切够次数了：剩下的**整段**（含中间的空白）算最后一格 */
+      ...(cut === null ? [] : [{
+        kind: 'if',
+        cond: bin('>=', cut, int(maxsplit)),
+        then: [
+          { kind: 'builtin-stmt', name: 'apush', args: [out, call1('ssub', [s, i, bin('-', ls, i)])] },
+          { kind: 'break', label: null },
+        ],
+        else_: [{ kind: 'assign', target: cut, value: bin('+', cut, int(1)) }],
+      }]),
+      { kind: 'assign', target: a, value: i },
+      {
+        kind: 'while',
+        cond: bin('&&', bin('<', i, ls), { kind: 'unop', op: '!', operand: isWs(i) }),
+        body: [inc(i)],
+      },
+      { kind: 'builtin-stmt', name: 'apush', args: [out, call1('ssub', [s, a, bin('-', i, a)])] },
+    ],
+  });
+  return h.wrap(out);
+}
+
+/**
+ * `s.count(sub)` / `s.count(sub, start, end)` —— 数**不重叠**的那几段
+ * （`"aaa".count("aa")` 是 1，不是 2）。空的那一段数的是"位置数"：
+ * `"abc".count("")` 是 4。
+ */
+export function countOf(s0, sub0, C, start0 = null, end0 = null) {
+  const h = holder(C);
+  const s = h.keep(s0, 'ct_s');
+  const sub = h.keep(sub0, 'ct_b');
+  const ls = h.decl('ct_l', INT, call1('slen', [s]));
+  const lb = h.decl('ct_n', INT, call1('slen', [sub]));
+  /* start / end 按 python 的规矩折：负的加长度，再夹到 [0, len] 里。 */
+  const clamp = (v) => {
+    const x = h.decl('ct_x', INT, v);
+    h.pre.push({
+      kind: 'if',
+      cond: bin('<', x, int(0)),
+      then: [{ kind: 'assign', target: x, value: bin('+', x, ls) }],
+      else_: null,
+    });
+    h.pre.push({
+      kind: 'if',
+      cond: bin('<', x, int(0)),
+      then: [{ kind: 'assign', target: x, value: int(0) }],
+      else_: [{
+        kind: 'if',
+        cond: bin('>', x, ls),
+        then: [{ kind: 'assign', target: x, value: ls }],
+        else_: null,
+      }],
+    });
+    return x;
+  };
+  const lo = start0 === null ? int(0) : clamp(start0);
+  const hi = end0 === null ? ls : clamp(end0);
+  const cnt = h.decl('ct_c', INT, int(0));
+  const i = h.decl('ct_i', INT, lo);
+  h.pre.push({
+    kind: 'if',
+    cond: bin('==', lb, int(0)),
+    /* 空段：位置数是 hi - lo + 1（`hi < lo` 时一格也没有）。 */
+    then: [{
+      kind: 'if',
+      cond: bin('<', hi, lo),
+      then: [{ kind: 'assign', target: cnt, value: int(0) }],
+      else_: [{ kind: 'assign', target: cnt, value: bin('+', bin('-', hi, lo), int(1)) }],
+    }],
+    else_: [{
+      kind: 'while',
+      cond: bin('<=', i, bin('-', hi, lb)),
+      body: [
+        {
+          kind: 'if',
+          cond: bin('==', call1('ssub', [s, i, lb]), sub),
+          then: [
+            { kind: 'assign', target: cnt, value: bin('+', cnt, int(1)) },
+            /* 不重叠：对上了就跳过整段 */
+            { kind: 'assign', target: i, value: bin('+', i, lb) },
+          ],
+          else_: [inc(i)],
+        },
+      ],
+    }],
+  });
+  return h.wrap(cnt);
+}
+
 /** `s.startswith(p)` / `s.endswith(p)` —— 比一段（方言里没有这一格算子）。 */
 export function startsEndsOf(s0, p0, atStart, C) {
   const h = holder(C);
@@ -1065,8 +1176,8 @@ export function startsEndsOf(s0, p0, atStart, C) {
   return h.wrap(bin('&&', bin('>=', ls, lp), bin('==', seg, p)));
 }
 
-/** `s.replace(a, b)` —— 全部换掉（python 的 `count` 参数那一档还没接）。 */
-export function replaceOf(s0, a0, b0, C) {
+/** `s.replace(a, b)` / `s.replace(a, b, n)` —— 换掉全部，或者只换前 n 处。 */
+export function replaceOf(s0, a0, b0, C, count = null) {
   const h = holder(C);
   const s = h.keep(s0, 'rp_s');
   const from = h.keep(a0, 'rp_a');
@@ -1075,6 +1186,9 @@ export function replaceOf(s0, a0, b0, C) {
   const at = h.decl('rp_at', INT, int(0));
   const hit = h.decl('rp_h', INT, int(0));
   const rest = h.decl('rp_r', STR, str(''));
+  /* `count`：换够那么多处就把剩下的整段接上（与 `splitOf` 的 maxsplit 同一条办法）。
+     负的是"不限"，与不给是一回事。 */
+  const cap = count === null || count < 0 ? null : h.decl('rp_n', INT, int(0));
   h.pre.push({
     kind: 'if',
     cond: bin('==', call1('slen', [from]), int(0)),
@@ -1091,6 +1205,12 @@ export function replaceOf(s0, a0, b0, C) {
         value: call1('ssub', [s, at, bin('-', call1('slen', [s]), at)]),
       },
       { kind: 'assign', target: hit, value: call1('sfind', [rest, from]) },
+      ...(cap === null ? [] : [{
+        kind: 'if',
+        cond: bin('>=', cap, int(count)),
+        then: [{ kind: 'assign', target: hit, value: int(-1) }],
+        else_: [{ kind: 'assign', target: cap, value: bin('+', cap, int(1)) }],
+      }]),
       {
         kind: 'if',
         cond: bin('<', hit, int(0)),

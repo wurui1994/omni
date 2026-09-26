@@ -14,9 +14,12 @@
 #     `.isalpha()` 那一族反过来：每一格都要在类里，而且串非空。
 #   - **`str.center()` 与 f-string 的 `:^` 摆法不一样**：`'ab'.center(7,'*')` 是
 #     `***ab**`（多的在左），`f"{'ab':*^7}"` 是 `**ab***`（多的在右）。
+#   - `.partition()` 找不到分隔符时**两边站的位置不一样**：`partition` 交 `(s, '', '')`，
+#     `rpartition` 交 `('', '', s)` —— 不是对称的。
+#   - `.count()` 数的是**不重叠**的那几段（`"aaa".count("aa")` 是 1），而空的那一段数的是
+#     "位置数"（`"abc".count("")` 是 4）。
 #
-# 明说还没接的：`.split()` 不带分隔符、`.split(sep, maxsplit)`、`.partition()`、
-# `.format()`、`.encode()`、`.count(sub, start, end)` 那一族带范围的。
+# 明说还没接的：`.format()`、`.encode()`。
 
 
 def main():
@@ -65,6 +68,24 @@ def main():
     # 串里走一遍的那几格接着用
     words = "a,bb,ccc".split(",")
     print(words, [w.upper() for w in words], "-".join(words))
+
+    # 切三段：分隔符前、分隔符本身、分隔符后（找不到时两边站的位置不一样）
+    print("a,b,c".partition(","), "a,b,c".rpartition(","))
+    print("abc".partition("-"), "abc".rpartition("-"))
+    print("a=".partition("="), "=b".partition("="))
+    print("k:v".partition(":")[0], "k:v".partition(":")[2])
+
+    # 数段：不重叠；空的那一段数位置
+    print("abcabc".count("bc"), "aaa".count("aa"), "abc".count(""))
+    print("abcabc".count("bc", 2), "abcabc".count("b", 0, 3), "abcabc".count("c", -2))
+
+    # 换：只换前几处
+    print("a-b-c".replace("-", "+"), "a-b-c".replace("-", "+", 1))
+    print("a-b-c".replace("-", "+", 0), "a-b-c".replace("-", "+", 9))
+
+    # 不带分隔符地切：按连续空白，首尾的空段不算
+    print("  a b  c ".split(), "".split(), " ".split())
+    print("a b  c".split(None, 1), "a b c".split(None, 0))
 
 
 main()

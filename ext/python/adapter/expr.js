@@ -27,7 +27,7 @@ import { splitFString } from './fstring.js';
 import { splitPercent, percentArity } from './percent.js';
 import {
   sumOf, pickList, anyAllOf, sortedOf, rangeList,
-  joinOf, splitOf, stripOf, replaceOf, startsEndsOf, justOf,
+  joinOf, splitOf, splitWsOf, countOf, stripOf, replaceOf, startsEndsOf, justOf,
   containsList, indexOfList, countList, valuesList, dictPopOf, dictSetDefaultOf,
   concatList, repeatList, reversedList, stepSlice, bankRound,
   caseMapOf, charClassOf, rfindOf, copyList, copyDict, charsOf, dictOfPairs,
@@ -401,6 +401,8 @@ function methodType(recvTy, name, argTys, C) {
     if (['startswith', 'endswith',
       'isdigit', 'isalpha', 'isalnum', 'isspace', 'isupper', 'islower'].includes(name)) return BOOL;
     if (name === 'split') return arrOf(STR);
+    /* `.partition()` / `.rpartition()` —— 三格串的元组（那格记录顺手登记上）。 */
+    if (name === 'partition' || name === 'rpartition') return tupleRec([STR, STR, STR], C).type;
     return null;
   }
   if (recvTy.kind === 'map') {
@@ -1829,6 +1831,73 @@ function tupleAt(box, idxTok, rec, C) {
   return { kind: 'field', obj: box, name: `_${at}` };
 }
 
+/**
+ * `s.partition(sep)` / `s.rpartition(sep)` —— 交**三格的元组**：分隔符前、分隔符本身、
+ * 分隔符后。找不到的时候两边站的位置不一样：`partition` 交 `(s, "", "")`，
+ * `rpartition` 交 `("", "", s)` —— 量出来的，别照着"对称"猜。
+ */
+function partitionOf(s0, sep0, C, fromRight) {
+  if (sep0.kind === 'string' && String(sep0.value) === '') {
+    throw new Error('python->IR: `.partition("")` 空分隔符在 python 里是 ValueError');
+  }
+  const pre = [];
+  const pin = (e, t, p) => {
+    if (isPure(e)) return e;
+    const n = C.fresh(p);
+    C.bind(n, t);
+    pre.push({ kind: 'let', name: n, type: t, init: e });
+    return { kind: 'name', name: n };
+  };
+  const s = pin(s0, STR, 'pt_s');
+  const sep = pin(sep0, STR, 'pt_d');
+  const atN = C.fresh('pt_at');
+  C.bind(atN, INT);
+  const at = { kind: 'name', name: atN };
+  pre.push({
+    kind: 'let',
+    name: atN,
+    type: INT,
+    init: fromRight ? rfindOf(s, sep, C) : { kind: 'builtin', name: 'sfind', args: [s, sep] },
+  });
+  const rec = tupleRec([STR, STR, STR], C);
+  const empty = { kind: 'string', value: '' };
+  /* 三格先各落一格临时量、再发一句 `if` —— **不用三元**：这一层的三元两支都会算，
+     找不到的时候 `ssub(s, 0, -1)` 会当场炸（量到过：`"abc".partition("-")`）。 */
+  const slot = (p) => {
+    const n = C.fresh(p);
+    C.bind(n, STR);
+    pre.push({ kind: 'let', name: n, type: STR, init: empty });
+    return { kind: 'name', name: n };
+  };
+  const p0 = slot('pt_0');
+  const p1 = slot('pt_1');
+  const p2 = slot('pt_2');
+  const ls = { kind: 'builtin', name: 'slen', args: [s] };
+  const after = { kind: 'binop', op: '+', left: at, right: { kind: 'builtin', name: 'slen', args: [sep] } };
+  pre.push({
+    kind: 'if',
+    cond: { kind: 'binop', op: '<', left: at, right: { kind: 'int', value: 0 } },
+    then: [{ kind: 'assign', target: fromRight ? p2 : p0, value: s }],
+    else_: [
+      { kind: 'assign', target: p0, value: { kind: 'builtin', name: 'ssub', args: [s, { kind: 'int', value: 0 }, at] } },
+      { kind: 'assign', target: p1, value: sep },
+      {
+        kind: 'assign',
+        target: p2,
+        value: { kind: 'builtin', name: 'ssub', args: [s, after, { kind: 'binop', op: '-', left: ls, right: after }] },
+      },
+    ],
+  });
+  return {
+    kind: 'block-expr',
+    stmts: pre,
+    value: {
+      kind: 'new-record', type: rec.type, ref: true,
+      fields: [p0, p1, p2].map((v, i) => ({ name: `_${i}`, value: v })),
+    },
+  };
+}
+
 /** `xs[i]` / `d[k]` / `s[i]` / `xs[a:b]` / `s[a:b]`。 */
 function indexOf(x, C) {
   const box = exprOf(kids(x)[0], C);
@@ -2577,20 +2646,39 @@ function methodOf(recvTok, name, args, C) {
     /* 下面这几格**现场发一趟循环**（`builtins.js`）—— 方言的串那一族只有五格算子，
        python 的这几个方法是它自己的规矩（空段算一格、去哪几个空白字符）。 */
     if (name === 'join' && args.length === 1) return joinOf(recv, args[0], C);
+    /* `.split()` / `.split(None)` / `.split(None, n)` —— **不带分隔符**那一档要先拦：
+       它按连续空白切、首尾的空段不算，与带分隔符是两条规矩（所以是另一趟循环）。 */
+    const noSep = (a) => a !== undefined && a.kind === 'builtin' && a.name === 'dnull';
+    if (name === 'split' && (args.length === 0 || noSep(args[0]))) {
+      if (args.length === 2 && args[1].kind !== 'int') {
+        throw new Error('python->IR: `.split(None, maxsplit)` 的 maxsplit 要写成一格整数字面量');
+      }
+      if (args.length > 2) throw new Error('python->IR: `.split()` 最多收两格实参');
+      return splitWsOf(recv, C, args.length === 2 ? Number(args[1].value) : null);
+    }
     if (name === 'split' && (args.length === 1 || args.length === 2)) {
       if (args.length === 2 && args[1].kind !== 'int') {
         throw new Error('python->IR: `.split(sep, maxsplit)` 的 maxsplit 要写成一格整数字面量');
       }
       return splitOf(recv, args[0], C, args.length === 2 ? Number(args[1].value) : null);
     }
-    if (name === 'split' && args.length === 0) {
-      throw new Error('python->IR: `.split()` 不带分隔符那一档还没接'
-        + '（它按连续空白切，而且首尾的空段不算 —— 与带分隔符是两条规矩）');
-    }
     if (name === 'strip' && args.length <= 1) return stripOf(recv, true, true, C, args[0] ?? null);
     if (name === 'lstrip' && args.length <= 1) return stripOf(recv, true, false, C, args[0] ?? null);
     if (name === 'rstrip' && args.length <= 1) return stripOf(recv, false, true, C, args[0] ?? null);
-    if (name === 'replace' && args.length === 2) return replaceOf(recv, args[0], args[1], C);
+    if (name === 'replace' && (args.length === 2 || args.length === 3)) {
+      if (args.length === 3 && args[2].kind !== 'int') {
+        throw new Error('python->IR: `.replace(a, b, count)` 的 count 要写成一格整数字面量');
+      }
+      return replaceOf(recv, args[0], args[1], C, args.length === 3 ? Number(args[2].value) : null);
+    }
+    /* `.count(sub)` / `.count(sub, start, end)` —— 数不重叠的那几段。 */
+    if (name === 'count' && args.length >= 1 && args.length <= 3) {
+      return countOf(recv, args[0], C, args[1] ?? null, args[2] ?? null);
+    }
+    /* `.partition(sep)` / `.rpartition(sep)` —— 交一格**三格的元组**。 */
+    if ((name === 'partition' || name === 'rpartition') && args.length === 1) {
+      return partitionOf(recv, args[0], C, name === 'rpartition');
+    }
     if (name === 'startswith' && args.length === 1) return startsEndsOf(recv, args[0], true, C);
     if (name === 'endswith' && args.length === 1) return startsEndsOf(recv, args[0], false, C);
     /* 大小写那三格与 upper / lower 同一条口径（**只动 ASCII**，见上面那段话）。 */
