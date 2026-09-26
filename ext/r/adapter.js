@@ -1762,7 +1762,22 @@ const isVecMakerCall = (node) => isList(node) && tag(node) === 'call'
 
 function dictNames(x, out = new Set(), vecs = new Set()) {
   if (!isList(x)) return out;
-  if (tag(x) === 'sub2' && tag(kids(x)[0]) === 'sym') out.add(nameOf(kids(x)[0]));
+  /**
+   * `m[["k"]]` 算"这是张表"的证据 —— **两处不算**：
+   *
+   * * base 里那几条常量（`letters` / `LETTERS` / `month.name` / `month.abb`）：它们是
+   *   字符向量，不是表；
+   * * 下标是**写着的数**（`v[[2]]`）：这一层的表键只有串，`dget` 收不下数。
+   *
+   * 从前这两处都算，于是 `print(letters[[3]])` 落成 `(dget (var letters) (real 3))`，
+   * 撞在公共层那句 `dget 的键要是 string` 上 —— 而那时**已经过了换档那道门**：
+   * 退出码 1、一行输出都没有（**硬错**，2026-09-27 扫出来的，判据 `ext/r/examples/strvec.R`）。
+   */
+  if (tag(x) === 'sub2' && tag(kids(x)[0]) === 'sym') {
+    const ks2 = kids(x).slice(1).map((a) => kids(a)[0]).filter((k) => k !== undefined);
+    const numKey = ks2.length === 1 && tag(ks2[0]) === 'num';
+    if (!numKey && baseVar(mangle(nameOf(kids(x)[0]))) === undefined) out.add(nameOf(kids(x)[0]));
+  }
   /* `m$k` 与 `m[["k"]]` 是同一件事（R 里 `$` 就是按名字取），所以这一格也算。 */
   if (isDollar(x) && tag(kids(x)[1]) === 'sym') out.add(nameOf(kids(x)[1]));
   if (isAssign(x)) {

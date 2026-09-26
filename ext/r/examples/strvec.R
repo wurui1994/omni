@@ -327,3 +327,8 @@ kdv <- c("ab", "cd")
 print(kdv[[2]])
 print(kdv[2])
 cat(kdv[[1]], kdv[[2]], "\n")
+## base 那几条字符向量常量上取一格：`[` 与 `[[` 同一格值（`[[` 从前当成"这是张表"）
+print(letters[[3]])
+print(LETTERS[[5]])
+print(month.abb[[2]])
+cat(month.name[[1]], letters[[1]], letters[1], "\n")
