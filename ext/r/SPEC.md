@@ -956,6 +956,14 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
    （`out <- c(); out <- c(out, i)` 那种攒结果的循环）。差别是 `is.null(c())`：R 回 TRUE，
    我们这儿它是一条零长向量。`numeric(n)` / `logical(n)` / `integer(n)` 接了（一条零向量）。
    **真正的 `NULL`** —— 当值传、当 list 的一格、`is.null(x)` 对任意 x —— 没有。
+
+   **零长的是哪一种跟着上游走**（2026-09-26 补的）：`out` 后面攒的是**串**时那一条得是零长的
+   **字符**向量。这一格连着两处类型推断的旧账，三处一起改才通：`inferRound` 的 `rank`
+   从前认不出 `(arr string)`（既不是 `string` 也不是 `isVecTy`），于是它排在数值向量**之下**，
+   `out` 整条被推成数值向量；`forNames` 又只让 `int` 让位，于是 `for (s in out)` 的循环量
+   卡在 double 上。症状离病根很远：`s %in% c("+")` 报"一边是串一边是数"，整份退到 libR
+   （量出来的，判据 `ext/r/examples/strvec.R` 末尾那一段）。现在 `rank` 里**串赢**、
+   `forNames` 让串盖掉 double、`c()` 的零长看 `want`。
 9. **数的印法**：R 的那条挑法**照 `src/main/format.c` 抄了**（`scientific()` +
    `formatReal()`，账在 `ext/r/adapter.js` 的 `numFmtStmts()`）—— 定点与科学记数按**哪个短**
    挑、7 位有效数字里尾随零不算、舍到有效数字时**就近取偶**，于是 `cat(1e5)` 印 `1e+05`、

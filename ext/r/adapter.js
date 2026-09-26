@@ -2163,8 +2163,15 @@ function inferFns(fns, rest) {
   /* 同一个名字写过多次：**串赢、其次实数赢**（`t <- 0` 之后 `t <- t + 2.5`，t 是 double）。
      R 那边这不是"类型"而是"这一刻装着什么"，而方言那侧一个名字只有一种类型 ——
      所以取能装下所有写的那一种。 */
-  const rank = (t) => (t.kind === 'string' ? 3 : (isVecTy(t) || t.kind === 'map' ? 3
-    : (t.kind === 'real' ? 2 : 1)));
+  /**
+   * 同一个名字写过多次时"谁赢"的高低。**字符向量最高**（与 `widenTy` 同一条：串赢）——
+   * 从前这一句认不出 `(arr string)`（它既不是 `string` 也不是 `isVecTy`），于是落到最后
+   * 那档 1，比数值向量的 3 还低：`out <- c()` 之后 `out <- c(out, substr(s,1,1))` 里那个
+   * `out` **永远是数值向量**，接着 `for (t in out)` 的循环量是 double、`t %in% c("+")`
+   * 报"一边是串一边是数"，整份退到 libR（量出来的，2026-09-26）。
+   */
+  const rank = (t) => (isStrVec(t) ? 4 : (t.kind === 'string' ? 3 : (isVecTy(t) || t.kind === 'map' ? 3
+    : (t.kind === 'real' ? 2 : 1))));
   eachAssign(body, ({ target, value, op }) => {
     /* `names(v) <- ns` —— 那一句把 `v` 变成**带名字的**向量（记号见 `RNVEC`）。
        `rank` 那条管不了这一格：两边都是"向量"，宽度一样，所以单独记一笔。 */
@@ -2208,10 +2215,21 @@ function forNames(x, types) {
     /* 向量上遍历，循环量是一格 double；字符向量上遍历，循环量是一格串。 */
     const want = isStrVec(st) ? STR : (isVecTy(st) ? REAL : st);
     const had = types.get(v);
-    /* **第二遍要能盖掉第一遍** —— 第一遍时那格序列可能还没定型（`for (x in xs)` 里的 `xs`
-       是后面一句赋值定的），于是 `x` 先按 int 记下。只往"装得下"的方向走，不往回：
-       int 是那个"还不知道"的起点，所以它让位给别的（double、串）；反过来不行。 */
-    if (had === undefined || (had.kind === 'int' && want.kind !== 'int')) types.set(v, want);
+    /**
+     * **第二遍要能盖掉第一遍** —— 第一遍时那格序列可能还没定型（`for (x in xs)` 里的 `xs`
+     * 是后面一句赋值定的），于是 `x` 先按 int 记下。只往"装得下"的方向走，不往回：
+     * int 是那个"还不知道"的起点，所以它让位给别的（double、串）；反过来不行。
+     *
+     * **串也要能盖掉 double**（2026-09-26 补的）：`out <- c()` 出的是一条**数值**零长向量，
+     * 于是"回一条 `c()` 攒出来的字符向量"那种函数在第一遍算出的是 `RVEC`，循环量先落
+     * double；第二遍它定型成字符向量了，而那时 `had.kind` 是 `'real'` —— 从前这一句
+     * 不让动，循环量就永远是 double，接着 `t %in% c("+")` 报"一边是串一边是数"、
+     * 整份退到 libR（量出来的）。串在这一层本来就是"赢"的那一边（见 `widenTy`）。
+     */
+    const strWins = want.kind === 'string' && had !== undefined && had.kind !== 'string';
+    if (had === undefined || strWins || (had.kind === 'int' && want.kind !== 'int')) {
+      types.set(v, want);
+    }
   }
   for (const k of kids(x)) forNames(k, types);
 }
@@ -4133,8 +4151,17 @@ function callOf(x, types, extra, want, stmtPos) {
         /* `c()` 不带实参在 R 里是 `NULL`，而这一档没有 `NULL` —— 落成**零长向量**。
            这两者在最常用的那个写法上同解：`out <- c(); out <- c(out, i)` 那种攒结果的
            循环（`c(NULL, 1)` 与 `c(零长, 1)` 都是 `1`）。差别是 `is.null()`：
-           R 对 `c()` 回 TRUE，我们这儿它是一条零长向量（明写在 SPEC）。 */
-        if (n === 0) return lglCall('r_zeros', { kind: 'int', value: 0 });
+           R 对 `c()` 回 TRUE，我们这儿它是一条零长向量（明写在 SPEC）。
+
+           **零长的是哪一种由上游那格 `want` 定**（2026-09-26 补的）：`out` 后面攒的是串时
+           它得是零长的**字符**向量，不然发出来是"`out` 是 arr<string>，赋的值是 real*" ——
+           而那一句在公共层，已经过了换档那道门（量出来的）。 */
+        if (n === 0) {
+          if (want !== undefined && isStrVec(want)) {
+            return call1('anew', tyArg(RSTRV), { kind: 'int', value: 0 });
+          }
+          return lglCall('r_zeros', { kind: 'int', value: 0 });
+        }
         /* **有一格是串 → 整条是字符向量**（R 的收拢次序，数那几格按 `as.character` 的
            15 位有效数字转）。字符向量走 `(arr string)`，长度不必先算 —— `apush` 能现长。 */
         if (all.some((a) => {

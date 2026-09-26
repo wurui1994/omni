@@ -237,3 +237,29 @@ print(!(eqw == "a"))
 print(ifelse(eqw == "a", "yes", "no"))
 print(eqw == "")
 print(c("", "a") == "")
+
+# **`out <- c()` 之后攒的是串**（2026-09-26 修的）：`c()` 不带实参落成零长向量，而那一条
+# 从前一律是**数值**的 —— 于是 `out` 整条被推成数值向量，`for (s in out)` 的循环量是
+# double，接着 `s %in% c("+")` 报"一边是串一边是数"，整份退到 libR。
+# 三处一起改：`rank` 认出字符向量（串赢）、`forNames` 让串盖掉 double、
+# `c()` 的零长跟着上游那格 `want` 走（要串就出零长的字符向量）。
+grab <- function(s) {
+  out <- c()
+  i <- 1
+  while (i <= nchar(s)) {
+    ch <- substr(s, i, i)
+    if (ch != " ") out <- c(out, ch)
+    i <- i + 1
+  }
+  out
+}
+gv <- grab("a b+c")
+print(gv)
+print(length(gv))
+for (s in gv) cat(s, if (s %in% c("+", "-")) "op" else "ch", "\n")
+print(gv %in% c("+", "a"))
+print(sum(gv %in% c("+", "a")))
+print(paste(gv, collapse = ""))
+print(rev(gv))
+print(sort(gv, method = "radix"))
+print(nchar(gv))
