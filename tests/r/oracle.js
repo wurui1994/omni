@@ -7,6 +7,11 @@
 //     两把尺子都要在 —— 家族表说的是"这一族在各语言之间是同一件事"，Rscript 说的是
 //     "我们对 R 的理解没走样"。`Rscript` 不在就整轴跳过（不是失败）。
 //
+// 三、**C 那条腿**（`omni build` 出来的可执行文件）也逐字节对 Rscript。R 有两条腿，
+//     而第一节只量了 JS 那一条 —— "一条腿对、另一条腿错"从前一个判据都管不着
+//     （见那一节的注）。`--no-native` 关得掉，但默认开。
+
+//
 // 二、**那份 `.y` 的漂移守卫**。`ext/r/r.grammar` 的正本是参考树里的
 //     `r-source/src/main/gram.y`，而"正本"这句话只有在**它一直读得动**的时候才成立：
 //       * `omni glr y gram.y` 转得出来（ADR-0034 的导入器）；
@@ -17,9 +22,11 @@
 //
 //   node tests/r/oracle.js
 //   node tests/r/oracle.js basics      只跑名字里带 basics 的
+//   node tests/r/oracle.js --no-native 不跑 C 那条腿（省掉每份一次 cc）
+
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { REF_ROOT } from '../lib/refsrc.js';
@@ -27,6 +34,7 @@ import { REF_ROOT } from '../lib/refsrc.js';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
 const CLI = join(ROOT, 'src/core/cli.js');
 const EXAMPLES = join(ROOT, 'ext/r/examples');
+const NATIVE_OUT = join(ROOT, '.omni-cache/r-oracle');
 const GRAM_Y = join(REF_ROOT, 'r-source/src/main/gram.y');
 const only = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 
@@ -43,6 +51,9 @@ const run = (cmd, args) => {
 const have = (cmd) => spawnSync('which', [cmd], { encoding: 'utf8' }).status === 0;
 
 /* ─── 一、逐字节对 Rscript ─────────────────────────────────────────────── */
+
+/** 每份例子 `Rscript` 的 stdout —— 第一节量出来，第三节（C 那条腿）照用。 */
+const wants = new Map();
 
 const files = readdirSync(EXAMPLES).filter((f) => f.endsWith('.R')).sort();
 if (!have('Rscript')) {
@@ -66,6 +77,7 @@ if (!have('Rscript')) {
       no(label, `stdout 不一样\n       Rscript: ${JSON.stringify(want.out)}\n       omni   : ${JSON.stringify(got.out)}`);
       continue;
     }
+    wants.set(f, want.out);
     ok(`${label} [与 Rscript 逐字节相同，${want.out.length} 字节]`);
   }
 }
@@ -162,5 +174,51 @@ if (only.length === 0 || only.some((x) => 'nanpayload'.includes(x))) {
   }
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed（R：对 Rscript + gram.y 漂移守卫 + NaN 载荷）\n`);
+/* ─── 三、**C 那条腿**也逐字节对 Rscript ──────────────────────────────────
+ *
+ * 为什么单独来一节：R 有**两条腿**（`omni run` 是 JS + N-API、`omni build` 出的可执行
+ * 文件是 C），而第一节只量了 JS 那一条。于是"一条腿对、另一条腿错"这种病**一个判据都
+ * 管不着** —— 2026-09-26 撞上的就是这一类：nmath 每个函数开头是
+ * `if (ISNAN(x)) return x + digits;`，C 那条腿上硬件把 NaN 的**载荷**带出来，
+ * `round(NA)` 印 `NA`；JS 那条腿上 `NaN + 0` 是规范化的 NaN，印 `NaN`。
+ * 那会儿"两条腿都验过"是**手工**做的一步，这个轴自己一次都没跑过。
+ *
+ * 代价：每份例子多一次 `cc`（本机约 2s / 份）。所以给了 `--no-native` ——
+ * 但**默认是开的**：一个不跑的判据等于没有判据。
+ * 产物落 `.omni-cache/r-oracle/`，不往例子目录里丢 `.bin`。
+ */
+
+if (process.argv.includes('--no-native')) {
+  skip('oracle-c：--no-native（C 那条腿这一节整格跳过）');
+} else if (wants.size === 0) {
+  /* 第一节整格跳过了（没有 Rscript），这儿没有期望值可比 */
+} else {
+  mkdirSync(NATIVE_OUT, { recursive: true });
+  for (const f of files) {
+    const want = wants.get(f);
+    if (want === undefined) continue;
+    const label = `oracle-c/${f.replace(/\.R$/, '')}`;
+    const exe = join(NATIVE_OUT, f.replace(/\.R$/, '.bin'));
+    const b = run(process.execPath, [CLI, 'build', join(EXAMPLES, f), '-o', exe]);
+    if (b.code !== 0) {
+      no(label, `omni build 退出码 ${b.code}：${b.err.split('\n').slice(-2).join(' ')}`);
+      continue;
+    }
+    const got = run(exe, []);
+    if (got.code !== 0) {
+      no(label, `跑出来退出码 ${got.code}：${got.err.split('\n').slice(-2).join(' ')}`);
+      continue;
+    }
+    if (got.out !== want) {
+      /* 这一格红多半是**两条腿不一样**，不是两条腿一起错 —— 第一节是绿的。 */
+      no(label, `stdout 与 Rscript 不一样（JS 那条腿是绿的 → 两条腿走散了）`
+        + `\n       Rscript: ${JSON.stringify(want.slice(0, 200))}`
+        + `\n       C 那条腿: ${JSON.stringify(got.out.slice(0, 200))}`);
+      continue;
+    }
+    ok(`${label} [C 那条腿也逐字节相同，${want.length} 字节]`);
+  }
+}
+
+process.stdout.write(`\n${pass} passed, ${fail} failed（R：两条腿对 Rscript + gram.y 漂移守卫 + NaN 载荷）\n`);
 process.exit(fail === 0 ? 0 : 1);
