@@ -111,3 +111,36 @@ def twice(k):
 
 
 print(twice(3), twice("xy"), twice(1.5))
+
+
+# **类的字段也退到箱子**：函数按实参类型单态化，可**类不**（一格 `(class Point …)` 只有
+# 一份字段表），所以 `Point(3, 4)` 与 `Point(1.5, 2.5)` 里 `x` 装的东西不同型时，那一格
+# 字段就是 dyn。要静态的那一档给字段一格标注（`x: float`）。
+# 方言那一侧的字段白名单从前没有 dyn，所以这一片整个走不通 —— 开了口之后
+# `structLayout` / 零值 / 三条腿的字段读写全是现成的。
+class Point:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+    def __str__(self) -> str:
+        return "(" + str(self.x) + "," + str(self.y) + ")"
+
+    def total(self):
+        return self.x + self.y
+
+
+a = Point(3, 4)
+b = Point(1.5, 2.5)
+print(a, b)
+print(a.x, b.y, a.total(), b.total())
+print(a.x == 3, b.x > 1, str(a.y))
+# 装回去：字段那一格是箱子，装什么都行（python 自己就这样）
+a.x = 10
+print(a, a.total())
+a.x = "ten"
+print(a, f"{a.x}/{a.y}")
+ps = [Point(1, 2), Point(0.5, 0.5)]
+for p in ps:
+    print(p, p.total())
+

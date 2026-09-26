@@ -1,0 +1,62 @@
+;; 字段收一格箱子（dyn）。这一份的存在理由是**python 的类不按实参单态化**：
+;; `Point(3, 4)` 与 `Point(1.5, 2.5)` 是同一个 `(class Point …)`、只有一份字段表，
+;; 所以那两格字段该退到 dyn（ADR-0008：异质 ⇒ 降为 dynamic）。字段白名单里没有 dyn
+;; 的那阵子，adapter 只能在自己那一侧当场报，让人加标注。
+;;
+;; 与 48-dyn / 55-dyn-arr 同一族：`sizeOf(dynamic) = 24` 与 `arrIsBlob` 收 dynamic 早就有了，
+;; `structLayout` / 零值 / 三条腿的字段读写也都是现成的 —— **缺的只有那张白名单**。
+;;
+;; 三条要紧的规矩：
+;;   1. **零值的标签是 null**（`(cnew …)` / `(new …)` / `anew` 铺出来的那几格都是），
+;;      所以不 fldset 就 `dtag` 也走得通；
+;;   2. 值语义的结构体**拷一份就是拷那 24 个字节**：拷完再改源值，拷出来那份不许跟着变；
+;;   3. `(arr S)` 里的元素走的是按字节那条 blob 路（50-arrstruct 那一条），dyn 在里头也一样。
+(module
+  (class D (v dyn) (n int))
+  (struct S (n int) (v dyn) (m real))
+
+  (fn bump ((s S)) int (ret (bin "+" (asint (fld (var s) v)) (int 1))))
+
+  (main
+    ;; 一、类上那一格：引用语义，零值的标签是 null
+    (let d D (cnew D))
+    (print (dtag (fld (var d) v)))
+    (fldset (var d) v (dyn (int 7)))
+    (print (dtag (fld (var d) v)))
+    (print (asint (fld (var d) v)))
+    (fldset (var d) v (dyn (str "hi")))
+    (print (dtag (fld (var d) v)))
+    (print (asstr (fld (var d) v)))
+    (fldset (var d) v (dyn (real 1.5)))
+    (print (asreal (fld (var d) v)))
+    ;; `(dnull)` 也是一格 dyn —— 装回去标签就回到 null
+    (fldset (var d) v (dnull))
+    (print (dtag (fld (var d) v)))
+
+    ;; 二、值语义的结构体上那一格：拷一份之后改源值，拷出来那份不跟着变
+    (let s S (new S))
+    (print (dtag (fld (var s) v)))
+    (fldset (var s) v (dyn (int 41)))
+    (print (call bump (var s)))
+    (let t S (var s))
+    (fldset (var s) v (dyn (str "x")))
+    (print (dtag (fld (var t) v)))
+    (print (asint (fld (var t) v)))
+    (print (dtag (fld (var s) v)))
+    (fldset (var s) n (int 3))
+    (fldset (var s) m (real 2.5))
+    (print (fld (var s) n))
+    (print (fld (var s) m))
+    (print (fld (var t) n))
+
+    ;; 三、`(arr S)` ——元素走按字节那条 blob 路，dyn 在里头也一样
+    (let a (arr S) (anew (arr S) (int 2)))
+    (print (dtag (fld (aget (var a) (int 0)) v)))
+    (aset (var a) (int 0) (var s))
+    (print (dtag (fld (aget (var a) (int 0)) v)))
+    (print (asstr (fld (aget (var a) (int 0)) v)))
+    (print (fld (aget (var a) (int 0)) n))
+    ;; aset 是拷一份：改源值不许波及表里那一格
+    (fldset (var s) v (dyn (int 9)))
+    (print (dtag (fld (aget (var a) (int 0)) v)))
+    (print (dtag (fld (aget (var a) (int 1)) v)))))

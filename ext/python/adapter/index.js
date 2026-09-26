@@ -217,15 +217,17 @@ function inferFields(rec, C) {
   rec.fields = order
     .map((n) => ({ name: n, type: unifyPy(seen.get(n)) }))
     .filter((f) => f.type !== null);
-  /* 字段退到 dyn 这一档**方言那一侧还不收**（`(class …)` 的字段白名单里没有 dyn，
-     见 `src/core/sexpr/lower.js` 的字段检查）—— 所以在这儿报，别让它落到下一层
-     变成"类 Point 没有字段 'x'"那一串连锁错。 */
-  for (const f of rec.fields) {
-    if (f.type.kind !== 'dyn') continue;
-    const ks = [...new Set(seen.get(f.name).map((t) => t.kind))].join(' / ');
-    throw new Error(`python->IR: \`${rec.name}.${f.name}\` 在几处造出来时装的是 ${ks}`
-      + ' —— 类不按实参单态化（一格 `(class …)` 只有一份字段表），而方言的字段还不收 dyn'
-      + `（给它一格标注，如 \`${f.name}: float\`；或者两处都造成同一种）`);
+  /* **合不成一格**（几处造出来时装的东西连箱子都装不进 —— 表与记录装不进 dyn，
+     见 `dyn.js` 文件头）：在这儿报。不报的话那一格字段被上面那句 filter 摘掉，
+     下一层说的是"`Holder` 没有字段 `v`（一格都没有）"，离根因就远了。
+     **`order` 里没有的名字不在这儿报** —— 那是"这一轮还没推出来"，与真冲突不是一回事。 */
+  for (const n of order) {
+    if (rec.fields.some((f) => f.name === n)) continue;
+    const ks = [...new Set(seen.get(n).map((t) => t.kind))].join(' / ');
+    throw new Error(`python->IR: \`${rec.name}.${n}\` 在几处造出来时装的是 ${ks}`
+      + ' —— 合不成一格（类不按实参单态化，一格 `(class …)` 只有一份字段表；'
+      + '不同型的那一档退到 dyn，可表与记录装不进那格箱子）'
+      + `（给它一格标注，如 \`${n}: list[int]\`；或者几处都造成同一种）`);
   }
 }
 

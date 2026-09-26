@@ -944,10 +944,11 @@ class CoreLowerer {
           + ' 类是引用、字段在堆上那一格里，内嵌一段定长内存要另一套零值');
       }
       if (t !== INT && t !== REAL && t !== BOOL && t !== STRING
-          && t.k !== 'vec' && t.k !== 'arr' && t.k !== 'dict' && t.k !== 'struct' && t.k !== 'class'
+          && t.k !== 'vec' && t.k !== 'arr' && t.k !== 'dict' && t.k !== 'dynamic'
+          && t.k !== 'struct' && t.k !== 'class'
           && t.k !== 'ptr' && t.k !== 'tptr' && t.k !== 'fn' && t.k !== 'blk') {
         return this.err(fd, `字段 ${nm}.${fn}：这一刀的字段只能是 int / real / bool / string、`
-          + `(vec T N)、(arr T)、(dict K V)、(ptr T)、(tptr T)、(blk T N)、(fnty (T...) R) `
+          + `(vec T N)、(arr T)、(dict K V)、dyn、(ptr T)、(tptr T)、(blk T N)、(fnty (T...) R) `
           + `或另一个结构体/类，这里是 ${coreTypeText(t)}`);
       }
       seen.set(fn, true);
