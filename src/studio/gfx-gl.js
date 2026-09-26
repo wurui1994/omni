@@ -720,14 +720,28 @@ function uniLoc(idx) {
   return h;
 }
 
-/** `gluniform{1,2,3,4}f(句柄, …)`。句柄不认（着色器里没这个名字）就**当场报**。 */
-function uniSet(h, vals) {
+/**
+ * `gluniform{1,2,3,4}{f,i}(句柄, …)`。句柄不认（着色器里没这个名字）就**当场报**。
+ *
+ * **整数那一档非有不可**（`ints === true`）：采样器与开关位走它（`sampler2D` 只吃
+ * `uniform1i`，用 `1f` 喂它在 WebGL2 上是 `INVALID_OPERATION`）。
+ * 撞过：`evaldraw/demos/drawcone2.kc` 在页面上跑，帧函数第一帧就抛
+ * "这格设备（WebGL2）上没有 'gluniform1i'"，帧循环当场停 —— CPU 备选那一档早就有它
+ * （`host/gfx-cpu.js` 的 `gluniform1i/2`），这边漏了。
+ */
+function uniSet(h, vals, ints = false) {
   const e = UNI.list[Math.trunc(h)];
   if (e === undefined) throw new Error(`gluniform：没有这格句柄 ${h}（glgetuniformloc 回的才算）`);
   if (e.loc === null) return 0;    /* 着色器里没用到那个 uniform —— GL 那边也是静默 */
   const gl = D.gl;
   gl.useProgram(e.prog);
-  if (vals.length === 1) gl.uniform1f(e.loc, vals[0]);
+  if (ints) {
+    const v = vals.map((x) => Math.trunc(x));
+    if (v.length === 1) gl.uniform1i(e.loc, v[0]);
+    else if (v.length === 2) gl.uniform2i(e.loc, v[0], v[1]);
+    else if (v.length === 3) gl.uniform3i(e.loc, v[0], v[1], v[2]);
+    else gl.uniform4i(e.loc, v[0], v[1], v[2], v[3]);
+  } else if (vals.length === 1) gl.uniform1f(e.loc, vals[0]);
   else if (vals.length === 2) gl.uniform2f(e.loc, vals[0], vals[1]);
   else if (vals.length === 3) gl.uniform3f(e.loc, vals[0], vals[1], vals[2]);
   else gl.uniform4f(e.loc, vals[0], vals[1], vals[2], vals[3]);
@@ -906,6 +920,11 @@ function call(name, args) {
     case 'gluniform2f/3': return uniSet(a(0), [a(1), a(2)]);
     case 'gluniform3f/4': return uniSet(a(0), [a(1), a(2), a(3)]);
     case 'gluniform4f/5': return uniSet(a(0), [a(1), a(2), a(3), a(4)]);
+    /* **整数那一档**（采样器与开关位）—— 见 `uniSet` 的头注。 */
+    case 'gluniform1i/2': return uniSet(a(0), [a(1)], true);
+    case 'gluniform2i/3': return uniSet(a(0), [a(1), a(2)], true);
+    case 'gluniform3i/4': return uniSet(a(0), [a(1), a(2), a(3)], true);
+    case 'gluniform4i/5': return uniSet(a(0), [a(1), a(2), a(3), a(4)], true);
     /* `gluniform(句柄, 值)` / `gluniform(句柄, 个数, 数组)`：说明书里是同一个名字两种元数。
        数组那一档要一格数组实参 —— 宿主面只收 double，所以**明着拒**。 */
     case 'gluniform/2': return uniSet(a(0), [a(1)]);
