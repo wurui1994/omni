@@ -3023,3 +3023,25 @@ otim = tim; do { tim = klock(); dtim = tim-otim; } while (dtim < 1/60);
 
 落在 `adapter.js` 的 `tailReturn`（`bodyOf` 的收尾一格），所以两门语言、每个函数体
 都是同一条路。
+
+### 34.7 读像素那两格 + 调用点的 `&` 可省 + `if (常量)`
+
+一刀三格，都是"接上体素那一族之后顺着语料往下走"挖出来的：
+
+1. **`getpix(x,y,&r,&g,&b)` / `getrgb(col,&r,&g,&b)`**（`evaldraw.txt:1478`/`:1490`）——
+   落在 `gfx3-rt.js`（`g3_getpix5` / `g3_getrgb4`），`&r,&g,&b` 三格走 `BLOCK_ARGS`
+   那张白名单配对着发（块 + 偏移），设备那一层一行新代码都没加（宿主设备早有
+   `getpix/2`）。`getrgb` 回 **alpha**、`getpix` 回 **Z 深度** —— 后者这条腿没有 z 缓冲
+   ⇒ 回 0（明写偏差）。
+2. **调用点的 `&` 可省**：`demos/glow.kc:21` 写的是 `getpix(x,y,fr,fg,fb)`。
+   这条规矩拿 `eval_bench` 量过（`(x){w=0;f(w);return(w);}` 配 `f(&a){a=7;}` 回 **7**）
+   —— 用户函数那一侧早就照它做了（`collectBoxed` 的 `call` 那一支），这一刀把
+   **宿主/生成那一族**（`BLOCK_ARGS` 里的位置）也接上。
+3. **`if (常量)` 要补 truthy**：`enum` 与宿主常量折成字面量之后**忘了按位置补
+   `!= 0`**，于是 `if (TEXT)`（`TEXT` 是个 `enum`）落成 `(if (real 1) …)`，
+   方言当场拦下"条件要是 bool"。这一格是先前就有的洞，只是从前没有脚本走到过。
+
+账：`demos/plussing.kc` 真跑了（读自己画的像素认数字，印 `5 + 8 = 13`）；
+`demos/glow.kc` 编得过、跑得完，但**图是黑的** —— 它的光源是 `printchar` 画的文字，
+而画布文字那一族（`setfont`/`printchar`/`printg`）还是空操作（任务 #28）。
+这一条**明着记下来**：不许当成"又过了一份"（那正是"两边都不画白拿分"那条纪律）。

@@ -383,11 +383,19 @@ function exprOf(x, C, want = 'val') {
       return want === 'cond' ? truthy(v) : v;
     }
     /* `enum` 是**编译期常量**（`eval.txt`：数组长度可以用它）—— 就地换成那个数。
-       **除了被本函数里的量盖住的那几个**（见 `bodyOf` 里 `C.shadow` 的头注）。 */
-    if (C.enums.has(n) && C.shadow?.has(n) !== true) return num(C.enums.get(n));
+       **除了被本函数里的量盖住的那几个**（见 `bodyOf` 里 `C.shadow` 的头注）。
+       站在条件位置上也要补 truthy：`if (TEXT)`（`demos/glow.kc:23`，`TEXT` 是个 enum）
+       折成 `(if (real 1) …)` 会被方言当场拦下（"条件要是 bool"）。 */
+    if (C.enums.has(n) && C.shadow?.has(n) !== true) {
+      const v = num(C.enums.get(n));
+      return want === 'cond' ? truthy(v) : v;
+    }
     /* 宿主的那批常量（PolyDraw 的 `GL_TRIANGLE_FAN` 之类：`myext[]` 里它们是
        "名字 -> 一格 double"）。值照 `GL/gl.h`，不是我们自己编的号。 */
-    if (C.host.consts?.has(n)) return num(C.host.consts.get(n));
+    if (C.host.consts?.has(n)) {
+      const v = num(C.host.consts.get(n));
+      return want === 'cond' ? truthy(v) : v;
+    }
     /* **设备/联网不在场那四格**（见 `ABSENT_VARS` 的头注：值是说明书给的）。
        被本函数里的量盖住就不算（与 `enum` 那一格同一手）。 */
     if (ABSENT_VARS.has(n) && C.shadow?.has(n) !== true) {
@@ -2498,6 +2506,20 @@ function collectBoxed(x, C, out = new Set(), blocks = new Set()) {
           pi += block ? 2 : 1;
           const a = as[i];
           if (!block || !isList(a) || tag(a) !== 'name') continue;
+          const n = idOf(a);
+          if (!C.arrs.has(n) && !C.svars.has(n) && !blocks.has(n)) out.add(n);
+        }
+      }
+      /* **宿主/生成那一族也一样**（`BLOCK_ARGS` 那张白名单）：`getpix(x,y,fr,fg,fb)`
+         （`demos/glow.kc:21`）与 `pic(u,v,fr,fg,fb)` 都没写 `&`，而那几格要的是一整块。
+         "调用点的 `&` 可省"这条规矩拿 `eval_bench` 量过（`(x){w=0;f(w);return(w);}`
+         配 `f(&a){a=7;}` 回 7），对宿主那一族与用户函数是同一条。 */
+      const bi = BLOCK_ARGS.get(`${idOf(h)}/${kids(x).length - 1}`);
+      if (bi !== undefined) {
+        const as = kids(x).slice(1);
+        for (const i of bi) {
+          const a = as[i];
+          if (a === undefined || !isList(a) || tag(a) !== 'name') continue;
           const n = idOf(a);
           if (!C.arrs.has(n) && !C.svars.has(n) && !blocks.has(n)) out.add(n);
         }
