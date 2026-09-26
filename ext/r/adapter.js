@@ -259,6 +259,8 @@ const FN_DEPS = new Map([
   ['r_upper_v', []],
   ['r_lower_v', ['r_lower']],
   ['r_lower', []],
+  /* `strtoi` 自己按字符解一遍（要小写那一格与 NA）。 */
+  ['r_strtoi', ['r_lower', 'r_na']],
   ['r_pick_str', []],
   ['r_sat1', []],
   ['r_nm_pos', []],
@@ -1016,6 +1018,7 @@ const NAMED_OK = new Map([
   ['seq', new Set(['by', 'length.out'])],
   ['sort', new Set(['decreasing', 'method', 'na.last'])],
   ['order', new Set(['method', 'decreasing'])],
+  ['strtoi', new Set(['base'])],
   ['strsplit', new Set(['fixed'])],
   ['grepl', new Set(['fixed'])], ['sub', new Set(['fixed'])], ['gsub', new Set(['fixed'])],
   ['grep', new Set(['fixed', 'value'])],
@@ -1103,7 +1106,7 @@ const BUILTINS = new Set([
   'cat', 'paste', 'paste0', 'c', 'list', 'length', 'nchar', 'return', 'is.null',
   'as.integer', 'as.numeric', 'as.character', 'as.logical', 'abs', 'seq_len', 'is.na', 'is.nan',
   'sum', 'mean', 'max', 'min', 'rev', 'seq_along', 'which', 'any', 'all',
-  'print', 'invisible', 'xor', 'isTRUE', 'isFALSE', 'ifelse', 'identical',
+  'print', 'invisible', 'xor', 'isTRUE', 'isFALSE', 'ifelse', 'identical', 'strtoi',
   /* base 里"向量进向量出"那一族 + 两格统计量。`seq` 与 `rep` 是造向量的。 */
   'sort', 'cumsum', 'prod', 'range', 'diff', 'head', 'tail', 'var', 'sd', 'rep', 'seq', 'rep_len',
   /* 两条向量的那两格统计量（`var(x, y)` 与 `cov(x, y)` 是同一件事）。 */
@@ -1837,6 +1840,8 @@ function applyTy(fn, x, types) {
     case 'isTRUE': case 'isFALSE': return BOOL;
     /* `identical` 回的是**两态**（它从不回 NA）。 */
     case 'identical': return BOOL;
+    /* `strtoi` 回一格数（这一层没有整数的缺失，NA 走 NaN 载荷，所以是 double）。 */
+    case 'strtoi': return REAL;
     case 'ifelse': {
       const sArgs = posArgs(x);
       /* 两支是串 → 出字符向量（test 是向量）或者一格串（test 是标量）。 */
@@ -5077,6 +5082,35 @@ function callOf(x, types, extra, want, stmtPos) {
        * 分不出 R 的 integer 向量与 double 向量 —— 照值比会答 TRUE 而 R 答 FALSE，
        * 那是静默答错（见 ext/r/SPEC.md 第四节第 13 条）。
        */
+      /**
+       * **`strtoi(x, base)`**（2026-09-26）：`base` 只接 **整数字面量**，认 `0`
+       * （R 的默认，照 `strtol` 自己认前缀）与 `2..36`；`1` 与 `37` 往上 R 自己也报错。
+       * 值那一半在 `r_strtoi` 里按字符解（那一格的注里记着量出来的一整排口径）。
+       *
+       * 默认那一格**不是 10**：`args(strtoi)` 印的是 `base = 0L`，所以 `strtoi("011")`
+       * 是 9 而不是 11。一开始按 10 写，`.omni-cache/probe/sti.R` 那一行就差一个字节 ——
+       * 这种"看着像对"的默认值正是静默答错的来路。
+       */
+      case 'strtoi': {
+        if (n < 1 || n > 2) throw new Error(`r->IR: strtoi() 接一格或两格实参（给了 ${n}）`);
+        const bn2 = namedArg(x, 'base') ?? (n === 2 ? all[1] : undefined);
+        let bv2 = 0;
+        if (bn2 !== undefined && bn2 !== null) {
+          if (!isList(bn2) || tag(bn2) !== 'num') {
+            throw new Error('r->IR: strtoi() 的 `base` 只接一格整数字面量（0 或 2..36）');
+          }
+          bv2 = Number(String(leaf(kids(bn2)[0])).replace(/L$/, ''));
+          if (!Number.isInteger(bv2) || bv2 === 1 || bv2 < 0 || bv2 > 36) {
+            throw new Error(`r->IR: strtoi() 的 \`base\` 只接 0 或 2..36（给了 ${bv2}）`);
+          }
+        }
+        const xt2 = all[0] === null ? STR : typeOfExpr(all[0], types);
+        if (isStrVec(xt2)) {
+          throw new Error('r->IR: strtoi() 在字符向量上还没接（一格串那一档接了）');
+        }
+        if (xt2.kind !== 'string') throw new Error(`r->IR: strtoi() 的第一格实参要是串（是 ${xt2.kind}）`);
+        return lglCall('r_strtoi', ev(0), { kind: 'int', value: bv2 });
+      }
       case 'identical': {
         if (n !== 2) throw new Error(`r->IR: identical() 要两格实参（给了 ${n}）`);
         const it = [0, 1].map((k) => (all[k] === null ? REAL : typeOfExpr(all[k], types)));
@@ -6729,6 +6763,96 @@ function strFnDecl(name) {
         letI('m', call1('slen', t)),
         iff(b('>', nm('m'), nm('n')), [ret({ kind: 'bool', value: false })]),
         ret(b('==', call1('ssub', s, b('-', nm('n'), nm('m')), nm('m')), t)),
+      ],
+    };
+  }
+  if (name === 'r_strtoi') {
+    /**
+     * `strtoi(s, base)` —— **按字符自己解一遍**（核心方言里没有"串 → 数"，见 SPEC 第四节）。
+     * 量出来的 R 口径（2026-09-26，`Rscript`）：
+     *
+     *   strtoi("ff", 16)      255      大小写都认（`"FF"` 也是 255）
+     *   strtoi("777", 8)      511      strtoi("101", 2) 5、strtoi("z", 36) 35
+     *   strtoi("0x1f", 16)    31       base 16 认 `0x` / `0X` 前缀
+     *   strtoi(" 12", 10)     12       **前导**空白跳过（空格与制表符）
+     *   strtoi(" 12 ", 10)    NA       **后头**多一个字符就 NA（整串必须吃完）
+     *   strtoi("12abc", 10)   NA       同上；strtoi("1.5", 10) 也是 NA
+     *   strtoi("-ff", 16)     -255     strtoi("+5", 10) 5、strtoi("-", 10) NA
+     *   strtoi("", 16)        NA       一位数字都没有就 NA
+     *   strtoi("2147483647")  2147483647
+     *   strtoi("2147483648")  NA       **出了 int 的范围就 NA**
+     *   strtoi("-2147483648") NA       连 INT_MIN 也是 NA（R 拿它当 NA_INTEGER）
+     *
+     * **`base` 的默认是 `0L` 而不是 10**（`args(strtoi)` 印的就是 `base = 0L`），那一档
+     * 照 `strtol` 自己认前缀，量出来：
+     *
+     *   strtoi("011")         9        前导 `0` → 八进制
+     *   strtoi("08")          NA       八进制里没有 `8`
+     *   strtoi("0x11")        17       `0x` → 十六进制
+     *   strtoi("11")          11       别的还是十进制
+     *   strtoi("011", 10L)    11       明写 base 就不认前缀
+     *
+     * 办法：先 `r_lower` 把整串压成小写（顺带把 `0X` 变 `0x`），再拿一张 36 位的数字表
+     * `(sfind 表 这个字符)` 查每一位 —— 与 `r_lower` 同一条路，不新加算子。
+     * 回的是 **double**（这一层没有整数的缺失，NA 走 NaN 载荷那一格）。
+     */
+    const DIG = '0123456789abcdefghijklmnopqrstuvwxyz';
+    const L = nm('L');
+    const at = (e) => call1('ssub', L, e, I(1));
+    const naOf = () => ({ kind: 'call', fn: { kind: 'name', name: useFn('r_na') }, args: [] });
+    const isSp = (e) => b('||', b('==', at(e), S(' ')), b('==', at(e), S('\t')));
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 's', type: STR }, { name: 'bs', type: INT }],
+      ret: REAL,
+      body: [
+        { kind: 'let', name: 'L', type: STR, init: { kind: 'call', fn: { kind: 'name', name: useFn('r_lower') }, args: [s] } },
+        letI('n', call1('slen', L)),
+        letI('i', I(0)),
+        /* 前导空白（R 走 strtol，开头的空格与制表符是跳过的）。 */
+        { kind: 'while', cond: b('&&', b('<', nm('i'), nm('n')), isSp(nm('i'))), body: [set('i', b('+', nm('i'), I(1)))] },
+        letI('neg', I(0)),
+        iff(b('&&', b('<', nm('i'), nm('n')), b('==', at(nm('i')), S('-'))),
+          [set('neg', I(1)), set('i', b('+', nm('i'), I(1)))],
+          [iff(b('&&', b('<', nm('i'), nm('n')), b('==', at(nm('i')), S('+'))),
+            [set('i', b('+', nm('i'), I(1)))])]),
+        /* 真正用的底数 —— `base = 0` 那一档要自己认前缀，所以拿一格本地的来写。 */
+        letI('bb', nm('bs')),
+        iff(b('==', nm('bb'), I(0)),
+          /* `strtol` 的 base 0：`0x` / `0X` → 16、前导 `0` → 8（那个 `0` 还算一位
+             数字，所以 `i` 不动）、别的 → 10。 */
+          [iff(b('&&', b('<', b('+', nm('i'), I(1)), nm('n')),
+            b('&&', b('==', at(nm('i')), S('0')), b('==', at(b('+', nm('i'), I(1))), S('x')))),
+          [set('bb', I(16)), set('i', b('+', nm('i'), I(2)))],
+          [iff(b('&&', b('<', nm('i'), nm('n')), b('==', at(nm('i')), S('0'))),
+            [set('bb', I(8))],
+            [set('bb', I(10))])])],
+          /* 明写了 base 的那一档：`0x` 只在 16 认（量出来 `strtoi("0x1f", 10)` 是 NA）。 */
+          [iff(b('&&', b('==', nm('bb'), I(16)),
+            b('&&', b('<', b('+', nm('i'), I(1)), nm('n')),
+              b('&&', b('==', at(nm('i')), S('0')), b('==', at(b('+', nm('i'), I(1))), S('x'))))),
+          [set('i', b('+', nm('i'), I(2)))])]),
+        letI('cnt', I(0)),
+        letI('acc', I(0)),
+        { kind: 'let', name: 'bad', type: BOOL, init: { kind: 'bool', value: false } },
+        {
+          kind: 'while',
+          cond: b('&&', b('<', nm('i'), nm('n')), { kind: 'unop', op: '!', operand: nm('bad') }),
+          body: [
+            letI('k', call1('sfind', S(DIG), at(nm('i')))),
+            iff(b('||', b('<', nm('k'), I(0)), b('>=', nm('k'), nm('bb'))),
+              [set('bad', { kind: 'bool', value: true })],
+              [
+                set('acc', b('+', b('*', nm('acc'), nm('bb')), nm('k'))),
+                iff(b('>', nm('acc'), I(2147483647)), [set('bad', { kind: 'bool', value: true })]),
+                set('cnt', b('+', nm('cnt'), I(1))),
+                set('i', b('+', nm('i'), I(1))),
+              ]),
+          ],
+        },
+        iff(b('||', nm('bad'), b('==', nm('cnt'), I(0))), [ret(naOf())]),
+        ret(call1('toreal', { kind: 'ternary', cond: b('==', nm('neg'), I(1)), then: b('-', I(0), nm('acc')), else_: nm('acc') })),
       ],
     };
   }
@@ -11625,7 +11749,8 @@ function vecFnDecl(name) {
   }
   if (name === 'r_substr' || name === 'r_starts' || name === 'r_ends'
       || name === 'r_padl' || name === 'r_padr' || name === 'r_pad0' || name === 'r_lower'
-      || name === 'r_trim' || name === 'r_chartr' || name === 'r_format1') {
+      || name === 'r_trim' || name === 'r_chartr' || name === 'r_format1'
+      || name === 'r_strtoi') {
     return strFnDecl(name);
   }
   if (STRV_FNS.has(name)) return strvFnDecl(name);

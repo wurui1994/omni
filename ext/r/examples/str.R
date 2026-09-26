@@ -148,3 +148,22 @@ print(substring("abcdef", 1:3, 3:5))
 cat(nchar(substring("abcdef", 1:3, 3:5)), "\n")
 cat(rev(substring("abcdef", 1:3, 3:5)), "\n")
 cat(toupper(substring("abcdef", 1:2, 2:3)), "\n")
+
+# **`strtoi(x, base)`** —— 核心方言里没有"串 → 数"，这一格按字符自己解一遍（一张 36 位的
+# 数字表 + `sfind`，跟 `tolower` 同一条路）。整串必须吃完：后头多一个字符就 NA。
+# **`base` 的默认是 `0L` 不是 10**（`args(strtoi)` 印的就是），那一档照 `strtol` 认前缀 ——
+# `0x` → 16、前导 `0` → 8、别的 → 10，所以 `strtoi("011")` 是 9 而 `strtoi("011", 10L)` 是 11。
+cat(strtoi("ff", 16L), strtoi("FF", 16L), "\n")
+cat(strtoi("777", 8L), strtoi("101", 2L), strtoi("z", 36L), strtoi("Z", 36L), "\n")
+cat(strtoi("0x1f", 16L), strtoi("0X1f", 16L), strtoi("-ff", 16L), "\n")
+cat(strtoi("10", 10L), strtoi("-10", 10L), strtoi("+5", 10L), strtoi(" 12", 10L), "\n")
+cat(strtoi("zz", 16L), strtoi("", 16L), strtoi(" 12 ", 10L), strtoi("12abc", 10L), "\n")
+cat(strtoi("1.5", 10L), strtoi("-", 10L), strtoi("0x1f", 10L), "\n")
+# 出了 int 的范围就 NA —— 连 INT_MIN 也是（R 拿那一格当 NA_INTEGER）。
+cat(strtoi("2147483647", 10L), strtoi("2147483648", 10L), strtoi("-2147483648", 10L), "\n")
+cat(strtoi("011"), strtoi("11"), strtoi("08"), "\n")
+cat(strtoi("0x11"), strtoi("0X11"), strtoi("-0x11"), "\n")
+cat(strtoi("0"), strtoi("00"), strtoi("0x"), strtoi("007"), "\n")
+cat(strtoi("011", 10L), strtoi("011", 8L), "\n")
+cat(strtoi("ff", base = 16L) + 1, "\n")
+cat(is.na(strtoi("zz", 16L)), strtoi("7fffffff", 16L), "\n")
