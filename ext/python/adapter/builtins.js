@@ -195,6 +195,39 @@ export function rangeList(from, to, step, C) {
   return h.wrap(out);
 }
 
+/* ─── 字典上那几个（键表已经由方言的 `(dkeys d)` 交出来了）─────────────────── */
+
+/**
+ * `d.values()` —— 走一遍键表，逐个 `dget`。
+ *
+ * 为什么不给方言加一格 `dvalues`：键表那一格是**非加不可**的（不遍历就没有别的路
+ * 走到键上），而值表是它的一个推论 —— 加了就要连 `.items()` 一起加，方言那一层
+ * 又不该知道 python 的视图语义。次序与 `.keys()` 同（插入序）。
+ */
+export function valuesList(d0, C) {
+  const h = holder(C);
+  const d = h.keep(d0, 'dv_d');
+  const t = C.tyOfIR(d);
+  if (t.kind !== 'map') throw new Error(`python->IR: \`.values()\` 的接收者装的是 ${t.kind}`);
+  const vt = arrOf(t.value);
+  const ks = h.decl('dv_ks', arrOf(t.key), call1('dkeys', [d]));
+  const out = h.decl('dv_o', vt, call1('anew', [{ kind: 'type', type: vt }, int(0)]));
+  const i = h.decl('dv_i', INT, int(0));
+  h.pre.push({
+    kind: 'while',
+    cond: bin('<', i, call1('alen', [ks])),
+    body: [
+      {
+        kind: 'builtin-stmt',
+        name: 'apush',
+        args: [out, call1('dget', [d, { kind: 'index', obj: ks, index: i }])],
+      },
+      inc(i),
+    ],
+  });
+  return h.wrap(out);
+}
+
 /* ─── 表上那几个"找"与"改"（`in` / index / count / insert / remove / …）─────── */
 
 /**

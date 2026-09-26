@@ -1315,6 +1315,9 @@ export function applyBuiltin(I, e, a) {
     case 'dictSet': a[0].set(a[1], a[2]); return a[2];
     case 'remove': return a[0].delete(a[1]);
     case 'keys': return [...a[0].keys()];
+    // `keys_arr`（方言的 `(dkeys d)`）：这条腿上 arr 与 list 同是裸 JS 数组（arrNew 回 `[]`），
+    // 所以与 `keys` 逐字同一句。分名字只为 C 那条腿。
+    case 'keys_arr': return [...a[0].keys()];
     case 'items': return [...a[0]];
     case 'byteAt': return byteAt(a[0], a[1]);
     case 'substr': return substr(a[0], a[1], a[2]);

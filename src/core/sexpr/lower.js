@@ -37,7 +37,7 @@
  *         | (splat TYPE E) | (vlit TYPE E...) | (lane E N) | (hsum E)
  *         | (bnew TYPE E) | (bget E E) | (blen E) | (gid)
  *         | (anew TYPE E) | (aget E E) | (alen E) | (apop E)
- *         | (dnew TYPE) | (dget E E) | (dhas E E) | (dlen E)
+ *         | (dnew TYPE) | (dget E E) | (dhas E E) | (dlen E) | (dkeys E)
  *         | (new NAME) | (fld E 字段) | (cnew NAME)
  *         | (fnref NAME) | (mkclo NAME E...) | (cap NAME) | (callfn E E...)
  *         | (dyn E) | (dtag E) | (asint E) | (asreal E) | (asbool E) | (asstr E)
@@ -2882,7 +2882,8 @@ class CoreLowerer {
       || h === 'pisnull' || h === 'pfield' || h === 'pthin' || h === 'pelem'
       || h === 'pcast' || h === 'peq') return this.ptrExpr(n, h);
     if (h === 'anew' || h === 'aget' || h === 'alen' || h === 'apop') return this.arrExpr(n, h);
-    if (h === 'dnew' || h === 'dget' || h === 'dhas' || h === 'dlen') return this.dictExpr(n, h);
+    if (h === 'dnew' || h === 'dget' || h === 'dhas' || h === 'dlen'
+      || h === 'dkeys') return this.dictExpr(n, h);
     // 结构体的两条读侧（写侧是语句 fldset）：`(new Point)` 零值，`(fld p x)` 读字段。
     // 没有"结构体字面量"：字段一多，字面量就要么按顺序（改字段顺序会静默改语义）、
     // 要么带名字（那是命名实参那套东西，属于各语言的前端）。零值 + 逐个 fldset 少一条路。
@@ -3181,9 +3182,20 @@ class CoreLowerer {
    *   (dhas d k)          在不在              -> contains 内建
    *   (dlen d)            有几格              -> length 内建
    *   (dset d k v)        写；键不在就**长一格**（语句，见 dictWrite）
+   *   (dkeys d)           所有的键，交一格 `(arr K)`（第一百六十片）
+   *
+   * `dkeys` 为什么不直接落成 `keys` 那个内建：`keys` 交的是 `list<K>`，而方言里
+   * 只有 `(arr T)` 这一格可命名 —— `list` 这个词根本没有。两者在 js/解释两条腿上
+   * 同是一个裸 JS 数组（`$anew` 回 `[]`、`arrNew` 回 `[]`），**只有 C 那条腿要转**
+   * （arr 是 `{len, cap, items}`，list 是 `{items, len, cap}`，字段顺序不同，
+   * 不能互相当）。于是这里发一个**新名字** `keys_arr`，C 那边逐字典生成一个
+   * `_keysarr` 把 `_keys` 的结果抄进 `omni_arr_*`，js/解释两腿与 `keys` 逐字同一句。
+   *
+   * 键的次序：就是 `_keys` 的次序 —— 插入序（`d->keys[]` 按插入追加，删除只灭 live）。
+   * 与 Python 3.7+ 的 dict 同一条，所以 `for k in d` 对得上。
    *
    * 刻意没有的：字面量（`(dnew …)` + 逐个 `(dset …)` 少一条路，与结构体那儿同一条理由）、
-   * 遍历（键的次序要先定死，那是另一刀）、删除。
+   * 删除。
    */
   dictExpr(n, h) {
     if (h === 'dnew') {
@@ -3198,6 +3210,12 @@ class CoreLowerer {
       return this.err(n, `${h} 的第一个实参要是字典，这里是 ${coreTypeText(d.type)}`);
     }
     if (h === 'dlen') return { kind: 'Builtin', name: 'len', args: [d], recvType: d.type, type: INT };
+    if (h === 'dkeys') {
+      return {
+        kind: 'Builtin', name: 'keys_arr', args: [d],
+        recvType: d.type, type: arrType(d.type.key),
+      };
+    }
     const k = this.expr(n.items[2]);
     if (k === null) return null;
     if (!sameCoreType(k.type, d.type.key)) {

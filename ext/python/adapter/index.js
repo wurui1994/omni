@@ -652,9 +652,20 @@ function pairIter(target, iterTok, C) {
   if (target === undefined || tag(target) !== 'tuple') return null;
   const ts = kids(target);
   if (ts.length !== 2 || ts.some((t) => tag(t) !== 'n')) return null;
-  if (iterTok === undefined || tag(iterTok) !== 'call' || tag(kids(iterTok)[0]) !== 'n') return null;
-  const fn = String(nameOf(kids(iterTok)[0]));
+  if (iterTok === undefined || tag(iterTok) !== 'call') return null;
+  const callee = kids(iterTok)[0];
   const as = kids(part(iterTok, 'args') ?? { kind: 'list', items: [] });
+  /* `for k, v in d.items():` —— 被调的是一格 `attr`（不是名字），所以单独一支。
+     交的两格就是字典的键与值：走一遍 `(dkeys d)`，值再 `(dget d k)` 取。 */
+  if (tag(callee) === 'attr') {
+    if (String(nameOf(kids(callee)[1])) !== 'items' || as.length !== 0) return null;
+    const recv = kids(callee)[0];
+    const dt = tyOfCst(recv, C);
+    if (dt === null || dt.kind !== 'map') return null;
+    return { fn: 'items', args: [recv], t0: dt.key, t1: dt.value };
+  }
+  if (tag(callee) !== 'n') return null;
+  const fn = String(nameOf(callee));
   if (fn === 'enumerate' && (as.length === 1 || as.length === 2)) {
     const et = elemOf(tyOfCst(as[0], C), as[0]);
     return { fn, args: as, t0: INT, t1: et };
@@ -697,6 +708,17 @@ function pairFor(x, pair, once, pre, C) {
       ? idx
       : { kind: 'binop', op: '+', left: idx, right: start };
     second = at(box);
+  } else if (pair.fn === 'items') {
+    /* `d.items()` —— 键表落一格临时量（`(dkeys d)` 是抄的一份，循环里 `dget` 取值）。 */
+    const d = once(pair.args[0], 'items_d');
+    const kn = C.fresh('items_ks');
+    const kt = arrOf(pair.t0);
+    C.bind(kn, kt);
+    pre.push({ kind: 'let', name: kn, type: kt, init: { kind: 'builtin', name: 'dkeys', args: [d] } });
+    const ks = { kind: 'name', name: kn };
+    cond = { kind: 'binop', op: '<', left: idx, right: { kind: 'builtin', name: 'alen', args: [ks] } };
+    first = { kind: 'index', obj: ks, index: idx };
+    second = { kind: 'builtin', name: 'dget', args: [d, first] };
   } else {
     const a = once(pair.args[0], 'zip_a');
     const b = once(pair.args[1], 'zip_b');
@@ -736,6 +758,8 @@ function pairFor(x, pair, once, pre, C) {
   if (it === null) return null;
   if (it.kind === 'arr') return it.elem;
   if (it.kind === 'string') return STR;
+  /* `for k in d:` —— python 走的是键（不是值，也不是键值对）。 */
+  if (it.kind === 'map') return it.key;
   return null;
 }
 
@@ -1245,25 +1269,36 @@ function forStmt(x, C) {
   }
 
   const box = once(iter, 'iter');
-  const bt = typeOfIR(box, C);
+  let src = box;
+  let bt = typeOfIR(box, C);
+  /* `for k in d:` —— python 走的是**键**。`(dkeys d)` 交一格 `(arr K)`（插入序），
+     于是这一格落成"键表 + 下标循环"，与走一遍表逐字同一条路。 */
+  if (bt.kind === 'map') {
+    const kn = C.fresh('for_ks');
+    const kt = arrOf(bt.key);
+    C.bind(kn, kt);
+    pre.push({ kind: 'let', name: kn, type: kt, init: { kind: 'builtin', name: 'dkeys', args: [box] } });
+    src = { kind: 'name', name: kn };
+    bt = kt;
+  }
   if (bt.kind !== 'arr' && bt.kind !== 'string') {
-    throw new Error(`python->IR: 在 ${bt.kind} 上走一遍还没接（range / 表 / 串接了）`);
+    throw new Error(`python->IR: 在 ${bt.kind} 上走一遍还没接（range / 表 / 串 / 字典接了）`);
   }
   const i = C.fresh('for_i');
   C.bind(i, INT);
   const item = bt.kind === 'arr'
-    ? { kind: 'index', obj: box, index: { kind: 'name', name: i } }
+    ? { kind: 'index', obj: src, index: { kind: 'name', name: i } }
     : {
       /* `(ssub E I N)` 是"从 I 起取 N 个" —— 一格字符就是 N = 1。 */
       kind: 'builtin', name: 'ssub',
-      args: [box, { kind: 'name', name: i }, { kind: 'int', value: 1 }],
+      args: [src, { kind: 'name', name: i }, { kind: 'int', value: 1 }],
     };
   return {
     kind: 'block',
     stmts: [...pre, {
       kind: 'for',
       init: { kind: 'let', name: i, type: INT, init: { kind: 'int', value: 0 } },
-      cond: { kind: 'binop', op: '<', left: { kind: 'name', name: i }, right: lenOf(box, C) },
+      cond: { kind: 'binop', op: '<', left: { kind: 'name', name: i }, right: lenOf(src, C) },
       post: {
         kind: 'assign', target: { kind: 'name', name: i },
         value: { kind: 'binop', op: '+', left: { kind: 'name', name: i }, right: { kind: 'int', value: 1 } },

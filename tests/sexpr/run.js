@@ -136,6 +136,11 @@ const CANT = {
     legs: ['run-llvm'],
     why: '同 48-dyn：LLVM 后端连一格 dyn 的槽位都落不下去，`(dnull)` 也是一格 dyn',
   },
+  '58-dkeys': {
+    legs: ['run-llvm'],
+    why: '同 44-dicts：LLVM 后端不支持聚合容器（dict / list / set），主语言也一样 —— '
+      + '这一格整份都在字典上，所以挡住它的还是那一条既有缺口',
+  },
   'dyn-asfn-wrong-tag': {
     legs: ['run-llvm'],
     why: '同 48-dyn：LLVM 后端连一格 dyn 的槽位都落不下去，报的不是这份用例要钉的那句',

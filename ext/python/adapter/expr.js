@@ -28,7 +28,7 @@ import { splitPercent, percentArity } from './percent.js';
 import {
   sumOf, pickList, anyAllOf, sortedOf, rangeList,
   joinOf, splitOf, stripOf, replaceOf, startsEndsOf, justOf,
-  containsList, indexOfList, countList,
+  containsList, indexOfList, countList, valuesList,
 } from './builtins.js';
 
 /** 一格名字节点（`(n x)`）的文本；也收裸记号。 */
@@ -477,10 +477,65 @@ export function pyRepr(e, C) {
     };
   }
   if (t.kind === 'arr') return listRepr(e, t, C);
-  if (t.kind === 'map') {
-    throw new Error('python->IR: 字典转串还没接 —— 方言里没有"走一遍字典的键"那一格算子');
-  }
+  if (t.kind === 'map') return dictRepr(e, t, C);
   throw new Error(`python->IR: ${t.kind} 转串还没接`);
+}
+
+/**
+ * `{'a': 1, 'b': 3}` —— 与 `listRepr` 同一条办法（现场发一趟循环），只是走的是
+ * `(dkeys d)` 交回来的那格键表，值再用 `(dget d k)` 取。
+ *
+ * 次序是**插入序**（`dkeys` 那一格钉死的），与 python 3.7+ 的 dict 同一条。
+ * 键与值都走 `pyRepr` —— 所以 `print({"a": 1})` 是 `{'a': 1}`（键带引号）。
+ */
+function dictRepr(box, t, C) {
+  const pre = [];
+  let src = box;
+  if (!isPure(box)) {
+    const n = C.fresh('dr_d');
+    C.bind(n, t);
+    pre.push({ kind: 'let', name: n, type: t, init: box });
+    src = { kind: 'name', name: n };
+  }
+  const ks = C.fresh('dr_ks');
+  const s = C.fresh('dr_s');
+  const i = C.fresh('dr_i');
+  const kt = arrOf(t.key);
+  C.bind(ks, kt);
+  C.bind(s, STR);
+  C.bind(i, INT);
+  const ksv = { kind: 'name', name: ks };
+  const sv = { kind: 'name', name: s };
+  const iv = { kind: 'name', name: i };
+  const cat = (v) => ({ kind: 'assign', target: { kind: 'name', name: s }, value: { kind: 'binop', op: '+', left: sv, right: v } });
+  const k = { kind: 'index', obj: ksv, index: iv };
+  return {
+    kind: 'block-expr',
+    stmts: [
+      ...pre,
+      { kind: 'let', name: ks, type: kt, init: { kind: 'builtin', name: 'dkeys', args: [src] } },
+      { kind: 'let', name: s, type: STR, init: { kind: 'string', value: '{' } },
+      {
+        kind: 'for',
+        init: { kind: 'let', name: i, type: INT, init: { kind: 'int', value: 0 } },
+        cond: { kind: 'binop', op: '<', left: iv, right: { kind: 'builtin', name: 'alen', args: [ksv] } },
+        post: { kind: 'assign', target: { kind: 'name', name: i }, value: { kind: 'binop', op: '+', left: iv, right: { kind: 'int', value: 1 } } },
+        body: [
+          {
+            kind: 'if',
+            cond: { kind: 'binop', op: '>', left: iv, right: { kind: 'int', value: 0 } },
+            then: [cat({ kind: 'string', value: ', ' })],
+            else_: null,
+          },
+          cat(pyRepr(k, C)),
+          cat({ kind: 'string', value: ': ' }),
+          cat(pyRepr({ kind: 'builtin', name: 'dget', args: [src, k] }, C)),
+        ],
+      },
+      cat({ kind: 'string', value: '}' }),
+    ],
+    value: sv,
+  };
 }
 
 /** `[1, 4, 9]` —— 方言里没有"表转串"，所以现场发一趟循环拼出来。 */
@@ -1449,7 +1504,16 @@ function methodOf(recvTok, name, args, C) {
           : (both.kind === 'real' && dt.kind === 'int' ? toReal(args[1], C) : args[1]),
       };
     }
-    throw new Error(`python->IR: 字典上的 \`.${name}()\` 还没接（\`.get()\` 接了）`);
+    /* `d.keys()` —— 方言的 `(dkeys d)` 就是它（交一格 `(arr K)`，插入序）。
+       python 交的是个**视图**，我们交的是抄出来的一份表 —— 差别是"改字典之后视图会变"，
+       这一层不接（`list(d.keys())` 那种用法两者一样）。 */
+    if (name === 'keys' && args.length === 0) {
+      return { kind: 'builtin', name: 'dkeys', args: [recv] };
+    }
+    /* `d.values()` —— 键表走一遍，逐个 `dget`（`builtins.js`）。 */
+    if (name === 'values' && args.length === 0) return valuesList(recv, C);
+    throw new Error(`python->IR: 字典上的 \`.${name}()\` 还没接`
+      + '（接了的是 get / keys / values；`.items()` 只在 `for k, v in d.items():` 里接）');
   }
   throw new Error(`python->IR: \`.${name}()\` 的接收者装的是 ${t.kind} —— 还没接`);
 }

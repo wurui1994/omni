@@ -121,6 +121,11 @@ function builtinType(e, ctx) {
       return t.kind === 'map' ? t.value : INT;
     }
     case 'dhas': return BOOL;
+    /* `(dkeys d)` 交一格 `(arr K)`（不是 list —— 方言里没有那个词）。 */
+    case 'dkeys': {
+      const t = typeOf(e.args[0], ctx);
+      return arrOf(t.kind === 'map' ? t.key : INT);
+    }
     case 'alen': case 'dlen': case 'slen': case 'toint': case 'sfind': return INT;
     case 'toreal': case 'torealu': return REAL;
     /* 串那一族交出来的都是串（漏了 `ssub` 的症状是 `(let c int (ssub …))` —— 声明说 int，

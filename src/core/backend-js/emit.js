@@ -1106,6 +1106,9 @@ class JsEmitter {
       case 'dictSet': return `$dictSet(${a[0]}, ${a[1]}, ${a[2]})`;
       case 'remove': return `${a[0]}.delete(${a[1]})`;
       case 'keys': return `[...${a[0]}.keys()]`;
+      // `keys_arr`（方言的 `(dkeys d)`）与 `keys` 在这条腿上**逐字同一句**：arr 与 list
+      // 都是裸 JS 数组（`$anew` 回 `[]`）。分名字只为 C 那条腿 —— 那边两者结构体不同。
+      case 'keys_arr': return `[...${a[0]}.keys()]`;
       case 'items': return `[...${a[0]}]`;
       case 'byteAt': return `$byteAt(${a[0]}, ${a[1]})`;
       case 'substr': return `$substr(${a[0]}, ${a[1]}, ${a[2]})`;

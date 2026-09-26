@@ -1,0 +1,86 @@
+;; 字典的键（第一百六十片）：`(dkeys d)` 交一格 `(arr K)`。
+;;
+;; 这一格的存在理由是**遍历**：字典原先只有 dnew/dget/dset/dhas/dlen 五格，
+;; 谁都走不到"把键一个个拿出来"这一步 —— Python 那边的 `for k in d`、
+;; `d.keys()`、`print(d)` 全卡在这儿。
+;;
+;; 为什么交 arr 而不是 list：方言里 `list` 这个词根本没有，`(arr T)` 才是能写出来的
+;; 那一格。运行时里字典的 `_keys` 交的是 `list<K>`，两者的 C 结构体**字段顺序不同**
+;; （arr 是 {len, cap, items}，list 是 {items, len, cap}），所以 C 那条腿要抄一遍
+;; （backend-c 的 `keysArrFn` 逐字典生成 `_keysarr`）。js 与解释两条腿上 arr 与 list
+;; 同是一个裸 JS 数组，于是与 `keys` 逐字同一句。
+;;
+;; 次序钉死成**插入序**（`d->keys[]` 按插入追加，`live[]` 只灭不挪）—— 与 Python 3.7+
+;; 的 dict 同一条，所以上面那门语言的 `for k in d` 才对得上。这一份的 a/b/c 与 0/2
+;; 两串就是判这一条的。
+;;
+;; 两种键各压一格（string / int）：C 那条腿的 `omni_arr_*` 是按元素单态的四份
+;; （i64/f64/b8/str），少一格就是一个没声明的函数名。方言的字典键只收这两种
+;; （`(dict K V) 的键只能是 int 或 string`），所以 f64/b8 那两份到不了这儿。
+(module
+  ;; 键表在函数里取：字典是句柄，穿过参数照旧
+  (fn joinkeys ((d (dict string int))) string
+    (let ks (arr string) (dkeys (var d)))
+    (let out string (str ""))
+    (let i int (int 0))
+    (while (bin "<" (var i) (alen (var ks)))
+      (do
+        (set out (bin "+" (var out) (aget (var ks) (var i))))
+        (set i (bin "+" (var i) (int 1)))))
+    (ret (var out)))
+
+  (main
+    ;; 空字典：键表长 0（不是 null —— `_new(0, 零)` 交的是一格空数组）
+    (let m (dict string int) (dnew (dict string int)))
+    (print (alen (dkeys (var m))))
+
+    (dset (var m) (str "a") (int 1))
+    (dset (var m) (str "b") (int 3))
+    (dset (var m) (str "c") (int 9))
+    (let ks (arr string) (dkeys (var m)))
+    (print (alen (var ks)))
+    ;; 插入序
+    (print (aget (var ks) (int 0)))
+    (print (aget (var ks) (int 1)))
+    (print (aget (var ks) (int 2)))
+
+    ;; 交出来的是**抄的一份**：往键表里追一格，字典不动
+    (apush (var ks) (str "d"))
+    (print (alen (var ks)))
+    (print (dlen (var m)))
+
+    ;; 遍历：键表 + dget 就够了
+    (let k string (str ""))
+    (let sum int (int 0))
+    (let i int (int 0))
+    (let ks2 (arr string) (dkeys (var m)))
+    (while (bin "<" (var i) (alen (var ks2)))
+      (do
+        (set k (aget (var ks2) (var i)))
+        (print (bin "+" (bin "+" (var k) (str "=")) (tostr (dget (var m) (var k)))))
+        (set sum (bin "+" (var sum) (dget (var m) (var k))))
+        (set i (bin "+" (var i) (int 1)))))
+    (print (var sum))
+
+    ;; int 键（omni_arr_i64）
+    (let r (dict int real) (dnew (dict int real)))
+    (dset (var r) (int 0) (real 1.5))
+    (dset (var r) (int 2) (real 2.25))
+    (print (alen (dkeys (var r))))
+    (print (aget (dkeys (var r)) (int 0)))
+    (print (aget (dkeys (var r)) (int 1)))
+    (let t real (real 0.0))
+    (let j int (int 0))
+    (let rk (arr int) (dkeys (var r)))
+    (while (bin "<" (var j) (alen (var rk)))
+      (do
+        (set t (bin "+" (var t) (dget (var r) (aget (var rk) (var j)))))
+        (set j (bin "+" (var j) (int 1)))))
+    (print (var t))
+
+    ;; bool / real 的键方言压根不收（`(dict K V) 的键只能是 int 或 string`），
+    ;; 于是 C 那边的 `omni_arr_b8` / `omni_arr_f64` 这条路到不了 —— keysArrFn 里那道
+    ;; `t.key.k in HASH_FN` 的门是为将来留的，不是这一份在判的。
+
+    ;; 函数里取键表
+    (print (call joinkeys (var m)))))

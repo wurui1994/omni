@@ -13,7 +13,7 @@
 // 只有"按值嵌套"的 struct 需要拓扑排序。
 
 import { RUNTIME_INCLUDE, amalgamate } from '../runtime/c_runtime.js';
-import { cTypeName, listType, typeKey, cArrOps, arrIsBlob, loopLabelNeeds, sizeOf } from '../hir/types.js';
+import { cTypeName, listType, typeKey, cArrOps, arrIsBlob, loopLabelNeeds, sizeOf, arrType } from '../hir/types.js';
 import { JS_ABI, JS_ALL, JS_MEMBERS, JS_TAG_C } from '../hir/js_abi.js';
 import { C_ABI, C_TYPE, C_IN, C_OUT } from '../hir/c_abi.js';
 import { utf8Bytes } from '../host/utf8.js';
@@ -1540,10 +1540,41 @@ class CEmitter {
     if (t.k === 'dict') {
       this.line(`OMNI_DICT_DEFINE(${n}, ${cTypeName(t.key)}, ${cTypeName(t.val)}, `
         + `${HASH_FN[t.key.k]}, ${EQ_FN[t.key.k]}, ${KSTR_FN[t.key.k]}, ${cTypeName(listType(t.key))})`);
+      this.keysArrFn(t, n);
       return;
     }
     this.line(`OMNI_SET_DEFINE(${n}, ${cTypeName(t.elem)}, `
       + `${HASH_FN[t.elem.k]}, ${EQ_FN[t.elem.k]}, ${cTypeName(listType(t.elem))})`);
+  }
+
+  /**
+   * `(dkeys d)` 在这条腿上的那一格（第一百六十片）：逐字典生成
+   * `static omni_arr_<后缀> <字典>_keysarr(<字典> d)`。
+   *
+   * 为什么要抄一遍而不是把 `_keys` 的结果直接当 arr 用：两者的结构体**字段顺序不同** ——
+   * arr 是 `{len, cap, items}`（omni.h 的 `OMNI_ARR_DECL`），list 是 `{items, len, cap}`
+   * （omni_container.h 的 `OMNI_LIST_BODY`）。指针一转类型，`len` 读到的就是 `items`。
+   *
+   * 为什么走 `_keys` 而不是自己扫 `d->keys[]`：死格（`live[i] == false`，remove 留下的）
+   * 的跳过逻辑在 `_keys` 里，重写一遍就有两份。运行时那个共享宏一个字不动。
+   *
+   * js / 解释两条腿不需要这一步：那边 arr 与 list 同是裸 JS 数组。
+   */
+  keysArrFn(t, n) {
+    // 方言那一层的字典键只收 int 与 string，所以这里落到的只有 `omni_arr_i64` 与
+    // `omni_arr_str` 两份。这道门是给将来放宽键类型时留的：到不了 arrSuffix 认得的
+    // 那四格就干脆不发 —— 调用点会在 C 编译期炸成"没这个函数"，比静默发一段错的 C 好。
+    if (!(t.key.k in HASH_FN)) return;
+    const at = arrType(t.key);
+    const ht = cTypeName(at);
+    const ops = cArrOps(at);
+    const ln = cTypeName(listType(t.key));
+    this.line(`static ${ht} ${n}_keysarr(${n} d) {`);
+    this.line(`  ${ln} ks = ${n}_keys(d);`);
+    this.line(`  ${ht} out = ${ops}_new(ks->len, ${this.zeroExpr(t.key)});`);
+    this.line('  for (int64_t i = 0; i < ks->len; i++) out->items[i] = ks->items[i];');
+    this.line('  return out;');
+    this.line('}');
   }
 
   /**
@@ -2968,6 +2999,10 @@ class CEmitter {
       case 'contains': case 'remove': case 'keys': case 'items':
         return `${cTypeName(recv)}_${e.name}(${a.join(', ')})`;
       case 'dictGet': return `${cTypeName(recv)}_get(${a.join(', ')})`;
+      // `keys_arr`（方言的 `(dkeys d)`）：`_keys` 交的是 `list<K>`，这里要的是 `(arr K)`。
+      // 两者的 C 结构体**字段顺序不同**（arr 是 {len, cap, items}，list 是 {items, len, cap}），
+      // 不能互相当 —— 于是 containerDefine 逐字典生成一个 `_keysarr` 抄一遍。
+      case 'keys_arr': return `${cTypeName(recv)}_keysarr(${a[0]})`;
       case 'dictSet': return `${cTypeName(recv)}_set(${a.join(', ')})`;
       case 'byteAt': return `omni_byte_at(${a[0]}, ${a[1]})`;
       case 'substr': return `omni_substr(${a[0]}, ${a[1]}, ${a[2]})`;

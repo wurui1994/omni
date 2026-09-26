@@ -223,6 +223,34 @@ R 那一门（ADR-0045/0046/0047，`r-lang` 分支）已经把这条路走通过
   要对得上得借 `Objects/unicodeobject.c` 的大小写映射表（§一 的借用名单里本来就有它）。
   在那之前**只有 ASCII 那一档是对的**，`listmut.py` 里只钉 ASCII。
 
+* **`(dkeys D)` —— 走一遍字典的键**。方言加一格：交**所有的键**，一格 `(arr K)`，
+  次序是**插入序**（与 python 3.7+ 的 dict 同一条）。`for k in d` / `d.keys()` /
+  `d.values()` / `for k, v in d.items()` / `print(d)` / `str(d)` 都落在它上头。
+  判据：`tests/sexpr/cases/58-dkeys.sx` 四条腿（run / run-c / interp / interp --mir）
+  逐字节相同；`ext/python/examples/dictwalk.py` 三条腿与 python3 逐字节相同。
+
+  查过之后的落法比原先估的小得多：**js 与解释两条腿一行转换都不用** —— 那边 `arr` 与
+  `list` 同是一个裸 JS 数组（`$anew` 回 `[]`、`arrNew` 回 `[]`），所以 `keys_arr`
+  与 `keys` 逐字同一句。只有 **C 那条腿要抄一遍**：`omni_arr_*` 是
+  `{len, cap, items}`、list 是 `{items, len, cap}`，**字段顺序不同**，指针一转类型
+  `len` 就读到 `items` 上去了。于是 `backend-c` 的 `containerDefine` 逐字典生成一个
+  `static <字典>_keysarr`，里头调运行时那个 `_keys`（死格的跳过逻辑留在它那儿，
+  共享宏一个字不动）再抄进 `omni_arr_*`。原先记的两条出路（给方言加 `list` 那一档 /
+  在 OIR 里插一格转换节点）都不用走。
+
+  `.values()` 没给方言加算子：它是键表的一个推论（`builtins.js` 的 `valuesList`
+  现场发一趟循环，逐个 `dget`）。`.items()` 只在 `for k, v in d.items():` 里接
+  （走 `pairIter` 那条路，与 `enumerate` / `zip` 同一格下标循环）——
+  当值用要有元组，这一层没有元组那一档。
+
+  **明说的不足**（两条，都拿 python3 比出来的）：
+  `d.keys()` 在 python 里是个**视图**（`dict_keys([...])`，改字典之后跟着变、
+  `print` 出来带那层壳），我们交的是抄出来的一张表 —— `list(d.keys())` 那种写法
+  两边逐字相同，裸 `print(d.keys())` 不同。另一条是同一个作用域里**同一个名字**
+  当两张键类型不同的字典的循环变量：那个名字会合成 dyn（ADR-0008），而方言的
+  `dget` 的键要静态对上，于是报「dget 的键要是 string，这里是 dynamic」——
+  各起一个名字就行（`dictwalk.py` 里就是这么写的）。
+
 ### 下一刀，按顺序
 
 1. **箱子里的函数拆出来调**（`(asfn …)` 那一格 —— 于是 `f = g` 之后 `f()` 走得通，
@@ -233,26 +261,20 @@ R 那一门（ADR-0045/0046/0047，`r-lang` 分支）已经把这条路走通过
    （一格 `(class …)` 只有一份字段表），所以字段该退到 dyn，而那一层当场拒。
    现在 adapter 在自己这一侧报清楚并让人加标注；`sizeOf(dynamic) = 24` 已经有了，
    剩下的是 `structLayout` / 零值 / 四条腿各自的字段读写要一起验。
-4. **走一遍字典的键**（`for k in d` / `d.keys()` / `print(d)` 全卡在这一格）。
-   查过一遍，缺口的位置很具体：**运行时那一半早就有**
-   （`omni_container.h:215` 的 `NAME##_keys`，而且 `sexpr/lower.js:321-323` 每登记一格
-   `(dict K V)` 都顺手登记 `listType(k)`，**就是为了让生成的 C 里 `keys()` 编得过**），
-   `keys` 这格 Builtin 在 backend-c / backend-js / interp 三条腿上也都认。
-   卡的是**类型**：`_keys` 交出来的是 `list<K>`，而方言里只有 `(arr T)` 这一档，
-   `list` 这个词根本没有。两条出路都要先定下来：
-   给方言加 `list` 那一档（两种数组会把整层搞乱），还是让 `(dkeys D)` 交 `(arr K)`
-   并在 OIR 里插一格 list→arr 的转换节点（现在没有这样的节点）。
-   这一格不接，`print(dict)` 与 `for k in d` 就都还报"还没接"。
-5. **把借来的那份 `libomnipy` 接到语言里**。现在 `str(float)` 已经与 CPython 逐字节相同了
+3. **字典的键收 dyn，以及删一格**（`del d[k]` / `d.pop(k)`）。键那一侧现在只收
+   int 与 string（`(dict K V) 的键只能是 int 或 string`），所以"同一个循环变量走
+   两张键类型不同的字典"那一条挡在这儿；删那一格运行时有（`_remove`，墓碑都维护了），
+   方言没开口。
+4. **把借来的那份 `libomnipy` 接到语言里**。现在 `str(float)` 已经与 CPython 逐字节相同了
    （走我们自己那三份 `py_repr`），所以这一刀**不再是正确性问题**，而是"借来的那一半要
    真用上"：接上之后浮点格式化只有一份实现（CPython 的），三条腿不必各守一份。
    卡点还在：`cabi` 的类型词只有 `i32 i64 f64 ptr void`，**出串那一格怎么过**得先定
    （回 `ptr` 再转 `string`，还是给方言加一格算子），而且 `ccall` 在 JS 那条腿上要 N-API
    扩展（ADR-0038）—— 也就是说接上之后 `omni run` / `--mode js` 会退档，得先想清这一点。
-6. **再借两格**：`Objects/longobject.c`（大整数 —— 现在的 int 是 64 位，python 的没有上界）
+5. **再借两格**：`Objects/longobject.c`（大整数 —— 现在的 int 是 64 位，python 的没有上界）
    与 `Modules/_sre/`（正则）。这两格比浮点那一格耦合深，得先有"借来的东西怎么持有对象"
    那一层。
-7. **`try` / `with` / `match` / 生成器 / 闭包 / 装饰器** —— adapter 现在对它们当场报
+6. **`try` / `with` / `match` / 生成器 / 闭包 / 装饰器** —— adapter 现在对它们当场报
    "还没接"，不猜。
 
 ## 三、口径
