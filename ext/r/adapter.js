@@ -1438,6 +1438,16 @@ function namesExprOf(x, types) {
     if (as.length < 1 || !isStrVec(typeOfExpr(as[0], types))) return null;
     return exprOf(as[0], types);
   }
+  /**
+   * `mapply` 的 `USE.NAMES` —— 名字**只从第一格数据来**，而且只在那一格是字符向量时
+   * （量出来 `mapply(f, c(1,2), c("x","y"))` 没名字）。函数是第一格实参，所以数据从 1 起。
+   * 那条数据因此求值两遍（与 `sapply` 同一条账）。
+   */
+  if (fn === 'mapply') {
+    const as = posArgs(x);
+    if (as.length < 2 || !isStrVec(typeOfExpr(as[1], types))) return null;
+    return exprOf(as[1], types);
+  }
   /* 逐元素问一句那几格（`NAME_KEEP`）：长度不变、位置不动，名字**原样跟着**。
      这儿只看第一格实参 —— 那几格都是一元的。 */
   if (NAME_KEEP_LGL.has(fn) || NAME_KEEP_NUM.has(fn)) {
@@ -1823,13 +1833,21 @@ function applyTy(fn, x, types) {
   const bt = typeOfExpr(kids(fnode)[1], child);
   if (fn === 'Filter') return strIn ? RSTRV : dt;
   if (fn === 'Reduce') return bt.kind === 'string' ? STR : REAL;
-  /* `mapply` 的形参两格都是 double（字符向量那一侧没接 —— R 会加名字），
-     所以上头那趟按 `strIn` 绑的类型对它不适用；回的种类还是看函数体。 */
+  /**
+   * `mapply` 的两格数据各自可以是数值向量或**字符向量**（2026-09-26 接了），所以形参
+   * 一格一格地绑；回的种类看函数体。**名字只从第一格数据来**（R 的 `USE.NAMES`：
+   * 量出来 `mapply(f, c("x","y"), c("1","2"))` 的名字是 `x y`，
+   * 而 `mapply(f, c(1,2), c("x","y"))` 没名字）。
+   */
   if (fn === 'mapply') {
     const c2 = new Map(types);
-    for (const p of formalsOf(fnode)) c2.set(p, REAL);
+    const d2 = [args[1], args[2]].map((d) => (d === undefined ? RVEC : typeOfExpr(d, types)));
+    formalsOf(fnode).forEach((p, k) => c2.set(p, isStrVec(d2[k]) ? STR : REAL));
     const b2 = typeOfExpr(kids(fnode)[1], c2);
-    return (b2.kind === 'bool' || isLgl1(b2)) ? RLGL : RVEC;
+    const nmd = isStrVec(d2[0]);
+    if (b2.kind === 'string') return nmd ? RNSTRV : RSTRV;
+    if (b2.kind === 'bool' || isLgl1(b2)) return nmd ? RNLGL : RLGL;
+    return nmd ? RNVEC : RVEC;
   }
   /* `sapply` / `vapply` 在**字符向量**上会给结果加名字（R 的 `USE.NAMES`）——
      出来的是带名字的那几种（见 `namesExprOf` 里那一格）。 */
@@ -3558,33 +3576,44 @@ function applyOf(fn, x, types) {
      * 两条向量**逐元素**（R 的 `mapply`）。长度按**两头回收**：取长的那一条、短的用 `%`
      * 绕回去、有一边零长就出零长 —— 与 `pmax` / `pmin` 同一条（那一格的账在 `r_pmax`）。
      *
-     * 字符向量那一侧**当场报**：R 会拿第一条当结果的**名字**（`USE.NAMES`，量出来
-     * `mapply(function(a,b) paste0(a,b), c("x","y"), c("1","2"))` 印的是带名字那种），
-     * 而这一层没有 `names`。函数体出串也一样没接。
+     * **字符向量与出串那两档 2026-09-26 接了**：两格数据各自可以是数值向量或字符向量
+     * （形参一格一格地绑），函数体出串时结果是一条字符向量。名字照 R 的 `USE.NAMES`
+     * **只从第一格数据来**（量出来 `mapply(f, c("x","y"), c("1","2"))` 的名字是 `x y`，
+     * 而 `mapply(f, c(1,2), c("x","y"))` 没名字）—— 那一半在 `namesExprOf` 里。
+     * 带名字的数据**当场报**：R 会拿它的名字当结果的名字，而这一层名字跟着变量走。
      */
     const dts = [args[1], args[2]].map((d) => typeOfExpr(d, types));
     dts.forEach((t, k) => {
-      if (isStrVec(t)) {
-        throw new Error('r->IR: mapply() 在字符向量上会给结果加名字（R 的 USE.NAMES）——'
-          + ' 这一层没有 `names`');
+      if (isNamedTy(t) || isNamedStr(t)) {
+        throw new Error(`r->IR: mapply() 的第 ${k + 2} 格实参是**带名字的向量** ——`
+          + ' R 会拿它的名字当结果的名字（`USE.NAMES`），这一档还没接（写 `unname(…)` 就行）');
       }
-      if (!isVecTy(t)) throw new Error(`r->IR: mapply() 的第 ${k + 2} 格实参要是一条向量（是 ${t.kind}）`);
+      if (!isVecTy(t) && !isStrVec(t)) {
+        throw new Error(`r->IR: mapply() 的第 ${k + 2} 格实参要是一条向量（是 ${t.kind}）`);
+      }
     });
+    const sIn = dts.map((t) => isStrVec(t));
     const s2 = [fresh('mp'), fresh('mp')];
     const ns = [fresh('mn'), fresh('mn')];
     const m = fresh('mm');
     const out2 = fresh('mo');
     const i2 = fresh('mi');
     const child2 = new Map(types);
-    for (const p of ps) child2.set(p, REAL);
+    ps.forEach((p, k) => child2.set(p, sIn[k] ? STR : REAL));
     const bt2 = typeOfExpr(body, child2);
-    if (bt2.kind === 'string') {
-      throw new Error('r->IR: mapply() 的函数体出串那一档还没接（R 那边结果还会带名字）');
-    }
-    const lgl2 = bt2.kind === 'bool' || isLgl1(bt2);
+    const strOut2 = bt2.kind === 'string';
+    const lgl2 = !strOut2 && (bt2.kind === 'bool' || isLgl1(bt2));
+    const atK = (k) => {
+      const ix = b('%', vr(i2), vr(ns[k]));
+      return sIn[k] ? svGet(vr(s2[k]), ix) : vecGet(vr(s2[k]), ix);
+    };
     const stmts2 = [
-      ...[0, 1].map((k) => ({ kind: 'let', name: s2[k], type: RVEC, init: exprOf(args[k + 1], types) })),
-      ...[0, 1].map((k) => ({ kind: 'let', name: ns[k], type: INT, init: vecLen(vr(s2[k])) })),
+      ...[0, 1].map((k) => ({
+        kind: 'let', name: s2[k], type: sIn[k] ? RSTRV : RVEC, init: exprOf(args[k + 1], types),
+      })),
+      ...[0, 1].map((k) => ({
+        kind: 'let', name: ns[k], type: INT, init: sIn[k] ? svLen(vr(s2[k])) : vecLen(vr(s2[k])),
+      })),
       { kind: 'let', name: m, type: INT, init: vr(ns[0]) },
       { kind: 'if', cond: b('<', vr(m), vr(ns[1])), then: [{ kind: 'assign', target: vr(m), value: vr(ns[1]) }], else_: null },
       {
@@ -3593,7 +3622,9 @@ function applyOf(fn, x, types) {
         then: [{ kind: 'assign', target: vr(m), value: I(0) }],
         else_: null,
       },
-      ...vecNewAs(out2, vr(m)),
+      ...(strOut2
+        ? [{ kind: 'let', name: out2, type: RSTRV, init: call1('anew', tyArg(RSTRV), vr(m)) }]
+        : vecNewAs(out2, vr(m))),
       {
         kind: 'for',
         init: { kind: 'let', name: i2, type: INT, init: I(0) },
@@ -3601,11 +3632,13 @@ function applyOf(fn, x, types) {
         post: { kind: 'assign', target: vr(i2), value: b('+', vr(i2), I(1)) },
         body: [
           ...[0, 1].map((k) => ({
-            kind: 'let', name: ps[k], type: REAL, init: vecGet(vr(s2[k]), b('%', vr(i2), vr(ns[k]))),
+            kind: 'let', name: ps[k], type: sIn[k] ? STR : REAL, init: atK(k),
           })),
-          vecSet(vr(out2), vr(i2), lgl2
-            ? asLgl(exprOf(body, child2), bt2)
-            : asReal(exprOf(body, child2), bt2)),
+          strOut2
+            ? { kind: 'assign', target: svGet(vr(out2), vr(i2)), value: exprOf(body, child2) }
+            : vecSet(vr(out2), vr(i2), lgl2
+              ? asLgl(exprOf(body, child2), bt2)
+              : asReal(exprOf(body, child2), bt2)),
         ],
       },
     ];

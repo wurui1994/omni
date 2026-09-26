@@ -119,3 +119,18 @@ cat(Reduce(function(p2, q2) { t2 <- p2 * q2; t2 + 0 }, 1:5), "\n")
 cat(sapply(1:3, function(k) { b2 <- k > 1; b2 }), "\n")
 out2 <- 99
 cat(sapply(1:2, function(k) { out2 <- k; out2 }), out2, "\n")
+
+# **`mapply` 的字符向量与出串那两档**（2026-09-26）：两格数据各自可以是数值向量或
+# 字符向量（形参一格一格地绑），函数体出串时结果是一条字符向量。
+# 名字照 R 的 `USE.NAMES` **只从第一格数据来**，而且只在那一格是字符向量时 ——
+# 量出来 `mapply(f, c(1,2), c("x","y"))` 是**没名字**的。长度照旧两头回收。
+cat(mapply(function(a, b) paste0(a, b), c("x", "y"), c("1", "2")), "\n")
+print(mapply(function(a, b) paste0(a, b), c("x", "y"), c("1", "2")))
+print(mapply(function(a, b) paste0(a, b), c(1, 2), c("x", "y")))
+print(mapply(function(s, n) nchar(s) + n, c("ab", "cde"), c(1, 2)))
+print(mapply(function(a, b) a > b, c(1, 5), c(3, 3)))
+print(mapply(function(a, b) a + b, c(1, 2), c(10, 20)))
+cat(mapply(function(a, b) paste0(a, b), c("p", "q", "r"), c("1")), "\n")
+cat(names(mapply(function(a, b) paste0(a, b), c("x", "y"), c("1", "2"))), "\n")
+cat(length(mapply(function(a, b) a + b, c(1, 2, 3), c(1))), "\n")
+cat(mapply(function(a, b) toupper(paste0(a, b)), c("a"), c("b")), "\n")
