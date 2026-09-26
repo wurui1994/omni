@@ -6774,9 +6774,24 @@ function assignOf(x, types) {
           + '读那一侧（`v["a"]`）接了');
       }
       if (isNegSub(keys[0])) {
-        throw new Error('r->IR: `v[-k] <- …` 还没接 —— R 那儿负下标是"**除了**这几格"，'
-          + '写那一侧要把别的每一格都写一遍；硬发出去会当成"写第 -k 格"，'
-          + '运行期撞在指针边界上（退 1、什么都不印）');
+        /* `v[-k] <- 值` —— 与读那一侧同一条：摆成长度 1 的下标向量交给 `r_wset`，
+           负数那一档它自己认（"除了这几格"，见那儿的注）。 */
+        if (tag(obj) !== 'sym') {
+          throw new Error('r->IR: `v[-k] <- …` 只在左边是一个名字时接');
+        }
+        if (isNamedTy(ot)) {
+          throw new Error('r->IR: `带名字的向量[-k] <- …` 还没接（名字那一条要跟着走）');
+        }
+        const vn3 = mangle(nameOf(obj));
+        const vr3 = { kind: 'name', name: vn3 };
+        const vt4 = typeOfExpr(value, types);
+        const valV2 = isVecTy(vt4) ? exprOf(value, types)
+          : lglCall('r_vec1', asReal(exprOf(value, types), vt4));
+        return {
+          kind: 'assign',
+          target: vr3,
+          value: lglCall('r_wset', vr3, lglCall('r_vec1', asReal(kv, kt)), valV2),
+        };
       }
       const val = asReal(exprOf(value, types), typeOfExpr(value, types));
       /* **越界就接长**（R 的口径：`x <- c(1,2); x[5] <- 9` 之后 `x` 是 `1 2 NA NA 9`）。
@@ -12229,6 +12244,15 @@ function vecFnDecl(name) {
      * 右边**长度 1** 时那一格**跳过**（`v[c(TRUE,NA,FALSE)] <- 9` 出 `9 2 3`、
      * `v[c(1,NA)] <- 9` 也出 `9 2 3`），右边长过 1 就**报错**
      * （"NAs are not allowed in subscripted assignments"）。
+     *
+     * **下标全是负数**那一档是"**除了**这几格"（`r_wset` 里那个 `neg` 分支）。量出来：
+     *
+     *   v[-1] <- 0            1 0 0     写剩下每一格
+     *   v[-1] <- c(7,8)       1 7 8     值按"剩下那几格的次序"回收
+     *   v[c(-1,-3)] <- 0      1 0 3 0   （v 是 1..4）
+     *   v[-5] <- 0            0 0 0     排掉的那一格不在里头 ⇒ 全写
+     *
+     * 这一档**不接长**（R 也不），所以长度那一趟不用算最大下标。
      */
     const mask = name === 'r_wmask';
     const nm = (s) => ({ kind: 'name', name: s });
@@ -12325,26 +12349,81 @@ function vecFnDecl(name) {
           ],
         },
       ]
-      : [{
-        kind: 'for',
-        init: { kind: 'let', name: 'j', type: INT, init: I0 },
-        cond: b('<', jv, nm('m')),
-        post: { kind: 'assign', target: jv, value: b('+', jv, I1) },
-        body: [{
+      : [
+        /* **下标全是负数**那一档：写"剩下"每一格，值按剩下那几格的次序回收。 */
+        { kind: 'let', name: 'neg', type: BOOL, init: { kind: 'bool', value: false } },
+        {
+          kind: 'for',
+          init: { kind: 'let', name: 'j', type: INT, init: I0 },
+          cond: b('<', jv, nm('m')),
+          post: { kind: 'assign', target: jv, value: b('+', jv, I1) },
+          body: [{
+            kind: 'if',
+            cond: b('&&', { kind: 'unop', op: '!', operand: lglCall('r_is_na', vecGet(ixv, jv)) },
+              b('<', vecGet(ixv, jv), { kind: 'real', value: 0 })),
+            then: [{ kind: 'assign', target: nm('neg'), value: { kind: 'bool', value: true } }],
+            else_: null,
+          }],
+        },
+        {
           kind: 'if',
-          cond: lglCall('r_is_na', vecGet(ixv, jv)),
-          then: [naFail()],
-          else_: [
-            { kind: 'let', name: 'k', type: INT, init: call1('toint', vecGet(ixv, jv)) },
+          cond: nm('neg'),
+          then: [
+            { kind: 'let', name: 'jn', type: INT, init: I0 },
             {
-              kind: 'if',
-              cond: b('>=', kv2, I1),
-              then: [vecSet(ov, b('-', kv2, I1), vecGet(valv, b('%', jv, nm('nv'))))],
-              else_: null,
+              kind: 'for',
+              init: { kind: 'let', name: 'i2', type: INT, init: I0 },
+              cond: b('<', nm('i2'), len),
+              post: { kind: 'assign', target: nm('i2'), value: b('+', nm('i2'), I1) },
+              body: [
+                { kind: 'let', name: 'keep', type: BOOL, init: { kind: 'bool', value: true } },
+                {
+                  kind: 'for',
+                  init: { kind: 'let', name: 'j2', type: INT, init: I0 },
+                  cond: b('<', nm('j2'), nm('m')),
+                  post: { kind: 'assign', target: nm('j2'), value: b('+', nm('j2'), I1) },
+                  body: [{
+                    kind: 'if',
+                    cond: b('==', call1('toint', vecGet(ixv, nm('j2'))),
+                      b('-', I0, b('+', nm('i2'), I1))),
+                    then: [{ kind: 'assign', target: nm('keep'), value: { kind: 'bool', value: false } }],
+                    else_: null,
+                  }],
+                },
+                {
+                  kind: 'if',
+                  cond: nm('keep'),
+                  then: [
+                    vecSet(ov, nm('i2'), vecGet(valv, b('%', nm('jn'), nm('nv')))),
+                    { kind: 'assign', target: nm('jn'), value: b('+', nm('jn'), I1) },
+                  ],
+                  else_: null,
+                },
+              ],
             },
           ],
-        }],
-      }];
+          else_: [{
+            kind: 'for',
+            init: { kind: 'let', name: 'j', type: INT, init: I0 },
+            cond: b('<', jv, nm('m')),
+            post: { kind: 'assign', target: jv, value: b('+', jv, I1) },
+            body: [{
+              kind: 'if',
+              cond: lglCall('r_is_na', vecGet(ixv, jv)),
+              then: [naFail()],
+              else_: [
+                { kind: 'let', name: 'k', type: INT, init: call1('toint', vecGet(ixv, jv)) },
+                {
+                  kind: 'if',
+                  cond: b('>=', kv2, I1),
+                  then: [vecSet(ov, b('-', kv2, I1), vecGet(valv, b('%', jv, nm('nv'))))],
+                  else_: null,
+                },
+              ],
+            }],
+          }],
+        },
+      ];
     return {
       kind: 'fn',
       name,
