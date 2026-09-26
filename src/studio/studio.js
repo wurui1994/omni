@@ -1050,6 +1050,11 @@ async function run() {
   const offline = typeof window.__OMNI_LOCAL === 'function';
   if (live !== null) {
     live.dev.reset();
+    /* **图从哪儿取**：文件纹理与 `pic("a.png")` 里的名字是相对**脚本所在目录**的，
+       页面这一档过网取（`/api/asset?path=…`）—— 所以跑之前把那个目录告诉设备。 */
+    if (typeof live.dev.setAssets === 'function') {
+      live.dev.setAssets(String(S.path ?? '').replace(/\/[^/]*$/, ''));
+    }
     const box = $('#preview');
     box.textContent = '';
     box.classList.remove('empty');

@@ -65,14 +65,19 @@ export function mountOf(rel) {
  *
  * 目录本身也回（树要走它）；文件要过后缀白名单 —— 那棵树上几十份 `.png`/`.wav` 素材
  * 不该进树（跑起来那一侧照旧按脚本旁边的相对路径找它们）。
+ *
+ * `more` 是**额外收的那几个后缀**：`/api/asset` 那一格要拿脚本旁边那几张图
+ * （文件纹理与 `pic("a.png")`）—— 它们不进树，但**读得到**。两件事不是一件事，
+ * 所以分两格参数，而不是把图塞进 `exts` 里。
  */
-export function mountPath(rel) {
+export function mountPath(rel, more = []) {
   const m = mountOf(rel);
   if (m === null) return null;
   const sub = rel === m.path ? '' : rel.slice(m.path.length + 1);
   const abs = sub === '' ? m.dir : join(m.dir, sub);
   if (!exists(abs)) return null;
-  if (!isDir(abs) && m.exts !== null && !m.exts.includes(extOf(abs))) return null;
+  if (!isDir(abs) && m.exts !== null
+    && !m.exts.includes(extOf(abs)) && !more.includes(extOf(abs))) return null;
   return abs;
 }
 

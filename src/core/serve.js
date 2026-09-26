@@ -21,7 +21,9 @@ import { readText, readBinary, exists, isDir, stderr } from './host/native.js';
 import { join, dirname } from './host/path.js';
 /* 白名单、后缀表、路径闸、目录树、等效命令 —— 那五样**与单体 HTML 共用**
    （`src/studio/browser-main.js` 从同一份拿），所以住在 `studio/shared.js`。 */
-import { extOf, langOf, safePath, buildTree, shellToArgv, EQUIV, byIdeOrder } from './studio/shared.js';
+import {
+  extOf, langOf, safePath, mountPath, buildTree, shellToArgv, EQUIV, byIdeOrder,
+} from './studio/shared.js';
 import { Pool, warmable } from './studio/pool.js';
 
 /* 老调用方（`tests/serve/run.js`）照旧从这儿拿这三格：服务是它们的一个入口。 */
@@ -423,6 +425,41 @@ export function startServer(opts) {
         return json(res, 200, {
           kind: 'rgba', w: Number(m[1]), h: Number(m[2]), bytes: raw.slice(nl + 1),
         });
+      }
+      /**
+       * **脚本旁边的那几张图**（`GET /api/asset?path=polydraw/ken/earth.jpg`）。
+       *
+       * 谁要它：EVAL 的文件纹理与 `pic("a.png",…)`。本机那两档设备是**自己开文件**的
+       * （目录只有宿主知道），而页面那一档只能过网 —— 所以开这一格，按**原始字节**发，
+       * `<img src>` 直接吃。
+       *
+       * 闸三道：走 `safePath`（认目录映射，也就是说只在挂进来的那几棵树里）、
+       * 只认图片那几个后缀、名字里不许有 `..`。**不发别的东西** —— 源码走 `/api/file`，
+       * 产物走 `/api/mod`；这一格只发图。
+       */
+      if (path === '/api/asset') {
+        const rel = url.searchParams.get('path') ?? '';
+        const ext = rel.slice(rel.lastIndexOf('.')).toLowerCase();
+        const MIME = {
+          '.png': 'image/png',
+          '.jpg': 'image/jpeg',
+          '.jpeg': 'image/jpeg',
+          '.gif': 'image/gif',
+          '.bmp': 'image/bmp',
+          '.webp': 'image/webp',
+        };
+        if (rel.includes('..') || MIME[ext] === undefined) {
+          return json(res, 400, { error: '这一格只发图（png/jpg/gif/bmp/webp）' });
+        }
+        const abs = mountPath(rel, Object.keys(MIME)) ?? safePath(root, rel);
+        if (abs === null || !exists(abs)) return json(res, 404, { error: 'not found' });
+        res.writeHead(200, {
+          'content-type': MIME[ext],
+          /* 图是源文件不是产物（名字里没有内容哈希）—— 所以要问一句，别 immutable。 */
+          'cache-control': 'no-cache',
+        });
+        res.end(Buffer.from(readBinary(abs), 'latin1'));
+        return undefined;
       }
       /**
        * **按单元产物那一目录**（`GET /api/mod/<名字>.js`）—— EVAL 两门在页面上跑的那几份

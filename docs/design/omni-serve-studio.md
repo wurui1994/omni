@@ -403,6 +403,7 @@ PolyDraw 与 EvalDraw 各带一整棵例子树（`polydraw/{examples,ken,tigrou}
 结果：`emit js --units` 命中那一趟 **117ms -> 2.3ms**（进程内），
 真的 `POST /api/units` **0.2~1.0s -> 3~5ms**（头一趟仍是 161ms：那是工人起锅）。
 机制那一格的判据在 `tests/build`（不跑任何一门语言）。
+
 ### 9.4 驱动那一格怎么公用（定下来的做法）
 
 `cli.js` 的 `asyModsBuild` 里与 asy 有关的只有四处：`cap(asy.unitTexts)`（单元从哪儿来）、

@@ -285,6 +285,28 @@ try {
   ok('/api/file 拦路径穿越', (await get('/api/file?path=../.env')).code === 404);
   ok('/api/file 拦白名单外', (await get('/api/file?path=src/core/cli.js')).code === 404);
 
+  /* **脚本旁边那几张图**（`/api/asset`）：EVAL 的文件纹理与 `pic("a.png")` 在页面那一档
+     只能过网取。三道闸各判一条 —— 这一格开得太宽等于把整棵树交出去。 */
+  {
+    const img = await fetch(`${s.url}/api/asset?path=tests/asy/examples/piicon.png`);
+    ok('/api/asset 发图（原始字节 + content-type）',
+      img.status === 200 && img.headers.get('content-type') === 'image/png'
+      && (await img.arrayBuffer()).byteLength > 100,
+      `${img.status} ${img.headers.get('content-type')}`);
+    ok('/api/asset 只发图（别的后缀 400）',
+      (await get('/api/asset?path=docs/design/omni-serve-studio.md')).code === 400);
+    ok('/api/asset 拦路径穿越', (await get('/api/asset?path=%2e%2e%2f.env')).code === 400);
+    ok('/api/asset 不在白名单里的树 404',
+      (await get('/api/asset?path=src/studio/nope.png')).code === 404);
+    /* 挂载点上的图：**不在树上**（`exts` 只收脚本）可是**读得到** —— 两件事分开。
+       那份语料这台机器上有没有不一定，所以只在有的时候判。 */
+    const m = mounts()[0];
+    if (m !== undefined) {
+      const some = (await get(`/api/asset?path=${encodeURIComponent(m.path)}/nope.png`)).code;
+      ok(`/api/asset 挂载点上认得（${m.path}）`, some === 404, `${some}`);
+    }
+  }
+
   for (const p of ['/', '/studio.css', '/studio.js', '/render.js']) {
     ok(`静态 ${p}`, (await get(p)).code === 200);
   }

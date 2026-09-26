@@ -683,6 +683,105 @@ function texIn(slot, w, h, d, fmt, px) {
   return 0;
 }
 
+/**
+ * **文件纹理**（`glsettexfile 槽 名字下标 格`，§20 —— 脚本里写的是 `glsettex("earth.jpg",…)`）。
+ *
+ * 本机那两档设备自己开文件（目录只有宿主知道），页面这一档只能**过网**：
+ * `GET /api/asset?path=<脚本所在目录>/<名字>`（那一格在 `src/core/serve.js`，闸是
+ * `safePath` + 图片后缀白名单）。
+ *
+ * 浏览器里取图是**异步**的，而 `glsettex` 在脚本里是同步一句。所以这一格：
+ *
+ *   1. 当场先摆一格 **1×1 的白**（白乘上去等于"没贴图"）—— 图还在路上的那几帧照旧画得出，
+ *      而不是黑掉、更不是把帧循环停下；
+ *   2. 背后 `new Image()` 取，回来了再往**同一格 `WebGLTexture`** 上传一次。
+ *      槽与句柄都没换，所以脚本那边一个字都不用改；
+ *   3. 一份图只取一趟（`FT.st` 记状态）—— 脚本多半每帧都调一次 `glsettex`。
+ *
+ * 行序**照本机那一档**（`runtime-gl/omni_ev_gl.c:937` 是解码出来的第一行当 GL 的第一行），
+ * 所以这儿**不开** `UNPACK_FLIP_Y_WEBGL`。
+ */
+const FT = {
+  /** 这一趟脚本所在的目录（Studio 在跑之前摆一次，见 `setAssets`）。 */
+  base: '',
+  /** `槽|名字|格` -> `'load' | 'ok' | 'err'`。 */
+  st: new Map(),
+};
+
+/** `<base>/<名字>` 化简成一条干净的相对路径（`.` 与 `..` 在这儿就地消掉）。 */
+function assetPath(name, base = FT.base) {
+  const parts = `${base}/${name}`.split('/');
+  const out = [];
+  for (const p of parts) {
+    if (p === '' || p === '.') continue;
+    if (p === '..') { out.pop(); continue; }
+    out.push(p);
+  }
+  return out.join('/');
+}
+
+/** 一格图的 URL。 */
+const assetUrl = (rel) => `/api/asset?path=${encodeURIComponent(rel)}`;
+
+function texFile(slot, name, fmt) {
+  const gl = D.gl;
+  if (gl === null || typeof name !== 'string' || name === '') return 1;
+  const key = `${slot}|${name}|${fmt}`;
+  const had = FT.st.get(key);
+  if (had !== undefined) return had === 'err' ? 1 : 0;
+  FT.st.set(key, 'load');
+  flush();
+  const t = texOf(slot);
+  gl.activeTexture(gl.TEXTURE0 + TX.unit);
+  gl.bindTexture(gl.TEXTURE_2D, t.id);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+    new Uint8Array([255, 255, 255, 255]));
+  texParams(fmt);
+  t.w = 1;
+  t.h = 1;
+  t.fmt = fmt;
+  const im = new Image();
+  let tried = 0;
+  /* **落点试两处**：先脚本旁边，再那棵语料树的根。为什么有第二处：原版是拿
+     `polydraw.exe` 所在的目录当基准的（本机那一档对应 `OMNI_GFX_DIR`）——
+     `tigrou/disco ball.pss` 写的是 `"b2dr_sph.jpg"`，而那张图在语料树的根上。 */
+  const root = FT.base.split('/')[0] ?? '';
+  const next = () => {
+    tried += 1;
+    if (tried === 1) { im.src = assetUrl(assetPath(name)); return true; }
+    if (tried === 2 && root !== '' && root !== FT.base) {
+      im.src = assetUrl(assetPath(name, root));
+      return true;
+    }
+    return false;
+  };
+  im.onload = () => {
+    const g2 = D.gl;
+    if (g2 === null) return;
+    FT.st.set(key, 'ok');
+    /* **一竖条 6 格那一档是立方体贴图**（`polydraw.c:1338`）：WebGL2 这边要
+       `TEXTURE_CUBE_MAP` + `samplerCube`，还没接 —— 记一笔账，图按 2D 贴上去。 */
+    if (im.naturalWidth > 0 && im.naturalWidth * 6 === im.naturalHeight) {
+      miss(`glsettexfile:cube/${name}`);
+    }
+    g2.activeTexture(g2.TEXTURE0 + TX.unit);
+    g2.bindTexture(g2.TEXTURE_2D, t.id);
+    g2.texImage2D(g2.TEXTURE_2D, 0, g2.RGBA, g2.RGBA, g2.UNSIGNED_BYTE, im);
+    if (texParams(fmt)) g2.generateMipmap(g2.TEXTURE_2D);
+    t.w = im.naturalWidth;
+    t.h = im.naturalHeight;
+  };
+  im.onerror = () => {
+    if (next()) return;
+    FT.st.set(key, 'err');
+    /* **读不到就要说话**：静默失败等于"图不对但没人知道"（与本机那一档同一条）。 */
+    // eslint-disable-next-line no-console
+    console.warn(`#gfx 文件纹理没上去：'${name}'（脚本旁边与 '${root}/' 两处都取不到）`);
+  };
+  next();
+  return 0;
+}
+
 /** `glgetuniformloc(名字下标)` -> 一格句柄。句柄就是"第几个"（我们自己的编号）。 */
 const UNI = { list: [], byProg: new Map() };
 function uniLoc(idx) {
@@ -781,6 +880,18 @@ function attrSet(loc, val) {
  */
 /** **没接住的那几格的账**（名字/元数 -> 这一趟被调了几次）。见 `call` 的 `default`。 */
 const MISS = new Map();
+
+/** 记一笔"这一格没接住"（第一次在控制台报一行，之后静默）。 */
+function miss(op, note = '') {
+  if (!MISS.has(op)) {
+    MISS.set(op, 0);
+    // eslint-disable-next-line no-console
+    console.warn(`#gfx miss ${op} —— 这格设备（WebGL2）还没接这一格，当空操作，`
+      + `账记在 dev.misses()。${note}`);
+  }
+  MISS.set(op, MISS.get(op) + 1);
+  return 0;
+}
 
 function call(name, args) {
   const gl = D.gl;
@@ -904,6 +1015,9 @@ function call(name, args) {
       gl.bindTexture(gl.TEXTURE_2D, t === undefined ? texOf(slot).id : t.id);
       return 0;
     }
+    /* **文件纹理**（见 `texFile` 的头注）：名字在方言里是名字表的下标。 */
+    case 'glsettexfile/3':
+      return texFile(Math.trunc(a(0)), SH.names.get(String(Math.trunc(a(1)))), Math.trunc(a(2)));
     /* 收下但不管的那几格（光照/混合/剔除/线宽）。 */
     case 'glnormal/3':
     case 'glcullface/1':
@@ -983,21 +1097,14 @@ function call(name, args) {
        * **不是靠"跑通了"**（那就是"不许拿全黑对全黑白拿分"那条纪律的这一处落点）。
        */
     {
-      const miss = `${name}/${args.length}`;
-      if (!MISS.has(miss)) {
-        MISS.set(miss, 0);
-        // eslint-disable-next-line no-console
-        console.warn(`#gfx miss ${miss} —— 这格设备（WebGL2）还没接这一格，当空操作，`
-          + '账记在 dev.misses()。这一层有的是：'
-          + '2D cls/setcol/setpix/moveto/lineto/drawsph/drawcone/rgb/refresh，'
-          + '宿主量 nextframe/numframes/klock/xres/yres/mousx/mousy/bstatus/keystatus，'
-          + '批与状态 (gfxbatch …)/batchprog/batchmvp/batchblend/gldepth，'
-          + '可编程管线 glsetshader/glgetuniformloc/gluniform*/glgetattribloc/glvertexattrib*，'
-          + '纹理 (gfxtex …)/glbindtexture/glactivetexture；'
-          + '**GL 立即模式与矩阵栈不在设备这一层**（在语言那一侧的 ext/polydraw/gl-rt.js）');
-      }
-      MISS.set(miss, MISS.get(miss) + 1);
-      return 0;
+      const m = `${name}/${args.length}`;
+      return miss(m, '这一层有的是：'
+        + '2D cls/setcol/setpix/moveto/lineto/drawsph/drawcone/rgb/refresh，'
+        + '宿主量 nextframe/numframes/klock/xres/yres/mousx/mousy/bstatus/keystatus，'
+        + '批与状态 (gfxbatch …)/batchprog/batchmvp/batchblend/gldepth，'
+        + '可编程管线 glsetshader/glgetuniformloc/gluniform*/glgetattribloc/glvertexattrib*，'
+        + '纹理 (gfxtex …)/glsettexfile/glbindtexture/glactivetexture；'
+        + '**GL 立即模式与矩阵栈不在设备这一层**（在语言那一侧的 ext/polydraw/gl-rt.js）');
     }
   }
 }
@@ -1118,6 +1225,8 @@ function reset() {
   if (D.gl !== null) for (const t of TX.slots.values()) D.gl.deleteTexture(t.id);
   TX.slots.clear();
   TX.unit = 0;
+  /* 文件纹理那几张的状态跟着槽走（槽都删了）—— 下一趟重新取一遍。 */
+  FT.st.clear();
   const gl = D.gl;
   if (gl !== null) {
     gl.clearColor(0, 0, 0, 1);
@@ -1273,6 +1382,12 @@ export function installGlDevice(canvas, w = 320, h = 240) {
     snapshot,
     /** 这一趟**哪几格没接住、各被调了几次** —— 判据算"缺哪一格 × 几份"靠它。 */
     misses: () => [...MISS.entries()].map(([k, n]) => ({ op: k, n })),
+    /**
+     * **图从哪儿取**：脚本所在的目录（相对仓库根，例如 `polydraw/ken`）。
+     * 文件纹理与 `pic("a.png")` 里的名字是相对脚本的，而页面这一档要过网
+     * （`/api/asset?path=…`）—— 所以跑之前摆一次。
+     */
+    setAssets: (dir) => { FT.base = typeof dir === 'string' ? dir : ''; },
     setFrame,
     perf,
     frames: () => D.fno,
