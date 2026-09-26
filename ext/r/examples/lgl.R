@@ -100,3 +100,29 @@ cat(b + 1, "\n")
 n <- 0
 for (k in c(1, 5, 3)) n <- n + (k > 2)
 cat(n, "\n")
+
+# 一元 `+` / `-` 也把逻辑变成数（`class(+TRUE)` 是 `"integer"`）。**方言里没有一元 `+`**，
+# 从前这一格发 `(un "+" …)` 一路走到 `.sx` 才死（过了换档那道门，整份源码什么都不印）——
+# 现在 `+x` 就还操作数本身，逻辑那一侧先摊成数。
+cat(+1.5, -1.5, +2L, -2L, "\n")
+cat(+TRUE, -TRUE, +FALSE, -FALSE, "\n")
+cat(+NA, -NA, "\n")
+cat(+c(TRUE, FALSE), "\n")
+cat(-c(TRUE, FALSE), "\n")
+cat(-(1 > 2), +(1 > 2), "\n")
+z <- NA
+cat(+z, -z, "\n")
+print(+c(TRUE, FALSE))
+print(-c(TRUE, FALSE))
+cat(sum(-c(TRUE, TRUE)), "\n")
+
+# `append` / `replace` 也照 R 的收拢次序（logical < integer < double < character）：
+# 逻辑那一条**只在塞进去的也是逻辑时**还是逻辑。从前照抄第一格的类型，
+# `append(c(NA), c(1))` 印出来是 `NA TRUE` —— 静默答错。
+cat(append(c(NA), c(1)), "\n")
+cat(append(c(TRUE), c(FALSE)), "\n")
+cat(append(c(TRUE), c(NA)), "\n")
+cat(replace(c(TRUE, TRUE), 1, 2), "\n")
+cat(replace(c(TRUE, FALSE), 1, NA), "\n")
+print(append(c(TRUE), c(1)))
+print(replace(c(TRUE, TRUE), 1, FALSE))

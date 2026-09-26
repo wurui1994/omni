@@ -54,3 +54,13 @@ cat(pmax(NA, 1), pmin(1, NA), "\n")
 cat(round(c(NA, 1.5)), signif(c(NA, 1.23456)), "\n")
 cat(gamma(c(NA, 4)), factorial(c(NA, 4)), sign(c(NA, -3, 0, 2)), "\n")
 cat(is.na(round(NA)), is.nan(round(NaN)), is.na(round(NaN)), is.nan(round(NA)), "\n")
+
+# `^` 走 `R_pow`，缺失同一个毛病。拦的口径照 `R_pow` 的**头几句**抄，次序要紧：
+#   if (x == 1. || y == 0.) return 1.;    所以 `NA ^ 0` 与 `1 ^ NA` 都是 1
+#   if (x == 0.) { … else return y; }     所以 `0 ^ NA` 是 NA
+cat(0 ^ NA, NA ^ 0, 1 ^ NA, NA ^ NA, NA ^ 2, 2 ^ NA, "\n")
+cat(0 ^ NaN, NaN ^ 0, 1 ^ NaN, "\n")
+cat(0 ^ -1, 0 ^ 2, Inf ^ 0, 0 ^ Inf, "\n")
+cat(c(NA, 2) ^ 2, 2 ^ c(1, NA), c(0, 1) ^ NA, "\n")
+cat(is.na(0 ^ NA), is.nan(0 ^ NaN), "\n")
+print(c(NA, 2) ^ 2)

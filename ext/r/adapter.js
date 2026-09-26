@@ -1558,6 +1558,18 @@ function typeOfExpr(x, types) {
     }
     case 'un': {
       const op = String(leaf(kids(x)[0]));
+      if (op === '+' || op === '-') {
+        /**
+         * 一元 `+` / `-` 在 R 里把**逻辑变成数**（量出来：`+TRUE` 是 1、`-TRUE` 是 -1、
+         * `class(+TRUE)` 是 `"integer"`、`+NA` 是 `NA_integer_`）。所以那一格的类型
+         * 不能照抄操作数 —— 抄了 `cat(+c(TRUE, FALSE))` 会印 `TRUE FALSE`，
+         * 而 R 印 `1 0`，那是静默答错（2026-09-26 扫出来的）。
+         */
+        const t0 = typeOfExpr(kids(x)[1], types);
+        if (isLglTy(t0)) return isNamedTy(t0) ? RNVEC : RVEC;
+        if (t0.kind === 'bool' || isLgl1(t0)) return REAL;
+        return t0;
+      }
       if (op !== '!') return typeOfExpr(kids(x)[1], types);
       /* `!` 跟着被取反的那一格走：逻辑向量进逻辑向量出，三态标量进三态标量出，
          `bool` 那一格（`!TRUE`）仍然是 `bool`。 */
@@ -1913,7 +1925,23 @@ function applyTy(fn, x, types) {
     case 'bitwShiftL': case 'bitwShiftR': return INT;
     case 'append': case 'replace': {
       const t = args.length > 0 ? typeOfExpr(args[0], types) : RVEC;
-      return isVecTy(t) ? t : RVEC;
+      if (!isVecTy(t)) return RVEC;
+      /**
+       * **逻辑那一条只在"塞进去的也是逻辑"时还是逻辑**（2026-09-26 扫出来的）：
+       * R 的收拢次序是 logical < integer < double < character，所以
+       * `append(c(NA), c(1))` 出的是**数值**向量（`NA 1`），而从前这儿照抄第一格的
+       * 类型，印出来是 `NA TRUE` —— 静默答错。量出来的几格：
+       *
+       *   append(c(NA), c(1))          NA 1        （数值）
+       *   append(c(TRUE), c(FALSE))    TRUE FALSE  （逻辑）
+       *   append(c(TRUE), c(NA))       TRUE NA     （逻辑 —— `NA` 本来就是逻辑）
+       *   replace(c(TRUE,TRUE), 1, 2)  2 1         （数值）
+       */
+      if (!isLglTy(t)) return t;
+      const vi = fn === 'append' ? 1 : 2;
+      const vt = args.length > vi ? typeOfExpr(args[vi], types) : REAL;
+      const stillLgl = isLglTy(vt) || vt.kind === 'bool' || isLgl1(vt);
+      return stillLgl ? t : (isNamedTy(t) ? RNVEC : RVEC);
     }
     case 'range': case 'seq': return RVEC;
     /* 集合与位置那一族：位置回一格 int，别的回向量（`duplicated` 回逻辑向量）。
@@ -3700,12 +3728,27 @@ function exprOf(x, types, want, stmtPos) {
         return { kind: 'unop', op: '!', operand: condOf(operand, types) };
       }
       if (op === '-' || op === '+') {
-        /* 向量上的一元 `-` 逐元素（`-xs`）—— 方言的 `un` 只吃 int / real。 */
-        if (isVecTy(typeOfExpr(operand, types))) {
+        /**
+         * **方言里没有一元 `+`** —— 发 `(un "+" …)` 一路走到 `.sx` 才撞上，而那时已经
+         * 过了换档那道门（整份源码退出码 1、什么都不印）。量出来的（2026-09-26）：
+         * `cat(+2L)` / `cat(+TRUE)` / `cat(+NA)` 全是这么死的。R 那边一元 `+` 除了
+         * "把逻辑变成数"之外什么都不做，所以这一层**就还操作数本身**。
+         *
+         * 逻辑那一侧要摊成数：`+TRUE` 是 1、`-TRUE` 是 -1（`class` 是 `"integer"`）。
+         * 三态标量（`NA`）本来就存成 double，`asReal` 原样过，改的只是类型
+         * （见 `typeOfExpr` 的 `un` 那一格）—— 不摊的话 `-NA` 会发成
+         * `(un "-" …)` 打在一格逻辑上，同样是过了门才死。
+         */
+        const t = typeOfExpr(operand, types);
+        if (isVecTy(t)) {
+          /* 向量上逐元素（`-xs`）。逻辑向量底下也是 `(ptr real)`，所以 `-` 那一格
+             照样打得出去，出来的类型由 `typeOfExpr` 改成数值向量。 */
           return op === '+' ? exprOf(operand, types)
             : vecMap1(exprOf(operand, types), (e) => ({ kind: 'unop', op: '-', operand: e }));
         }
-        return { kind: 'unop', op, operand: exprOf(operand, types) };
+        const e0 = exprOf(operand, types);
+        const e = (t.kind === 'bool' || isLgl1(t)) ? asReal(e0, t) : e0;
+        return op === '+' ? e : { kind: 'unop', op: '-', operand: e };
       }
       throw new Error(`r->IR: 一元 \`${op}\` 还没接`);
     }
@@ -3872,7 +3915,43 @@ const powOf = (x, y) => {
      对 `1^x` 与 `x^0` 有明文特例，而 `pow()` 在这几格上与 R 不一样。 */
   cabiUsed.add('R_pow');
   rmathSig('R_pow');
-  return { kind: 'ccall', sym: 'R_pow', args: [x, y] };
+  /**
+   * **缺失得在进 `R_pow` 之前拦住**（2026-09-26）——与 nmath 那一族同一个毛病
+   * （见 `rmathCall` 里那段注）：载荷过不了 JS 那条腿的 ccall 边界，量出来
+   * `cat(0 ^ NA)` R 答 `NA`、JS 那条腿答 `NaN`。
+   *
+   * 拦的口径照 `R_pow` 的**头几句**抄，次序要紧：
+   *
+   *   if (x == 1. || y == 0.) return 1.;      ← 所以 `NA ^ 0` 与 `1 ^ NA` 都是 1
+   *   if (x == 0.) { … else return y; }       ← `0 ^ NA` 回的是 y 本身
+   *   … if (ISNAN(x) || ISNAN(y)) return x + y;  ← 载荷来自第一个 NaN 操作数
+   *
+   * 所以"有一边是缺失"那一支就是：`y == 0 || x == 1` 时 1，否则缺失的那一格里
+   * **x 优先**。别的照旧交给 R 自己的代码。
+   */
+  const tx = fresh('pw');
+  const ty = fresh('pw');
+  const vx = { kind: 'name', name: tx };
+  const vy = { kind: 'name', name: ty };
+  const R0 = (v) => ({ kind: 'real', value: v });
+  return {
+    kind: 'block-expr',
+    stmts: [
+      { kind: 'let', name: tx, type: REAL, init: x },
+      { kind: 'let', name: ty, type: REAL, init: y },
+    ],
+    value: {
+      kind: 'ternary',
+      cond: b('||', naQ(vx), naQ(vy)),
+      then: {
+        kind: 'ternary',
+        cond: b('||', b('==', vy, R0(0)), b('==', vx, R0(1))),
+        then: R0(1),
+        else_: { kind: 'ternary', cond: naQ(vx), then: vx, else_: vy },
+      },
+      else_: { kind: 'ccall', sym: 'R_pow', args: [vx, vy] },
+    },
+  };
 };
 const modOf = (op, x, y) => {
   const q = call1('rmath', { kind: 'strlit', value: 'floor' }, b('/', x, y));
