@@ -46,6 +46,8 @@ export const GFX3_GLOBALS = [
   'g3_glz',
   /* `pic` 那一族缓存着的那张图：名字下标 +1（0 = 还没读过）、宽、高。 */
   'g3_picn', 'g3_picw', 'g3_picy',
+  /* EvalDraw 的 GL 子集：那张投影矩阵要不要重算（相机动过就置 1，见 `g3_glbegin`）。 */
+  'g3_pdirty',
 ];
 
 
@@ -163,10 +165,17 @@ export function gfx3FnDecls(host = false, withGL = false) {
        */
       fn('g3_glbegin', ['mode'], [
         ex(call('g3_need', [])),
-        ex(call('gl_evproj', [nm('g3_rx'), nm('g3_ry'), nm('g3_rz'),
-          nm('g3_dx'), nm('g3_dy'), nm('g3_dz'), nm('g3_fx'), nm('g3_fy'), nm('g3_fz'),
-          nm('g3_cx'), nm('g3_cy'), nm('g3_cz'),
-          nm('g3_hx'), nm('g3_hy'), nm('g3_hz'), D.xres(), D.yres()])),
+        /* **相机动过才重算那张矩阵**：`glBegin` 在语料里是一帧几千次的量
+           （`sprite2d.kc` / `clippy.kc`），每次都摊一遍 4×4 是白算 —— 量过：
+           不带这道闸时 GL 那几份 `.kc` 每帧时间翻一倍。相机那几格
+           （`setcam`/`setview`/第一次 `g3_need`）置脏。 */
+        iff(bin('!=', nm('g3_pdirty'), num(0)), [
+          set('g3_pdirty', num(0)),
+          ex(call('gl_evproj', [nm('g3_rx'), nm('g3_ry'), nm('g3_rz'),
+            nm('g3_dx'), nm('g3_dy'), nm('g3_dz'), nm('g3_fx'), nm('g3_fy'), nm('g3_fz'),
+            nm('g3_cx'), nm('g3_cy'), nm('g3_cz'),
+            nm('g3_hx'), nm('g3_hy'), nm('g3_hz'), D.xres(), D.yres()])),
+        ]),
         letR('c', rm('floor', [D.getcol()])),
         letR('r', rm('floor', [bin('/', nm('c'), num(65536))])),
         letR('g', rm('floor', [bin('/', bin('-', nm('c'),
@@ -194,6 +203,7 @@ export function gfx3FnDecls(host = false, withGL = false) {
       set('g3_hx', bin('*', D.xres(), num(0.5))),
       set('g3_hy', bin('*', D.yres(), num(0.5))),
       set('g3_hz', bin('*', D.xres(), num(0.5))),
+      set('g3_pdirty', num(1)),
       ret(num(0)),
     ]),
     /* `clz(d)`：这一档没有 z 缓冲（见头注第 2 条）—— 收下记着不用。 */
@@ -222,6 +232,7 @@ export function gfx3FnDecls(host = false, withGL = false) {
       set('g3_dx', bin('-', bin('*', nm('g3_fy'), nm('g3_rz')), bin('*', nm('g3_fz'), nm('g3_ry')))),
       set('g3_dy', bin('-', bin('*', nm('g3_fz'), nm('g3_rx')), bin('*', nm('g3_fx'), nm('g3_rz')))),
       set('g3_dz', bin('-', bin('*', nm('g3_fx'), nm('g3_ry')), bin('*', nm('g3_fy'), nm('g3_rx')))),
+      set('g3_pdirty', num(1)),
       ret(num(0)),
     ]),
     fn('g3_setcam12', ['x', 'y', 'z', 'rx', 'ry', 'rz', 'dx', 'dy', 'dz', 'fx', 'fy', 'fz'], [
@@ -230,6 +241,7 @@ export function gfx3FnDecls(host = false, withGL = false) {
       set('g3_rx', nm('rx')), set('g3_ry', nm('ry')), set('g3_rz', nm('rz')),
       set('g3_dx', nm('dx')), set('g3_dy', nm('dy')), set('g3_dz', nm('dz')),
       set('g3_fx', nm('fx')), set('g3_fy', nm('fy')), set('g3_fz', nm('fz')),
+      set('g3_pdirty', num(1)),
       ret(num(0)),
     ]),
     /* `setview(x0,y0,x1,y1)`：视口那一档这一版**只记不用**（我们画的是整块画布），
@@ -239,11 +251,13 @@ export function gfx3FnDecls(host = false, withGL = false) {
       set('g3_hx', bin('*', bin('+', nm('x0'), nm('x1')), num(0.5))),
       set('g3_hy', bin('*', bin('+', nm('y0'), nm('y1')), num(0.5))),
       set('g3_hz', bin('*', bin('-', nm('x1'), nm('x0')), num(0.5))),
+      set('g3_pdirty', num(1)),
       ret(num(0)),
     ]),
     fn('g3_setview7', ['x0', 'y0', 'x1', 'y1', 'hx', 'hy', 'hz'], [
       ex(call('g3_need', [])),
       set('g3_hx', nm('hx')), set('g3_hy', nm('hy')), set('g3_hz', nm('hz')),
+      set('g3_pdirty', num(1)),
       ret(num(0)),
     ]),
     /**

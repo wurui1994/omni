@@ -3319,6 +3319,9 @@ export function evalToIR(cst, host, src = '') {
      * 帧函数的返回值宿主压根不看（`evaldraw.txt:1237` 那张表里 `()` 这一档没有回值的
      * 用处），所以把末尾那句 `return e` 退回成"算一遍 `e`"—— 副作用一格不少。
      */
+    /* **脚本自己那个 `while(1){ …; refresh(); }` 原样留着** —— 帧的边界是 `refresh()`
+       那一格（等待点 + 帧同步），不在编译期动脚本的循环，见
+       `docs/design/eval-realtime-gpu.md` §34.11。 */
     mainBody = untailFrame(mainBody);
   }
   /**

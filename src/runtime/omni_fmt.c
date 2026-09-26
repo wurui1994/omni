@@ -557,6 +557,32 @@ static double g_gklast = 0.0;
    推到几千万像素外，画面**从第二帧起全黑**（"只闪一帧然后变黑"就是这一格）。 */
 static double g_gkt0 = -1.0;
 
+/* ─── 帧同步：`refresh()` 就是**等待点** ────────────────────────────────────────
+   EvalDraw 的脚本一半把帧循环写在自己身上（`while(1){ …; refresh(); }`）。那一格
+   不是"顺手交张图"，而是**这一帧的边界**：交图、等到下一帧的时间片、看出口。
+   等法两种，只有一处口径（`OMNI_FPS`，默认 60）：
+     * 窗口那一档：等在 vsync 上（`glfwSwapInterval(1)`，见 omni_ev_gl.c:1446）；
+     * 没窗口那一档（离屏 view）：等在这儿的 `nanosleep` 上。
+   render 那一档一格都不等 —— 判据要快，而且它的时钟是确定性的（帧号/60）。
+   `g_gdue` 是"下一帧该开跑的时刻"（毫秒）；落后超过一帧就重新起点，不补帧。 */
+static double g_gdue = -1.0;
+
+static void gfx_frame_sync(void) {
+  double per, now, left;
+  if (gfx_mode() != 2 || g_glwin) return;        /* render 不等；窗口等在 vsync 上 */
+  per = 1000.0 / (double)gfx_int_env("OMNI_FPS", 60);
+  now = gfx_now_ms();
+  if (g_gdue < 0) { g_gdue = now + per; return; }
+  left = g_gdue - now;
+  if (left > 0) {
+    struct timespec ts;
+    ts.tv_sec = (time_t)(left / 1000.0);
+    ts.tv_nsec = (long)((left - (double)ts.tv_sec * 1000.0) * 1e6);
+    nanosleep(&ts, NULL);
+  }
+  g_gdue = left > -per ? g_gdue + per : now + per;
+}
+
 /* `klock()` / `klock(0)` 的秒数 —— 与 host/gfx-cpu.js 的 `klockSec()` 同一句话：
    view 模式是真墙上时间；render 模式是确定性时钟（帧号/60），**但同一帧里第二次起
    往前走一帧的量**（语料里有"把帧限速写在脚本里"那个写法：
@@ -750,7 +776,19 @@ static void gfx_px(double x, double y, int64_t c) {
 }
 
 static void gfx_line(double x0, double y0, double x1, double y1, int64_t c) {
+  /* **整段在画布外就不走**（与 gfx_disc 那一格同一个理由）：这门语言的脚本拿时钟算坐标，
+     分母接近 0 时端点会炸到几十万（`roadway.kc` 的路牌：`sy = (hy*2-20)/z`）——
+     Bresenham 是逐像素走的，不夹的话一帧就走几百万格，看着就是"卡死"。
+     非有限/过大的坐标也在这儿挡掉：`gfx_rnd` 到 int64 会溢出。
+     画布内那些线一个像素都不差（画布外的格本来就被 `gfx_px` 丢掉）。 */
+  int64_t lo, hi;
+  if (!(x0 > -1e15 && x0 < 1e15 && y0 > -1e15 && y0 < 1e15
+     && x1 > -1e15 && x1 < 1e15 && y1 > -1e15 && y1 < 1e15)) return;
   int64_t x = gfx_rnd(x0), y = gfx_rnd(y0), xe = gfx_rnd(x1), ye = gfx_rnd(y1);
+  lo = x < xe ? x : xe; hi = x < xe ? xe : x;
+  if (hi < 0 || lo >= g_gw) return;
+  lo = y < ye ? y : ye; hi = y < ye ? ye : y;
+  if (hi < 0 || lo >= g_gh) return;
   int64_t dx = xe > x ? xe - x : x - xe;
   int64_t dy = ye > y ? ye - y : y - ye;
   int64_t sx = x > xe ? -1 : 1, sy = y > ye ? -1 : 1, err = dx - dy;
@@ -1530,7 +1568,14 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
     if (g_grefr < 2) { gfx_present(); return 0.0; }
     if (g_gframes < 0) { gfx_frame_setup(); g_gfno = 1; }
     gfx_frame_end();
+    /* **窗口那一档：`refresh()` 就是这一帧的出口** —— 贴到窗口上（那一格顺带交换缓冲、
+       poll 事件、读输入，并且窗口一关就把 `g_glwin` 放下）。从前这儿第二回起只结算不交帧，
+       于是窗口那一档**既不刷新也关不掉**（`--mode view` 跑这一族当场卡死）：窗口那一档的
+       收摊条件是"窗口关了"，而那一格只有 present 的时候才看得见。
+       **与 `host/gfx-cpu.js` 的 `refresh/0` 逐句相同**。 */
+    if (g_glwin) gfx_present();
     if ((g_glwin_was && g_glwin == 0) || g_gfno >= g_gframes) { gfx_perf_report(); exit(0); }
+    gfx_frame_sync();                 /* 等待点：等到下一帧的时间片（见那段头注） */
     g_gfno += 1;
     g_gkn = 0;                        /* 新一帧：klock 那个"帧内第几次"从头数 */
     g_gtprev = gfx_now_ms();

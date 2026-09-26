@@ -378,12 +378,23 @@ function cls(r, g, b) {
   D.dirty = true;
 }
 
-/** Bresenham。两头都画（与 EvalDraw 的 `lineto` 一样是闭区间）。 */
+/**
+ * Bresenham。两头都画（与 EvalDraw 的 `lineto` 一样是闭区间）。
+ *
+ * **整段在画布外就不走**（与 `disc` 那一格同一个理由，与 `omni_fmt.c` 的 `gfx_line`
+ * 逐句相同）：这门语言的脚本拿时钟算坐标，分母接近 0 时端点会炸到几十万
+ * （`roadway.kc` 的路牌 `sy = (hy*2-20)/z`）—— 逐像素走的话一帧几百万格，看着就是卡死。
+ * 非有限/过大的坐标也在这儿挡掉。画布内的线一个像素都不差。
+ */
 function line(x0, y0, x1, y1, c) {
+  if (!(x0 > -1e15 && x0 < 1e15 && y0 > -1e15 && y0 < 1e15
+    && x1 > -1e15 && x1 < 1e15 && y1 > -1e15 && y1 < 1e15)) return;
   let x = rnd(x0);
   let y = rnd(y0);
   const xe = rnd(x1);
   const ye = rnd(y1);
+  if ((x < xe ? xe : x) < 0 || (x < xe ? x : xe) >= D.w) return;
+  if ((y < ye ? ye : y) < 0 || (y < ye ? y : ye) >= D.h) return;
   const dx = Math.abs(xe - x);
   const dy = Math.abs(ye - y);
   const sx = x > xe ? -1 : 1;
@@ -682,18 +693,32 @@ export function gfxCall(name, args) {
       cone(a(0), a(1), a(2), a(3), a(4), a(5), D.col);
       return 0;
     case 'rgb/3': return rgb(a(0), a(1), a(2));
-    /* `refresh()`：**交出这一帧**。CPU 这一档就是写表面 + 印一行指针
-       （GL 那两档在各自的设备里是交换缓冲）。
-       **一次 body 里来第二回起，它还要把一帧结算掉**（与 `omni_fmt.c` 的 refresh
-       逐句相同）：EvalDraw 那一族把帧循环写在脚本里（`while(1){ …; refresh(); }`），
-       `nextframe` 一趟都回不来 —— 不在这儿收摊就是死循环（语料里 21 份这么写）。
-       分界用"一次 body 里第几回"，不是"有没有人调过 nextframe"（入口永远调它）。 */
+    /* `refresh()`：**这一帧的边界 —— 等待点 + 帧同步**（与 `omni_fmt.c` 的 refresh 逐句
+       相同）。EvalDraw 的脚本一半把帧循环写在自己身上（`while(1){ …; refresh(); }`，语料里
+       21 份），那个 `while` 我们**不动**：它每转一圈就在这儿交一帧、等下一格时间片、看出口。
+       等在哪儿：窗口那一档等在 vsync 上（`glfwSwapInterval(1)`）；离屏那一档没什么可等的
+       （判据要快），出口是帧预算。
+       "一次 body 里第几回"分开两种写法：第一回只交图（宿主每帧调一次 body 那一族，`nextframe`
+       才是它的边界）；第二回起这一格才是边界 —— 不能看"有没有人调过 nextframe"（产物入口
+       永远调它，那一格永远是 1）。 */
     case 'refresh/0': {
       need(320, 240);
       D.refr = (D.refr ?? 0) + 1;
       if (D.refr < 2) { present(); return 0; }
       if (D.frames < 0) { frameSetup(); D.fno = 1; }
       frameEnd();
+      /**
+       * 窗口那一档：`present()` 走的是 `winPresent()` —— 贴图 + 交换缓冲（**等在 vsync
+       * 上，这就是那个等待点**）+ poll 事件 + 读输入，并且窗口一关就把 `G.win` 放下。
+       * 所以先 present 再看出口那两格。
+       */
+      if (G.win) present();
+      if (G.wasWin && !G.win) {
+        perfReport();
+        const e = new Error('gfx: 窗口关了（脚本自己那个 while 没有出口）');
+        e.$exit = 0;
+        throw e;
+      }
       if (D.fno >= D.frames) {
         perfReport();
         /* 收摊。**不能 `process.exit`**（ADR-0011 决议 2：它不在闭合 ABI 里，`check:self`
