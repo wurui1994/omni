@@ -1000,8 +1000,18 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
    **命名实参过一张白名单**（`adapter.js` 的 `NAMED_OK`）：认得的是 `cat` 的 `sep=`、
    `paste` 的 `sep=` / `collapse=`、聚合那一族的 `na.rm=`（`sum` / `prod` / `mean` /
    `max` / `min` / `range` / `var` / `sd` / `any` / `all`）、`head`/`tail` 的 `n=`、
-   `rep` 的 `times=` / `each=`、`seq` 的 `by=` / `length.out=`、`numeric(n)` 那一族的
-   `length=`、`sort` 的 `decreasing=`、找与换那一族的 `fixed=` / `value=`。
+   `rep` 的 `times=` / `each=` / `length.out=`、`seq` 的 `by=` / `length.out=`、
+   `numeric(n)` 那一族的 `length=`、`sort` 与 `order` 的 `decreasing=`、
+   找与换那一族的 `fixed=` / `value=`。
+
+   这两格是 2026-09-26 补的，都是扫一排单行量出来的：
+   * **`order(x, decreasing = TRUE)`** —— 换一份比较（`r_ord_gt`），**只有值那两格反过来**，
+     缺失照旧摆最后、同值照旧按**原下标**。要紧的是它**不是**"升着排完倒过来"：量出来
+     `order(c(2,1,2,1), decreasing=TRUE)` 是 `1 3 2 4`，倒过来是 `3 1 4 2`。
+     字符向量上那一档还没接（同值的先后会分家）。
+   * **`rep(x, length.out = n)`** —— 单独用时就是 `rep_len(x, n)`（那一格本来就有）。
+     与 `times` / `each` 一起用**当场报**：R 那儿是先 each 再 times、最后截到 n，
+     三格叠起来的账没量过，不猜。
    **表外的一律当场报** —— `length.out=`（`rep` 上那一格）/ `na.last=` / `ignore.case=` /
    `digits=` / `quote=` 都在表外。这张表是为了躲一种静默答错：从前认不出来的命名实参
    被**直接丢掉**，于是 `sum(x, na.rm = TRUE)` 答 `NA` 而 R 答 4（量出来的）。

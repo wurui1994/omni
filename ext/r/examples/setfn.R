@@ -76,3 +76,27 @@ print(anyDuplicated(c(NA, 1, NA)))
 print(anyDuplicated(c("b", "a", "b")))
 print(anyDuplicated(c("a", "b")))
 cat(anyDuplicated(c(2, 2)), anyDuplicated(c(2, 3)), "\n")
+
+# **`order(x, decreasing = TRUE)`**：换一份比较（只有值那两格反过来）——
+# 缺失照旧摆最后、同值照旧按**原下标**。量出来 R 就是这样：
+# `order(c(2,1,2,1), decreasing=TRUE)` 是 `1 3 2 4`，不是"升着排完倒过来"的 `3 1 4 2`。
+cat(order(c(3, 1, 2), decreasing = TRUE), "\n")
+cat(order(c(2, 1, 2, 1), decreasing = TRUE), "\n")
+cat(order(c(3, NA, 1), decreasing = TRUE), "\n")
+cat(order(c(5, 5, 5), decreasing = TRUE), "\n")
+cat(order(c(3, 1, 4, 1, 5), decreasing = TRUE), "\n")
+cat(order(c(3, 1, 4, 1, 5), decreasing = FALSE), "\n")
+odv <- c(10, 30, 20)
+cat(odv[order(odv, decreasing = TRUE)], "\n")
+cat(order(numeric(0), decreasing = TRUE), "\n")
+print(order(c(1.5, -2.5, 0), decreasing = TRUE))
+
+# **`rep(x, length.out = n)`** 单独用那一档就是 `rep_len(x, n)`（那一格本来就有）。
+# 与 `times` / `each` 一起用还没接 —— 三格叠起来的次序没量过，所以当场报。
+cat(rep(c(1, 2), length.out = 5), "\n")
+cat(rep(c(1, 2, 3), length.out = 2), "\n")
+cat(rep(7, length.out = 4), "\n")
+cat(rep(c(1, 2), length.out = 0), "\n")
+odn <- 3
+cat(rep(c(9, 8), length.out = odn), "\n")
+print(rep(c(1, 2), length.out = 5))

@@ -288,7 +288,10 @@ const FN_DEPS = new Map([
   ['r_pmax', ['r_is_na', 'r_na']],
   ['r_pmin', ['r_is_na', 'r_na']],
   ['r_ord_lt', ['r_is_na']],
+  /* `decreasing = TRUE` 那一档的比较（只有值那两格反过来，见生成器）。 */
+  ['r_ord_gt', ['r_is_na']],
   ['r_order', ['r_ord_lt']],
+  ['r_order_d', ['r_ord_gt']],
   ['r_match', ['r_same', 'r_na']],
   ['r_in_v', ['r_same']],
   ['r_in1', ['r_same']],
@@ -1008,10 +1011,10 @@ const NAMED_OK = new Map([
   /* `sort` 上**没有** `na.rm=` —— R 自己都报"参数没有用(na.rm = TRUE)"（它的默认
      `na.last = NA` 已经是"丢掉缺失"了）。量出来的：我们本来跟着收了，比 R 宽。 */
   ['head', new Set(['n'])], ['tail', new Set(['n'])],
-  ['rep', new Set(['times', 'each'])],
+  ['rep', new Set(['times', 'each', 'length.out'])],
   ['seq', new Set(['by', 'length.out'])],
   ['sort', new Set(['decreasing', 'method', 'na.last'])],
-  ['order', new Set(['method'])],
+  ['order', new Set(['method', 'decreasing'])],
   ['strsplit', new Set(['fixed'])],
   ['grepl', new Set(['fixed'])], ['sub', new Set(['fixed'])], ['gsub', new Set(['fixed'])],
   ['grep', new Set(['fixed', 'value'])],
@@ -4931,6 +4934,27 @@ function callOf(x, types, extra, want, stmtPos) {
         const named = namedArg(x, 'times');
         const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
         /**
+         * **`rep(x, length.out = n)` 单独用那一档就是 `rep_len(x, n)`**（2026-09-26）——
+         * 那一格（`r_rep_len`）本来就有，只是从前 `length.out=` 不在白名单里。
+         * 与 `times` / `each` **一起**用还没接：R 那儿是先 each 再 times、最后截到 n，
+         * 三格叠起来的账没量过，所以当场报而不是猜。
+         */
+        const lenOut = namedArg(x, 'length.out');
+        if (lenOut !== undefined) {
+          if (namedArg(x, 'times') !== undefined || namedArg(x, 'each') !== undefined
+              || (n >= 2 && all[1] !== null)) {
+            throw new Error('r->IR: rep() 的 `length.out=` 与 `times` / `each` 一起用还没接'
+              + '（单独用那一档接了，就是 `rep_len(x, n)`）');
+          }
+          const lt = typeOfExpr(lenOut, types);
+          if (isVecTy(lt) || isStrVec(lt)) {
+            throw new Error('r->IR: rep() 的 `length.out=` 要是一格数');
+          }
+          const kk = asIntE(exprOf(lenOut, types), lt);
+          if (isStrVec(t) || t.kind === 'string') throw new Error(strvGap('rep(length.out=)'));
+          return lglCall('r_rep_len', isVecTy(t) ? ev(0) : lglCall('r_vec1', asReal(ev(0), t)), kk);
+        }
+        /**
          * `times` / `each` 只接**一格数**。R 里 `times` 还可以是一条与 `x` 同长的向量
          * （`rep(1:2, times = c(2, 3))` 是 `1 1 2 2 2`）—— 那一档没接，**当场报**。
          *
@@ -5122,13 +5146,25 @@ function callOf(x, types, extra, want, stmtPos) {
             throw new Error('r->IR: order() 在字符向量上只接 `method = "radix"`（R 的默认那一档'
               + '按 locale 的排序规则，要 ICU）');
           }
+          if (trueFlag(x, 'decreasing')) {
+            throw new Error('r->IR: 字符向量上的 `order(…, decreasing = TRUE)` 还没接'
+              + '（倒过来那一格要另一份比较，同值那几格的先后会分家）');
+          }
           return lglCall('r_order_str', ev(0));
         }
         if (isStrVec(t)) throw new Error(strvGap(fn));
         if (!isVecTy(t)) throw new Error(`r->IR: ${fn}() 的实参不是向量（是 ${t.kind}）`);
+        /**
+         * **`order(x, decreasing = TRUE)`**（2026-09-26）：换一份比较（`r_ord_gt`）——
+         * **只有值那两格反过来**，缺失照旧摆最后、同值照旧按原下标。量出来 R 就是这样：
+         * `order(c(2,1,2,1), decreasing=TRUE)` 是 `1 3 2 4`（不是"升着排完倒过来"的
+         * `3 1 4 2`），`order(c(3,NA,1), decreasing=TRUE)` 是 `1 3 2`。
+         */
         const gen = {
           'which.max': 'r_which_max', 'which.min': 'r_which_min', unique: 'r_unique',
-          duplicated: 'r_dup', order: 'r_order', cumprod: 'r_cumprod',
+          duplicated: 'r_dup',
+          order: trueFlag(x, 'decreasing') ? 'r_order_d' : 'r_order',
+          cumprod: 'r_cumprod',
           cummax: 'r_cummax', cummin: 'r_cummin',
         }[fn];
         /* 带名字的向量上的 `which.max` / `which.min`：R 连那一格的名字一起回，所以出的是
@@ -6746,7 +6782,7 @@ const STRV_FNS = new Set([
 /** 这一批由 `setFnDecl` 发（集合与位置那一族，见 `FN_DEPS` 上那段账）。 */
 const SET_FNS = new Set([
   'r_same', 'r_which_max', 'r_which_min', 'r_cumprod', 'r_pmax', 'r_pmin',
-  'r_ord_lt', 'r_order', 'r_match', 'r_in_v', 'r_in1', 'r_unique', 'r_dup', 'r_any_dup',
+  'r_ord_lt', 'r_ord_gt', 'r_order', 'r_order_d', 'r_match', 'r_in_v', 'r_in1', 'r_unique', 'r_dup', 'r_any_dup',
   'r_union', 'r_intersect', 'r_setdiff', 'r_setequal', 'r_find_int',
   'r_na_v', 'r_nan_v', 'r_fin_v', 'r_inf_v', 'r_nm_sort', 'r_at1', 'r_at_keys', 'r_tab_cnt',
 ]);
@@ -6922,9 +6958,14 @@ function setFnDecl2(name) {
   const P1 = [{ name: 'v', type: RVEC }];
   const P2 = [{ name: 'v', type: RVEC }, { name: 'w', type: RVEC }];
 
-  if (name === 'r_ord_lt') {
+  if (name === 'r_ord_lt' || name === 'r_ord_gt') {
     /* `order` 的比较：缺失摆最后，同值按**原下标**分先后（于是这个次序是唯一的）。
-       `a` / `c` 是两格下标（按 double 存在那条索引向量里）。 */
+       `a` / `c` 是两格下标（按 double 存在那条索引向量里）。
+       `r_ord_gt` 是 `decreasing = TRUE` 那一档：**只有值那两格反过来**——
+       缺失照旧摆最后、同值照旧按原下标（量出来 R 就是这样：
+       `order(c(2,1,2,1), decreasing=TRUE)` 是 `1 3 2 4`、`order(c(3,NA,1), decreasing=TRUE)`
+       是 `1 3 2`）。 */
+    const dec = name === 'r_ord_gt';
     const ai = call1('toint', nm('a'));
     const ci = call1('toint', nm('c'));
     const xa = vecGet(v, ai);
@@ -6940,14 +6981,16 @@ function setFnDecl2(name) {
         iff(b('&&', nm('ma'), nm('mc')), [ret(b('<', nm('a'), nm('c')))]),
         iff(nm('ma'), [ret({ kind: 'bool', value: false })]),
         iff(nm('mc'), [ret({ kind: 'bool', value: true })]),
-        iff(b('<', xa, xc), [ret({ kind: 'bool', value: true })]),
-        iff(b('>', xa, xc), [ret({ kind: 'bool', value: false })]),
+        iff(b(dec ? '>' : '<', xa, xc), [ret({ kind: 'bool', value: true })]),
+        iff(b(dec ? '<' : '>', xa, xc), [ret({ kind: 'bool', value: false })]),
         ret(b('<', nm('a'), nm('c'))),
       ],
     };
   }
-  if (name === 'r_order') {
-    /* 排的是**下标**（Shell 排序，与 `r_sort` 同一条 gap 序列），比较交给 `r_ord_lt`。 */
+  if (name === 'r_order' || name === 'r_order_d') {
+    /* 排的是**下标**（Shell 排序，与 `r_sort` 同一条 gap 序列），比较交给 `r_ord_lt`；
+       `r_order_d` 是 `decreasing = TRUE` 那一档，换 `r_ord_gt`（见那一格）。 */
+    const cmp = name === 'r_order_d' ? 'r_ord_gt' : 'r_ord_lt';
     return {
       kind: 'fn',
       name,
@@ -6974,7 +7017,7 @@ function setFnDecl2(name) {
                 {
                   kind: 'while',
                   cond: b('&&', b('>=', j, nm('h')),
-                    cal('r_ord_lt', v, nm('t'), vecGet(o, b('-', j, nm('h'))))),
+                    cal(cmp, v, nm('t'), vecGet(o, b('-', j, nm('h'))))),
                   body: [
                     vecSet(o, j, vecGet(o, b('-', j, nm('h')))),
                     set('j', b('-', j, nm('h'))),
