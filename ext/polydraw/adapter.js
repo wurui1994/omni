@@ -594,6 +594,38 @@ function callOf(x, C) {
   const head = kids(x)[0];
   if (tag(head) !== 'name') throw new Error('eval->IR: 调用的不是一个名字（函数指针还没接）');
   const n = idOf(head);
+  /**
+   * **`readtouch(&id,&x,&y)`**（EvalDraw，`evaldraw.txt:1413`）：读多点触摸。
+   *
+   * 这台机器上**没有触摸设备**，所以照那份说明书自己的协议回"没有点了"——
+   * 返回 `-1`，出参一个都不写。
+   *
+   * 为什么不写出参也是对的：说明书那句是 *"Start id as -1, then continue reading until
+   * id is set to -1"* —— **调用方必须先把 `id` 置成 -1**，语料里三处都照做了
+   * （`for(id=-1;readtouch(&id,&x,&y)>=0;)` 两处、`id = -1; while(1){ readtouch(…);
+   * if (id < 0) break; …}` 一处）。所以 `id` 本来就是 -1，我们不写它，行为与"真硬件
+   * 但没有触点"逐句相同。
+   *
+   * 为什么拦在这儿（而不是像 `readmouse` 那样摊成几句赋值）：那三处里**两处是在
+   * 表达式位置**（`for` 的条件），摊成语句摊不进去；而 `&id` 这种实参光过 `exprOf`
+   * 会当场报（局部量取地址这一档方言里没有）—— 所以要在**算实参之前**拦。
+   */
+  if (C.host.who === 'evaldraw' && n === 'readtouch') return num(-1);
+  /**
+   * **`fputc(v)`**（EvalDraw，`evaldraw.txt:1525`）：与 `printchar` 像，但那个字符
+   * **只在"capture (next frame's output) to file (F6)"开着的时候**进文件
+   * （那门语言里连文件句柄都没有 —— "only 1 file can be saved at a time"）。
+   *
+   * 我们这一侧没有 F6 那一档 ⇒ **capture 是关着的**，照说明书那句，这个字符哪儿都不去。
+   * 所以这一格就是个收下不管的空操作（回 0）。
+   *
+   * 一句明写的偏差：**实参不求值**。语料里那两份（`geeky/pi.kc:122`、
+   * `geeky/circtris.kc` 那十几处）的实参都是纯算术，没有副作用；真碰上
+   * `fputc(i++)` 这种得改成"算一遍再丢"。
+   */
+  if (C.host.who === 'evaldraw' && n === 'fputc') return num(0);
+
+
   /* **可编程管线那一族**先看：它的实参里可能有**串**（着色器名 / uniform 名），
      而 `exprOf` 把串落成 `{kind:'string'}` —— 那格进不了宿主面（只收 double）。
      所以这儿把串内部到名字表里换成下标（表在入口里登记，见 `gfxDefIR`）。
