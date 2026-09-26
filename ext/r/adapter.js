@@ -4476,7 +4476,29 @@ function exprOf(x, types, want, stmtPos) {
           + '`%o%` / `%*%` 那些（外积与矩阵乘）要先有多维数组，自己用 `%名字%` 定的中缀'
           + '也在这儿 —— 那一档是 libR（见 ext/r/SPEC.md 第五节）');
       }
+      /**
+       * **整数算术溢出**（`2147483647L + 1L`）：R 那儿出的是 `NA_integer_`，还往 stderr
+       * 印一句 `NAs produced by integer overflow`。而这一层的 int 是 64 位、也没有整数的
+       * 缺失（见第四节第 11 条）—— 从前照算，印出 `2147483648`：**静默答错**
+       * （2026-09-27 扫出来的）。两边都是**写着的整数**时这儿就看得出来，当场报 →
+       * 退到 libR，值与那句警告两样都对。运行期才溢出的那一档拦不住（每一次 int 加法
+       * 都查一遍，那是最热的一条路），明写在 SPEC。
+       */
+      if (['+', '-', '*'].includes(op)
+          && typeOfExpr(l, types).kind === 'int' && typeOfExpr(r, types).kind === 'int') {
+        const lv0 = constNumOf(l);
+        const rv0 = constNumOf(r);
+        if (lv0 !== null && rv0 !== null && Number.isInteger(lv0) && Number.isInteger(rv0)) {
+          const v0 = op === '+' ? lv0 + rv0 : op === '-' ? lv0 - rv0 : lv0 * rv0;
+          if (!(v0 >= -2147483647 && v0 <= 2147483647)) {
+            throw new Error('r->IR: 整数算术溢出了 int 的范围 —— R 那儿出的是 `NA_integer_`'
+              + '（而且往 stderr 印一句 `NAs produced by integer overflow`），'
+              + '这一层没有整数的缺失（见 ext/r/SPEC.md 第四节第 11 条）');
+          }
+        }
+      }
       /* **向量化**：一边是向量就逐元素算（R 里这是常态，不是特例）。 */
+
       {
         const vt = vecBin(op, l, r, types);
         if (vt !== null) return vt;
