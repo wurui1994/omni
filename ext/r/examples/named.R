@@ -288,3 +288,18 @@ print(which(wna > 2))
 print(which(unname(wv) > 1))
 cat(length(which(wv > 1)), sum(which(wv > 1)), "\n")
 print(which(wv >= 1))
+
+# **`ifelse` 的名字只从 `test` 那一格来** —— R 的实现是 `ans <- test` 起手，带走的是
+# test 的属性。量出来 `ifelse(c(TRUE,FALSE), c(x=1,y=2), 9)` 出的是**没名字**的 `1 9`。
+# 成绩单那种 `grade <- ifelse(score >= 80, 3, 2)` 在真 R 代码里很常见。
+print(ifelse(c(a = TRUE, b = FALSE), 1, 2))
+print(ifelse(c(TRUE, FALSE), c(x = 1, y = 2), 9))
+sc <- c(alice = 88, bob = 72)
+print(ifelse(sc > 80, 1, 0))
+print(ifelse(c(a = TRUE, b = NA, c = FALSE), 1, 0))
+cat(ifelse(sc > 80, 1, 0), names(ifelse(sc > 80, 1, 0)), "\n")
+print(ifelse(sc > 80, TRUE, FALSE))
+print(unname(ifelse(sc > 80, 1, 0)))
+grade <- ifelse(sc >= 80, 3, 2)
+print(grade)
+cat(sum(grade), names(which(grade == max(grade))), "\n")

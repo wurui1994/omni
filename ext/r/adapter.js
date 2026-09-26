@@ -751,7 +751,7 @@ const NAME_KEEP_NUM = new Set([
    `c` 也在里头 —— 它的名字是**接起来**而不是原样跟着（见 `namesExprOf` 的 `c` 那一格）。 */
 const NAME_KEEP = new Set([...NAME_KEEP_LGL, ...NAME_KEEP_NUM,
   'rev', 'head', 'tail', 'sort', 'c', 'diff', 'which.max', 'which.min', 'append', 'which',
-  'quantile']);
+  'quantile', 'ifelse']);
 /** 第 i 格（0 起）。方言的 `{kind:'index'}` 落成 `(aget …)`，赋值那侧落 `(aset …)`。 */
 const svGet = (v, i) => ({ kind: 'index', obj: v, index: i });
 const svLen = (v) => call1('alen', v);
@@ -1433,6 +1433,15 @@ function namesExprOf(x, types) {
     return { kind: 'call', fn: { kind: 'name', name: h }, args: [ns, cnt] };
   }
   /**
+   * `ifelse(test, yes, no)` —— 名字**只从 `test` 那一格来**（R 的实现是 `ans <- test`
+   * 起手，带走的是 test 的属性；量出来 `ifelse(c(TRUE,FALSE), c(x=1,y=2), 9)` 出的是
+   * 没名字的 `1 9`）。长度与位置都不动，所以原样跟着。
+   */
+  if (fn === 'ifelse') {
+    const as = posArgs(x);
+    return as.length < 1 ? null : namesExprOf(as[0], types);
+  }
+  /**
    * `quantile(x)` —— 不给 `probs` 时 R 回的是一条带名字的向量，那五个标签
    * （`0% 25% 50% 75% 100%`）是**编译期常量**，所以名字那一条直接合成一格
    * `c("0%", …)` 的 CST 再发一遍（与 `formatC` 改写成 `sprintf` 同一条路子，
@@ -1949,7 +1958,14 @@ function applyTy(fn, x, types) {
           const t = typeOfExpr(args[k], types);
           return t.kind === 'bool' || isLgl1(t) || isLglTy(t);
         });
-      if (args.length > 0 && isVecTy(typeOfExpr(args[0], types))) return lgl ? RLGL : RVEC;
+      if (args.length > 0 && isVecTy(typeOfExpr(args[0], types))) {
+        /* **名字只从 `test` 那一格来**（R 的 `ifelse` 是 `ans <- test` 起手，所以带的是
+           test 的属性）—— 量出来 `ifelse(c(TRUE,FALSE), c(x=1,y=2), 9)` 出的是**没名字**的
+           `1 9`，而 `ifelse(c(a=TRUE,b=FALSE), 1, 2)` 的名字是 `a b`。 */
+        const named = isNamedTy(typeOfExpr(args[0], types));
+        if (lgl) return named ? RNLGL : RLGL;
+        return named ? RNVEC : RVEC;
+      }
       return lgl ? RLGL1 : REAL;
     }
     /* 这三格进出都是向量（`which` 回的是位置，所以是数值向量，不是逻辑向量）。
