@@ -786,21 +786,31 @@ int omni_ev_gl_tex(int slot, int w, int h, int d, int fmt, const double *px) {
  * 逐像素对照本来就不成立，见 §20.3）。
  */
 /**
- * 找并解开一张图：**先按给的路径，找不到就一级一级往上找**（回 NULL = 都没有）。
+ * 找并解开一张图：**先按给的路径，找不到就一级一级往上找**，每一级还要试一次
+ * `…/data/<名字>`（回 NULL = 都没有）。
  *
  * 为什么要往上找：脚本里写的是相对路径，而素材常常摆在**语料根**而不是脚本旁边
  * （`ken/cubetex.pss` 写 `"kensky.jpg"`，那个文件在 `ken/` 的上一级）——
  * 原版的 `kzopen` 是按 cwd 找的，而它本来就在语料根上跑。
+ *
+ * 为什么还要试 `data/`：EvalDraw 那套语料**所有素材都在 `<语料根>/data/` 下**，
+ * 而脚本写的是光名字（`demos/beer.kc` 的 `glsettex("brick.png")`，文件在
+ * `evaldraw/data/brick.png`）—— 只往上找永远找不着它，那份脚本于是整幅白。
  */
 static unsigned char *ev_img_find(const char *path, int *w, int *h) {
   unsigned char *p = ev_img_load(path, w, h);
   if (p != NULL) return p;
   char buf[1024];
   snprintf(buf, sizeof(buf), "%s", path);
+  /* 每一级先试 `<这一级>/data/<名字>`，再把名字往上提一级。 */
   for (int lvl = 0; lvl < 8; lvl++) {
     char *base = strrchr(buf, '/');
     if (base == NULL) break;
+    char alt[1024];
     *base = 0;
+    snprintf(alt, sizeof(alt), "%s/data/%s", buf, base + 1);
+    p = ev_img_load(alt, w, h);
+    if (p != NULL) return p;
     char *up = strrchr(buf, '/');
     if (up == NULL) break;
     /* `.../ken/kensky.jpg` -> `.../kensky.jpg` -> `.../..` 那样一级一级上去。 */

@@ -5355,9 +5355,14 @@ function applyGfxFlags(verb, path, rest) {
   if (!(path.endsWith('.pss') || path.endsWith('.kc'))) return;
   /* **素材（文件纹理）按脚本所在的目录找**：`glsettex(0,"earth.jpg")` 里那是个相对路径，
      而原版是在脚本旁边跑的（`kzopen` 按 cwd）。判据从仓库根跑，所以这儿把脚本那一格目录
-     交给设备（`OMNI_GFX_DIR`）—— 环境变量对两条腿都管用（js 腿同进程、原生腿继承）。 */
+     交给设备（`OMNI_GFX_DIR`）—— 环境变量对两条腿都管用（js 腿同进程、原生腿继承）。
+     **递绝对路径**：设备那一侧是"一级一级往上找 + 每级试一次 `data/`"
+     （`omni_ev_gl.c` 的 `ev_img_find`），而 `omni run beer.kc` 给的目录是 `.` ——
+     那条梯子第一步就爬不上去，于是 `demos/beer.kc` 的 `brick.png`（在
+     `<语料根>/data/` 下）永远找不着，整幅图白着。 */
   const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
-  setEnv('OMNI_GFX_DIR', cut > 0 ? path.slice(0, cut) : '.');
+  const dir = cut > 0 ? path.slice(0, cut) : '.';
+  setEnv('OMNI_GFX_DIR', dir.startsWith('/') ? dir : `${cwd()}/${dir}`);
   const val = (n) => {
     const i = rest.indexOf(n);
     return i >= 0 && rest[i + 1] !== undefined ? rest[i + 1] : undefined;
