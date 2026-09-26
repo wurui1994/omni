@@ -19,7 +19,6 @@
 //      得看 `(dtag …)` —— 那笔分派的账在**这一份里**（方言那一层不替谁猜）。
 //      所以这儿给四件事：`dynText`（印出来，python 的 str/repr 口径）、`dynTruthy`
 //      （当条件用）、`dynBin`（二元算符）与 `noneOf` / `isNoneOf`（`None` 那一格）。
-//      位运算还没接，撞上了当场说清。
 
 import {
   REAL, STR, BOOL, DYN, typeOf, sameType,
@@ -243,6 +242,8 @@ function hold(v, C, pre, tag_) {
 }
 
 const CMP_OPS = new Set(['==', '!=', '<', '>', '<=', '>=']);
+/** 位运算：python 的写法 → 方言里那一格（与 `expr.js` 的 `BITS` 同一张）。 */
+const BITS_OPS = new Map([['&', '&'], ['|', '|'], ['^', '^'], ['<<', '<<'], ['>>', '>>']]);
 
 /**
  * **两支各走各的**（不是 `(sel c a b)`）：交回一格临时量 + 一句 `if`。
@@ -271,11 +272,12 @@ function dynBranch(cond, thenE, elseE, C, pre) {
  *   * `+` `-` `*`：两边都是 int 就走整数（交回一格装着 int 的箱子），否则按 real 算；
  *     `+` 另有"两边都是串"那一支（拼接）。
  *   * `/`：python 里永远出浮点。
+ *   * `// % **`：两边都是整数走整数那一支（`**` 另加"指数不是负数"—— 运行期问一次），
+ *     否则按 real 算。
+ *   * 位运算：两边都得是整数（python 里 `1.5 & 1` 是 TypeError），直接发整数那一支。
  *   * 比较：交的是 bool（不装箱）—— 数与数按 real 比，串与串按串比，标签不同型是 False
  *     （`1 == "1"` 在 python 里就是 False，不是报错）。
  *
- * **明说的不足**：位运算落在箱子上还没接（方言的位运算要两边都是 int，而箱子里是什么
- * 运行期才知道 —— 要接得再加一支"两边都是 int 才算，否则报"）。
  * 算术那几支**碰上不该碰的标签是运行期错误**（`"a" - 1` 走到 real 那一支，`asreal`
  * 看见 string 标签当场报 `dynamic value is string, expected real`）—— python 那边是
  * TypeError，方言里没有异常，**报出来比算出个假数字好**，所以就让它报。
@@ -318,7 +320,9 @@ export function dynBin(op, a0, b0, C, hooks = {}) {
 
   /* `//` `%` `**` —— python 的那三条规矩（向下取整、符号跟着除数、整数次幂还是整数）
      写在 `expr.js` 里（静态那一侧用的是同一份），所以这儿只管**分派**：
-     两边都是整数走整数那一支，否则走 real 那一支，两支各自装回箱子。 */
+     走整数那一支的条件是"两边都是整数"，`**` 另加一条"指数不是负数"
+     （python 里 `2 ** -1` 是 0.5 —— 静态那一侧靠"指数是非负整数字面量"才敢说 int，
+     箱子上没有那个信息，所以在**运行期**问一次）。 */
   if (['//', '%', '**'].includes(op)) {
     const h = hooks[op];
     if (h === undefined) {
@@ -326,8 +330,15 @@ export function dynBin(op, a0, b0, C, hooks = {}) {
     }
     const ai = { kind: 'builtin', name: 'asint', args: [a] };
     const bi = { kind: 'builtin', name: 'asint', args: [b] };
+    let wantInt = bothInt(a, b);
+    if (op === '**') {
+      wantInt = {
+        kind: 'binop', op: '&&', left: wantInt,
+        right: { kind: 'binop', op: '>=', left: bi, right: { kind: 'int', value: 0 } },
+      };
+    }
     return wrap(dynBranch(
-      bothInt(a, b),
+      wantInt,
       boxOf(h(ai, bi, true), C),
       boxOf(h(asNum(a), asNum(b), false), C),
       C,
@@ -335,9 +346,19 @@ export function dynBin(op, a0, b0, C, hooks = {}) {
     ));
   }
 
+  /* 位运算：python 里两边都得是整数（`1.5 & 1` 是 TypeError）—— 所以直接发整数那一支，
+     标签不对时 `(asint …)` 在运行期报，与那边抛异常同一档（方言里没有异常）。 */
+  if (BITS_OPS.has(op)) {
+    return wrap(boxOf({
+      kind: 'binop', op: BITS_OPS.get(op),
+      left: { kind: 'builtin', name: 'asint', args: [a] },
+      right: { kind: 'builtin', name: 'asint', args: [b] },
+    }, C));
+  }
+
   if (!['+', '-', '*'].includes(op)) {
     throw new Error(`python->IR: 箱子上的 '${op}' 还没接`
-      + '（接了的是 + - * / // % ** 与那六个比较；位运算要两边都是 int，还没接）');
+      + '（接了的是 + - * / // % **、六个比较与五格位运算）');
   }
 
   const intArm = boxOf({
