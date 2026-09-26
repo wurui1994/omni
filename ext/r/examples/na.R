@@ -162,3 +162,13 @@ cat(is.integer(c(TRUE, FALSE)), is.double(c(TRUE, FALSE)), "\n")
 cat(is.integer(seq_len(3)), is.integer(which(c(TRUE, FALSE, TRUE))), "\n")
 ## as.double 就是 as.numeric 的别名
 cat(as.double("3.5"), as.double(2L), as.double(c("1", "2")), "\n")
+## 一格标量上开 na.rm：收掉那一格剩的是零长 —— sum 是 0、mean 是 NaN、any 是 FALSE、all 是 TRUE
+print(sum(NA, na.rm = TRUE))
+print(mean(NA, na.rm = TRUE))
+print(any(NA, na.rm = TRUE))
+print(all(NA, na.rm = TRUE))
+nrx <- NA
+print(sum(nrx, na.rm = TRUE))
+print(mean(nrx, na.rm = TRUE))
+print(sum(3, na.rm = TRUE))
+cat(sum(NA, na.rm = TRUE), any(NA, na.rm = TRUE), all(NA, na.rm = TRUE), "\n")

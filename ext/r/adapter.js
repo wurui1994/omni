@@ -6147,7 +6147,29 @@ function callOf(x, types, extra, want, stmtPos) {
             + ' R 的 `any(a, b)` 要"任意多格实参"那一层，这一版没有');
         }
         const t = all[0] === null ? REAL : typeOfExpr(all[0], types);
-        if (!isVecTy(t)) return asLgl(ev(0), t);
+        if (!isVecTy(t)) {
+          const sl = asLgl(ev(0), t);
+          /**
+           * **一格标量上开了 `na.rm = TRUE`**：收掉那一格之后剩的是**零长**，而 R 的
+           * 空 `any` 是 `FALSE`、空 `all` 是 `TRUE`（量出来 2026-09-27：
+           * `any(NA, na.rm=TRUE)` 印 `FALSE`、`all(NA, na.rm=TRUE)` 印 `TRUE`）。
+           * 从前这儿把那格值原样回，于是两格都印 `NA` —— **静默答错**。
+           */
+          if (naRmOn() && t.kind !== 'bool') {
+            const vn = fresh('narl');
+            return {
+              kind: 'block-expr',
+              stmts: [{ kind: 'let', name: vn, type: REAL, init: sl }],
+              value: {
+                kind: 'ternary',
+                cond: lglCall('r_is_na', { kind: 'name', name: vn }),
+                then: { kind: 'real', value: fn === 'any' ? 0 : 1 },
+                else_: { kind: 'name', name: vn },
+              },
+            };
+          }
+          return sl;
+        }
         return lglCall(fn === 'any' ? 'r_any' : 'r_all', dropNa(ev(0)));
       }
       case 'sum': case 'mean': case 'max': case 'min': {
@@ -6179,7 +6201,34 @@ function callOf(x, types, extra, want, stmtPos) {
         if (n === 1) {
           const t = one(0);
           /* 一格标量（`sum(5)` / `max(x[1])`）在 R 里就是它自己（`mean` 也一样）。 */
-          if (!isVecTy(t)) return asReal(ev(0), t);
+          if (!isVecTy(t)) {
+            const sv = asReal(ev(0), t);
+            /**
+             * **一格标量上开了 `na.rm = TRUE`**（量出来 2026-09-27，`Rscript` 4.6.1）：
+             * 收掉那一格之后剩的是**零长**，于是 `sum(NA, na.rm=TRUE)` 是 `0`（空和）、
+             * `mean(NA, na.rm=TRUE)` 是 `NaN`（0/0）、`max` / `min` 是 `-Inf` / `Inf`
+             * **而且往 stderr 印一句警告**。从前这儿把那格值原样回，四格全印 `NA` ——
+             * **静默答错**。前两格在这儿算；后两格当场报，退到 libR 那一档连警告一起对。
+             */
+            if (naRmOn() && t.kind !== 'bool' && t.kind !== 'int') {
+              if (fn === 'max' || fn === 'min') {
+                throw new Error(`r->IR: \`${fn}(一格标量, na.rm = TRUE)\` 碰上 NA 时 R 回 `
+                  + '∓Inf **并往 stderr 印一句警告**（`所有的参数都不存在`），这一层发不出那句');
+              }
+              const vn = fresh('nar');
+              return {
+                kind: 'block-expr',
+                stmts: [{ kind: 'let', name: vn, type: REAL, init: sv }],
+                value: {
+                  kind: 'ternary',
+                  cond: lglCall('r_is_na', { kind: 'name', name: vn }),
+                  then: fn === 'sum' ? { kind: 'real', value: 0 } : numLit('NaN'),
+                  else_: { kind: 'name', name: vn },
+                },
+              };
+            }
+            return sv;
+          }
           return { kind: 'call', fn: { kind: 'name', name }, args: [dropNa(ev(0))] };
         }
         const pre = [];
