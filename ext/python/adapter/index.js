@@ -59,6 +59,8 @@ export function pyToIR(tree, ctx = {}) {
     C.fnNodes.set(nm, f);
   }
   declareClasses(classNodes, C);
+  /* **函数里套的函数**：没有捕获外层名字的那一档**提到模块级**（见 `hoistNested`）。 */
+  for (const f of fnNodes) hoistNested(f, C);
   /* **f-string 里那几段表达式先解析出来**。单态化那一趟是从**调用点**收实例的，而
      `f"{twice(n)}"` 里那次调用躺在一个 STRING 记号里 —— `allNodes` 看不见它，于是
      `twice` 一格实例都收不到（量出来的原话：`twice(int)` 没有对得上的那一格）。
@@ -440,8 +442,74 @@ function digExpr(tree) {
   return null;
 }
 
+/** 一棵树里用到的名字（`(n x)` 那一族；属性名与命名实参的键是叶子，不算）。 */
+function namesIn(nd) {
+  const out = new Set();
+  for (const k of allNodes(nd)) if (tag(k) === 'n') out.add(String(nameOf(k)));
+  return out;
+}
+
+/** 一棵树里**被赋过值**的那几个名字（赋值、带标注的赋值、`+=`、`for` 的目标）。 */
+function boundIn(nd) {
+  const out = new Set();
+  const take = (t) => {
+    if (t === undefined || t === null) return;
+    if (tag(t) === 'n') out.add(String(nameOf(t)));
+    if (tag(t) === 'tuple') for (const k of kids(t)) take(k);
+  };
+  for (const s of allNodes(nd)) {
+    if (tag(s) === 'assign' || tag(s) === 'annot') {
+      const lhs = part(s, 'lhs');
+      if (lhs === undefined) take(kids(s)[0]);
+      else for (const g of kids(lhs)) take(kids(g)[0]);
+    }
+    if (tag(s) === 'augassign') take(kids(s)[1]);
+    if (tag(s) === 'for') take(kids(s)[0]);
+    /* **套在里头的 `def` 的名字不算"外层的局部"** —— 它自己也会被提到模块级，所以
+       一格嵌套函数调它的兄弟**不是捕获**（量到过：`a2` 调 `a1` 被误判成闭包）。 */
+  }
+  return out;
+}
+
+/** 一棵 `def` 的形参名字。 */
+const paramNames = (f) => paramsOf(f).filter((p) => tag(p) === 'p')
+  .map((p) => String(nameOf(kids(p)[0])));
+
+/**
+ * **函数里套的函数：没有捕获的那一档提到模块级**。
+ *
+ * python 的嵌套 `def` 有两种用法：一种只是"把一段逻辑关在里头"（不读外层的任何名字），
+ * 另一种是真闭包（读外层的局部）。前者与模块级的 `def` **没有区别** —— 提上去就是，
+ * 单态化那一套照旧。后者要"把捕获的那几格连函数一起带走"，那是 `(asfn …)` 与环境
+ * 那一层的事，所以**当场报**，不悄悄把它当前者办（那会读到一个不存在的名字）。
+ *
+ * 判据就是一句话：**内层用到的名字里，有没有落在外层的形参或局部上**
+ * （内层自己的形参与局部先减掉 —— 那是遮住的，不算捕获）。
+ */
+function hoistNested(f, C) {
+  const outer = new Set([...paramNames(f), ...boundIn(part(f, 'body') ?? f)]);
+  for (const nd of allNodes(part(f, 'body') ?? f)) {
+    if (tag(nd) !== 'def') continue;
+    const nm = String(nameOf(kids(nd).find((y) => tag(y) === 'n')));
+    const mine = new Set([...paramNames(nd), ...boundIn(part(nd, 'body') ?? nd), nm]);
+    const grabbed = [...namesIn(nd)].filter((n) => outer.has(n) && !mine.has(n));
+    if (grabbed.length > 0) {
+      throw new Error(`python->IR: \`def ${nm}\` 用到了外层的 ${grabbed.join(' / ')}`
+        + ' —— 真闭包还没接（要把捕获的那几格连函数一起带走，是 `(asfn …)` 那一层的事）；'
+        + '不读外层名字的嵌套函数是接了的（提到模块级）');
+    }
+    if (C.fnNodes.has(nm)) {
+      throw new Error(`python->IR: 套在里头的 \`def ${nm}\` 与外头那个同名 —— 还没接`
+        + '（提到模块级之后会撞）');
+    }
+    C.fnNodes.set(nm, nd);
+    hoistNested(nd, C);
+  }
+}
+
 /**
  * 形参、返回类型、模块级变量 —— 整个扫三轮，每轮只填得出来的那几格。
+
  * 三轮之后还缺的当场报（见文件头那四条）。
  *
  * **单态化**在这一趟里：一个 python 函数按"实参类型的元组"生成几格实例。
@@ -1031,8 +1099,11 @@ export function stmtsOf(x, C) {
       const msg = vs.length === 0 ? { kind: 'string', value: 'raise' } : raiseText(vs[0], C);
       return [{ kind: 'builtin-stmt', name: 'fail', args: [msg] }];
     }
+    /* 函数里套的函数**已经提到模块级**了（`hoistNested`），所以这一句不发东西。
+       有捕获的那一档在 `hoistNested` 里就当场报了，走不到这儿。 */
     case 'def':
-      throw new Error('python->IR: 函数里套函数还没接');
+      return [];
+
     case 'class':
       throw new Error('python->IR: `class` 还没接（下一刀）');
     case 'del': return delStmt(x, C);
