@@ -1466,6 +1466,11 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
 
     * `rep(x, times = 一条向量)`（R 里是"每格各重复几次"，`rep(1:2, c(2,3))` 是
       `1 1 2 2 2`）—— 从前 `asIntE` 对一条向量发 `(toint 那条向量)`，公共层才报。
+      **当天晚些就真接住了**（`r_rep_times`）：两趟，先数总长再一格一格摊开。R 的三条
+      规矩在运行期看 —— `length(times)` 与 `length(x)` 不一样、`times` 里有负数、
+      `times` 里有缺失，R 都报 `invalid 'times' argument`，这一层没有它的条件系统，
+      所以停下来报我们自己那句。`times` 是向量又给了 `each=` 还没接（R 那儿先 each 再
+      times，叠起来的账没量过）；字符向量那一侧也还没接。判据 `ext/r/examples/vecfn.R`。
     * **这一段里没定义过的名字**（`print(Recall)`：R 里 `Recall` 是 base 的一格函数
       对象）—— 从前照原样发 `(var Recall)`，公共层报"未声明的变量"。
 

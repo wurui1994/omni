@@ -194,6 +194,7 @@ const FN_DEPS = new Map([
   ['r_cummax', ['r_is_na', 'r_na']],
   ['r_cummin', ['r_is_na', 'r_na']],
   ['r_rep_len', []],
+  ['r_rep_times', ['r_is_na']],
   /* `tabulate`：缺失与非正数与超出 nbins 的那几格都不记，所以要问 `r_is_na`。
      不给 `nbins` 时的那个默认长度是另一格（`r_tab_n` —— R 的默认实参是 `max(1, bin)`）。 */
   ['r_tab_n', ['r_is_na']],
@@ -5668,6 +5669,23 @@ function callOf(x, types, extra, want, stmtPos) {
           }
           return asIntE(exprOf(node, types), ct);
         };
+        /**
+         * **`times` 是一条向量那一档 2026-09-26 接了**（`rep(1:2, times = c(2, 3))` 是
+         * `1 1 2 2 2`）—— 走生成出来的 `r_rep_times`：先数一遍总长、再一格一格摊开。
+         * R 的规矩（量出来的）：`length(times)` 必须与 `length(x)` 一样（不一样它报
+         * `invalid 'times' argument`），每格不能是负数也不能是缺失 —— 这三条在运行期看，
+         * 撞上就停下来（这一层没有 R 的条件系统，报的是我们自己那句）。
+         * 与 `each=` 一起用还没接：R 那儿是先 each 再 times，叠起来的账没量过。
+         */
+        const timesNode = named !== undefined ? named : (n >= 2 ? all[1] : undefined);
+        if (timesNode !== undefined && timesNode !== null
+            && isVecTy(typeOfExpr(timesNode, types)) && !isStrVec(t) && t.kind !== 'string') {
+          if (namedArg(x, 'each') !== undefined) {
+            throw new Error('r->IR: rep() 的 `times` 是向量、又给了 `each=` —— 两格叠起来还没接');
+          }
+          const xv = isVecTy(t) ? ev(0) : lglCall('r_vec1', asReal(ev(0), t));
+          return lglCall('r_rep_times', xv, exprOf(timesNode, types));
+        }
         let cnt = null;
         if (named !== undefined) cnt = scalarCnt(named, 'times');
         else if (n >= 2 && all[1] !== null) cnt = scalarCnt(all[1], 'times');
@@ -11682,6 +11700,64 @@ function vecFnDecl(name) {
               },
               vecSet(out, i, acc),
             ],
+          },
+        ], 0),
+        { kind: 'return', values: [out] },
+      ],
+    };
+  }
+  if (name === 'r_rep_times') {
+    /**
+     * `rep(x, times = 一条向量)` —— **每格各重复几次**（`rep(1:2, c(2,3))` 是 `1 1 2 2 2`）。
+     * 两趟：先数总长（顺带把 R 的三条规矩看一遍），再一格一格摊开。
+     *
+     * R 的规矩（量出来的）：`length(times)` 与 `length(x)` 不一样时它报
+     * `invalid 'times' argument`、负数与缺失同样报。这一层没有 R 的条件系统，
+     * 所以撞上就停下来（`(fail …)`），报的是我们自己那句。
+     */
+    const out = { kind: 'name', name: 'o' };
+    const tv = { kind: 'name', name: 't' };
+    const kk = { kind: 'name', name: 'k' };
+    const pp = { kind: 'name', name: 'p' };
+    const jj = { kind: 'name', name: 'j' };
+    const I0 = (v2) => ({ kind: 'int', value: v2 });
+    const fail = (msg) => ({ kind: 'builtin-stmt', name: 'fail', args: [{ kind: 'string', value: msg }] });
+    const ti = vecGet(tv, i);
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RVEC }, { name: 't', type: RVEC }],
+      ret: RVEC,
+      body: [
+        declLen(),
+        { kind: 'let', name: 'm', type: INT, init: vecLen(tv) },
+        {
+          kind: 'if',
+          cond: b('!=', { kind: 'name', name: 'm' }, len),
+          then: [fail("rep(x, times = 向量)：times 的长度与 x 不一样 —— R 那边报 invalid 'times' argument")],
+          else_: null,
+        },
+        { kind: 'let', name: 'z', type: INT, init: I0(0) },
+        loop([
+          {
+            kind: 'if',
+            cond: b('||', { kind: 'call', fn: { kind: 'name', name: useFn('r_is_na') }, args: [ti] },
+              b('<', ti, { kind: 'real', value: 0 })),
+            then: [fail("rep(x, times = 向量)：times 里有负数或缺失 —— R 那边报 invalid 'times' argument")],
+            else_: null,
+          },
+          { kind: 'assign', target: { kind: 'name', name: 'z' }, value: b('+', { kind: 'name', name: 'z' }, call1('toint', ti)) },
+        ], 0),
+        ...vecNewAs('o', { kind: 'name', name: 'z' }),
+        { kind: 'let', name: 'p', type: INT, init: I0(0) },
+        loop([
+          { kind: 'let', name: 'k', type: INT, init: call1('toint', ti) },
+          {
+            kind: 'for',
+            init: { kind: 'let', name: 'j', type: INT, init: I0(0) },
+            cond: b('<', jj, kk),
+            post: { kind: 'assign', target: jj, value: b('+', jj, I0(1)) },
+            body: [vecSet(out, pp, vecGet(v, i)), { kind: 'assign', target: pp, value: b('+', pp, I0(1)) }],
           },
         ], 0),
         { kind: 'return', values: [out] },

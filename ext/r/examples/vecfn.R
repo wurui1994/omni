@@ -290,3 +290,12 @@ print(rep(5))
 print(rep(c("a", "b")))
 print(rep(c(TRUE, FALSE)))
 cat(length(rep(1:3)), "\n")
+
+## rep(x, times = 一条向量)：每格各重复几次（长度不符/负数/缺失都当场停，与 R 报错对应）
+cat(rep(c(1, 2), times = c(2, 3)), "\n")
+cat(rep(1:3, times = c(1, 0, 2)), "\n")
+print(rep(c(10, 20), c(3, 1)))
+cat(length(rep(c(1, 2), c(0, 0))), "\n")
+cat(rep(c(1.5, 2.5), times = c(2, 2)), "\n")
+rptt <- c(2, 1); cat(rep(c(7, 8), rptt), "\n")
+cat(rep(5, times = c(3)), "\n")
