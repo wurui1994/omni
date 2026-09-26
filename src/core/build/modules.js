@@ -245,3 +245,41 @@ export function moduleOrderOf(dir, mainName) {
   return { mods, entry: mainName.slice('main-'.length) };
 }
 
+
+/**
+ * 把一份 `(module …)` 的**核心方言文本切成顶层项**（一项一条，正文带全）。
+ *
+ * 谁要它：把一份程序切成几格单元时，"哪几项归哪一份"是按名字分的
+ * （EVAL 两门就是这么把 `gl_*` 那一层切成共用的 `ev_rt`：见
+ * `docs/design/omni-serve-studio.md` §9.3）。`frontend-asy/link.js` 的 `formsOf` 只取
+ * **签名那一行**（它要的是"谁定义了什么"），这一格要的是**整项的正文**，两件事。
+ *
+ * 认的形状只有一种：顶层项从**行首那个左括号**起（`  (fn 名字 …`），到括号平衡为止。
+ * 公共降级器印出来的就是这个样子（缩进两格、一项一段）。`(module` 自己与末尾那个
+ * 右括号不算项。回 `[{head, name, text}]`，`head` 是 `fn`/`global`/`main`… 。
+ */
+export function sxForms(text) {
+  const out = [];
+  const lines = text.split('\n');
+  let cur = null;
+  let depth = 0;
+  for (const ln of lines) {
+    if (cur === null) {
+      const m = /^\s{1,}\((fn|cfn|class|struct|global|kernel|main|extern)\b\s*([A-Za-z_$][\w$]*)?/
+        .exec(ln);
+      if (m === null) continue;
+      cur = { head: m[1], name: m[2] === undefined ? '' : m[2], lines: [] };
+      depth = 0;
+    }
+    cur.lines.push(ln);
+    for (const c of ln) {
+      if (c === '(') depth++;
+      else if (c === ')') depth--;
+    }
+    if (depth <= 0) {
+      out.push({ head: cur.head, name: cur.name, text: cur.lines.join('\n') });
+      cur = null;
+    }
+  }
+  return out;
+}
