@@ -1205,11 +1205,25 @@ function taintedSym(node) {
  *
  * 拦不住的那一半明写在 SPEC：名字过了函数的形参（`f(v["a"])` 里的形参）就看不见了。
  */
+/** R 自己就把名字丢掉那几格（套在最外头时上面那道门不拦 —— 一格一格量过的）。 */
+const NAME_ELEM_DROP = new Set(['unname', 'length', 'names', 'sum', 'mean', 'paste', 'paste0']);
 const NAMED_ELEM_VARS = new Set();
 function namedElemHit(node, types, top) {
   if (node === null || node === undefined || !isList(node)) return false;
   if (tag(node) === 'paren') return namedElemHit(kids(node)[0], types, top);
   if (tag(node) === 'sym') return NAMED_ELEM_VARS.has(mangle(nameOf(node)));
+  /**
+   * **R 自己就把名字丢掉那几格**套在最外头时这道门不拦（2026-09-27 一格一格量的）：
+   * `print(unname(v["a"]))` 是 `[1] 3`、`print(length(v["a"]))` 是 `[1] 1`、
+   * `print(names(v["a"]))` 是 `[1] "a"`、`print(sum(v["a"]))` 是 `[1] 3`，
+   * 名字那一行本来就没有，所以印得出来 —— 拦着只是白退一趟 libR。
+   *
+   * 只认**套在最外头**那一格：`print(unname(v["a"]) + 1)` 的最外头是 `+`，照旧拦
+   * （R 那儿 `unname` 之后名字没了，可这一层的值也没名字 —— 那一格是对的，但
+   * 这道门先保守，等量过再放）。
+   */
+  if (top === true && tag(node) === 'call' && tag(kids(node)[0]) === 'sym'
+      && NAME_ELEM_DROP.has(nameOf(kids(node)[0]))) return false;
   /* `[[ ]]` **不带名字**（量出来 `v[["a"]] + 1` 印的是 `[1] 4`，没有名字那一行）——
      所以这道门只看 `[ ]`。 */
   if (tag(node) === 'sub1') {
@@ -2437,6 +2451,10 @@ function applyTy(fn, x, types) {
     case 'unname': {
       const t0 = args.length === 0 ? RVEC : typeOfExpr(args[0], types);
       if (isStrVec(t0)) return RSTRV;
+      /* **一格标量进来还是一格标量**（`unname(v["a"])` / `unname(3)`）—— 从前一律
+         回 `RVEC`，于是 `print` 那侧照向量发 `r_print_num (real 3)`，撞在公共层的
+         `real*` 上：退出码 1、一行输出都没有（硬错，2026-09-27 扫出来的）。 */
+      if (!isVecTy(t0)) return t0;
       return isLglTy(t0) ? RLGL : RVEC;
     }
     /**
@@ -5024,6 +5042,13 @@ function callOf(x, types, extra, want, stmtPos) {
         const t = all[0] === null ? INT : typeOfExpr(all[0], types);
         if (t.kind === 'map') return call1('dlen', ev(0));
         if (isStrVec(t)) return svLen(ev(0));
+        /**
+         * **一格标量的 length 是 1** —— R 里没有"不是向量"的值（`length(3)` / `length("ab")` /
+         * `length(TRUE)` 都是 1）。从前这儿一律发 `vecLen`，于是落成 `(pload (real 3))`，
+         * 撞在公共层那句 `pload 的实参要是指针` 上 —— 而那时已经过了换档那道门：
+         * 退出码 1、一行输出都没有（**硬错**，2026-09-27 扫出来的）。
+         */
+        if (!isVecTy(t)) return { kind: 'int', value: 1 };
         return vecLen(ev(0));
       }
       case 'nchar': {

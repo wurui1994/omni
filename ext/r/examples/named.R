@@ -365,3 +365,18 @@ print(nsg[[1]])
 nsk <- "x"
 print(nsg[nsk])
 cat(nsg["x"], nsg["y"], "\n")
+## R 自己就把名字丢掉那几格（`unname` / `length` / `sum` / `mean` / `paste0`）：
+## 印出来本来就没有名字那一行，所以"取出来那一格"套在它们里头不必退档
+ndv <- c(a = 3, b = 1)
+print(unname(ndv["a"]))
+print(length(ndv["a"]))
+print(sum(ndv["a"]))
+print(mean(ndv["a"]))
+print(paste0(ndv["a"], "!"))
+print(sum(ndv["a"], ndv["b"]))
+print(length(ndv["a"] + 1))
+print(unname(ndv[2]))
+nds <- c(x = "ab", y = "cd")
+print(unname(nds["y"]))
+print(length(nds["y"]))
+print(paste0(nds["y"], "!"))

@@ -197,3 +197,11 @@ cat(inherits(1, "double"), inherits(1:3, "numeric"), inherits(1:3, "integer"), "
 cat(inherits(list(a = 1), "list"), inherits(TRUE, "logical"), "\n")
 cat(inherits(1, c("foo", "numeric")), inherits(1, c("a", "b")), "\n")
 cat(inherits(c(1, 2), "numeric"), inherits(sqrt(2), "numeric"), inherits(nchar("ab"), "integer"), "\n")
+## 一格标量的 length 是 1、unname 原样回（R 里没有"不是向量"的值）
+print(length(3))
+print(length("ab"))
+print(length(TRUE))
+print(unname(3))
+lsx <- 5
+print(length(lsx))
+cat(length(3), length("ab"), length(TRUE), "\n")
