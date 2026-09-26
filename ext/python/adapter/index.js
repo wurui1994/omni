@@ -35,7 +35,7 @@ import {
 } from './expr.js';
 import {
   reverseStmts, clearStmts, extendStmts, insertStmts, dropAtStmts, indexOfList,
-  dictClearStmts, sortStmts, dictUpdateStmts,
+  dictClearStmts, sortStmts, dictUpdateStmts, sliceAssignStmts,
 } from './builtins.js';
 import { boxOf, unifyPy } from './dyn.js';
 
@@ -1287,6 +1287,14 @@ function assignTo(t, valueTok, C) {
     ts.forEach((tt, i) => out.push(...writeTo(tt, tmps[i], C)));
     return out;
   }
+  /* **`xs[a:b] = []`** —— 空表的元素类型从**左边那张表**来（右边自己答不出）。 */
+  if (tag(t) === 'index' && tag(valueTok) === 'list' && kids(valueTok).length === 0) {
+    const subs0 = kids(part(t, 'subs') ?? { kind: 'list', items: [] });
+    if (subs0.length === 1 && tag(subs0[0]) === 'slice') {
+      const bt1 = tyOfCst(kids(t)[0], C);
+      if (bt1 !== null && bt1.kind === 'arr') return writeTo(t, emptyOf(bt1), C);
+    }
+  }
   /* **`xs = []` / `d = {}`**：空容器自己答不出元素类型，可这一格名字的类型
      `scanBinds` 那一趟已经认出来了（从 `xs.append(v)` 或标注）—— 按它造。 */
   if (tag(t) === 'n' && ['list', 'dict'].includes(tag(valueTok)) && kids(valueTok).length === 0) {
@@ -1333,7 +1341,24 @@ function writeTo(t, value, C) {
     const box = exprOf(kids(t)[0], C);
     const subs = kids(part(t, 'subs') ?? { kind: 'list', items: [] });
     if (subs.length !== 1) throw new Error('python->IR: 多维下标赋值还没接');
-    if (tag(subs[0]) === 'slice') throw new Error('python->IR: 给切片赋值（`xs[1:3] = …`）还没接');
+    /* **`xs[a:b] = ys`** —— 就地换掉那一段（长度可以不一样）。步长那一档不收：
+       python 里带步长的切片赋值要求两边格数一样，是另一条规矩。 */
+    if (tag(subs[0]) === 'slice') {
+      const parts = kids(subs[0]);
+      if (parts.length > 2 && parts[2] !== undefined && tag(parts[2]) !== null) {
+        throw new Error('python->IR: 带步长的切片赋值（`xs[::2] = …`）还没接'
+          + '（python 那一档要求两边格数一样，是另一条规矩）');
+      }
+      const bt0 = typeOfIR(box, C);
+      const vt0 = typeOfIR(value, C);
+      if (bt0.kind !== 'arr') throw new Error(`python->IR: 给 ${bt0.kind} 的切片赋值还没接（表接了）`);
+      if (vt0.kind !== 'arr' || !sameType(vt0.elem, bt0.elem)) {
+        throw new Error('python->IR: `xs[a:b] = ys` 的右边要是一张**同型的表**'
+          + `（这里是 ${vt0.kind === 'arr' ? `arr<${vt0.elem.kind}>` : vt0.kind}）`);
+      }
+      const at = (k) => (parts[k] === undefined || tag(parts[k]) === null ? null : exprOf(parts[k], C));
+      return sliceAssignStmts(box, at(0), at(1), value, C);
+    }
     const bt = typeOfIR(box, C);
     const key = exprOf(subs[0], C);
     /* 容器装的是箱子时，写进去的那一格要先装箱（`d["k"] = 1` / `xs[0] = "a"`）。 */

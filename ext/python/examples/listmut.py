@@ -64,3 +64,32 @@ print("Hello, World! 123".lower())
 print("Hello, World! 123".upper())
 print("MiXeD".lower() == "mixed")
 print("".lower(), "".upper(), len("".lower()))
+
+# 切片赋值：**就地**换掉那一段，两边长度可以不一样。改的是那个对象本身 ——
+# 所以别处拿着同一个句柄的要一起看见（下面 `alias` 那一格判的就是这条）。
+sl = [1, 2, 3, 4]
+sl[1:3] = [9]
+print(sl)
+sl2 = [1, 2, 3]
+sl2[0:0] = [0]
+print(sl2)
+sl3 = [1, 2, 3]
+sl3[1:] = [7, 8, 9]
+print(sl3)
+sl4 = [1, 2, 3]
+sl4[:2] = []
+print(sl4)
+sl5 = [1, 2, 3]
+alias = sl5
+sl5[0:1] = [9]
+print(sl5, alias)
+sl6 = [1, 2, 3]
+sl6[-1:] = [5, 6]
+print(sl6)
+# 两头都不越界；`b < a` 那一刀是"在 a 处插进去"
+sl7 = [1, 2, 3]
+sl7[2:1] = [8]
+print(sl7)
+sl8 = [1, 2, 3]
+sl8[0:99] = [4]
+print(sl8)

@@ -1566,6 +1566,83 @@ export function pickByKeyOf(xs, keys, op, name, C) {
   return h.wrap({ kind: 'index', obj: xs, index: at });
 }
 
+/**
+ * `xs[a:b] = ys` —— **就地**换掉那一段（长度可以不一样，这是 python 的规矩）。
+ *
+ * 办法：先在一格临时表里拼出"前段 + ys + 后段"，再把 xs 清空、照抄回去。为什么要
+ * 清空再抄而不是造一张新表交出去：python 改的是**那个对象**，别处拿着同一个句柄的要
+ * 一起看见（`ys = xs; xs[0:1] = [9]` 之后 `ys` 也变）。
+ * 两头按 python 的规矩折（负的加长度、再夹到 [0, len]），而且 `b < a` 时当**插入**看。
+ */
+export function sliceAssignStmts(xs, lo0, hi0, src, C) {
+  const h = holder(C);
+  const t = C.tyOfIR(xs);
+  const ls = h.decl('sa_l', INT, call1('alen', [xs]));
+  const clamp = (v, p) => {
+    const x = h.decl(p, INT, v);
+    h.pre.push({
+      kind: 'if',
+      cond: bin('<', x, int(0)),
+      then: [{ kind: 'assign', target: x, value: bin('+', x, ls) }],
+      else_: null,
+    });
+    h.pre.push({
+      kind: 'if',
+      cond: bin('<', x, int(0)),
+      then: [{ kind: 'assign', target: x, value: int(0) }],
+      else_: [{
+        kind: 'if',
+        cond: bin('>', x, ls),
+        then: [{ kind: 'assign', target: x, value: ls }],
+        else_: null,
+      }],
+    });
+    return x;
+  };
+  const lo = clamp(lo0 === null ? int(0) : lo0, 'sa_a');
+  const hi = clamp(hi0 === null ? ls : hi0, 'sa_b');
+  /* `b < a` 的那一刀在 python 里是"在 a 处插进去"。 */
+  h.pre.push({
+    kind: 'if',
+    cond: bin('<', hi, lo),
+    then: [{ kind: 'assign', target: hi, value: lo }],
+    else_: null,
+  });
+  const tmp = h.decl('sa_t', t, { kind: 'builtin', name: 'anew', args: [{ kind: 'type', type: t }, int(0)] });
+  const i = h.decl('sa_i', INT, int(0));
+  /** 从 box 的 [from, to) 抄进 tmp。 */
+  const run = (from, to, box) => {
+    h.pre.push({ kind: 'assign', target: i, value: from });
+    h.pre.push({
+      kind: 'while',
+      cond: bin('<', i, to),
+      body: [
+        { kind: 'builtin-stmt', name: 'apush', args: [tmp, { kind: 'index', obj: box, index: i }] },
+        inc(i),
+      ],
+    });
+  };
+  run(int(0), lo, xs);
+  run(int(0), call1('alen', [src]), src);
+  run(hi, ls, xs);
+  /* 清空再照抄回去（改的是这个对象本身）。 */
+  h.pre.push({
+    kind: 'while',
+    cond: bin('>', call1('alen', [xs]), int(0)),
+    body: [{ kind: 'expr-stmt', expr: call1('apop', [xs]) }],
+  });
+  h.pre.push({ kind: 'assign', target: i, value: int(0) });
+  h.pre.push({
+    kind: 'while',
+    cond: bin('<', i, call1('alen', [tmp])),
+    body: [
+      { kind: 'builtin-stmt', name: 'apush', args: [xs, { kind: 'index', obj: tmp, index: i }] },
+      inc(i),
+    ],
+  });
+  return h.pre;
+}
+
 /** `s.startswith(p)` / `s.endswith(p)` —— 比一段（方言里没有这一格算子）。 */
 export function startsEndsOf(s0, p0, atStart, C) {
   const h = holder(C);
