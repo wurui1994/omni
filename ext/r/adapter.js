@@ -204,6 +204,9 @@ const FN_DEPS = new Map([
   ['r_any_na', ['r_is_na']],
   ['r_append', []],
   ['r_append_e', ['r_append']],
+  /* `append` 的**名字那一侧**（插进去那几格的名字是空串）—— 与值那一侧一对一。 */
+  ['r_app_str', []],
+  ['r_app_str_e', ['r_app_str']],
   /* `replace(x, k, v)` 就是 `x[k] <- v`，所以越界那一条也接长（借 `r_ext`）。 */
   ['r_replace', ['r_is_na', 'r_ext', 'r_na']],
   ['r_prod', []],
@@ -652,11 +655,14 @@ const NAME_KEEP_NUM = new Set([
   'sinh', 'cosh', 'tanh', 'cumsum', 'cumprod', 'cummax', 'cummin', 'zapsmall',
   /* `rank` 也是"位置不动"那一批（量出来 R 把名字带过去）。 */
   'rank',
+  /* `replace(v, i, val)` 换的是**值**，长度与位置都不动；`unlist` 在一条原子向量上
+     就是它自己（R 的文档）—— 两格的名字都原样跟着（量出来的，2026-09-26）。 */
+  'replace', 'unlist',
 ]);
 /* `NAME_KEEP` 只管那道门（`callOf` 里"名字跟不住就报"那一句）：这几格的名字跟得住。
    `c` 也在里头 —— 它的名字是**接起来**而不是原样跟着（见 `namesExprOf` 的 `c` 那一格）。 */
 const NAME_KEEP = new Set([...NAME_KEEP_LGL, ...NAME_KEEP_NUM,
-  'rev', 'head', 'tail', 'sort', 'c', 'diff', 'which.max', 'which.min']);
+  'rev', 'head', 'tail', 'sort', 'c', 'diff', 'which.max', 'which.min', 'append']);
 /** 第 i 格（0 起）。方言的 `{kind:'index'}` 落成 `(aget …)`，赋值那侧落 `(aset …)`。 */
 const svGet = (v, i) => ({ kind: 'index', obj: v, index: i });
 const svLen = (v) => call1('alen', v);
@@ -1187,6 +1193,26 @@ function namesExprOf(x, types) {
     return { kind: 'call', fn: { kind: 'name', name: h }, args: [ns, cnt] };
   }
   /**
+   * `append(x, values, after = k)` —— 插进去那几格在 R 里**名字是空串**
+   * （量出来 `append(c(a=1,bb=2), 9)` 的名字是 `"a" "bb" ""`，印出来最后那一列是空的）。
+   * 所以名字那一条也照值那一侧插一遍，插的是 `length(values)` 格空串（见 `r_app_str`）。
+   * 那条 `values` 因此**算两遍**（值那侧一遍、名字那侧一遍）—— 与 `c(…)` 同一条账。
+   */
+  if (fn === 'append') {
+    const as = posArgs(x);
+    if (as.length < 2) return null;
+    const ns = namesExprOf(as[0], types);
+    if (ns === null) return null;
+    const t1 = typeOfExpr(as[1], types);
+    const m = isVecTy(t1) ? vecLen(exprOf(as[1], types)) : { kind: 'int', value: 1 };
+    const afterArg = namedArg(x, 'after');
+    let at = null;
+    if (afterArg !== undefined) at = asIntE(exprOf(afterArg, types), typeOfExpr(afterArg, types));
+    else if (as.length >= 3) at = asIntE(exprOf(as[2], types), typeOfExpr(as[2], types));
+    if (at === null) return { kind: 'call', fn: { kind: 'name', name: useFn('r_app_str_e') }, args: [ns, m] };
+    return { kind: 'call', fn: { kind: 'name', name: useFn('r_app_str') }, args: [ns, at, m] };
+  }
+  /**
    * `table(v)` 的名字那一条：那几个取值**印出来的样子**（R 的 levels 是
    * `as.character(sort(unique(v)))`，15 位有效数字那一档）。逻辑那一侧是
    * `"FALSE"` / `"TRUE"`，所以分两格函数。那条数据会**求值两遍**（与 `c(…)` 同一条账）。
@@ -1528,6 +1554,10 @@ function applyTy(fn, x, types) {
       if (args.length !== 1) return INT;
       if (isSplitCall(args[0])) return RSTRV;
       if (isApplyCall(args[0], 'lapply')) return applyTy('lapply', args[0], types);
+      /* 一条原子向量上 `unlist` 就是**它自己**（R 的文档：`unlist(一条向量)` 原样回来）。
+         带名字的那一档在上头 `NAME_KEEP_NUM` 那一问里已经答过（回 `RNVEC`）。 */
+      const t = typeOfExpr(args[0], types);
+      if (isVecTy(t) || isStrVec(t)) return t;
       return INT;
     }
     case 'sapply': case 'vapply': case 'lapply': case 'Reduce': case 'Filter': case 'mapply':
@@ -4292,7 +4322,6 @@ function callOf(x, types, extra, want) {
         if (isStrVec(t0) || t0.kind === 'string' || isStrVec(t1) || t1.kind === 'string') {
           throw new Error(strvGap('append'));
         }
-        if (isNamedTy(t0)) throw new Error('r->IR: append() 在带名字的向量上还没接（名字那一条要跟着插）');
         const av = isVecTy(t0) ? ev(0) : lglCall('r_vec1', asReal(ev(0), t0));
         const bv = isVecTy(t1) ? ev(1) : lglCall('r_vec1', asReal(ev(1), t1));
         const named = namedArg(x, 'after');
@@ -4306,7 +4335,6 @@ function callOf(x, types, extra, want) {
         if (n !== 3) throw new Error(`r->IR: replace() 要三格实参（给了 ${n}）`);
         const ts = [0, 1, 2].map((k) => (all[k] === null ? REAL : typeOfExpr(all[k], types)));
         if (ts.some((t) => isStrVec(t) || t.kind === 'string')) throw new Error(strvGap('replace'));
-        if (isNamedTy(ts[0])) throw new Error('r->IR: replace() 在带名字的向量上还没接（名字那一条要跟着走）');
         const asVec = (k) => (isVecTy(ts[k]) ? ev(k) : lglCall('r_vec1', asReal(ev(k), ts[k])));
         return lglCall('r_replace', asVec(0), asVec(1), asVec(2));
       }
@@ -4765,8 +4793,14 @@ function callOf(x, types, extra, want) {
         if (n === 1 && all[0] !== null && isApplyCall(all[0], 'lapply')) {
           return applyOf('lapply', all[0], types);
         }
-        throw new Error('r->IR: unlist() 只接 `unlist(strsplit(s, sep))` 与'
-          + ' `unlist(lapply(v, function(x) …))` 这两种形状（这一层没有"表里装向量"）');
+        /* 一条原子向量（含带名字的那一条）上 `unlist` 就是它自己 —— 名字那一侧
+           走 `NAME_KEEP_NUM`（见 `namesExprOf`）。 */
+        if (n === 1 && all[0] !== null) {
+          const t = typeOfExpr(all[0], types);
+          if (isVecTy(t) || isStrVec(t)) return ev(0);
+        }
+        throw new Error('r->IR: unlist() 只接一条向量、`unlist(strsplit(s, sep))` 与'
+          + ' `unlist(lapply(v, function(x) …))` 这几种形状（这一层没有"表里装向量"）');
       }
       case 'sapply': case 'vapply': case 'Reduce': case 'Filter': case 'mapply':
         return applyOf(fn, x, types);
@@ -5817,6 +5851,7 @@ const STRV_FNS = new Set([
   'r_as_str_v', 'r_as_str_lv',
   'r_sv1', 'r_sort_str', 'r_order_str', 'r_any_dup_str', 'r_uniq_str', 'r_dup_str', 'r_match_str', 'r_in_str', 'r_in1_str',
   'r_union_str', 'r_isect_str', 'r_sdiff_str', 'r_head_str', 'r_tail_str',
+  'r_app_str', 'r_app_str_e',
 ]);
 
 /** 这一批由 `setFnDecl` 发（集合与位置那一族，见 `FN_DEPS` 上那段账）。 */
@@ -6807,6 +6842,61 @@ function strvFnDecl(name) {
         ], nm('n')),
         { kind: 'return', values: [val ? lglCall('r_na') : S('<NA>')] },
       ],
+    };
+  }
+  if (name === 'r_app_str') {
+    /**
+     * `append(v, vals, after = k)` 的**名字那一侧**：在第 `k` 格之后插 `m` 格**空串**
+     * （量出来 R 给新来的那几格的名字就是空串：`append(c(a=1), 9)` 的名字是 `"a" ""`）。
+     *
+     * `k` 与值那一侧同一个口径（`r_append`）：小于 0 当 0、大于长度当长度。
+     */
+    const at = nm('at');
+    const mm = nm('m');
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RSTRV }, { name: 'at', type: INT }, { name: 'm', type: INT }],
+      ret: RSTRV,
+      body: [
+        letI('n', svLen(v)),
+        letI('k', at),
+        iff(b('<', nm('k'), I(0)), [set('k', I(0))]),
+        iff(b('>', nm('k'), nm('n')), [set('k', nm('n'))]),
+        { kind: 'let', name: 'o', type: RSTRV, init: call1('anew', tyArg(RSTRV), I(0)) },
+        {
+          kind: 'for',
+          init: letI('i', I(0)),
+          cond: b('<', i, nm('k')),
+          post: set('i', b('+', i, I(1))),
+          body: [{ kind: 'builtin-stmt', name: 'apush', args: [nm('o'), svGet(v, i)] }],
+        },
+        {
+          kind: 'for',
+          init: letI('j', I(0)),
+          cond: b('<', nm('j'), mm),
+          post: set('j', b('+', nm('j'), I(1))),
+          body: [{ kind: 'builtin-stmt', name: 'apush', args: [nm('o'), S('')] }],
+        },
+        {
+          kind: 'for',
+          init: letI('i2', nm('k')),
+          cond: b('<', nm('i2'), nm('n')),
+          post: set('i2', b('+', nm('i2'), I(1))),
+          body: [{ kind: 'builtin-stmt', name: 'apush', args: [nm('o'), svGet(v, nm('i2'))] }],
+        },
+        { kind: 'return', values: [nm('o')] },
+      ],
+    };
+  }
+  if (name === 'r_app_str_e') {
+    /** `append(v, vals)` 不给 `after` 的那一档：插到最后（与 `r_append_e` 一对一）。 */
+    return {
+      kind: 'fn',
+      name,
+      params: [{ name: 'v', type: RSTRV }, { name: 'm', type: INT }],
+      ret: RSTRV,
+      body: [{ kind: 'return', values: [lglCall('r_app_str', v, svLen(v), nm('m'))] }],
     };
   }
   if (name === 'r_tab_nm' || name === 'r_tab_nml') {

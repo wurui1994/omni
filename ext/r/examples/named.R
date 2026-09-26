@@ -197,3 +197,16 @@ cat(sum(diff(dv)), "\n")
 # 负的 `n`：`head(v, -1)` 是"去掉最后一格"、`tail(v, -1)` 是"去掉第一格"（名字跟着）
 print(head(dv, -1))
 print(tail(dv, -1))
+
+# `replace` / `unlist` / `append`（2026-09-26 接了）：`replace(v, i, val)` 换的是**值**，
+# 长度与位置都不动，所以名字原样跟着；`unlist(一条原子向量)` 就是它自己；
+# `append` 插进去那几格在 R 里**名字是空串**（印出来那一列是空的）。
+av <- c(a = 1, bb = 2, ccc = 3)
+print(replace(av, 2, 99))
+print(unlist(av))
+print(append(av, 9))
+print(append(av, 9, after = 1))
+print(append(av, 9, after = 0))
+print(append(av, c(8, 9), after = 2))
+print(names(append(av, 9)))
+cat(length(append(av, 9)), sum(append(av, 9)), "\n")
