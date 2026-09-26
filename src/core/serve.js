@@ -283,10 +283,17 @@ const RUN_GFX = new Set(['host', 'ir', 'cpu', 'null', 'gl']);
  *
  * 留在同一个进程里那几样只付一次：语法表、`srcStamp()`、V8 的 JIT、模块缓存。
  * 代价写在明处：编译器自己抛的异常要在这儿拦住（下面那个 try），别把服务带走。
+ *
+ * **还有一格比异常更狠**：时限那一枪。`armDevDeadline` 给编译这一趟装的是"到点给
+ * **本进程**一枪"（默认 `OMNI_BUILD_TIMEOUT=300s`）—— 本进程现在就是服务。踩过一次：
+ * `examples/opengl/28_peaks.pss` 编一趟要好几分钟，到点那一枪把整个 `omni serve` 打死，
+ * 页面上表现成"服务没了"，与刚点的那份脚本八竿子打不着。所以这一格照常驻工人那一档办：
+ * `OMNI_CLI_NO_SHOT=1` —— **只记预算、不开枪**（见 `cli.js` 的 `armDevDeadline` 头注）。
  */
 let CLI_MOD = null;
 async function runInProc(argv) {
   if (CLI_MOD === null) CLI_MOD = await import('./cli.js');
+  process.env.OMNI_CLI_NO_SHOT = '1';
   let out = '';
   let err = '';
   const so = process.stdout.write.bind(process.stdout);
