@@ -40,6 +40,31 @@ def fib(n):
     return fib(n - 1) + fib(n - 2)
 
 
+# **空容器的类型从"它被递给哪一格形参"认**（`bindFromParams`）。
+# `memo = {}` 那一句自己答不出键值类型（与 `d[k] = v` 同一条口径：赋值先不绑，等走到用它的
+# 那一句）；而 `fibm(20, memo)` 里那格形参标注了 `dict[int, int]` —— 那就是它的类型。
+# 一样的信息，只是从前不从那一侧看：那时报"空字典 `{}` 的键值类型推不出来"。
+#
+# **明说的不足**：`memo` 那一格形参**也不标注**时还是不行 —— 调用点收不到实例、形参退到
+# 箱子，报的是"`in` 作用在 dyn 上还没接 —— 形参没标注、调用点又推不出来时会退到箱子"。
+# 要从函数体里那句 `memo[n] = v` 反推形参，那是另一刀（三轮推断里还有一处循环要解）。
+def fibm(n: int, memo: dict[int, int]) -> int:
+    if n in memo:
+        return memo[n]
+    if n < 2:
+        return n
+    v = fibm(n - 1, memo) + fibm(n - 2, memo)
+    memo[n] = v
+    return v
+
+
+def total(xs: list[int]) -> int:
+    s = 0
+    for v in xs:
+        s += v
+    return s
+
+
 def main():
     # 三格实例：int / float / str
     print(add(2, 3), add(1.5, 2.5), add("a", "b"))
@@ -56,6 +81,15 @@ def main():
 
     # 递归的那一格（返回类型要从 `return n` 那一支推出来，没有标注）
     print(fib(10), fib(1), fib(0))
+
+    # 空容器的类型从形参认（上面那段账）
+    memo = {}
+    print(fibm(20, memo), len(memo), memo[10])
+    acc = []
+    acc.append(3)
+    print(total(acc))
+    empty = []
+    print(total(empty), len(empty))
 
 
 main()

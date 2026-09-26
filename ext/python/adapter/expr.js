@@ -1531,7 +1531,10 @@ function containsOf(box, needle, C) {
   }
   /* 表：方言里没有这一格，所以走一遍（比法与 `==` 同一条 —— 元素是箱子时按标签分派）。 */
   if (t.kind === 'arr') return containsList(box, needle, C, (l, r) => cmpOne('==', l, r, C));
-  throw new Error(`python->IR: \`in\` 作用在 ${t.kind} 上还没接（表 / 字典 / 串接了）`);
+  /* 箱子那一档多说一句：走到这儿多半是**形参退到了 dyn**（没标注、调用点又推不出来），
+     而不是真想在箱子上问 `in` —— 提一句标注比只报个 kind 有用。 */
+  throw new Error(`python->IR: \`in\` 作用在 ${t.kind} 上还没接（表 / 字典 / 串接了）`
+    + (t.kind === 'dyn' ? '—— 形参没标注、调用点又推不出来时会退到箱子，给它一格标注' : ''));
 }
 
 /**

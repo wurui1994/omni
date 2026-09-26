@@ -766,7 +766,41 @@ function scanBinds(x, C, rets = null) {
   for (const s of flatten([x])) scanOne(s, C, rets);
 }
 
+/**
+ * **"这个名字被递给某个形参"也是一条线索** —— 空容器那一档要靠它。
+ *
+ * `m = {}` 那一句自己答不出键值类型（与 `d[k] = v` 那一条同一条口径：赋值先不绑，
+ * 等走到用它的那一句）。而 `fib(20, m)` 里那格形参**标注了** `dict[int, int]` ——
+ * 那就是这个名字的类型。量到的原话：`m = {}` 之后 `fib(20, m)`（形参带标注）报
+ * "空字典 `{}` 的键值类型推不出来"，而把标注挪到 `m` 上就好了 —— 一样的信息，
+ * 只是从前不从那一侧看。
+ *
+ * **只认实例唯一、而且形参是表或字典的那一档**：几格实例说明这个函数按实参类型单态化过，
+ * 那时猜哪一格都是错的；标量那几档不必从这儿认（右边自己就答得出来），从这儿认反而会
+ * 把真该报的错遮住。
+ */
+function bindFromParams(call, C) {
+  const fn = kids(call)[0];
+  if (tag(fn) !== 'n') return;
+  const list = C.insts.get(String(nameOf(fn)));
+  if (!Array.isArray(list) || list.length !== 1) return;
+  const inst = list[0];
+  const raw = kids(part(call, 'args') ?? { kind: 'list', items: [] });
+  if (raw.length !== inst.params.length) return;
+  raw.forEach((a, k) => {
+    if (tag(a) !== 'n') return;
+    const t = inst.params[k].type;
+    if (t === null || t === undefined || !['arr', 'map'].includes(t.kind)) return;
+    const n = String(nameOf(a));
+    const local = C.inScope() && !C.isDeclGlobal(n);
+    if ((local ? C.lookupHere(n) : C.lookup(n)) !== null) return;
+    C.bind(C.ref(n), t);
+  });
+}
+
 function scanOne(s, C, rets) {
+  /* 这一句里的每一处调用都看一眼形参那一侧（见 `bindFromParams`）。 */
+  for (const node of allNodes(s)) if (tag(node) === 'call') bindFromParams(node, C);
   switch (tag(s)) {
     case 'assign': {
       const v = kids(s)[kids(s).length - 1];
