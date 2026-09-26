@@ -157,6 +157,35 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
    少定义一格 `HAVE_*` 的后果往往不是编不过，而是 CPython 走进另一条 `#else`、
    在某个角落静默答错。
 
+4. **对象层那一份，用 CPython 自己的头 + 我们探出来的 `pyconfig.h`，clang 编得过了**：
+
+   ```
+   $ node ext/python/rt/gen-pyconf.js --src <cpython> --out /tmp/pyinc/pyconfig.h \
+       --extra Include,Objects/stringlib,Objects/unicodeobject.c,…      # 75 行，0 个不认得
+   $ clang -c -DPy_BUILD_CORE -I /tmp/pyinc -I …/Include -I …/Include/internal \
+       …/Objects/unicodeobject.c -o /tmp/uo.o                            # 780656 字节
+   ```
+
+   15436 行**一个字不改**编得过。中间还量到一条机制在起作用：头一次少了 `ALIGNOF_LONG`，
+   因为它在 `Objects/stringlib/codecs.h` 里 —— 把 `Objects/stringlib` 加进名单，
+   那一格自己就被四族里的 `ALIGNOF_*` 探出来了。**名单跟着借的东西长**，不必手抄。
+
+5. **我们自己那台 C 前端到对象层还差一格：原子操作**。同一份文件、同一套开关：
+
+   ```
+   $ node src/cli.js c obj -DPy_BUILD_CORE -I … …/Objects/unicodeobject.c -o /tmp/uo.o
+   Include/cpython/pyatomic.h:594: error: "no available pyatomic implementation …"
+   ```
+
+   `pyatomic.h` 按编译器挑后端：`__GNUC__ >= 4.8` 走 `__atomic_*` 内建、
+   C11 `<stdatomic.h>` 走标准那份、MSVC 走它那份，都不成就 `#error`。
+   量出来我们这台是 `__GNUC__ = 4`（没有 `__GNUC_MINOR__`）、`__STDC_VERSION__ = 199901L`，
+   而 `__atomic_load_n` 与 `<stdatomic.h>` **两样都还没有**（各当场报）。
+   所以第 0 刀 (b) 的下一格是**给 C 前端补原子操作**（两条路选一条）。
+   有一处必须写在前头：这一版没有线程，落成普通读写**也能跑**，
+   可那是在"claim 了原子性却不提供"——接线程之前一定要换成真的，
+   否则症状是那种最难查的静默错。
+
 ## 二、进度
 
 ### 已落地
@@ -1159,9 +1188,14 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 0. **把运行时真借进来**（§一之二 那条路，这一刀在别的之前）。三小步，每一步都有判据：
    a. **定值的表示**：`PyObject *` 打通到底（倾向这个），还是边界上转换。两边的代价写在
       §一之二。定下来之前不许再往"自己写一份库函数"那个堆上加东西。
-   b. **编进来**：`build.js` 多借几份（对象层 + `bltinmodule`），照现在编 `dtoa.c` /
-      `pystrtod.c` 的形状。判据是那几份 `.c` 过**我们自己的 C 前端**编得出 MIR
-      （`omni c mir`），而不是只过 clang。
+   b. **编进来**。现在卡在**一格**上：**C 前端要有原子操作**（`pyatomic.h` 三条后端一条都
+      对不上，见 §一之二 的量到哪儿了第 5 条）。两条路选一条：
+      * 补 `__atomic_*` 那一族内建（再把 `__GNUC_MINOR__` 报到 8 以上，或者直接
+        `-D_Py_USE_GCC_BUILTIN_ATOMICS=1`）；
+      * 或者补 `<stdatomic.h>` 与 `__STDC_VERSION__ >= 201112L`（C11 那条路，顺带把
+        别的借来的库也一起解开）。
+      这一格过了之后，判据是那几份 `.c` 过**我们自己的 C 前端**编得出目标文件
+      （`omni c obj` —— `dtoa.c` 已经过了，`unicodeobject.c` 卡在原子那一格）。
    c. **一格走通两条腿**：拿 `.zfill` 当样品 —— adapter 发的是"调 `unicode_zfill`"，
       `omni build` 出的原生程序与 `--mode js`（C → MIR → JS）**都**与 python3 逐字节相同。
       这一格立住，剩下的就是按族替换（每族一刀，旧路那一族当场删掉）。
