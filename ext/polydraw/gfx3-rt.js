@@ -373,19 +373,24 @@ export function gfx3FnDecls(host = false, withGL = false) {
      *
      * 缓存一张（`g3_picn` 记着名字下标 +1）：脚本换图就重抄一趟。读不到的图记 `宽 = 0`，
      * 采样一律回 0 —— 与"没选过图"那一档同一个样子（说明书没说读不到该回什么）。
+     *
+     * **读不到不进缓存**（2026-09-26）：`g3_picn` 只在真抄到的时候记。为什么：页面那一档
+     * 取图是**异步**的（`studio/gfx-gl.js` 的 `PIC`），头几帧 `picsiz` 必然回 -1 ——
+     * 缓存下来的话那张图这一趟就永远上不来了（"图在，可是不画"）。
+     * 代价是真读不到的那一张每帧多问设备一句（`picsiz` 一趟就回）。
      */
     fn('g3_picneed', ['ni'], [
       iff(bin('==', nm('g3_picn'), bin('+', nm('ni'), num(1))), [ret(num(0))]),
-      set('g3_picn', bin('+', nm('ni'), num(1))),
       letR('v', D.picsiz(nm('ni'))),
       iff(bin('<', nm('v'), num(0)), [
-        set('g3_picw', num(0)), set('g3_picy', num(0)), ret(num(0)),
+        set('g3_picn', num(0)), set('g3_picw', num(0)), set('g3_picy', num(0)), ret(num(0)),
       ]),
       set('g3_picw', rm('floor', [bin('/', nm('v'), num(65536))])),
       set('g3_picy', bin('-', nm('v'), bin('*', nm('g3_picw'), num(65536)))),
       iff(bin('<=', bin('*', nm('g3_picw'), nm('g3_picy')), num(0)), [
-        set('g3_picw', num(0)), ret(num(0)),
+        set('g3_picn', num(0)), set('g3_picw', num(0)), ret(num(0)),
       ]),
+      set('g3_picn', bin('+', nm('ni'), num(1))),
       set('g3_picb', anew(bin('*', nm('g3_picw'), nm('g3_picy')))),
       ex(bi('gfxarr', [str('picread'), num(0), num(0), num(0), num(0), nm('g3_picb')])),
       ret(num(0)),

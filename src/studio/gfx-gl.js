@@ -1018,6 +1018,8 @@ function call(name, args) {
     /* **文件纹理**（见 `texFile` 的头注）：名字在方言里是名字表的下标。 */
     case 'glsettexfile/3':
       return texFile(Math.trunc(a(0)), SH.names.get(String(Math.trunc(a(1)))), Math.trunc(a(2)));
+    /* **`pic` 那一族的头一句**（见 `PIC` 的头注）：宽高，还没取到回 -1。 */
+    case 'picsiz/1': return picSiz(a(0));
     /* 收下但不管的那几格（光照/混合/剔除/线宽）。 */
     case 'glnormal/3':
     case 'glcullface/1':
@@ -1315,6 +1317,82 @@ function batchIn(kind, n, verts) {
  * 这一档有的是 `gluniform{1..4}{f,i}v`；`glgettex`（把纹理读回来）在 WebGL2 上没有
  * `glGetTexImage`，要另走一趟离屏 `readPixels` —— 还没做，**当场报**不静默。
  */
+/**
+ * **`pic("a.png",x,y)` 那一族**（`evaldraw.txt:1341`）：`picsiz` 问宽高、`picread` 抄整张。
+ *
+ * 采样在**语言那一侧**（一次抄过来，之后全是数组下标 —— 每像素问设备一句慢几十倍），
+ * 所以这一层只要答两句。取图还是异步的，于是：
+ *
+ *   * `picsiz` 第一趟**开始取**并回 `-1`（= 还没有这张图，与"读不到"同一个样子）；
+ *   * 取回来之后画进一格离屏 canvas 拿像素，之后 `picsiz` 回 `宽*65536+高`、
+ *     `picread` 把那一片抄进脚本那块数组；
+ *   * 语言那一侧**读不到不缓存**（`gfx3-rt.js` 的 `g3_picneed`）—— 所以下一帧它会再问一次，
+ *     图到了就接上。这是页面这一档与本机那两档唯一的差：**头几帧没有图**。
+ */
+const PIC = {
+  /** 名字 -> `{ st:'load'|'ok'|'err', w, h, px: Uint8Array }`。 */
+  m: new Map(),
+  /** 上一句 `picsiz` 问的是哪一张（`picread` 抄的就是它 —— 语言那一侧两句紧挨着发）。 */
+  cur: null,
+};
+
+function picLoad(name) {
+  const e = { st: 'load', w: 0, h: 0, px: null };
+  PIC.m.set(name, e);
+  const im = new Image();
+  let tried = 0;
+  const root = FT.base.split('/')[0] ?? '';
+  const next = () => {
+    tried += 1;
+    if (tried === 1) { im.src = assetUrl(assetPath(name)); return true; }
+    if (tried === 2 && root !== '' && root !== FT.base) {
+      im.src = assetUrl(assetPath(name, root));
+      return true;
+    }
+    return false;
+  };
+  im.onload = () => {
+    const cv = document.createElement('canvas');
+    cv.width = im.naturalWidth;
+    cv.height = im.naturalHeight;
+    const c2 = cv.getContext('2d', { willReadFrequently: true });
+    c2.drawImage(im, 0, 0);
+    e.px = c2.getImageData(0, 0, cv.width, cv.height).data;
+    e.w = cv.width;
+    e.h = cv.height;
+    e.st = 'ok';
+  };
+  im.onerror = () => {
+    if (next()) return;
+    e.st = 'err';
+    // eslint-disable-next-line no-console
+    console.warn(`#gfx pic 读不到 '${name}'（脚本旁边与 '${root}/' 两处都取不到）`);
+  };
+  next();
+}
+
+/** `picsiz(名字下标)` -> `宽*65536+高`（还没取到 / 取不到都回 -1）。 */
+function picSiz(idx) {
+  const name = SH.names.get(String(Math.trunc(idx)));
+  if (typeof name !== 'string' || name === '') return -1;
+  const e = PIC.m.get(name);
+  if (e === undefined) { picLoad(name); return -1; }
+  if (e.st !== 'ok') return -1;
+  PIC.cur = name;
+  return e.w * 65536 + e.h;
+}
+
+/** `picread` -> 把上一句 `picsiz` 那张图抄进脚本那块数组（一格一个 0xRRGGBB）。 */
+function picRead(blk) {
+  const e = PIC.cur === null ? undefined : PIC.m.get(PIC.cur);
+  if (e === undefined || e.st !== 'ok' || e.px === null) return 0;
+  const n = Math.min(blk.length, e.w * e.h);
+  for (let i = 0; i < n; i += 1) {
+    blk[i] = (e.px[i * 4] << 16) | (e.px[i * 4 + 1] << 8) | e.px[i * 4 + 2];
+  }
+  return 0;
+}
+
 function arrIn(name, args, blk) {
   const nm = String(name);
   /* **一整张矩阵一句**（`batchmvp16` / `batchmv16`，列主序 16 个数）：与四句
@@ -1366,7 +1444,9 @@ function arrIn(name, args, blk) {
     D.col = keep;
     return 0;
   }
-  throw new Error(`这格设备（WebGL2）上没有 '${nm}'（有的是 setrow / gluniform{1..4}{f,i}v）`);
+  /* **`pic` 那一族的第二句**（见 `PIC` 的头注）：把整张图抄给脚本。 */
+  if (nm === 'picread') return picRead(blk);
+  throw new Error(`这格设备（WebGL2）上没有 '${nm}'（有的是 setrow / picread / gluniform{1..4}{f,i}v）`);
 
 }
 
