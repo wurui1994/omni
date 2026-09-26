@@ -679,6 +679,15 @@ R 那儿它把属性全扒掉，而名字也是属性（量出来 `as.vector(c(a
 （它知道类型），`cat` 落成一串 `write`（**不是 `print`**：方言的 `print` 自带换行，
 R 的 `cat` 不带，差一个字节就对不上 `Rscript`）。
 
+**`cat` 的 `sep` 里带换行的话，末尾还要多一个 `"\n"`**（2026-09-26 扫出来的静默答错，
+判据在 `ext/r/examples/print.R` 末尾）。那不是"元素之间的分隔"那一条，是 `do_cat`
+收尾处单独一句 —— `src/main/builtin.c` 里先
+`if (strstr(CHAR(STRING_ELT(sepr, i)), "\n")) nlsep = 1;`，最后
+`if ((pwidth != SIZE_MAX) || nlsep) Rprintf("\n");`。量出来：
+`cat(c("x","y"), sep = "\n")` 出 `x\ny\n`（**带**末尾那一格），而
+`cat(c("p","q"), sep = ", ")` 出 `p, q`（**不带**）。从前这一层两种都不补，于是每一处
+`cat(…, sep = "\n")` 都少一个字节 —— 后面每一行都往上顶一格，最难查的那种错。
+
 ### 串那一族，与 R 的**两套有效数字**
 
 同一个 double，R 有两个文本形式，而且挑法同源、只差位数：
@@ -962,7 +971,7 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
    串里的引号与反斜杠**不转义**（R 印 `"a\"b"`，我们印 `"a"b"`），
    `list` 的 `print` 没接：R 印一张 list 要一行一行 `$名字` 地印，而这一层的表**问不出
    它有哪些键**（方言的字典只有 `dnew` / `dget` / `dset` / `dhas` / `dlen`，没有"列出键"
-   那一格）。`names(m)` 同理 —— 要补就得先给核心方言加一格算子，那不属于 R 这一刀。
+   那一格）。`names(m)` 同理 —— 卡在哪儿量清楚了，见本节第 16 条。
    （**向量**上的 `names` 接了，那一条不靠字典，见第二节。）
    **命名实参过一张白名单**（`adapter.js` 的 `NAMED_OK`）：认得的是 `cat` 的 `sep=`、
    `paste` 的 `sep=` / `collapse=`、聚合那一族的 `na.rm=`（`sum` / `prod` / `mean` /
@@ -1175,6 +1184,18 @@ adapter 按类型分：串上 `slen`、表上 `dlen`、向量上读槽 0 —— 
     `omni_container.h` 里多一格按键型生成的 `_keys_arr`。那是**核心方言**的一刀，
     会碰到所有语言（`tests/lower` 165 格、`tests/mir`、`check:self`），所以单独做，
     不夹在 R 的刀里。
+
+17. **`ifelse(条件, 串, 串)` 里条件带 `NA` 还是报得太晚**（扫出来的，2026-09-26）。
+    R 那儿 `ifelse(c(3, NA, 7) > 5, "大", "小")` 出 `"小" NA "大"` —— 缺失那一格是
+    `NA_character_`。这一层**没有串的缺失**（本节第 3 条），所以 `r_ifelse_str` 在运行期
+    `fail`：`NA in ifelse() over strings: NA_character_ 还没有`。那是**运行期**的，
+    已经过了换档那道门 —— 退 70、前面几行已经印出去了、libR 也接不着。
+
+    为什么没顺手改成"在 adapter 里当场报"：能不能出 `NA` 是**运行期**的事，而类型这一层
+    只有一种逻辑向量（`RLGL`，三态那一档）。按类型一刀切会把现在答得对的那些也推去 libR
+    （`ext/r/examples/strvec.R` 里 `ifelse(eqw == "a", "yes", "no")` 就是一格 —— 字符向量
+    之间比较出不了 `NA`，因为这一层没有 `NA_character_`）。真要修是把 `NA_character_`
+    接进来，那是第 3 条那一刀。
 
 ## 五、另一档：libR（ADR-0046）
 

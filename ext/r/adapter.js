@@ -5627,6 +5627,20 @@ function catOf(x, types) {
     }
     out.push({ kind: 'builtin-stmt', name: 'write', args: [asStr(a, types)] });
   });
+  /**
+   * **`sep` 里带换行的话，末尾还要多一个 `"\n"`**（量出来的，2026-09-26）。
+   *
+   * 这不是"元素之间的分隔"那一条，是 `do_cat` 最后单独一句
+   * （`src/main/builtin.c`：`if (strstr(CHAR(STRING_ELT(sepr, i)), "\n")) nlsep = 1;`
+   * 然后收尾处 `if ((pwidth != SIZE_MAX) || nlsep) Rprintf("\n");`）。
+   *
+   * 量法：`cat(c("x","y"), sep = "\n")` R 出 `x\ny\n`（**带**末尾那格），而
+   * `cat(c("p","q"), sep = ", ")` 出 `p, q`（**不带**）。从前这一层两种都不补，于是
+   * 所有 `cat(…, sep = "\n")` 都少一个字节 —— 后面每一行都往上顶一格，是静默答错。
+   */
+  if (sep.includes('\n')) {
+    out.push({ kind: 'builtin-stmt', name: 'write', args: [{ kind: 'string', value: '\n' }] });
+  }
   return { kind: 'block', stmts: out };
 }
 
