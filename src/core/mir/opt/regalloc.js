@@ -399,6 +399,145 @@ function isCallOp(op) {  return op === OP.CALL || op === OP.CALLI || op === OP.C
 }
 
 /**
+ * **栈位也按区间复用**（第一百四十四片）。
+ *
+ * 两个后端的口径是"每个 MIR 值一个栈位"（`arm64/from_mir.js` 的 `valOff`），于是帧的
+ * 大小正比于**指令条数**。几十条指令的函数上这无所谓，几万条的函数上是硬伤：
+ * CPython 的 `_PyEval_EvalFrameDefault`（`generated_cases.c.h` 展开出几千个 case）
+ * 要 **0x6e1e0 ≈ 451KB** 的帧 —— 8MB 的主线程栈递归十几层就踩穿，我们自己编出来的
+ * python 跑 `-c "print(285)"` 崩在那个函数序言的第一条 `str`（量到的）。
+ *
+ * 复用的判据与寄存器那一套**共用同一份区间**（`[定义, 最后一次使用]`，循环那一刀已经
+ * 延长过）：区间不相交的两个值可以住同一格。栈位这一侧"颜色"没有上限（要多少有多少），
+ * 所以一遍线性扫描就够、不必抢占：
+ *   - 到 pc 先把"上一条之前就死了"的格子收回空闲表；
+ *   - 定义在 pc 的值领一格：空闲表非空就拿（LIFO —— 刚还回来的先用，帧更紧），否则新开。
+ *
+ * 出 `fn.valHome`（下标 -> 第几格）与 `fn.valHomes`（一共几格）。与 `regHint` 同一种
+ * 性质：**标注**。后端拿不到就照旧一个值一格，所以这一格永远是安全的。
+ */
+function stackHomes(fn, last) {
+  const n = fn.op.length;
+  /* 普通数组 —— **自编那条腿的方言里没有 `Int32Array`**（量到的原话：
+   * `unresolved identifier 'Int32Array'`，`tests/mir` 当场报）。 */
+  const home = new Array(n).fill(0);
+  /** `endsAt[e]` = 区间右端正好是 e 的那几格（到 e+1 就能还回去） */
+  const endsAt = new Array(n).fill(null);
+  const free = [];
+  let next = 0;
+  for (let pc = 0; pc < n; pc++) {
+    if (pc > 0) {
+      const done = endsAt[pc - 1];
+      if (done !== null) {
+        for (const h of done) free.push(h);
+        endsAt[pc - 1] = null;
+      }
+    }
+    const h = free.length > 0 ? free.pop() : next++;
+    home[pc] = h;
+    /* 没人用的值（`last = -1`）区间就是 `[pc, pc]`：它自己那一条写完就能让位。 */
+    const end = last[pc] > pc ? last[pc] : pc;
+    if (endsAt[end] === null) endsAt[end] = [h];
+    else endsAt[end].push(h);
+  }
+  fn.valHome = home;
+  fn.valHomes = next;
+}
+
+/**
+ * **槽位的栈位也按区间复用**（第一百四十四片第二格）。
+ *
+ * 值那一侧复用完之后，几万条指令的函数上剩下的大头是**槽位**：`_PyEval_EvalFrameDefault`
+ * 有 3900 个槽（C 的局部变量，没被取地址的那些），一个槽一格就是 31KB。
+ * 复用之后那个函数的帧从 46KB 掉到几 KB —— 而 python 的递归每层要一个 `ceval` 帧，
+ * 46KB × 200 层就是 9MB，8MB 的栈照旧踩穿（量到的：`deep(200)` 崩）。
+ *
+ * 区间的算法与 `slotIntervals`（槽位提升那一格）**同一条**：`[第一次访问, 最后一次访问]`，
+ * 有访问落在循环里就把整个循环算活着。差别有两处：
+ *   * 这儿**每个槽都要**（提升那一格只收"住得下一个寄存器且类型对得上"的），
+ *     因为后端给每个槽都留了一格；
+ *   * 形参的槽从 -1 起（序言就写进去了）。
+ *
+ * `SETJMP` 那一族**整份不碰**（回 false）：`longjmp` 会把控制送回一个**更早的 pc**，
+ * 于是"区间按 pc 线性"这条前提不成立 —— 一个早就"死了"的槽回去之后还要读，
+ * 而它那一格可能已经借给别人了。槽位提升那一格出于同一个理由也是整份退出。
+ */
+function slotHomes(fn, openLoops, endOf) {
+  const ns = fn.slots === undefined ? 0 : fn.slots.length;
+  const n = fn.op.length;
+  for (let pc = 0; pc < n; pc++) if (fn.op[pc] === OP.SETJMP) return false;
+  if (ns === 0) { fn.slotHome = []; fn.slotHomeCount = 0; return true; }
+  const start = new Array(ns).fill(-2);     // -2 = 从没访问过
+  const end = new Array(ns).fill(-2);
+  for (let pc = 0; pc < n; pc++) {
+    const o = fn.op[pc];
+    if (o !== OP.LOAD && o !== OP.STORE) continue;
+    const no = fn.aux[pc];
+    if (!(no >= 0 && no < ns)) continue;
+    if (start[no] === -2) start[no] = pc;
+    if (pc > end[no]) end[no] = pc;
+    for (const lp of openLoops[pc]) {
+      if (lp < start[no]) start[no] = lp;
+      if (endOf[lp] > end[no]) end[no] = endOf[lp];
+    }
+  }
+  if (fn.params !== undefined) {
+    for (const p of fn.params) {
+      if (!(p.slot >= 0 && p.slot < ns)) continue;
+      /* 形参的槽序言就写进去了：访问过的往前撑到 -1；**一次都没访问过**的也得占一格
+       * （序言照样写它，而那一格若借给了"第一次访问是读"的槽，读到的就是入参）。 */
+      if (start[p.slot] === -2) { start[p.slot] = -1; end[p.slot] = -1; } else start[p.slot] = -1;
+    }
+  }
+  /* 按区间起点排一遍再线性扫描（槽号的次序与区间没关系，值那一侧才天然有序）。
+   * 从没访问过的槽排在最后，它们谁的格子都能借（没人读）。 */
+  const order = [];
+  for (let no = 0; no < ns; no++) order.push(no);
+  order.sort((a, b) => (start[a] === start[b] ? a - b : start[a] - start[b]));
+  const home = new Array(ns).fill(0);
+  const live = [];          // {end, home}，按 end 升序摆着
+  const free = [];
+  let next = 0;
+  for (const no of order) {
+    if (start[no] === -2) { home[no] = 0; continue; }   // 没人访问：借 0 号
+    const s = start[no];
+    /* 起点之前就死掉的那些格子收回来 */
+    for (let k = live.length - 1; k >= 0; k--) {
+      if (live[k].end < s) { free.push(live[k].home); live.splice(k, 1); }
+    }
+    const h = free.length > 0 ? free.pop() : next++;
+    home[no] = h;
+    live.push({ end: end[no], home: h });
+  }
+  fn.slotHome = home;
+  fn.slotHomeCount = next === 0 ? 1 : next;
+  return true;
+}
+
+/**
+ * 给这个函数算一张栈位复用表（`fn.valHome` / `fn.valHomes`），已经有了就不再算。
+ *
+ * **两个后端自己叫这一条**：C 那条路一遍过、不跑优化管线（`regalloc` 那个通道根本没跑），
+ * 而"帧不要正比于指令条数"这件事与优化开不开无关 —— 它是能不能跑起来的问题
+ * （`_PyEval_EvalFrameDefault` 451KB 的帧在 8MB 栈上递归十几层就踩穿）。
+ * 跑过管线的那一路这张表已经在了，这儿直接回。
+ *
+ * 顺带把**槽位**那一侧也算了（`fn.slotHome`，见 `slotHomes`）—— 两件事共用
+ * `scanRegions` 那一遍。
+ */
+export function assignStackHomes(fn) {
+  if (!fn || fn.op.length === 0) return 0;
+  if (fn.valHome !== undefined && fn.valHome !== null
+    && fn.valHome.length === fn.op.length) {
+    return fn.valHomes;
+  }
+  const { openLoops, endOf } = scanRegions(fn);
+  stackHomes(fn, extendForLoops(fn, lastUses(fn)));
+  slotHomes(fn, openLoops, endOf);
+  return fn.valHomes;
+}
+
+/**
  * 跑 regalloc。**不改一条指令** —— 只往 `fn.regHint`（通用那一类）与 `fn.regHintF`
  * （浮点那一类）上各挂一张 `下标 -> 颜色` 的表（`Map`），由后端消费。
  *
@@ -409,11 +548,15 @@ function isCallOp(op) {  return op === OP.CALL || op === OP.CALLI || op === OP.C
  * 不进 `bytes.js` 的哈希（那边按字段来，认不出多出来的属性）、不进 verifier、
  * 解释器一眼都不看。后端拿不到它就照旧「每个值一个栈位」，所以这一格永远是安全的。
  *
+ * 顺手还出一张 `fn.valHome`（栈位按区间复用，见 `stackHomes`）——
+ * 同一份区间算两件事，算区间那几步不必跑两遍。
+ *
  * 回分到了几个值（两类之和）。
  */
 export function regalloc(fn, mod) {
   if (!fn || fn.op.length === 0) return 0;
   const last = extendForLoops(fn, lastUses(fn));
+  stackHomes(fn, last);
   const uses = useLists(fn);
   const { openLoops, endOf } = scanRegions(fn);
   const slotIv = slotIntervals(fn, mod, openLoops, endOf);

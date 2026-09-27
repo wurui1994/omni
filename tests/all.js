@@ -89,6 +89,11 @@ const SUITES = [
      与退出码逐字节相同。抓出过两个真 bug：buildCfg 不认 BRTABLE（switch 的 CFG 是错的）、
      `String(-0)` 是 `"0"`（把 -0.0 折成了 0.0）。 */
   { s: 'mir/opt.js' }, { s: 'mir/reloc.js' },
+  /* 栈位按活跃区间复用（第一百四十四片）：两个后端的口径是"每个 MIR 值一个栈位"，
+     几万条指令的函数上那是**跑不起来**级的问题 —— CPython 的
+     `_PyEval_EvalFrameDefault` 451KB 的帧踩穿 8MB 栈。这一条量那张复用表本身
+     （后端怎么用它由 `tests/c` 那 300 份真跑的用例兜住）。 */
+  { s: 'mir/stackhome.js' },
   /* 一个 .c 一个 .js（ADR-0047）：地址在装载期才定。把基址推开再跑，stdout 与退出码
      必须与烤死地址那一版逐字节相同 —— 这道门抓出过 `printf("…")` 那个串地址在
      `castTo` 的常量折叠里丢掉"我是地址"记号（静默错地址，答案是空串）。 */

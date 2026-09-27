@@ -55,6 +55,9 @@ import {
   callVaFixed,
 } from '../mir/ir.js';
 import { planRodata, planData, planBss } from '../mir/rodata.js';
+/* 栈位按活跃区间复用（第一百四十四片）。算区间那几步住在 regalloc 里 ——
+ * 这一条与"优化开不开"无关，C 那条路一遍过也要，所以后端自己叫。 */
+import { assignStackHomes } from '../mir/opt/regalloc.js';
 
 /* 草稿寄存器。x8 是 arm64 的「间接结果」寄存器、x9-x15 是调用者保存的临时 ——
  * 这一层不跨调用活，所以随便用哪三个都行，取这三个只为读起来一致。 */
@@ -560,8 +563,19 @@ class FnGen {
     this.outArgs = arm64OutArgsBytes(mod, f);
     /** 帧里 0 号槽位的偏移。出参区在它下面（第二十二片）。 */
     this.slotBase = this.outArgs;
-    this.valBase = this.slotBase + f.slots.length * 8;
-    let bytes = this.valBase + f.count() * 8;
+    /* 值的栈位**按活跃区间复用**（第一百四十四片，`regalloc.js` 的 `stackHomes`）：
+     * 区间不相交的两个值住同一格，于是帧不再正比于指令条数
+     * （`_PyEval_EvalFrameDefault` 那 451KB 就是"一个值一格"来的）。
+     * 表在这儿现算（C 那条路不跑优化管线）；算不出来就照旧一个值一格。
+     * **槽位那一侧同理**（`slotHome`）—— 那个函数 3900 个槽、一个槽一格就是 31KB。 */
+    assignStackHomes(f);
+    this.slotHome = (f.slotHome !== undefined && f.slotHome !== null
+      && f.slotHome.length === f.slots.length) ? f.slotHome : null;
+    const slotCells = this.slotHome === null ? f.slots.length : f.slotHomeCount;
+    this.valBase = this.slotBase + slotCells * 8;
+    this.valHome = (f.valHome !== undefined && f.valHome !== null
+      && f.valHome.length === f.count()) ? f.valHome : null;
+    let bytes = this.valBase + (this.valHome === null ? f.count() : f.valHomes) * 8;
     /* 帧块（第十八片）：接在值的栈位后面，每块按自己的 `align` 对齐。**能这么算是因为
      * `sp` 本身 16 对齐**（AAPCS64 要求，序言里的 `sub sp` 也按 16 取整），于是
      * 「sp + off」的对齐就等于 off 的对齐 —— 块内不用再留余地。 */
@@ -749,7 +763,7 @@ class FnGen {
     if (!Number.isInteger(no) || no < 0 || no >= this.f.slots.length) {
       throw new OmniError(`arm64: 槽号 ${no} 越界`);
     }
-    return this.slotBase + no * 8;
+    return this.slotBase + (this.slotHome === null ? no : this.slotHome[no]) * 8;
   }
 
   /* ------------------------------------------------- 提升到寄存器的槽位 */
@@ -790,7 +804,7 @@ class FnGen {
   }
 
   valOff(i) {
-    return this.valBase + i * 8;
+    return this.valBase + (this.valHome === null ? i : this.valHome[i]) * 8;
   }
 
   /** 第 no 块帧存储在帧里的偏移（`FRAME` 的落脚点）。 */

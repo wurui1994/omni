@@ -60,6 +60,8 @@ import {
   memArgSize, memArgSse, memArgIsF80, callLdRet,
 } from '../mir/ir.js';
 import { planRodata, planData, planBss } from '../mir/rodata.js';
+/* 栈位/槽位按活跃区间复用（第一百四十四片）——与 arm64 那条腿同一张表。 */
+import { assignStackHomes } from '../mir/opt/regalloc.js';
 
 /* 草稿寄存器。挑 r10/r11 是因为它们**既不是实参寄存器、也不是被调用者保存的** ——
  * 于是备实参的时候不会先把自己的草稿踩掉。`rax` 当结果（也是返回值寄存器）。 */
@@ -468,8 +470,16 @@ class x64FnGen {
     this.buf = buf0;
     this.callLabels = callLabels === undefined ? null : callLabels;
     this.strSyms = strSyms === undefined ? null : strSyms;
-    this.valBase = f.slots.length;
-    const cells = this.valBase + f.count();
+    assignStackHomes(f);
+    this.slotHome = (f.slotHome !== undefined && f.slotHome !== null
+      && f.slotHome.length === f.slots.length) ? f.slotHome : null;
+    this.valBase = this.slotHome === null ? f.slots.length : f.slotHomeCount;
+    /* 值的栈位**按活跃区间复用**（第一百四十四片，`regalloc.js` 的 `stackHomes`）——
+     * 与 arm64 那条腿同一张表、同一条理由（帧不再正比于指令条数）。
+     * 拿不到就照旧一个值一格，一个字节都不变。 */
+    this.valHome = (f.valHome !== undefined && f.valHome !== null
+      && f.valHome.length === f.count()) ? f.valHome : null;
+    const cells = this.valBase + (this.valHome === null ? f.count() : f.valHomes);
     let bytes = cells * 8;
     /* 帧块（第十八片）：`rbp` 往下继续挖。**`rbp` 是 16 对齐的** —— 进函数时 `rsp ≡ 8`
      * （返回地址占了 8），`push rbp` 之后回到 16 的整数倍，`mov rbp, rsp` 于是搬来一个
@@ -549,11 +559,11 @@ class x64FnGen {
     if (!Number.isInteger(no) || no < 0 || no >= this.f.slots.length) {
       throw new OmniError(`x64: 槽号 ${no} 越界`);
     }
-    return -8 * (no + 1);
+    return -8 * ((this.slotHome === null ? no : this.slotHome[no]) + 1);
   }
 
   valOff(i) {
-    return -8 * (this.valBase + i + 1);
+    return -8 * (this.valBase + (this.valHome === null ? i : this.valHome[i]) + 1);
   }
 
   /** 第 no 块帧存储的偏移（`FRAME` 的落脚点）。 */
