@@ -61,7 +61,9 @@
     ;; 十六进制。语料里是键码那一族：`keystatus[0xc8]`、`0xffffff`
     ;; （EvalDraw 的 `demos/beer.kc:35`；同一门语言，见文件头那句"两家共用"）。
     (token NUMBER "0" (or "x" "X") (+ hex))
-    (string STRING "\"")
+    ;; `join`：**挨着的两个串字面量拼成一个**（C 的翻译阶段 6，`"a" "b"` == `"ab"`）。
+    ;; 语料里 `games/traffic.kc:810` 那段多行帮助文本用的就是这个写法。
+    (string STRING "\"" join)
     ;; **字符字面量**（`RScript.htm` 算子表第二行："' ' Literal; substitutes a character
     ;; for its integer value"）—— `'+'`、`'\n'` 那种，值是那个字符的编码。
     ;; 语料里 `games/kenken.kc` 用它存 ALU 运算符（`o == '+'`）。

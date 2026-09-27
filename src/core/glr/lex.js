@@ -423,9 +423,23 @@ export function readLexSpec(node, diags) {
       if (nm === null || !isStr(q) || q.value.length !== 1) { diags.error(it.span, '(string NAME "Q") needs a name and a one-character quote'); continue; }
       // `verbatim` = 反斜杠只对引号本身有效，别的位置就是一个普通反斜杠。asy 的双引号串
       // 就是这样（量过：`"a\tb"` 是 4 个字符 a \ t b），因为它要直接往 TeX 里塞。
-      const verbatim = isAtom(it.items[c.from + 1]) && it.items[c.from + 1].value === 'verbatim';
-      if (it.items.length > c.from + 1 && !verbatim) diags.error(it.span, "the only flag after (string NAME \"Q\") is 'verbatim'");
-      rules.push({ kind: 'string', type: nm, quote: q.value, verbatim, cond: c.cond, span: it.span });
+      const flags = it.items.slice(c.from + 1).filter((f) => isAtom(f)).map((f) => f.value);
+      const verbatim = flags.includes('verbatim');
+      /**
+       * `join`：**挨着的两个串字面量拼成一个**（C 的翻译阶段 6：`"a" "b"` == `"ab"`）。
+       *
+       * 这一格在词法层做，不在语法层：语法层要么加一条 `串 -> 串 串` 的产生式（GLR 表上
+       * 平白多一处歧义），要么让 `str` 节点变成可变长（读它的地方全得改）。词法层就是
+       * "上一个记号也是同一种串就接上去"，一句话的事。
+       * 语料里 `games/traffic.kc:810` 那段多行帮助文本用的就是这个写法。
+       */
+      const join = flags.includes('join');
+      if (flags.some((f) => f !== 'verbatim' && f !== 'join')) {
+        diags.error(it.span, "the only flags after (string NAME \"Q\") are 'verbatim' and 'join'");
+      }
+      rules.push({
+        kind: 'string', type: nm, quote: q.value, verbatim, join, cond: c.cond, span: it.span,
+      });
       continue;
     }
     if (h === 'interp-string') {
@@ -832,6 +846,19 @@ export function lexText(spec, file, diags) {
     i = bestEnd;
     prevEnd = bestEnd;
     if (rule.kind === 'string' || rule.kind === 'interp') {
+      /* `join`（C 的翻译阶段 6）：**挨着的同一种串接上去**，不另发一个记号。
+         中间只允许空白与注释 —— 它们在上头那一趟 trivia 里已经吃掉了，所以这儿
+         只要看"上一个记号是不是同一种串"。 */
+      const last = toks.length > 0 ? toks[toks.length - 1] : null;
+      if (rule.join === true && last !== null && last.type === rule.type
+          && last.node.kind === 'string') {
+        last.node.value += bestValue;
+        last.node.raw += text.slice(1, text.length - 1);
+        last.node.span = mkSpan(file, last.span.start, bestEnd);
+        last.span = last.node.span;
+        prevType = rule.type;
+        continue;
+      }
       toks.push({ type: rule.type, node: { kind: 'string', value: bestValue, raw: text.slice(1, text.length - 1), span }, span });
       prevType = rule.type;
       continue;

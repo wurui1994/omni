@@ -629,6 +629,15 @@ if (only.length === 0 || only.some((x) => 'eofcomment'.includes(x))) {
   } else if (!said.includes('unterminated block comment')) {
     no('末尾没关的块注释：`.go` 照旧要报', `报的不是那一句：${said.split('\n').slice(0, 2).join(' ')}`);
   } else ok('末尾没关的块注释：`.go` 照旧报 unterminated（旗子是按语法给的）');
+  /* **挨着的两个串字面量拼成一个**（C 的翻译阶段 6，`(string STRING "\"" join)`）：
+     `games/traffic.kc:810` 那段多行帮助文本用的就是这个写法。 */
+  const j1 = write('join.kc', '()\nprintf("ab" "cd"\n       "ef\\n");\n');
+  const r3 = spawnSync(process.execPath, [CLI, 'run', j1], { encoding: 'utf8', timeout: 60000 });
+  if (r3.status !== 0) {
+    no('挨着的串字面量要拼起来', `退出码 ${r3.status}：${(r3.stderr ?? '').split('\n').slice(0, 2).join(' ')}`);
+  } else if ((r3.stdout ?? '').trim() !== 'abcdef') {
+    no('挨着的串字面量要拼起来', `期望 abcdef，得到 ${JSON.stringify(r3.stdout)}`);
+  } else ok('挨着的串字面量拼成一个（跨行也算）');
   rmSync(tmp, { recursive: true, force: true });
 }
 
