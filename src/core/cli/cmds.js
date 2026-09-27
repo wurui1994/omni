@@ -163,6 +163,9 @@ const C_CPP_FLAGS = [
    * 得在这张表里声明 —— 不然带的那个目录会被当成一个**位置参数**（源文件）。 */
   { name: '--tcc-lib-dir', arity: 1, value: 'DIR', brief: 'tcc 的 -B：换掉自带的系统头目录' },
   { name: '-nostdinc', arity: 0, brief: '不带自带/系统那两层头目录（只剩 -I 给的）' },
+  /* tcc 的 `-std=`（libtcc.c:1994）：只有 `c11` / `gnu11` 算，认了就把
+   * `__STDC_VERSION__` 报成 201112L。别的写法照默认（C99）走，与 tcc 一样不骂。 */
+  { name: '-std', arity: 1, value: 'STD', brief: 'c11|gnu11：__STDC_VERSION__ 报 201112L（别的按 c99）' },
   { name: '--sysroot', arity: 1, value: 'DIR', brief: '交叉编译：系统头 DIR/include、库 DIR/lib' },
 ];
 const C_TARGET_FLAGS = [

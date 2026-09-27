@@ -211,6 +211,8 @@ export function cMir(path, incs, defs, args, sysIncs, tgt, opts) {
     join,
     arch: tgt?.arch,
     os: tgt?.os,
+    /* `-std=c11` 那一格（`__STDC_VERSION__` 报 201112L 而不是 199901L）。 */
+    cversion: tgt?.cversion,
   }, defs.map(([name, body]) => ({ name, body })), args, tu ? { tu: true } : undefined);
   for (const w of warnings) stderr(`${w}\n`);
   /**
@@ -392,6 +394,8 @@ export function cppText(path, incs, defs, dflag, pflag, deps, sysIncs, incls, ve
      * 这件事在命令行上说得出来。 */
     arch: tgt?.arch,
     os: tgt?.os,
+    /* `-std=c11` 那一格（`__STDC_VERSION__` 报 201112L 而不是 199901L）。 */
+    cversion: tgt?.cversion,
   });
   /* `-dD` = 3、`-dM` = 7（tcc 的 `dflag`）。拨在装预定义**之前** —— `-dD`/`-dM` 要印的
    * 头一批就是预定义那几行，攒行的开关得先开（见 tccpp.js 的 `cmdlineDump`）。
@@ -440,6 +444,7 @@ export function cMirNative(path, opts, defs) {
     join,
     arch: opts.arch,
     os: opts.os,
+    cversion: opts.cversion,
     /* `-finstrument-functions`（第一百五十片第三格）：每个函数进出各插一次
      * `__cyg_profile_func_enter/exit`。`omni run x.c --profile cc` 那一趟要它 ——
      * 于是 `.c` 输入上「精确的调用次数与自用时间」不再要外部编译器。 */
@@ -473,6 +478,7 @@ export function cDeclsOf(path, opts, defs) {
     join,
     arch: opts.arch,
     os: opts.os,
+    cversion: opts.cversion,
   }, (defs ?? []).map(([name, body]) => ({ name, body })));
 }
 

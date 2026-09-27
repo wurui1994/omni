@@ -367,6 +367,13 @@ if (pick('cpp').includes('09-cmdline.c')) {
     ['-UPATH_DOES_NOT_EXIST'],   // 掀一个本来就没有的，什么都不该发生
   ]) optCase('cpp', '09-cmdline.c', fl);
 }
+/* `-std=…`（tcc 的 `TCC_OPTION_std`）：只有 `c11`/`gnu11` 把 `__STDC_VERSION__` 抬到
+ * 201112L，别的写法照 C99 —— 四种都与 tcc 逐字节对一遍，包括「不给」那一种。 */
+if (pick('cpp').includes('10-std.c')) {
+  for (const fl of [[], ['-std=c11'], ['-std=gnu11'], ['-std=c99'], ['-std=c17']]) {
+    optCase('cpp', '10-std.c', fl);
+  }
+}
 /* `-isystem` 与 `-nostdinc`：把 inc/ 那两个目录当系统头目录来找 `<next.h>`。 */
 if (pick('inc').includes('02-include-next.c')) {
   optCase('inc', '02-include-next.c', ['-isystem', incDir, '-isystem', incDir2]);

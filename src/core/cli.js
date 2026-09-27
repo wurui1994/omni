@@ -241,7 +241,34 @@ function sysIncDirs(argv) {
 function cTgt(argv) {
   const ai = argv.indexOf('--arch');
   const si = argv.indexOf('--os');
-  return { arch: ai >= 0 ? argv[ai + 1] : hostArch(), os: si >= 0 ? argv[si + 1] : hostOs() };
+  return {
+    arch: ai >= 0 ? argv[ai + 1] : hostArch(),
+    os: si >= 0 ? argv[si + 1] : hostOs(),
+    cversion: cVersion(argv),
+  };
+}
+
+/**
+ * `-std=…`（tcc 的 `TCC_OPTION_std`，libtcc.c:1994）：**只有 `c11` 与 `gnu11` 算**，
+ * 认了就把 `__STDC_VERSION__` 从 199901L 换成 201112L；别的写法（`c99`、`c17`、打错的）
+ * 一律照默认走，也不骂 —— tcc 就是这么办的（那一格 `break` 什么都不做）。
+ *
+ * 能看见的后果多半不在我们这儿而在**系统头**里：macOS 的 `_static_assert.h` 只在
+ * `__STDC_VERSION__ >= 201112L` 时 `#define static_assert _Static_assert`，
+ * CPython 的 `Include/object.h:145` 也只在那一支上才用 `_Alignas` ——
+ * 所以「拿 CPython 当运行时借」这件事上，这一格是门。
+ */
+function cVersion(argv) {
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    /* 两种写法都收：粘着的 `-std=c11`（gcc 与 tcc 只有这一种）与分开的 `-std c11` ——
+     * 我们的 `splitArgv` 按 arity 1 连后者也收得下，不认它的话分开写会**悄悄**按 C99 走。 */
+    let v = null;
+    if (a.startsWith('-std=')) v = a.slice(5);
+    else if (a === '-std') v = argv[i + 1];
+    if (v === 'c11' || v === 'gnu11') return 201112;
+  }
+  return 199901;
 }
 
 /** `-include 文件`（tcc 的 `cmdline_incl`）：开工前先读的那几份，按命令行次序。 */
@@ -391,7 +418,7 @@ function ehFrameOf(blob, arch, os) {
  * 就是栈爆，量到的是当场 `Segmentation fault: 11`）。所以这一格是显式的参数、不是一格
  * 全局状态：谁被插过在调用点上看得见。
  */
-function cObj(path, out, arch, incs, defs, fmt, os, sysIncs, instr) {
+function cObj(path, out, arch, incs, defs, fmt, os, sysIncs, instr, cver) {
   /* C -> 原生 MIR 那一步按名字要（ADR-0021 的 S4）：读文件、预处理、降级都在 C 那门语言里，
      驱动这一层只管把参数递过去、再把产物写成目标文件。 */
   const { mod, warnings } = cap('c.toMirNative')(path, {
@@ -402,6 +429,9 @@ function cObj(path, out, arch, incs, defs, fmt, os, sysIncs, instr) {
      * 剩下那四十几条跟着 `--os` 走（第一百二十九片），`wchar_t` 的宽度也是（第一百三十片）。 */
     arch: arch === 'x86_64' ? 'x86_64' : 'arm64',
     os,
+    /* `-std=c11`（`cVersion`）。**只有用户那一份 `.c` 给**：我们自己的运行时是 C99，
+     * 内部那十来处调用点一个字不改，走默认的 199901。 */
+    cversion: cver ?? 199901,
     instrument: instr === true,
   }, defs);
   for (const w of warnings) stderr(`${w}\n`);
@@ -5306,7 +5336,8 @@ function tccPrepLink(argv) {
     /* 目标文件的容器**永远是 ELF**（tcc 的 `-c` 在所有目标上都写 ELF，见 ADR-0017）。 */
     const obj = join(workDirFor('c-tcc', workName(a)), `${basename(a, '.c')}.o`);
     mkdirAll(dirname(obj));
-    cObj(a, obj, arch, incDirs(argv), defArgs(argv), 'elf', os, sysIncDirs(argv));
+    cObj(a, obj, arch, incDirs(argv), defArgs(argv), 'elf', os, sysIncDirs(argv),
+      false, cVersion(argv));
     vStep(`c front end + codegen  ${a} -> ${obj}`);
     out.push(obj);
     nSrc++;
@@ -7397,7 +7428,11 @@ function main(argv) {
        * 等于默认交叉编译到 macOS）。 */
       const cai = rest.indexOf('--arch');
       const csi = rest.indexOf('--os');
-      const tgt = { arch: cai >= 0 ? rest[cai + 1] : hostArch(), os: csi >= 0 ? rest[csi + 1] : hostOs() };
+      const tgt = {
+        arch: cai >= 0 ? rest[cai + 1] : hostArch(),
+        os: csi >= 0 ? rest[csi + 1] : hostOs(),
+        cversion: cVersion(rest),
+      };
       const out = cap('c.preprocess')(path, incDirs(rest), defArgs(rest), dflag, pflag, deps,
         sysIncDirs(rest), inclArgs(rest), verbose, tgt, rest.includes('--skip-missing-includes'));
       if (wantDeps) {
@@ -7480,7 +7515,8 @@ function main(argv) {
       const os = si >= 0 ? flags[si + 1] : hostOs();
       const fi = flags.indexOf('--format');
       const fmt = fi >= 0 ? flags[fi + 1] : fmtOfOs(os);
-      stdout(`${cObj(path, out, arch, incDirs(flags), defArgs(flags), fmt, os, sysIncDirs(flags))}\n`);
+      stdout(`${cObj(path, out, arch, incDirs(flags), defArgs(flags), fmt, os, sysIncDirs(flags),
+        false, cVersion(flags))}\n`);
       return 0;
     }
     /* `c-jit`：C -> 真机器码 -> **就在这个进程里跑**（ADR-0045 的 D2）。

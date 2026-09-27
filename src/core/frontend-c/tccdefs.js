@@ -163,8 +163,10 @@ const REDIRECT_DEFS = [
  * @param {string} arch `arm64` | `x86_64`
  * @param {string} os `linux` | `osx` | `win32`
  * @param {boolean} forPP 只预处理那一路（多一条 `__TCC_PP__`，见 `PP_ONLY_DEFS`）
+ * @param {number} cversion `__STDC_VERSION__` 报的那个数（tcc 的 `s->cversion`：
+ *   默认 199901，只有 `-std=c11` / `-std=gnu11` 会把它换成 201112，libtcc.c:1994）
  */
-export function predefs(arch = 'arm64', os = 'osx', forPP = false) {
+export function predefs(arch = 'arm64', os = 'osx', forPP = false, cversion = 199901) {
   const cpu = CPU_DEFS[arch];
   if (cpu === undefined) throw new Error(`tccdefs: 不认识的架构 ${arch}`);
   const osDefs = OS_DEFS[os];
@@ -191,7 +193,7 @@ export function predefs(arch = 'arm64', os = 'osx', forPP = false) {
     // ---- C 标准（tcc 报 C99）
     ['__STDC__', '1'],
     ['__STDC_HOSTED__', '1'],
-    ['__STDC_VERSION__', '199901L'],
+    ['__STDC_VERSION__', `${cversion}L`],
     // ---- 标准类型的底子（这儿起是 `tccdefs.h`）
     ['__SIZE_TYPE__', m.sizeT],
     ['__PTRDIFF_TYPE__', m.ptrdiffT],

@@ -245,6 +245,13 @@ export class Cpp {
     /** 目标 OS（`--os`）：`linux` | `osx` | `win32`。预定义宏里 OS 那一段、数据模型、
      * `wchar_t` 那两条都按它换，见 tccdefs 的 `OS_DEFS` / `MODEL` / `WCHAR_DEFS` */
     this.os = host.os ?? 'osx';
+    /** `__STDC_VERSION__` 报的那个数（tcc 的 `s->cversion`，libtcc.c:883）。
+     * 默认 199901；`-std=c11` / `-std=gnu11` 换成 201112 —— tcc 只认这两个写法。
+     * 这一条能看见的后果不在我们这儿而在**系统头**里：macOS 的 `_static_assert.h`
+     * 只在 `__STDC_VERSION__ >= 201112L` 时 `#define static_assert _Static_assert`，
+     * 所以报 C99 的话 CPython 的 `static_assert(…)` 会变成「隐式声明的函数」
+     * （`Objects/longobject.c:7008`、`Objects/sliceobject.c:705`）。 */
+    this.cversion = host.cversion ?? 199901;
 
     /* 标识符表（tcc 的 `table_ident` + `hash_ident`，`tccpp.c:463-521`）。
      * tcc 用一张 16384 桶的手写哈希表；这里用 Map —— 引擎的哈希表就是那件事，
@@ -2554,7 +2561,7 @@ export class Cpp {
   installPredefs(baseFile, forPP = true) {
     if (this.predefsDone) return;
     this.predefsDone = true;
-    for (const [name, body] of predefs(this.arch, this.os, forPP)) {
+    for (const [name, body] of predefs(this.arch, this.os, forPP, this.cversion)) {
       this.define(name, body);
     }
     if (!forPP) for (const [name, body] of COMPILE_DEFS) this.define(name, body);
