@@ -794,6 +794,17 @@ export const EVNETBOX = ['field=1,102,3', 'slot=10,20,130,40', 'plain=107',
   'else=0', 'then=0', 'sent3=3', 'recv3=3', 'got=10,5,6,7 from=0'];
 
 /**
+ * **串摆进数组里**（`ext/evaldraw/examples/strtab.kc`）。
+ *
+ * 这门语言的值只有 double，所以 `static a[3] = {"alpha",…}` 装的是**串表下标**
+ * （正本里是个句柄）；`printf` 的 `%s` 拿到一个数就查一趟回来（`pd_strof`）。
+ * 六行分别钉住：下标取出来能当串印、字面量 `%s` 照旧是字面量、**同一个串只占一格**
+ * （`same=1`）、没登记过的下标回空串。`geeky/calend.kc:100` 的那七个星期名靠它。
+ */
+export const EVSTRTAB = ['n0=[alpha]', 'n1=[beta]', 'n2=[alpha]',
+  'mix=[lit][beta]', 'same=1', 'none=[]'];
+
+/**
  * **入口收一整块**（`ext/evaldraw/examples/inst.kc`：`(a[16])` 那一档）。
  *
  * 口径 `evaldraw.txt:1258-1296`（自己写乐器那个模式）：宿主每采样调一次，那 16 格是它传进来的

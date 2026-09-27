@@ -27,7 +27,7 @@ import {
   BASICS, INTMATH, LOOPEXIT, DICT, UNARY, RECORD, INDEX, SLICE, CONV, VALUES, MUT,
   DEFER, BLOCKRET, METHOD, ASSERTOK, STRCAT, NUMSTR, NAMEDARG, CASEFOR, CASERANGE,
   CTIF, MEMBER, BLOCKSCOPE, BITS, CHARLIT, CTCONST, DECLS, ENUMVAL, FNVAL, FORIN,
-  HOIST, LITNONE, MATCH, METHOD2, OPTRES, POINTER, POSINIT, PUSH, INHERIT, OPOVER, TMPL, CTOR, VIRT, CTMPL, LAMBDA, FMT, FORMAT, POSTEST, CTOR2, METHOV, PUREVIRT, DTORCHAIN, MIXVIRT, OUTLINE, CTMPL2, FNOVL, METHOV2, CTOR3, REFPARAM, STATICMEM, BYVALUE, ARRFIELD, RANGEFOR, SWBREAK, NARROW, ENUMDO, DECLMIX, ARRMATH, GLOBALS, CHAIN, EVALARR, PDNOISE, EVDOWHILE, EVTAIL, EVTAILSEMI, EVREADPIX, EVARRVIEW, EVBLOCKCOPY, EVNETBOX, EVINST,
+  HOIST, LITNONE, MATCH, METHOD2, OPTRES, POINTER, POSINIT, PUSH, INHERIT, OPOVER, TMPL, CTOR, VIRT, CTMPL, LAMBDA, FMT, FORMAT, POSTEST, CTOR2, METHOV, PUREVIRT, DTORCHAIN, MIXVIRT, OUTLINE, CTMPL2, FNOVL, METHOV2, CTOR3, REFPARAM, STATICMEM, BYVALUE, ARRFIELD, RANGEFOR, SWBREAK, NARROW, ENUMDO, DECLMIX, ARRMATH, GLOBALS, CHAIN, EVALARR, PDNOISE, EVDOWHILE, EVTAIL, EVTAILSEMI, EVREADPIX, EVARRVIEW, EVBLOCKCOPY, EVNETBOX, EVSTRTAB, EVINST,
 } from '../lib/cases.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -67,6 +67,7 @@ const FAMILIES = {
   arrview: EVARRVIEW,
   blockcopy: EVBLOCKCOPY,
   netbox: EVNETBOX,
+  strtab: EVSTRTAB,
   inst: EVINST,
 };
 const MIGRATED = {
@@ -140,7 +141,7 @@ const MIGRATED = {
      （形参 `&x` 拿到的是"块 + 偏移"，`krnd(&lgs.krnd)` 那一格）**与联网那一族**
      （单机就是"自己发自己收"，见 `ext/polydraw/net-rt.js`）。
      `inst` 是**入口收一整块**（`(a[16])`：自己写乐器那一档，`insts/` 那五份靠它）。 */
-  evaldraw: ['basics', 'dowhile', 'tailexpr', 'tailsemi', 'readpix', 'arrview', 'blockcopy', 'netbox', 'inst'],
+  evaldraw: ['basics', 'dowhile', 'tailexpr', 'tailsemi', 'readpix', 'arrview', 'blockcopy', 'netbox', 'strtab', 'inst'],
 };
 
 /** 敲一条命令，回 `{ code, out, err }`（out 按行切好，末尾空行去掉）。 */

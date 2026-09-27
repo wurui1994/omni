@@ -28,7 +28,7 @@
 //   * 函数指针形参（`a()` / `a(,)`）与 `$a` 串形参没接。
 
 import { isList, tag, kids, leaf } from '../../src/core/lower/cst.js';
-import { cUnescape, fmtToStmts } from '../../src/core/lower/fmt.js';
+import { cUnescape, fmtToStmts, readSpec } from '../../src/core/lower/fmt.js';
 import { gfxGlobalDecls, gfxFnDecls, gfxPresentDecl } from './gfx-rt.js';
 import { POLYDRAW_GL, GL_CONSTS, glGlobalDecls, glFnDecls } from './gl-rt.js';
 import { gfx3FnDecls, gfx3GlobalDecls } from './gfx3-rt.js';
@@ -1929,6 +1929,53 @@ function exprStmtOf(e, C) {
  * 而正本那边"文字窗口"这件事是编辑器的，不在语言里。没画过别的图的脚本拿到的是
  * **空的那一份文字运行时**（`textStubDecls`），一格像素都不画。
  */
+/**
+ * 格式串里**每个实参对应的转换符**（按次序）。`%%` 不占实参；`*`（宽度/精度那一格）
+ * 各占一格实参，所以也要记上（记成 `'d'`）。
+ * 谁要它：`%s` 那几格实参**可能是一格串表下标而不是串**（见 `strOfDecl`）。
+ */
+function argConvs(fmt) {
+  const out = [];
+  for (let i = 0; i < fmt.length; i += 1) {
+    if (fmt[i] !== '%') continue;
+    if (fmt[i + 1] === '%') { i += 1; continue; }
+    const sp = readSpec(fmt, i);
+    if (sp === null) break;
+    if (sp.width === '*') out.push('d');
+    if (sp.prec === '*') out.push('d');
+    out.push(sp.conv);
+    i = sp.end;
+  }
+  return out;
+}
+
+/**
+ * **串表那一格**（`pd_strof(下标)` -> 那个串）：`internStr` 那张表反过来查。
+ *
+ * 为什么要它：这门语言的值只有 double，所以一格串字面量摆进数组之后就只剩"下标"
+ * （见 `initVals` 的头注）。`printf("%s", 那一格)` 拿到的是个数 —— 这一格把它换回串。
+ * 落成一串 `if (i == n) return "…"`（表在编译期就全了，所以这是纯查表，不是运行期格式化）。
+ */
+function strOfDecl(C) {
+  const body = [];
+  for (const [s, i] of C.strs) {
+    body.push({
+      kind: 'if',
+      cond: bin('==', nameRef('i'), num(i)),
+      then: [{ kind: 'return', values: [{ kind: 'string', value: s }] }],
+      else_: [],
+    });
+  }
+  body.push({ kind: 'return', values: [{ kind: 'string', value: '' }] });
+  return {
+    kind: 'fn',
+    name: 'pd_strof',
+    params: [{ name: 'i', type: REAL }],
+    ret: { kind: 'string' },
+    body,
+  };
+}
+
 function printfOf(e, C) {
   const args = kids(e).slice(1);
   const fmtTok = args[0];
@@ -1936,7 +1983,16 @@ function printfOf(e, C) {
     throw new Error('eval->IR: `printf` 的格式串不是字面量（运行期格式化还没接）');
   }
   const fmt = cUnescape(unquote(leaf(kids(fmtTok)[0])));
-  const vals = args.slice(1).map((a) => exprOf(a, C));
+  /* `%s` 那几格实参：拿到的可能是**串表下标**（串摆进数组之后就只剩一个数，
+     见 `initVals` 与 `strOfDecl` 的头注）—— 那就在这儿换回串。 */
+  const convs = argConvs(fmt);
+  const vals = args.slice(1).map((a, i) => {
+    const v = exprOf(a, C);
+    if (convs[i] !== 's' || v.kind === 'string') return v;
+    C.needStrOf = true;
+    C.fns.set('pd_strof', { params: [REAL], ret: { kind: 'string' } });
+    return { kind: 'call', fn: nameRef('pd_strof'), args: [v] };
+  });
   /* 末尾那个 `true` = **多给的实参丢掉不报**：这门语言的正本就是 C 的 `printf`
      （`polydraw_src` 里 `printf` 直接转给 libc），多给的那几格由 C 丢掉。语料里
      `geeky/remez8.kc:112` 写的是 `fprintf("%+.12f",coef[b][i],i)` —— 多给一格。
@@ -2217,8 +2273,21 @@ function indexChain(x) {
  *
  * 空位（`ihole`）与**末尾那个多余的逗号**是同一件事，所以末尾的空位直接丢掉。
  */
+/**
+ * 初值表里一格一格算。`{1,,3}` 那种空洞（`ihole`）落成 `null`（那一格不写）。
+ *
+ * **串字面量在这儿是一格数**（它的名字表下标，见 `internStr` / `strTabDecl`）：
+ * 这门语言的数组只装 double，而 `geeky/calend.kc:100` 的
+ * `static dayoweek[7] = {" \hSUN",…}` 装的就是七个串 —— 之后
+ * `printf("%sDAY",dayoweek[i])` 拿它当串用。正本里那个 double 是个句柄，
+ * 我们这儿是"名字表里的第几个"，**能观察到的行为一样**（脚本只把它递给 `%s`）。
+ */
 function initVals(list, C) {
-  const out = kids(list).map((e) => (tag(e) === 'ihole' ? null : exprOf(e, C)));
+  const out = kids(list).map((e) => {
+    if (tag(e) === 'ihole') return null;
+    if (tag(e) === 'str') return num(internStr(C, cUnescape(unquote(leaf(kids(e)[0])))));
+    return exprOf(e, C);
+  });
   while (out.length > 0 && out[out.length - 1] === null) out.pop();
   return out;
 }
@@ -3343,6 +3412,7 @@ export function evalToIR(cst, host, src = '') {
     needText: false,                    /* 用过画布文字没有（`text-rt.js`：`gt_*`） */
     needNoise: false,                   /* 用过 `NOISE`/`NOISE3D` 没有（`noise-rt.js`） */
     needNet: false,                     /* 用过 `net_send`/`net_recv` 没有（`net-rt.js`） */
+    needStrOf: false,                   /* 用过"串表下标 -> 串"没有（见 `strOfDecl`） */
     usedGL: false,                      /* 这份脚本用过 GL 那一族没有（每帧初态要不要发） */
     /* 用到了宿主那"每帧盖一次"的哪几格（`xres`/`yres`/`mousx`/`mousy`）——
        用到的那几格各有一格模块级量，每帧开头问设备一次盖上去。 */
@@ -3681,6 +3751,9 @@ export function evalToIR(cst, host, src = '') {
     decls.unshift(...rt(C, netGlobalDecls()));
     decls.push(...rt(C, netFnDecls()));
   }
+  /* **串表那一格**（`pd_strof`）：摆在最后 —— 那张表要等整份程序都降完才全
+     （见 `strOfDecl` 的头注）。 */
+  if (C.needStrOf) decls.push(...rt(C, [strOfDecl(C)]));
   /* `static x = 3;` 的初值：**在入口里做一次**（方言的 `(global 名 类型)` 不许带初值 ——
      `lower/lower.js` 那一段写着"要非零初值就让 adapter 在入口里摆一句 set"）。
      摆在帧循环**之前**，所以它一辈子只跑一趟 —— 那正是 static 的意思。 */

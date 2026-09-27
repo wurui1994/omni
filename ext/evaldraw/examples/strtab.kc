@@ -1,0 +1,27 @@
+// ext/evaldraw/examples/strtab.kc —— **串摆进数组里**（值只有 double，所以那一格是"串表下标"）
+//
+// `geeky/calend.kc:100` 写的是
+//
+//     static dayoweek[7] = {" \hSUN"," \hMON"," TUES","WEDNES","\hTHURS"," FRI","\hSATUR",};
+//     for(i=0;i<7;i++) { moveto(…); printf("%sDAY",dayoweek[i]); }
+//
+// 这门语言的数组只装 double，所以一格串字面量摆进去之后剩下的是个**句柄**。我们这儿那个
+// 句柄是"名字表里的第几个"（`internStr`），`printf` 的 `%s` 拿到一个数时就查一趟回来
+// （`pd_strof`，落成一串 `if (i==n) return "…"`，表在编译期就全了）。
+// 能观察到的行为与正本一样 —— 脚本只把它递给 `%s`，不在上头做算术。
+//
+// 判四样：下标取出来能当串印、混在一行里的字面量 `%s` 照旧是字面量、
+// 同一个串只占一格（`internStr` 去重）、没登记过的下标回空串。
+
+static names[3] = {"alpha", "beta", "alpha"};
+
+()
+{
+   for(i=0;i<3;i++) printf("n%g=[%s]\n", i, names[i]);
+      //字面量那一格照旧直接是串；两格 %s 混在一行里
+   printf("mix=[%s][%s]\n", "lit", names[1]);
+      //同一个串只占一格 ⇒ names[0] 与 names[2] 是同一个下标
+   printf("same=%g\n", names[0] == names[2]);
+      //越出那张表的下标：回空串（不报）
+   printf("none=[%s]\n", 999);
+}

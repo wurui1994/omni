@@ -3553,6 +3553,27 @@ pgs = gs; for(i=gs.sprn-1;i>=0;i--) pspr[i] = spr[i];
 压根没有三元 `? :`** —— `a?b:c` 报"unexpected character ?"，所以这条规则不会与谁打起来）。
 那个标号名含括号，`goto` 写不出来，所以不必登记。
 
+### 36.18 串摆进数组里 —— 那一格是"串表下标"（`calend.kc` 的七个星期名）
+
+`geeky/calend.kc:100`：
+
+    static dayoweek[7] = {" \hSUN"," \hMON"," TUES","WEDNES","\hTHURS"," FRI","\hSATUR",};
+    for(i=0;i<7;i++) { moveto(…); printf("%sDAY",dayoweek[i]); }
+
+这门语言的值只有 double，所以一格串字面量摆进数组之后剩下的是个**句柄**。落法：
+
+* 初值表里的串字面量走 `internStr`（本来就有的那张名字表）⇒ 一格**下标**；
+* `printf` 的 `%s` 那格实参**不是串**时，套一层 `pd_strof(下标)` —— 落成一串
+  `if (i == n) return "…"`（那张表在编译期就全了，所以是纯查表，**不是运行期格式化**）；
+  哪个实参对上哪个转换符由 `argConvs` 数出来（`%%` 不占实参、`*` 各占一格）。
+
+能观察到的行为与正本一样：脚本只把它递给 `%s`，不在上头做算术。
+**没做的那一格**：`geeky/rscr_strings.kc` 的格式串本身是变量（`printf(s,…)`）——
+那要一台**运行期**的格式化机器，是另一件活。
+
+判据：`ext/evaldraw/examples/strtab.kc`（`--only evaldraw` 80/80）。
+
+
 
 
 
