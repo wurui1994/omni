@@ -32,8 +32,12 @@ const CLI = join(root, 'src', 'core', 'cli.js');
 const CLANG = ['/usr/bin/clang', '/opt/homebrew/opt/llvm/bin/clang'].find((p) => existsSync(p));
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 
-/** 能编出来并且跑对的最少条数。往上走是好事（那说明又填了一格），往下走是回归。 */
-const MIN_OK = 83;
+/** 能编出来并且跑对的最少条数。往上走是好事（那说明又填了一格），往下走是回归。
+ *
+ * 90 这一格是「**一条不剩**」：`gen/` 下每一份都编得出来、跑对了（「还没到」那张单子
+ * 空了）。最后填上的两格在 `gen/92`：静态初始化式里「算式下标的地址常量」与
+ * 「带非 ASCII 字节的串」—— 文件头上那句「非 ASCII 串常量还没做」到这一刀不再成立。 */
+const MIN_OK = 90;
 
 /**
  * 这几条**问不出同一个答案**，与对错无关：

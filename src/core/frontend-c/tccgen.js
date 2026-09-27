@@ -1395,7 +1395,15 @@ export class CGen {  /**
   symConstOf(f, ref) {
     if (ref === REF_NONE) return null;
     if (isConstRef(ref)) {
-      return this.mod.consts.get(ref).kind === 'str' ? { kind: 's', no: ref, add: 0n } : null;
+      /* 串常量：全 ASCII 的在常量池里是 `str`，带非 ASCII 字节的是 `bytes`
+       * （`strConst` 按字节挑，见 `mir/ir.js` 的 `strOnce` / `bytesOnce`）——
+       * **两种都是串**，后端给它们的符号也是同一格（`omni_str_<ref>`）。
+       * 从前这儿只认 `str`，于是「静态初始化式里一条带非 ASCII 字节的串」
+       * 被判成「不是常量」。逼出这一格的是 CPython 的 latin1 单字符表：
+       * `Python/pystate.c:309` 那个巨大的 `_PyRuntimeState_INIT` 里
+       * `_Py_LATIN1_CHR` 一族写的是 `"\xc2\x80"` 这样的字面量。 */
+      const c = this.mod.consts.get(ref);
+      return c.kind === 'str' || c.kind === 'bytes' ? { kind: 's', no: ref, add: 0n } : null;
     }
     const i = f.at(ref);
     const op = f.op[i];
@@ -1426,6 +1434,22 @@ export class CGen {  /**
     if (ref === REF_NONE || isConstRef(ref)) return null;
     const i = f.at(ref);
     const op = f.op[i];
+    /* **加宽**（`asI64` 那一步：`arr[0+2]` 里下标是 int，往 i64 走一趟 `CVT`）。
+     * 少这一格的后果很难猜：`&arr[2]` 是常量，而 `&arr[0+2]` 不是 —— 字面量下标
+     * 在 `ptrArith` 那儿就折完了，算式下标却剩一条 `CVT(ADD(0,2))`，
+     * 这台反着读的机器读到 `CVT` 就回 null，于是报「initializer element is not
+     * constant」。逼出这一格的是 CPython 的 `Python/parking_lot.c:49`：
+     * 那张 257 格的表全是 `[0+2+1] = { .root = { &buckets[0+2+1].root } }`。
+     *
+     * 只收两种模式，而且都不改值：`SEXT` 是恒等（值本来就是有符号的），
+     * `ZEXT` 只在值非负时是恒等（负数零扩之后是另一个数，那时宁可说"算不出来"）。
+     * `TRUNC` 不收 —— 它真的会改值。 */
+    if (op === OP.CVT) {
+      if (f.aux[i] !== CVT_SEXT && f.aux[i] !== CVT_ZEXT) return null;
+      const v = this.kfoldOf(f, f.a[i]);
+      if (v === null || (f.aux[i] === CVT_ZEXT && v < 0n)) return null;
+      return v;
+    }
     if (op !== OP.ADD && op !== OP.SUB && op !== OP.MUL) return null;
     const a = this.kfoldOf(f, f.a[i]);
     if (a === null) return null;
@@ -2891,7 +2915,14 @@ export class CGen {  /**
          `finally` 不在自编译子集里（ADR-0011），而这一格的收尾只有一句。 */
       try {
         const v = this.decay(this.exprEq());
-        const kaddr = v.mem !== null ? this.kintOf(v.mem.addr) : null;
+        /* 地址是不是常量：先问常量池，再让 `kfoldOf` 把那一小段指令折一遍 ——
+         * `&arr[0+2]` 在线性内存这条腿上是「data 段的地址 + 算出来的偏移」，
+         * 而算式下标会剩下 `CVT(ADD(0,2))` 这么一小棵树（指针算术那一层按纪律不折叠）。
+         * native 那一侧同一件事由 `symConstOf` 管（它内部也调 `kfoldOf`）。 */
+        let kaddr = v.mem !== null ? this.kintOf(v.mem.addr) : null;
+        if (kaddr === null && v.mem !== null && !this.native) {
+          kaddr = this.kfoldOf(scratch, v.mem.addr);
+        }
         if (kaddr !== null) {
           /* 值**住在 data 段里**、而地址是常量（静态的复合字面量 `(void*){…}`、
            * 另一个全局量）：把那几个字节读回来。tcc 在这一格也是从 section 里拷
@@ -2900,6 +2931,8 @@ export class CGen {  /**
         } else {
           const ref = this.gv(this.castTo(v, ty));
           k = this.kintOf(ref);
+          /* 同上：线性内存这条腿上「地址 + 折得出来的偏移」也是一个常量。 */
+          if (k === null && !this.native) k = this.kfoldOf(scratch, ref);
           /* native（第二十八片）：算不出数的那一格里可能是「符号 + 加数」——
            * `&g`、`arr + 2`、`&s.f`、一个函数名。那不是「不是常量」，那是一条重定位。 */
           if (k === null && this.native) fix = this.symConstOf(scratch, ref);
