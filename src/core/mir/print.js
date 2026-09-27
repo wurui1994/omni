@@ -114,7 +114,10 @@ export function printMir(mod) {
   }
   for (let i = 0; i < mod.consts.items.length; i++) {
     const c = mod.consts.items[i];
-    L.push(`const ${pad(`k${i}`, 6)} ${pad(typeText(c.t), 6)} ${constText(c)}`);
+    /* 记号 `addr`：这一条其实是 data 段里的一个地址（线性内存腿，见 `Mir.addrConsts`）——
+       搬 data 段时它得跟着加同一个差，普通整数不许动。 */
+    const isAddr = mod.addrConsts !== undefined && mod.addrConsts.has(i);
+    L.push(`const ${pad(`k${i}`, 6)} ${pad(typeText(c.t), 6)} ${constText(c)}${isAddr ? ' addr' : ''}`);
   }
   for (const g of mod.globals) L.push(`global g_${g}`);
   // 线性内存（第二刀）：页数与 data 段。data 的字节印成十六进制 —— 快照要能一眼看出

@@ -821,6 +821,8 @@ export class CGen {  /**
      * @type {{off:number}[]}
      */
     this.pendingPtr = [];
+    /** 地址常量的去重表（值的十进制 -> 常量池里那一条）—— 见 `kaddr`。 @type {Map<string,number>} */
+    this.addrRefs = new Map();
     /**
      * native：初值里的**地址**（第九刀第二十八片）。`off` 是那块暂存区上的绝对偏移，
      * 八个字节宽；`kind`/`no` 是它指着的符号（`g` 全局 / `f` 函数 / `s` 串常量）。
@@ -1989,11 +1991,35 @@ export class CGen {  /**
     const pk = p.mem === null && p.slot === null ? this.kintOf(p.ref) : null;
     if (nk !== null && pk !== null) {
       const d = nk * BigInt(es);
-      return sVal(p.ty, this.mod.consts.int(
-        BigInt.asUintN(64, op === PLUS ? pk + d : pk - d)));
+      const folded = BigInt.asUintN(64, op === PLUS ? pk + d : pk - d);
+      /* 底下那一格是**地址**时，折出来的还是地址（`arr + 2` / `&arr[1]`）——
+         记号要跟着走，不然搬 data 段时这一条就漏了（见 `kaddr`）。 */
+      if (!this.native && this.mod.addrConsts.has(p.ref)) return sVal(p.ty, this.kaddr(folded));
+      return sVal(p.ty, this.mod.consts.int(folded));
     }
     if (es !== 1) k = f.emit(OP.MUL, T_I64, k, this.mod.consts.int(BigInt(es)), 0);
     return sVal(p.ty, f.emit(op === PLUS ? OP.ADD : OP.SUB, T_I64, this.gv(p), k, 0));
+  }
+
+  /**
+   * **一格"其实是 data 段里的地址"的 i64 常量**（只有线性内存腿走这儿）。
+   *
+   * 与 `consts.int` 的差别：不去重、而且记进 `mod.addrConsts`。为什么要分开 ——
+   * 这条腿上取址烤成数，与普通整数长得一样；合并两份模块要搬其中一份的 data 段，
+   * 那时**代码里这些常量得加同一个差**，而普通整数一个字节都不许动。
+   * 去重会让"恰好等于某个地址的普通整数"与地址共用一条，那时就答不清了
+   * （ADR-0047 的"第 2 道坎"，那一半的账记在 `Mir.addrConsts` 上）。
+   */
+  kaddr(v) {
+    /* 地址之间**照旧去重**（同一个地址取两次是同一条）—— 只是不与普通整数共用。
+       不去重的话同一趟里会攒出一串一模一样、没人用的常量（量出来 7 条变 10 条）。 */
+    const key = String(v);
+    const hit = this.addrRefs.get(key);
+    if (hit !== undefined) return hit;
+    const ref = this.mod.consts.addr(BigInt(v));
+    this.mod.addrConsts.add(ref);
+    this.addrRefs.set(key, ref);
+    return ref;
   }
 
   /**
@@ -2090,7 +2116,7 @@ export class CGen {  /**
       return sMem(mkArray(TY_CHAR, bytes.length + 1), this.strConst(bytes), 0);
     }
     return sMem(mkArray(TY_CHAR, bytes.length + 1),
-      this.mod.consts.int(BigInt(this.strData(bytes))), 0);
+      this.kaddr(this.strData(bytes)), 0);
   }
 
   /** 宽字符串字面量的那一块 data：一格四字节小端，末尾补一个 0。 */
@@ -2127,7 +2153,7 @@ export class CGen {  /**
       return sMem(mkArray(wcharType(), vals.length + 1), this.wstrConst(vals), 0);
     }
     return sMem(mkArray(wcharType(), vals.length + 1),
-      this.mod.consts.int(BigInt(this.wstrData(vals))), 0);
+      this.kaddr(this.wstrData(vals)), 0);
   }
 
   /** native：一个宽串字面量在 MIR 常量池里的那一条（第三十三片）。一律 `bytes`。 */
@@ -2321,7 +2347,7 @@ export class CGen {  /**
      * 每次用都发一条：这一层的两个后端把每个值都落在栈位上，多一条 `adrp`/`lea`
      * 不改语义，而「把它缓存起来」要先有支配关系的账本，那是窥孔那一片的事。 */
     if (this.native) return sMem(e.ty, this.gaddr(e), 0);
-    return sMem(e.ty, this.mod.consts.int(BigInt(e.addr)), 0);
+    return sMem(e.ty, this.kaddr(e.addr), 0);
   }
 
   /** native：一个全局量的地址（`GADDR`）。MIR 的全局号第一次用到才登记。 */
@@ -2778,7 +2804,11 @@ export class CGen {  /**
       const freshPtr = this.pendingPtr.filter((x) => x.off >= lo && x.off + 8 <= lo + size);
       for (let k = 1; k < nb; k++) {
         for (const d of fresh) {
-          this.pendingData.push({ off: d.off + k * size, bytes: d.bytes });
+          /* **字节要抄一份**，不许与原件共用同一个数组：这几段各自带一条"这儿是地址"的
+             记录，而搬 data 段的人是**就地改字节**的 —— 共用一个数组就会被改两遍
+             （`char *g[4] = {[0 ... 1] = "BB"}` 搬完之后第二格指到界外，
+             2026-09-27 由 `tests/mir/reloc.js` 判出来的）。 */
+          this.pendingData.push({ off: d.off + k * size, bytes: d.bytes.slice() });
         }
         for (const x of freshFix) {
           this.pendingFix.push({
@@ -3218,7 +3248,7 @@ export class CGen {  /**
       else if (wstrVals !== null) this.initWString(dest, 0, vty, wstrVals);
       else if (body !== null) this.replayBraced(body, () => this.initializer(dest, 0, vty));
       else this.initializer(dest, 0, vty);
-      return sMem(vty, this.mod.consts.int(BigInt(e.addr)), 0);
+      return sMem(vty, this.kaddr(e.addr), 0);
     }
     const off = this.frameAlloc(vty);
     const dest = { stat: false, addr: this.fpRef };
