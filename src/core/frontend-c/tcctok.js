@@ -142,6 +142,10 @@ const KEYWORD_NAMES = [
   '__attribute', '__attribute__',
   '__alignof', '__alignof__', '_Alignof', '_Alignas',
   'typeof', '__typeof', '__typeof__', '__label__',
+  /* GNU 的 `__real__` / `__imag__`（第一百五十二片）：取复数的实部/虚部，**可以当左值**
+     （R 的 `Rcomplex.h` 里 `__real__ ans = x->r;` 就是这么写的）。放在关键字表末尾 ——
+     后面那几段（PP 名、builtin、attribute 名）的号都是算出来的，跟着挪不影响。 */
+  '__real__', '__imag__',
 ];
 
 /** 关键字到此为止 —— 这就是 `TOK_UIDENT`（`tcc.h:1205`）那条线。 */
@@ -302,6 +306,9 @@ export const TOK_BOOL = fixed('_Bool');
 /* C99 的 `_Complex`（ADR-0047）：R 的运行时几乎每份 `.c` 都经过 `R_ext/Complex.h`，
    那儿一条 `double _Complex private_data_c;` 从前把 107 份挡在门外。 */
 export const TOK_COMPLEX = fixed('_Complex');
+/** GNU 的取实部/取虚部（可以当左值）。 */
+export const TOK_REALPART = fixed('__real__');
+export const TOK_IMAGPART = fixed('__imag__');
 
 export const TOK_FLOAT = fixed('float');
 export const TOK_DOUBLE = fixed('double');

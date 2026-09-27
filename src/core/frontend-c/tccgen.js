@@ -153,7 +153,7 @@ import {
   TOK_EQ, TOK_NE, TOK_LT, TOK_GE, TOK_LE, TOK_GT, TOK_ULE, TOK_UGT,
   TOK_IF, TOK_ELSE, TOK_WHILE, TOK_FOR, TOK_DO, TOK_BREAK, TOK_CONTINUE, TOK_RETURN,
   TOK_SWITCH, TOK_CASE, TOK_DEFAULT, TOK_GOTO, TOK_SIZEOF, TOK_DOTS, TOK_STATIC_ASSERT,
-  TOK_INT, TOK_VOID, TOK_BOOL, TOK_COMPLEX, TOK_SIGNED, TOK_UNSIGNED, TOK_CHAR, TOK_SHORT, TOK_LONG,
+  TOK_INT, TOK_VOID, TOK_BOOL, TOK_COMPLEX, TOK_REALPART, TOK_IMAGPART, TOK_SIGNED, TOK_UNSIGNED, TOK_CHAR, TOK_SHORT, TOK_LONG,
   TOK_FLOAT, TOK_DOUBLE, TOK_STRUCT, TOK_UNION, TOK_ENUM, TOK_TYPEDEF,
   TOK_EXTERN, TOK_STATIC, TOK_CONST, TOK_REGISTER, TOK_AUTO, TOK_VOLATILE, TOK_INLINE,
   TOK_CONST1, TOK_CONST2, TOK_VOLATILE1, TOK_VOLATILE2, TOK_SIGNED1, TOK_SIGNED2,
@@ -1650,6 +1650,20 @@ export class CGen {  /**
      * （tcctest.c:1560，第四十二片）是一个：返回类型是 `char[]`，`return 0` 于是是
      * 「0 转成 char*」。 */
     if (isArray(ty.t)) return this.castTo(v, mkPointer(ty.ref));
+    /* 复数那两条转换（C11 6.3.1.6 / 6.3.1.7，第一百五十二片）：
+     *   - 转成复数：实数进实部、虚部补 0；复数之间按分量各转一次；
+     *   - 复数转成实数：**丢掉虚部**（`(double)z` 就是 `creal(z)`）。
+     * 放在这儿（数组之后、别的一切之前）：底下那几支都假定值装得进一个 ref。 */
+    if (this.isCplxTy(ty)) {
+      const ety = ctype(ty.ref.cplx);
+      const ps = this.cplxParts(v);
+      const re = this.gv(this.castTo(ps.re, ety));
+      const im = ps.im === null
+        ? this.gv(this.castTo(sVal(TY_INT, this.mod.consts.i32(0)), ety))
+        : this.gv(this.castTo(ps.im, ety));
+      return this.cplxMake(ty, ety, re, im);
+    }
+    if (this.isCplxTy(v.ty)) return this.castTo(this.cplxParts(v).re, ty);
     const tb = btype(ty.t);
     if (tb === VT_VOID) return sVal(TY_VOID, REF_NONE);
     // 转成 `_Bool`：C 规定「非零就是 1」，不是「截低位」。`(_Bool)256` 是 1，不是 0。
@@ -1813,6 +1827,12 @@ export class CGen {  /**
    * 所以全 `char` 的 struct 也照样八字节一步走。
    */
   structCopy(target, v) {
+    /* 复数是算术类型（只是**落成**一个两格的 struct）：赋一个实数或另一种宽度的复数
+       进来要按 C11 6.5.16.1 转一次，不是"类型不一样就报错"。
+       R 的 `complex.c:138` 就是 `Z = R_pow(0.0, yr);`（double 赋给 double complex）。 */
+    if (this.isCplxTy(target.ty) && !sameTypeUnqual(target.ty, v.ty)) {
+      return this.structCopy(target, this.castTo(v, target.ty));
+    }
     if (!sameTypeUnqual(target.ty, v.ty)) {
       this.err(`cannot assign '${cTypeText(v.ty)}' to '${cTypeText(target.ty)}'`);
     }
@@ -1921,6 +1941,9 @@ export class CGen {  /**
     const a = this.decay(a0);
     const b = this.decay(b0);
     if (isPtr(a.ty.t) || isPtr(b.ty.t)) return this.genPtrOp(op, a, b);
+    /* 复数（第一百五十二片，ADR-0047）：在指针之后、整型提升之前 —— 它是一个
+       两格浮点的聚合，`usualArith` 那一套对它没有意义。 */
+    if (this.isCplxTy(a.ty) || this.isCplxTy(b.ty)) return this.genCplxOp(op, a, b);
     /* 浮点上没有的那几个运算符（C11 6.5.5 第 2 段要求 `%` 的两侧是整型，
      * 6.5.7 / 6.5.10-12 要求移位与位运算的两侧是整型）。在这儿拦而不是让
      * `usualArith` 出来的浮点类型撞上 `OP.MOD`：撞上去是 verifier 的内部错，
@@ -1957,6 +1980,114 @@ export class CGen {  /**
   asI64(v) {
     if (isPtr(v.ty.t)) return this.gv(v);
     return this.gv(this.castTo(v, TY_LLONG));
+  }
+
+  /* ---------------------------------------------------- 复数（第一百五十二片） */
+
+  /** 这是那个"两格浮点"的复数类型吗（`complexType` 造的，`ref.cplx` 是分量的基本类型）。 */
+  isCplxTy(ty) {
+    return isStruct(ty.t) && ty.ref !== null && ty.ref !== undefined && ty.ref.cplx !== undefined;
+  }
+
+  /** 帧上一块复数的临时 —— 与 struct 返回值那一块（`ARGSRET`）同一条路数。 */
+  cplxTemp(cty) {
+    return sMem(cty, this.fpRef, this.frameAlloc(cty, 0, 0));
+  }
+
+  /** 一块复数左值的两个分量（实数操作数：虚部是 null，调用方补 0）。 */
+  cplxParts(v) {
+    if (!this.isCplxTy(v.ty)) return { re: v, im: null };
+    if (v.mem === null) this.err('internal: 复数不在内存上');
+    const fs = v.ty.ref.fields;
+    return {
+      re: sMem(fs[0].ty, v.mem.addr, v.mem.off + fs[0].off),
+      im: sMem(fs[1].ty, v.mem.addr, v.mem.off + fs[1].off),
+    };
+  }
+
+  /** 结果的复数类型：两边谁宽算谁的（`float _Complex * double` 是 `double _Complex`）。 */
+  cplxResTy(a, b) {
+    const rank = (bt) => (bt === VT_LDOUBLE ? 3 : bt === VT_DOUBLE ? 2 : bt === VT_FLOAT ? 1 : 0);
+    const wid = (v) => (this.isCplxTy(v.ty) ? v.ty.ref.cplx : btype(v.ty.t));
+    const wa = wid(a);
+    const wb = wid(b);
+    const bt = rank(wa) >= rank(wb) ? wa : wb;
+    return this.complexType(rank(bt) === 0 ? VT_DOUBLE : bt);
+  }
+
+  /** 把两个分量写进一块新临时里，回那块临时（复数表达式的值就是这样一块地方）。 */
+  cplxMake(cty, ety, reRef, imRef) {
+    const t = this.cplxTemp(cty);
+    const fs = cty.ref.fields;
+    this.vstore(sMem(fs[0].ty, t.mem.addr, t.mem.off + fs[0].off), sVal(ety, reRef));
+    this.vstore(sMem(fs[1].ty, t.mem.addr, t.mem.off + fs[1].off), sVal(ety, imRef));
+    return t;
+  }
+
+  /**
+   * 发一条对 `__muldc3` / `__divdc3` 的调用（实参是四个 double，回一个复数）。
+   *
+   * **为什么不在这儿手写朴素公式**：C99 的复数乘除在 Inf/NaN 上有一套收法
+   * （compiler-rt 的 Smith 算法 + Inf 回收），clang 就是发这两个函数。朴素式在
+   * `(Inf+0i)*(2+0i)` 那种地方给 NaN —— 那是**静默答错**。两个函数的身子在
+   * `ext/r/rt/omni_complex.c` 里（我们自己用 C 写的，判据在 `tests/r/rtc.js`）。
+   * 没把那份 `.c` 一起编进去的话，这儿就是一条 `undefined symbol` —— 响的。
+   */
+  cplxCall(name, args, cty) {
+    const info = this.funcSym(name);
+    if (info.params === null) {
+      info.params = args.map((_, i) => ({ name: `$a${i}`, ty: TY_DOUBLE }));
+      info.ret = cty;
+      info.declared = true;
+    }
+    info.used = true;
+    /* struct 的返回：调用方先划一块，地址当**第一个**实参（第十一片的 ABI）。 */
+    const sret = this.cplxTemp(cty);
+    const refs = [this.addrOf(sret), ...args];
+    const r = this.f.emit(OP.CALL, mirTypeOf(cty), info.no, this.f.pushArgs(refs), 0);
+    return sMem(cty, r, 0);
+  }
+
+  /**
+   * 复数的二元运算（C11 6.3.1.8 的"通常算术转换"在复数上那一半 + 6.5.5/6.5.9）。
+   *   - `+` / `-`：逐分量，**精确**，没有边角；
+   *   - `*` / `/`：交给 `__muldc3` / `__divdc3`（见 `cplxCall` 头上那段）；
+   *   - `==` / `!=`：两个分量都相等才算相等（C11 6.5.9 第 3 段）；
+   *   - 别的（`%`、位运算、大小比较）在复数上无意义，报出来。
+   */
+  genCplxOp(op, a, b) {
+    const f = this.f;
+    const cty = this.cplxResTy(a, b);
+    const ety = ctype(cty.ref.cplx);
+    const mt = mirTypeOf(ety);
+    const pa = this.cplxParts(a);
+    const pb = this.cplxParts(b);
+    const zero = () => this.gv(this.castTo(sVal(TY_INT, this.mod.consts.i32(0)), ety));
+    const comp = (x) => (x === null ? zero() : this.gv(this.castTo(x, ety)));
+    const ar = comp(pa.re);
+    const ai = comp(pa.im);
+    const br = comp(pb.re);
+    const bi = comp(pb.im);
+    if (op === PLUS || op === MINUS) {
+      const mop = binOpOf(op, false);
+      return this.cplxMake(cty, ety, f.emit(mop, mt, ar, br, 0), f.emit(mop, mt, ai, bi, 0));
+    }
+    if (op === STAR || op === SLASH) {
+      if (cty.ref.cplx !== VT_DOUBLE) {
+        this.todo('float / long double 的复数乘除还没到（只有 double 那一格有 __muldc3/__divdc3）');
+      }
+      return this.cplxCall(op === STAR ? '__muldc3' : '__divdc3', [ar, ai, br, bi], cty);
+    }
+    if (op === TOK_EQ || op === TOK_NE) {
+      const e1 = this.gv(this.castTo(sCmp(f.emit(cmpOpOf(TOK_EQ, false), mt, ar, br, 0)), TY_INT));
+      const e2 = this.gv(this.castTo(sCmp(f.emit(cmpOpOf(TOK_EQ, false), mt, ai, bi, 0)), TY_INT));
+      const both = f.emit(OP.BAND, T_I32, e1, e2, 0);
+      /* `==` 是"两格都相等"、`!=` 是它的反面 —— 与 0 比一次就得到那两个答案。 */
+      return sCmp(f.emit(cmpOpOf(op === TOK_EQ ? TOK_NE : TOK_EQ, false), T_I32,
+        both, this.mod.consts.i32(0), 0));
+    }
+    this.err(`invalid operands to binary '${this.cpp.tokStr(op, null)}' (complex)`);
+    return a;
   }
 
   /**
@@ -2458,7 +2589,11 @@ export class CGen {  /**
      * 拷贝要么是一条重定位、要么得把刚写进 data 的字节再读出来，两样都比这一行贵。
      *
      * `(` 后面不是类型名就把它放回去 —— 那是 `struct S x = (b);` 那一种。 */
-    if (this.tok === LPAR && (isArray(ty.t) || isStruct(ty.t))) {
+    /* 复数不走这一支（第一百五十二片）：`_Complex double z = (double _Complex)3.25;`
+       里那个括号是**类型转换**，不是复合字面量 —— 复数在语言里是算术类型，
+       它只是在我们这儿**落成**一个两格的 struct。 */
+    if (this.tok === LPAR && (isArray(ty.t) || isStruct(ty.t)) && !this.isCplxTy(ty)) {
+
       this.next();
       /* `(__extension__({ … }))` 不是复合字面量。`__extension__` 在我们这儿是个
        * **类型起始记号**（`isTypeStart` —— 声明说明符里真有它：`__extension__ typedef …`），
@@ -3359,9 +3494,21 @@ export class CGen {  /**
          * `f` 后缀已经 fround 过），所以这里只是挑类型再进常量池。
          * `1.5L` 的类型是 `long double` —— 在这个目标上它与 double 同一个表示，
          * 但类型要留着（`sizeof`、`_Generic` 那些看的是类型不是表示）。 */
+        /* 虚数字面量的值是 `{im: …}`（`parseNumber` 包的，见那儿的注）。 */
+        const imv = cv !== null && typeof cv === 'object' ? cv.im : null;
         this.next();
         const fty = t === TOK_CFLOAT ? TY_FLOAT : t === TOK_CDOUBLE ? TY_DOUBLE : TY_LDOUBLE;
-        return this.postfix(sVal(fty, this.fkonst(fty, /** @type {number} */ (cv))));
+        const k = sVal(fty, this.fkonst(fty, /** @type {number} */ (imv === null ? cv : imv)));
+        /* 虚数字面量（`1.0i` / `1.0iF`，第一百五十二片）：值进**虚部**，实部是 0。
+           复数只有这一层认识，所以在这儿就造成一块复数临时。 */
+        if (imv !== null) {
+          const cty = this.complexType(btype(fty.t) === VT_FLOAT ? VT_FLOAT
+            : btype(fty.t) === VT_LDOUBLE ? VT_LDOUBLE : VT_DOUBLE);
+          const ety = ctype(cty.ref.cplx);
+          const zero = this.gv(this.castTo(sVal(TY_INT, this.mod.consts.i32(0)), ety));
+          return this.postfix(this.cplxMake(cty, ety, zero, this.gv(this.castTo(k, ety))));
+        }
+        return this.postfix(k);
       }
       if (t === TOK_LSTR) return this.postfix(this.wstrLit(this.readWStrTok(cv)));
       if (t === TOK_STR) return this.postfix(this.strLit(this.readStrTok(cv)));
@@ -3421,8 +3568,32 @@ export class CGen {  /**
     }
     if (t === MINUS) {
       this.next();
-      const v = this.promote(this.unary());
+      const u = this.unary();
+      /* 复数取负：两个分量各取负（第一百五十二片）。`promote` 对聚合没有意义，
+         所以在它之前分岔。 */
+      if (this.isCplxTy(u.ty)) {
+        const ety = ctype(u.ty.ref.cplx);
+        const ps = this.cplxParts(u);
+        const mt = mirTypeOf(ety);
+        return this.cplxMake(u.ty, ety,
+          this.f.emit(OP.NEG, mt, this.gv(ps.re), REF_NONE, 0),
+          this.f.emit(OP.NEG, mt, this.gv(ps.im), REF_NONE, 0));
+      }
+      const v = this.promote(u);
       return sVal(v.ty, this.f.emit(OP.NEG, mirTypeOf(v.ty), this.gv(v), REF_NONE, 0));
+    }
+    /* GNU 的 `__real__` / `__imag__`（第一百五十二片）：回的是那个分量的**左值**
+       —— `__real__ z = 1.5;` 要能赋值（R 的 `Rcomplex.h` 靠它造复数）。 */
+    if (t === TOK_REALPART || t === TOK_IMAGPART) {
+      this.next();
+      const u = this.unary();
+      if (!this.isCplxTy(u.ty)) {
+        /* 实数上 gcc 也收：`__real__ x` 就是 x、`__imag__ x` 是 0。 */
+        if (t === TOK_REALPART) return u;
+        return sVal(u.ty, this.gv(this.castTo(sVal(TY_INT, this.mod.consts.i32(0)), u.ty)));
+      }
+      const ps = this.cplxParts(u);
+      return t === TOK_REALPART ? ps.re : ps.im;
     }
     if (t === TILDE) {
       this.next();
@@ -6726,7 +6897,7 @@ export class CGen {  /**
        两处各建一份的话同一种复数在两个块里会成为两个类型。 */
     let info = this.cplxTags.get(name);
     if (info === undefined) {
-      info = { kind: 'struct', name, anon: false, fields: null, size: 0, align: 1 };
+      info = { kind: 'struct', name, anon: false, fields: null, size: 0, align: 1, cplx: bt };
       this.cplxTags.set(name, info);
       const ety = ctype(bt);
       this.structLayout(info, false, [
@@ -7277,6 +7448,11 @@ export class CGen {  /**
       return v;
     }
     if (t === TOK_CFLOAT || t === TOK_CDOUBLE || t === TOK_CLDOUBLE) {
+      /* 虚数字面量的值是 `{im: …}`（见 `parseNumber`）。常量表达式里还没到 ——
+         报出来，别 `Number({…})` 得一个 NaN 悄悄当成 0（那是静默答错）。 */
+      if (this.tokc !== null && typeof this.tokc === 'object') {
+        this.err('虚数字面量还不能出现在常量表达式里');
+      }
       const v = Number(this.tokc);
       this.next();
       return v;
@@ -7326,6 +7502,19 @@ export class CGen {  /**
     // 一元 `+` / `-` 在 BigInt 与 number 上是同一个写法，所以这两格不分岔
     if (t === PLUS) { this.next(); return this.ceUnary(); }
     if (t === MINUS) { this.next(); return -this.ceUnary(); }
+    /* GNU 的 `__real__` / `__imag__`（第一百五十二片）：回的是那个分量的**左值**
+       —— `__real__ z = 1.5;` 要能赋值（R 的 `Rcomplex.h` 靠它造复数）。 */
+    if (t === TOK_REALPART || t === TOK_IMAGPART) {
+      this.next();
+      const u = this.unary();
+      if (!this.isCplxTy(u.ty)) {
+        /* 实数上 gcc 也收：`__real__ x` 就是 x、`__imag__ x` 是 0。 */
+        if (t === TOK_REALPART) return u;
+        return sVal(u.ty, this.gv(this.castTo(sVal(TY_INT, this.mod.consts.i32(0)), u.ty)));
+      }
+      const ps = this.cplxParts(u);
+      return t === TOK_REALPART ? ps.re : ps.im;
+    }
     if (t === TILDE) {
       this.next();
       const v = this.ceUnary();

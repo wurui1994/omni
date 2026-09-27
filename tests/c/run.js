@@ -890,7 +890,11 @@ for (const f of pick('diag')) {
     writeFileSync(pa, c.a);
     writeFileSync(pb, c.b);
     const out = join(ldir, c.name);
-    const g = cliRun(['c', 'tcc', '-o', out, pa, pb]);
+    /* **这一步不过缓存**：缓存只记 stdout 与退出码，而这儿要的是它的**副作用**
+       （落在 `workDir` 里的那个可执行文件），而 `workDir` 每趟进来先清空 ——
+       走缓存的话第二趟就是"命中 0 退出码、文件却不在"，症状是 `spawnSync` 回 null。 */
+    const gr = spawnSync(process.execPath, [CLI, 'c', 'tcc', '-o', out, pa, pb], { encoding: 'utf8' });
+    const g = { code: gr.status, out: gr.stdout ?? '', err: gr.stderr ?? '' };
     if (g.code !== 0) {
       bad(name, `    我们自己那台驱动没链成：${(g.err ?? '').split('\n').slice(-2).join(' ')}`);
       continue;

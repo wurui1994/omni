@@ -70,7 +70,7 @@ const verbose = process.argv.includes('-v');
  *   * `extern T x[];` 那一对（长度后补 / 占位地址）**108/111**。
  * 剩下 3 份要的是复数算术（`complex.c` / `array.c`）与计算跳转（`eval.c`）。
  */
-const FLOOR = 108;
+const FLOOR = 110;
 
 
 let pass = 0;

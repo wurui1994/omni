@@ -2793,14 +2793,24 @@ export function parseNumber(text) {
     ? /^[.]|^[pP]/.test(rest) || (body === '' && /^[.]/.test(s))
     : /^[.]|^[eE]/.test(rest) || (base === 8 && /[89]/.test(body));
   if (isFloat || (base === 10 && /^[.]/.test(text))) {
-    if (!/^([0-9]*[.]?[0-9]*([eE][-+]?[0-9]+)?|0[xX][0-9a-fA-F]*[.]?[0-9a-fA-F]*([pP][-+]?[0-9]+)?)[fFlL]*$/.test(text)) {
+    /* 虚数后缀（`1.0i` / `1.0iF` / `1.0fi`，GNU 的扩展，C11 附录 G 也这么写）：
+       先摘掉那个 `i`，剩下的照普通浮点解，回的时候带一格 `imag` ——
+       R 的 `complex.c` 里 `1.0iF` 是真有的一处（从前报 `invalid number`）。 */
+    let t2 = text;
+    let imag = false;
+    const im = /[iIjJ]/.exec(t2);
+    if (im !== null) {
+      imag = true;
+      t2 = t2.slice(0, im.index) + t2.slice(im.index + 1);
+    }
+    if (!/^([0-9]*[.]?[0-9]*([eE][-+]?[0-9]+)?|0[xX][0-9a-fA-F]*[.]?[0-9a-fA-F]*([pP][-+]?[0-9]+)?)[fFlL]*$/.test(t2)) {
       return null;
     }
     /* 后缀（C11 6.4.4.2）：`f` 是 float、`l` 是 long double、没有就是 double。
      * 只许一个 —— `1.0fl` 不合法。 */
-    const sfx = /[fFlL]*$/.exec(text)[0];
+    const sfx = /[fFlL]*$/.exec(t2)[0];
     if (sfx.length > 1) return null;
-    const num = text.slice(0, text.length - sfx.length);
+    const num = t2.slice(0, t2.length - sfx.length);
     const val = base === 16 ? hexFloatValue(num) : Number(num);
     if (val === null || Number.isNaN(val)) return null;
     const c = sfx.toLowerCase();
@@ -2809,7 +2819,10 @@ export function parseNumber(text) {
       /* f32 的字面量要**先舍到单精度**：`0.1f` 在 C 里是那个单精度数，
        * 而 `Number('0.1')` 是双精度的 0.1，两者不等。少这一次 fround，
        * `float x = 0.1f; x == 0.1f` 在解释器里会判假。 */
-      val: c === 'f' ? Math.fround(val) : val,
+      /* 虚数字面量的值包成 `{im: …}`：记号号仍然是那个浮点记号，于是**记号流**
+         （函数体那两遍要把记号收起来再放一遍）原样带得走它 —— 挂在 Cpp 上的一位
+         标记过不了那一关（量出来的：`1.0i` 在第二遍里成了普通 double）。 */
+      val: imag ? { im: c === 'f' ? Math.fround(val) : val } : (c === 'f' ? Math.fround(val) : val),
     };
   }
   if (body === '') return null;
