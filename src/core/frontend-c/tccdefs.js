@@ -321,6 +321,85 @@ export const COMPILE_DEFS = [
   ['__atomic_signal_fence(m)', '((void)0)'],
   ['__atomic_is_lock_free(sz,p)', '1'],
   ['__atomic_always_lock_free(sz,p)', '1'],
+
+  /* ---- 位计数那一族（`ffs` / `clz` / `ctz` / `clrsb` / `popcount` / `parity`）------
+   *
+   * tcc 把这十八个（六族 × int/long/long long）写成 **libtcc1 里的真函数**
+   * （`lib/builtin.c`，用 de Bruijn 查表），在 `tccdefs.h` 里只给原型。
+   * 我们落成**宏**，理由有两条：
+   *   一、不欠链接的债 —— 宏展开出来是纯 C，四条腿（解释器 / JS / native / 产物）
+   *       一处都不用加运行时符号；查表那一版还要一份静态数组，宏里放不下。
+   *   二、这一层本来就有"内建落成宏"的体例（上面 `__atomic_*` 一族），
+   *       而"实参只求值一次"靠的是同一手：语句表达式 `({ … })`。
+   *
+   * 算法是无表的 SWAR：`popcount` 那四行是 tcc 的 `POPCOUNTI`/`POPCOUNTL` 原样，
+   * 别的都从它导出 —— `ctz` = `popcount((x & -x) - 1)`、`clz` = 位宽 - `popcount(填满)`、
+   * `ffs` = `x ? ctz + 1 : 0`、`clrsb` = `clz(x<0 ? ~x : x) - 1`、`parity` = `popcount & 1`。
+   *
+   * `long` 那一族**不另写**：低位那几个（ctz/ffs/popcount/parity）与宽度无关，直接借
+   * 64 位那一份；`clz` 只差一个常数，靠已经预定义好的 `__SIZEOF_LONG__` 调 ——
+   * 于是 win32（long 是 4 字节）上也对，不必按 OS 分表。
+   *
+   * 与 tcc 的一处差别记在这儿：**x 为 0 时 `clz` / `ctz` 是未定义的**（C 与 GCC 都这么
+   * 说）。tcc 的查表实现给 `clz(0) = 31/63`、`ctz(0) = 0`；我们给 `clz(0) = 32/64`、
+   * `ctz(0) = 32/64`。`ffs(0) = 0` 与 `clrsb(0) = 31/63` 两边一样（那两个有定义）。
+   * 判据里因此不考 0 的 clz/ctz。
+   *
+   * 逼出这一族的是 CPython：`Objects/dictobject.c:8609`（`__builtin_clzl`）、
+   * `Objects/unicodeobject.c:15436`（`__builtin_ctzll`）、`Python/hamt.c:2897` 与
+   * `Objects/longobject.c:7008`（`__builtin_popcount`）—— 从前它们只是"隐式声明"的
+   * 警告，而那意味着**链接的时候才炸**。 */
+  ['__builtin_popcount(x)',
+    '(__extension__ ({ unsigned int __bc = (unsigned int)(x);'
+    + ' __bc = __bc - ((__bc >> 1) & 0x55555555u);'
+    + ' __bc = (__bc & 0x33333333u) + ((__bc >> 2) & 0x33333333u);'
+    + ' __bc = (__bc + (__bc >> 4)) & 0x0f0f0f0fu;'
+    + ' (int)(((__bc * 0x01010101u) >> 24) & 0x3f); }))'],
+  ['__builtin_popcountll(x)',
+    '(__extension__ ({ unsigned long long __bcl = (unsigned long long)(x);'
+    + ' __bcl = __bcl - ((__bcl >> 1) & 0x5555555555555555ull);'
+    + ' __bcl = (__bcl & 0x3333333333333333ull) + ((__bcl >> 2) & 0x3333333333333333ull);'
+    + ' __bcl = (__bcl + (__bcl >> 4)) & 0x0f0f0f0f0f0f0f0full;'
+    + ' (int)(((__bcl * 0x0101010101010101ull) >> 56) & 0x7f); }))'],
+  ['__builtin_popcountl(x)', '__builtin_popcountll((unsigned long long)(x))'],
+  ['__builtin_parity(x)', '(__builtin_popcount(x) & 1)'],
+  ['__builtin_parityll(x)', '(__builtin_popcountll(x) & 1)'],
+  ['__builtin_parityl(x)', '(__builtin_popcountll((unsigned long long)(x)) & 1)'],
+  ['__builtin_ctz(x)',
+    '(__extension__ ({ unsigned int __bt = (unsigned int)(x);'
+    + ' __builtin_popcount((__bt & (0u - __bt)) - 1u); }))'],
+  ['__builtin_ctzll(x)',
+    '(__extension__ ({ unsigned long long __btl = (unsigned long long)(x);'
+    + ' __builtin_popcountll((__btl & (0ull - __btl)) - 1ull); }))'],
+  ['__builtin_ctzl(x)', '__builtin_ctzll((unsigned long long)(x))'],
+  ['__builtin_clz(x)',
+    '(__extension__ ({ unsigned int __bz = (unsigned int)(x);'
+    + ' __bz |= __bz >> 1; __bz |= __bz >> 2; __bz |= __bz >> 4;'
+    + ' __bz |= __bz >> 8; __bz |= __bz >> 16;'
+    + ' (int)(32 - __builtin_popcount(__bz)); }))'],
+  ['__builtin_clzll(x)',
+    '(__extension__ ({ unsigned long long __bzl = (unsigned long long)(x);'
+    + ' __bzl |= __bzl >> 1; __bzl |= __bzl >> 2; __bzl |= __bzl >> 4;'
+    + ' __bzl |= __bzl >> 8; __bzl |= __bzl >> 16; __bzl |= __bzl >> 32;'
+    + ' (int)(64 - __builtin_popcountll(__bzl)); }))'],
+  ['__builtin_clzl(x)',
+    '(__builtin_clzll((unsigned long long)(x)) - (64 - __SIZEOF_LONG__ * 8))'],
+  ['__builtin_ffs(x)',
+    '(__extension__ ({ unsigned int __bf = (unsigned int)(x);'
+    + ' __bf == 0u ? 0 : (int)(__builtin_ctz(__bf) + 1); }))'],
+  ['__builtin_ffsll(x)',
+    '(__extension__ ({ unsigned long long __bfl = (unsigned long long)(x);'
+    + ' __bfl == 0ull ? 0 : (int)(__builtin_ctzll(__bfl) + 1); }))'],
+  ['__builtin_ffsl(x)', '__builtin_ffsll((unsigned long long)(x))'],
+  ['__builtin_clrsb(x)',
+    '(__extension__ ({ int __bs = (int)(x);'
+    + ' (int)(__builtin_clz((unsigned int)(__bs < 0 ? ~__bs : __bs)) - 1); }))'],
+  ['__builtin_clrsbll(x)',
+    '(__extension__ ({ long long __bsl = (long long)(x);'
+    + ' (int)(__builtin_clzll((unsigned long long)(__bsl < 0 ? ~__bsl : __bsl)) - 1); }))'],
+  ['__builtin_clrsbl(x)',
+    '(__extension__ ({ long __bsw = (long)(x);'
+    + ' (int)(__builtin_clzl((unsigned long)(__bsw < 0 ? ~__bsw : __bsw)) - 1); }))'],
 ];
 
 /**
