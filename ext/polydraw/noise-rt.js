@@ -31,6 +31,8 @@ export const NOISE_FNS = new Map([
   ['noise/2', 'pd_noise2'],
   ['noise/3', 'pd_noise3'],
   ['noise3d/3', 'pd_noise3'],
+  /* `snd(采样号)`：默认那条正弦（见 `pd_snd1` 的头注）。 */
+  ['snd/1', 'pd_snd1'],
 ]);
 
 export function noiseGlobalDecls() {
@@ -182,6 +184,22 @@ export function noiseFnDecls() {
       letR('h0', lerp(nm('g0'), nm('g1'), nm('t1'))),
       letR('h1', lerp(nm('g2'), nm('g3'), nm('t1'))),
       ret(lerp(nm('h0'), nm('h1'), nm('t2'))),
+    ]),
+    /**
+     * **`snd(采样号)`**（`evaldraw.txt:1326`）：「User-selectable 1D read-only array.
+     * By default, this is a sine wave function.」—— 宿主可以用 File..Select WAV 换成
+     * 一份 WAV 的采样，没换过就是一条正弦。
+     *
+     * **明写偏差：周期是我们定的**。说明书只说"默认是一条正弦"，没给周期，
+     * evaldraw 也没有源码 ⇒ 这儿取 **256 个采样一圈**（`sin(i·2π/256)`）。
+     * 语料里用它的是 `insts/frqshift.kc`（一份乐器：`snd(b)*(1-a) + snd(b+i)*a`，
+     * 在采样之间插值）—— 出的是**声音**不是图，而这条腿上压根没有音频设备，
+     * 所以"周期取多少"影响不到任何判得出来的东西；真接音频那天要先把它量出来。
+     *
+     * 放在这一摊（noise 那份"纯算术的宿主函数"）而不是设备层：它一个像素都不画。
+     */
+    fn('pd_snd1', ['i'], [
+      ret(rm('sin', [bin('*', nm('i'), num((Math.PI * 2) / 256))])),
     ]),
   ];
 }
