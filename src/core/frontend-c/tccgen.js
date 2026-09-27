@@ -2636,6 +2636,23 @@ export class CGen {  /**
       }
       // 长度补上了才划地方（试探性那一条当时没划）
       if (hit.addr < 0 && !(isArray(m.t) && m.count < 0)) this.allocGlobal(hit);
+      /* **类型是后来才完整的**那一格：`PyAPI_DATA(PyTypeObject) PyType_Type;` 在
+       * `Include/object.h` 里，那时 `struct _typeobject` 还没定义 —— 当初只留了一格
+       * （见 `allocGlobal`）。等这个名字真成了定义（`Objects/typeobject.c` 里那份
+       * 四百多字节的初始化式），原来那一格显然不够，得**重新划一块**：不重划的话
+       * 它的初值就写到后面那些全局量的字节上去了（量出来的：`PyType_Type` /
+       * `PyBaseObject_Type` / `PySuper_Type` 三份挤在相邻的几个字节上，
+       * 于是 ld 报 `pointer not aligned in '_PyType_Type'+0x192`）。
+       *
+       * native 那条腿**总是**能挪：代码里取地址走 `GADDR`（符号），初值里的地址走
+       * `pendingFix`（符号 + 加数），两处都不认那个暂存地址。线性内存那条腿会把
+       * **绝对地址**编进代码与初值里，所以已经有人拿过它的地址时就不挪了 ——
+       * 那一格只可能是"声明成不完整类型、又在同一份里定义"，而它在那条腿上本来就链不上。 */
+      else if (hit.addr >= 0 && hit.allocSize !== undefined
+        && (this.native || hit.used !== true)
+        && typeSize(m).size + (hit.extra === undefined ? 0 : hit.extra) > hit.allocSize) {
+        this.allocGlobal(hit);
+      }
       return hit;
     }
     if (btype(ty.t) === VT_VOID) this.err(`variable '${name}' has void type`);
@@ -2660,7 +2677,13 @@ export class CGen {  /**
     const s = typeSize(e.ty);
     this.dataOff = alignUp(this.dataOff, e.align !== 0 ? e.align : s.align);
     e.addr = this.dataOff;
-    this.dataOff += s.size + (e.extra === undefined ? 0 : e.extra);
+    /* **真留下了多少字节**：`extern` 那一侧的类型可能还不完整（`typeSize` 回 0），
+     * 那就至少留一格 —— 不然一串这样的声明全落在同一个地址上，
+     * 而封盘那步"把没认领的字节丢掉"就会按**现在**的类型大小去丢，
+     * 连带把后面那些全局量的初值一起丢掉（见 `lowerCNative` 里那一段注）。 */
+    const want = s.size + (e.extra === undefined ? 0 : e.extra);
+    e.allocSize = e.defined === false && want === 0 ? 1 : want;
+    this.dataOff += e.allocSize;
     /* 第一百二十五片：这一块是第几个领到字节的 —— 只读节按这个号排（见
      * mir/rodata.js）。tcc 那边这一步就是在只读/可写那一节上推游标，所以「领字节」
      * 这一刻的次序正是节里的次序。 */
@@ -2787,6 +2810,22 @@ export class CGen {  /**
         this.skip(RPAR);
         if (this.tok !== LBRACE || !sameType(lty, ty)) {
           this.err(`invalid initializer for '${cTypeText(ty)}'`);
+        }
+        /* 既然这一路把 `(T){…}` 当「直接写那对花括号」办，**清零也得跟着来**
+         * （C11 6.7.9 第 21 段：没点名的成员是 0）。`decl` 那儿的清零由 `braced` 管，
+         * 而那一格判的是 `=` 后面第一个记号是不是 `{` —— 这一路是 `(`，于是整块都没清。
+         *
+         * 量出来的（第一百四十三片）：`Include/internal/pycore_initconfig.h:110` 的
+         *   `#define _PyPreCmdline_INIT (_PyPreCmdline){ .use_environment = -1, … }`
+         * 三个 int 点了名、前两个成员 `PyWideStringList argv/xoptions` 一个都没点 ——
+         * 于是 `_PyConfig_Read` 里那个 `precmdline` 的 items 是栈上的垃圾，
+         * 一路活到 `done:` 的 `_PyPreCmdline_Clear`，在那儿把垃圾指针当字符串数组 free。
+         * 症状是我们自己编出来的 `_freeze_module` 崩在 `initconfig.c:794` 的
+         * `assert(list->items[i] != NULL)`，而 clang 编的同一份跑得过。
+         *
+         * `compoundLiteral()` 那条路（`&(T){…}` 一族）自己已经清过，不会重复。 */
+        if (dest.stat !== true && dest.slot === undefined) {
+          this.autoZero(dest.addr, off, typeSize(ty).size);
         }
         return this.initializer(dest, off, ty);
       }
@@ -9666,7 +9705,15 @@ export function lowerCNative(path, text, host, defs) {
        * 也不该算它，所以顺手把那几个字节丢掉。 */
       const no0 = e.gno === undefined ? mod.globalNo(name) : e.gno;
       mod.setGlobalExtern(no0, s0.size, s0.align);
-      for (let k = 0; k < s0.size; k++) stage.delete(e.addr + k);
+      /* 丢的是**当初真留下的那几个字节**（`allocGlobal` 记在 `allocSize` 上），
+       * 不是"现在这个类型有多大"：不完整类型的 extern 声明当初只留了一格
+       * （`PyAPI_DATA(PyTypeObject) PyType_Type;` 那时 `struct _typeobject` 还没定义），
+       * 而这会儿 `typeSize` 已经是 432 —— 照 432 丢就把**后面那些全局量的初值**
+       * 一起丢了（量出来的：`_Py_NoneStruct` 的 16 个字节被五个这样的 extern 连丢五遍，
+       * 于是 Py_None 的 refcnt 是 0，CPython 一初始化就 assert）。 */
+      for (let k = 0; k < (e.allocSize === undefined ? s0.size : e.allocSize); k++) {
+        stage.delete(e.addr + k);
+      }
       continue;
     }
     const s = s0;

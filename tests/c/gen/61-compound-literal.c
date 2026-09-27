@@ -15,6 +15,32 @@ struct P *cinit7 = &(struct P){ 71, 72 };
 char *cs = (char []){ 'h', 'i', 0 };
 int *part = (int [4]){ 9 };            /* 没写满的那几格是 0 */
 
+/* `T x = (T){…}` 当**声明的初始化式**那一格：没点名的成员照样要归零
+ * （C11 6.7.9 第 21 段）。出处是 CPython 的
+ * `_PyPreCmdline_INIT`（`Include/internal/pycore_initconfig.h:110`）——
+ * 三个 int 点了名、前两个成员是一个都没点名的**嵌套结构体**。
+ * 从前这一格漏了清零：`decl` 那儿判的是 `=` 后面第一个记号是不是 `{`，而这一路是 `(`。
+ *
+ * 要**先把栈写脏**才量得出来 —— 不然"看着是 0"只是那一段栈本来干净。
+ * `dirt()` 与 `pc_zero()` 都从 main 里同一层调，帧落在同一段上。 */
+struct Two { long len; void *items; };
+struct PC { struct Two a, b; int i, j, k; };
+
+static long dirt(void)
+{
+    volatile long buf[16];
+    int n;
+    for (n = 0; n < 16; n++) buf[n] = -1L;
+    return buf[0] + buf[15];
+}
+
+static int pc_zero(void)
+{
+    struct PC c = (struct PC){ .i = -1, .j = -1 };
+    return c.a.len == 0 && c.a.items == 0 && c.b.len == 0 && c.b.items == 0
+        && c.i == -1 && c.j == -1 && c.k == 0;
+}
+
 static int sum(struct P *p) { return p->a * 100 + p->b; }
 static int addup(int *v, int n)
 {
@@ -66,5 +92,8 @@ int main(void)
     int *m = (int []){ 1, 2 };
     m[0] = 100;
     printf("lv %d %d\n", m[0], m[1]);
+
+    if (dirt() == 0) printf("(不会走到)\n");
+    printf("dz %d\n", pc_zero());
     return 0;
 }

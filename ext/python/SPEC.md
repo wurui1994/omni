@@ -647,6 +647,60 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     - `py:symbols` **194** 份的外部符号与 clang 一模一样、5 笔按文件记账、没账的 0
     - `py:link` **199 份摞成 22.4M**，只缺那 7 个构建系统产物的符号
 
+18. **借来的那份运行时真跑起来了**：我们编出来的 `_freeze_module` 跑通，出的 frozen 头
+    与 clang 编的同一套**逐字节相同**。
+
+    前三把尺子最远只到"链得上"。这一格是**第四问：跑起来对不对**。拿 CPython 自己的
+    `Programs/_freeze_module.c` 当被试者（它是构建系统那一步要的工具：把一份 `.py` 编成
+    字节码、摞成一个 `.h`）—— 它一进门就 `Py_InitializeFromInitConfig`，跑完要
+    `PyParser` + `compile` + `ceval` + `marshal` 全都对。
+
+    要凑齐的三份构建系统产物：`Modules/config.c` 照 `config.c.in` 现生成
+    （新的 `ext/python/rt/gen-config.js`，模块名从 `Setup.bootstrap.in` 读 —— 与
+    `py:sweep` 量哪几份 `.c` 同一张名单）、`Modules/getpath_noop.c`（CPython 自己给
+    这一步用的空实现）、`_freeze_module.c` 自己（它在 `.c` 里定义那五个 frozen 符号，
+    所以不必先有 `frozen.c` —— 那个自举环就是这么破的）。
+
+    读数：**我们的 199 份 `.o` + 这三份，链出 21.5MB 的 `_freeze_module`，跑起来 exit 0**，
+    出的 `.h` 与"clang 编的同一套 199 份 + 同样这三份"出的**逐字节相同**（两份输入都试了：
+    一行赋值的、以及带 class / 默认参数 / 列表推导 / `__name__` 的）。
+
+    **这一趟当场抓出两格 codegen 答错**（都是"编得出、链得上、跑起来错"那一档 ——
+    前三把尺子一格都看不见）：
+
+    - **复合字面量当声明的初始化式时，没点名的成员没归零**（`tccgen.js` 的 `initializer`）。
+      `decl` 那儿的清零由 `braced` 管，而它判的是 `=` 后面第一个记号是不是 `{`；
+      `T x = (T){ … }` 那一路是 `(`，于是整块都没清。
+      出处 `Include/internal/pycore_initconfig.h:110` 的 `_PyPreCmdline_INIT`：
+      三个 int 点了名、前两个成员 `PyWideStringList argv/xoptions` 一个都没点 ——
+      于是 `_PyConfig_Read` 里那个 `precmdline` 的 items 是栈上的垃圾，一路活到
+      `done:` 的 `_PyPreCmdline_Clear`，在那儿把垃圾指针当字符串数组 free。
+      症状：崩在 `Python/initconfig.c:794` 的 `assert(list->items[i] != NULL)`。
+      判据：`tests/c/gen/61-compound-literal.c` 末尾那一格（**先把栈写脏**再量，
+      不然"看着是 0"只是那段栈本来干净）。
+
+    - **类型还不完整时的 `extern` 声明，把别人的初值吃掉了**（`allocGlobal` 与封盘那步）。
+      `PyAPI_DATA(PyTypeObject) PyType_Type;` 在 `Include/object.h` 里，那一刻
+      `struct _typeobject` 还没定义 —— `typeSize` 回 0，于是一串这样的声明**全落在
+      同一个暂存地址上**；封盘那步又按"现在这个类型有多大"（432 字节）去把没认领的字节
+      丢掉，把后面那些全局量的初值一起丢了。
+      症状：`Py_None` 的 refcnt 是 0（该是 `3<<30`），崩在 `Objects/object.c:3472` 的
+      `assert(_Py_IsImmortal(constants[i]))`；修了这一半又露出第二半 ——
+      同一个名字后来真成了定义（`PyType_Type` 那份四百多字节的初始化式）时要**重新划一块**，
+      不然它的初值写到别人的字节上，ld 报 `pointer not aligned in '_PyType_Type'+0x192`。
+      两处都修：`allocGlobal` 记下**真留了多少**（`allocSize`，不完整的 extern 至少一格）、
+      封盘按 `allocSize` 丢、类型补全且不够大时重划（native 那条腿总能挪 —— 代码里取地址
+      走 `GADDR`、初值里的地址走 `pendingFix`，两处都不认那个暂存地址）。
+      判据：`tests/c/gen/95-extern-incomplete-data.c`。
+
+    这两格都是**"自己编出来那份真跑一趟"**才抓得住的 —— 量过：两个用例在修之前
+    native 那条腿都 FAIL、修之后与 `tcc -run` 逐字节相同。
+
+    **还差一步到 201/201**：`Python/frozen.c` 与 `Modules/getpath.c` 要
+    `Python/frozen_modules/*.h`（`make regen-frozen` 那一步）。现在手上已经有一个
+    **能跑的 `_freeze_module`**，所以那一步是"拿它把那几十份标准库 `.py` 冻出来"，
+    不再是自举环。参考树只读，所以那些头落 `.omni-cache/py-rt/gen/` 再用 `-I` 指过去。
+
 ## 二、进度
 
 ### 已落地

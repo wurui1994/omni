@@ -46,6 +46,27 @@ export function coreModuleFiles(src) {
 }
 
 /**
+ * 同一份 `Setup.bootstrap.in` 的**另一面**：那几个**模块名**（不是源文件名）。
+ * `gen-config.js` 要它 —— `Modules/config.c` 那张 `_PyImport_Inittab` 表就是
+ * 「每个静态模块一行 `{"名字", PyInit_名字}`」，而 `makesetup` 正是从这几行读名字的。
+ */
+export function coreModuleNames(src) {
+  const p = join(src, 'Modules', 'Setup.bootstrap.in');
+  const out = [];
+  for (const raw of readFileSync(p, 'utf8').split('\n')) {
+    const line = raw.replace(/@[A-Z0-9_]+@/g, '').trim();
+    if (line === '' || line.startsWith('#') || line.startsWith('*')) continue;
+    const name = line.split(/\s+/)[0];
+    /* 一行至少得是「名字 + 一份源码」，不然那不是模块行 */
+    if (name !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) out.push(name);
+  }
+  if (out.length < 20) {
+    throw new Error(`scope.js: Setup.bootstrap.in 里只读出 ${out.length} 个模块名 —— 那份名单的形状变了`);
+  }
+  return out;
+}
+
+/**
  * **要构建系统先跑一步**的那几份（在不在树里都不算我们的欠账）：
  *   * `Modules/config.c` —— `makesetup` 生成的内建模块表（树里压根没有这份文件）；
  *   * `Python/frozen.c` 与 `Modules/getpath.c` —— 要 `Python/frozen_modules/*.h`
