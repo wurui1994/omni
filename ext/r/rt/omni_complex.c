@@ -158,3 +158,231 @@ double _Complex __divdc3(double a, double b, double c, double d) {
   (void)logbw;
   return cx_of(re, im).z;
 }
+
+/* ================ 超越那一族（`clog` / `csqrt` / `cexp` / …，第十八格）============
+ *
+ * R 的 `src/main/complex.c` 直接调这 13 个（`z_log` 那一套在 HAVE_* 齐的平台上就是
+ * 转手给 C99），所以"链得起"要它们。写法与上面两个不同的一点：这一族**不追求与
+ * 平台 libm 逐位相同** —— Apple 的 libm 与 musl 的 `clog` 本来就差最后几位。判据是
+ * `tests/r/rtc.js` 第三节记死的**相对误差上界**，外加实轴/Inf/NaN 那几格的分类相同。
+ *
+ * 实函数（`exp`/`log`/`sin`/…）问 libm（我们的 `callLibc` 那一侧有），复数那一层的
+ * 公式写在这儿：这样精度的来源只有一处，出了偏差看的是公式不是实现。
+ */
+
+double exp(double);
+double log(double);
+double log1p(double);
+double sqrt(double);
+double sin(double);
+double cos(double);
+double tan(double);
+double sinh(double);
+double cosh(double);
+double tanh(double);
+double asin(double);
+double atan(double);
+double pow(double, double);
+
+static const double OMNI_PI_2 = 1.5707963267948966;
+
+/** `exp(z)`：模长 `exp(x)`、相角 `y`。x 很大时 `exp(x)` 会先溢出，那时分两步缩放。 */
+double _Complex cexp(double _Complex z) {
+  omni_cx c;
+  c.z = z;
+  double x = c.p.r;
+  double y = c.p.i;
+  if (y == 0.0) return cx_of(exp(x), y).z;          /* 实轴：虚部的符号要留住 */
+  if (omni_isinf(x)) {
+    if (x < 0.0) {
+      if (!omni_isfinite(y)) y = 1.0;               /* 0 * 任意 = 0，符号不定，取正 */
+      return cx_of(0.0 * cos(y), 0.0 * sin(y)).z;
+    }
+    if (!omni_isfinite(y)) return cx_of(x, y - y).z; /* Inf * 不定 = NaN 虚部 */
+    return cx_of(x * cos(y), x * sin(y)).z;
+  }
+  if (omni_isnan(x)) return cx_of(x, y == 0.0 ? y : x).z;
+  if (x > 709.0) {                                   /* 先取出 e^709，剩下的再乘 */
+    double e = exp(x - 709.0);
+    double k = 8.2184074615549e307;                  /* exp(709) */
+    return cx_of(e * cos(y) * k, e * sin(y) * k).z;
+  }
+  double e = exp(x);
+  return cx_of(e * cos(y), e * sin(y)).z;
+}
+
+/**
+ * `log(z)`：实部 `log|z|`、虚部 `arg z`。`|z|` 贴着 1 的时候 `log(hypot)` 会把有效位
+ * 全丢在减法里（`log(1+eps)`），那一带改走 `log1p(x*x+y*y-1)`。
+ */
+double _Complex clog(double _Complex z) {
+  omni_cx c;
+  c.z = z;
+  double x = c.p.r;
+  double y = c.p.i;
+  double ax = omni_fabs(x);
+  double ay = omni_fabs(y);
+  double mx = ax > ay ? ax : ay;
+  double re;
+  if (mx > 0.5 && mx < 1.5 && omni_isfinite(mx)) {
+    /* x*x + y*y - 1 要精确：大的那一项拆成 (m-1)*(m+1) 免得先凑成 1 再减 */
+    double mn = ax > ay ? ay : ax;
+    re = 0.5 * log1p((mx - 1.0) * (mx + 1.0) + mn * mn);
+  } else {
+    re = log(hypot(x, y));
+  }
+  return cx_of(re, atan2(y, x)).z;
+}
+
+/** `sqrt(z)`：主支。`t = sqrt((|x| + |z|)/2)` 之后两支分开写，免得除以 0。 */
+double _Complex csqrt(double _Complex z) {
+  omni_cx c;
+  c.z = z;
+  double x = c.p.r;
+  double y = c.p.i;
+  if (x == 0.0 && y == 0.0) return cx_of(0.0, y).z;
+  if (omni_isinf(y)) return cx_of(1.0 / 0.0, y).z;
+  if (omni_isnan(x)) return cx_of(x, omni_isinf(y) ? y : x).z;
+  if (omni_isinf(x)) {
+    if (x < 0.0) return cx_of(omni_isnan(y) ? y : 0.0, omni_copysign(x * -1.0, y)).z;
+    return cx_of(x, omni_isnan(y) ? y : omni_copysign(0.0, y)).z;
+  }
+  double t = sqrt((omni_fabs(x) + hypot(x, y)) * 0.5);
+  if (x >= 0.0) return cx_of(t, y / (t + t)).z;
+  return cx_of(omni_fabs(y) / (t + t), omni_copysign(t, y)).z;
+}
+
+/** `pow(z, w) = exp(w * log z)`，乘法走 `__muldc3`（Inf/NaN 的收法只有一处）。 */
+double _Complex cpow(double _Complex z, double _Complex w) {
+  omni_cx a;
+  omni_cx b;
+  a.z = z;
+  b.z = w;
+  if (a.p.r == 0.0 && a.p.i == 0.0) {
+    if (b.p.r == 0.0 && b.p.i == 0.0) return cx_of(1.0, 0.0).z;
+    if (b.p.i == 0.0 && b.p.r > 0.0) return cx_of(0.0, 0.0).z;
+  }
+  /* 底是正实数、指数是实数：直接 `pow`，比绕一圈 log/exp 精确 */
+  if (a.p.i == 0.0 && a.p.r > 0.0 && b.p.i == 0.0) return cx_of(pow(a.p.r, b.p.r), 0.0).z;
+  omni_cx l;
+  l.z = clog(z);
+  omni_cx m;
+  m.z = __muldc3(b.p.r, b.p.i, l.p.r, l.p.i);
+  return cexp(m.z);
+}
+
+/* ---- 三角与双曲：加法公式，一条实公式一条虚公式 ------------------------------ */
+
+double _Complex csinh(double _Complex z) {
+  omni_cx c;
+  c.z = z;
+  return cx_of(sinh(c.p.r) * cos(c.p.i), cosh(c.p.r) * sin(c.p.i)).z;
+}
+
+double _Complex ccosh(double _Complex z) {
+  omni_cx c;
+  c.z = z;
+  return cx_of(cosh(c.p.r) * cos(c.p.i), sinh(c.p.r) * sin(c.p.i)).z;
+}
+
+/** `tanh(x+iy) = (sinh2x + i sin2y) / (cosh2x + cos2y)`。x 大了分母溢出，那时答 ±1。 */
+double _Complex ctanh(double _Complex z) {
+  omni_cx c;
+  c.z = z;
+  double x = c.p.r;
+  double y = c.p.i;
+  if (omni_fabs(x) > 350.0) return cx_of(omni_copysign(1.0, x), omni_copysign(0.0, sin(y + y))).z;
+  double d = cosh(x + x) + cos(y + y);
+  return cx_of(sinh(x + x) / d, sin(y + y) / d).z;
+}
+
+double _Complex csin(double _Complex z) {
+  omni_cx c;
+  c.z = z;
+  return cx_of(sin(c.p.r) * cosh(c.p.i), cos(c.p.r) * sinh(c.p.i)).z;
+}
+
+double _Complex ccos(double _Complex z) {
+  omni_cx c;
+  c.z = z;
+  return cx_of(cos(c.p.r) * cosh(c.p.i), -sin(c.p.r) * sinh(c.p.i)).z;
+}
+
+/** `tan(x+iy) = (sin2x + i sinh2y) / (cos2x + cosh2y)` —— 与 `ctanh` 对称的那一条。 */
+double _Complex ctan(double _Complex z) {
+  omni_cx c;
+  c.z = z;
+  double x = c.p.r;
+  double y = c.p.i;
+  if (omni_fabs(y) > 350.0) return cx_of(omni_copysign(0.0, sin(x + x)), omni_copysign(1.0, y)).z;
+  double d = cos(x + x) + cosh(y + y);
+  return cx_of(sin(x + x) / d, sinh(y + y) / d).z;
+}
+
+/* ---- 反三角：写成 log 与 sqrt 的组合（主支照 C99 附录 G）--------------------- */
+
+/** `asin(z) = -i log(iz + sqrt(1 - z^2))`。实轴上 |x|<=1 时直接问 `asin`，精度好得多。 */
+double _Complex casin(double _Complex z) {
+  omni_cx c;
+  c.z = z;
+  double x = c.p.r;
+  double y = c.p.i;
+  if (y == 0.0 && omni_fabs(x) <= 1.0) return cx_of(asin(x), y).z;
+  omni_cx z2;
+  z2.z = __muldc3(x, y, x, y);
+  /* |z| 很小的时候 log 那条路会把有效位全丢在 `1 - z^2` 与 `log(1+eps)` 里
+     （量出来 1e-8 那格差了 5e-9），那一带走级数 `z + z^3/6`（下一项 3z^5/40
+     在 |z| < 1e-4 时相对只有 1e-17）。 */
+  if (omni_fabs(x) < 1e-4 && omni_fabs(y) < 1e-4) {
+    omni_cx t;
+    t.z = __muldc3(x, y, z2.p.r / 6.0, z2.p.i / 6.0);
+    return cx_of(x + t.p.r, y + t.p.i).z;
+  }
+  omni_cx s;
+  s.z = csqrt(cx_of(1.0 - z2.p.r, -z2.p.i).z);
+  /* `iz + s` 与 `s - iz` 的**积恒为 1**（两个根相乘是 -((iz)^2 - (1-z^2)) = 1），
+     所以 `log(iz+s) = -log(s-iz)`。|z| 大的时候前者两个分量都在互相抵消
+     （量出来 z=100+0.5i 那格差了 2e-13），那时取后者再取负 —— 同一个值，没有抵消。 */
+  double ur = s.p.r - y;
+  double ui = s.p.i + x;                             /* iz = -y + xi */
+  double vr = s.p.r + y;
+  double vi = s.p.i - x;
+  omni_cx l;
+  if (hypot(ur, ui) >= hypot(vr, vi)) {
+    l.z = clog(cx_of(ur, ui).z);
+  } else {
+    omni_cx t;
+    t.z = clog(cx_of(vr, vi).z);
+    l = cx_of(-t.p.r, -t.p.i);
+  }
+  return cx_of(l.p.i, -l.p.r).z;                     /* -i * (a+bi) = b - ai */
+}
+
+/** `acos(z) = pi/2 - asin(z)`。 */
+double _Complex cacos(double _Complex z) {
+  omni_cx a;
+  a.z = casin(z);
+  return cx_of(OMNI_PI_2 - a.p.r, -a.p.i).z;
+}
+
+/** `atan(z) = -(i/2) log((1 + iz) / (1 - iz))`，除法走 `__divdc3`。 */
+double _Complex catan(double _Complex z) {
+  omni_cx c;
+  c.z = z;
+  double x = c.p.r;
+  double y = c.p.i;
+  if (y == 0.0) return cx_of(atan(x), y).z;
+  /* 与 `casin` 同一条缝：|z| 小的时候走级数 `z - z^3/3`。 */
+  if (omni_fabs(x) < 1e-4 && omni_fabs(y) < 1e-4) {
+    omni_cx z2;
+    z2.z = __muldc3(x, y, x, y);
+    omni_cx t;
+    t.z = __muldc3(x, y, z2.p.r / 3.0, z2.p.i / 3.0);
+    return cx_of(x - t.p.r, y - t.p.i).z;
+  }
+  omni_cx q;
+  q.z = __divdc3(1.0 - y, x, 1.0 + y, -x);
+  omni_cx l;
+  l.z = clog(q.z);
+  return cx_of(0.5 * l.p.i, -0.5 * l.p.r).z;         /* -(i/2) * (a+bi) = b/2 - a/2 i */
+}

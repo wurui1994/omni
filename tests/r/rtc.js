@@ -36,6 +36,11 @@ double cabs(double _Complex);
 double carg(double _Complex);
 double _Complex conj(double _Complex);
 
+/* div 在 ext/r/rt/omni_libc.c 里：按值回一个两格 struct —— 这一格顺手判
+   "跨模块按值回 struct"这条路（R 的 printarray.c 要它）。 */
+typedef struct { int quot; int rem; } omni_div_t;
+omni_div_t div(int, int);
+
 static void show(const char *tag, double _Complex z) {
   printf("%s\\t%.17g\\t%.17g\\n", tag, creal(z), cimag(z));
 }
@@ -51,18 +56,88 @@ int main(void) {
   show("inf-div", __divdc3(inf, 0.0, 2.0, 0.0));
   show("zero-div", __divdc3(1.0, 1.0, 0.0, 0.0));
   show("big-div", __divdc3(1e300, 1e300, 1e300, 1e300));
+  omni_div_t d1 = div(17, 5);
+  omni_div_t d2 = div(-17, 5);
+  printf("div\\t%d\\t%d\\t%d\\t%d\\n", d1.quot, d1.rem, d2.quot, d2.rem);
   return (int)(creal(__muldc3(1.5, 2.0, 0.5, -1.0)) * 2);
 }
 `;
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
-const RSRC = refDir('r-source', 'R_SRC');
+
+/**
+ * 超越那一族的驱动（第十八格）：13 个函数 × 12 个点，一行一格
+ * `函数(x,y)<制表符>实部<制表符>虚部`。
+ *
+ * 这一份**只按原型调**（不 `#include <complex.h>`），于是同一份 C 两条腿都能编：
+ * 我们那条链 `ext/r/rt/omni_complex.c`，尺子那条链**平台的 libm**。
+ */
+const CX2_DRV = `int printf(const char*, ...);
+double creal(double _Complex);
+double cimag(double _Complex);
+double _Complex cexp(double _Complex);
+double _Complex clog(double _Complex);
+double _Complex csqrt(double _Complex);
+double _Complex cpow(double _Complex, double _Complex);
+double _Complex csin(double _Complex);
+double _Complex ccos(double _Complex);
+double _Complex ctan(double _Complex);
+double _Complex csinh(double _Complex);
+double _Complex ccosh(double _Complex);
+double _Complex ctanh(double _Complex);
+double _Complex casin(double _Complex);
+double _Complex cacos(double _Complex);
+double _Complex catan(double _Complex);
+
+static double _Complex mk(double r, double i) {
+  double _Complex z = r;
+  __imag__ z = i;
+  return z;
+}
+
+static void show(const char *tag, double x, double y, double _Complex v) {
+  printf("%s(%.17g,%.17g)\\t%.17g\\t%.17g\\n", tag, x, y, creal(v), cimag(v));
+}
+
+static const double PTS[][2] = {
+  { 0.5, 0.25 }, { 1.5, -2.0 }, { -3.0, 0.75 }, { 0.75, 0.0 }, { 0.0, 0.75 },
+  { -1.0, 0.0 }, { 1e-8, 1e-8 }, { 2.0, 40.0 }, { 100.0, 0.5 }, { -0.5, -0.5 },
+  { 1e10, 1e-10 }, { 1.0, 1.0 },
+};
+
+int main(void) {
+  int i;
+  for (i = 0; i < 12; i++) {
+    double x = PTS[i][0];
+    double y = PTS[i][1];
+    double _Complex z = mk(x, y);
+    show("cexp", x, y, cexp(z));
+    show("clog", x, y, clog(z));
+    show("csqrt", x, y, csqrt(z));
+    show("cpow", x, y, cpow(z, mk(0.5, 0.25)));
+    show("csin", x, y, csin(z));
+    show("ccos", x, y, ccos(z));
+    show("ctan", x, y, ctan(z));
+    show("csinh", x, y, csinh(z));
+    show("ccosh", x, y, ccosh(z));
+    show("ctanh", x, y, ctanh(z));
+    show("casin", x, y, casin(z));
+    show("cacos", x, y, cacos(z));
+    show("catan", x, y, catan(z));
+  }
+  return 0;
+}
+`;const RSRC = refDir('r-source', 'R_SRC');
 /** `ext/r/build-libR.js` 生成的那几份头（config.h / Rconfig.h / Rversion.h / Rmath.h）。 */
 const GEN = join(ROOT, '.omni-cache', 'r-rt', 'libR');
 const INCS = [GEN, join(RSRC, 'src/include'), join(RSRC, 'src/nmath'), join(RSRC, 'src/extra'),
   join(RSRC, 'src/main'), join(RSRC, 'src/unix'), '/opt/homebrew/include'];
 const DEFS = [['HAVE_CONFIG_H', '1']];
 const verbose = process.argv.includes('-v');
+/** 只跑某一节：`rt`（编 + 符号表）/ `cx`（逐字节那一格）/ `cx2`（超越那一族）。
+ *  省得改一行公式就要重编 248 份 —— 那一趟 55 秒。 */
+const only = process.argv.slice(2).find((a) => !a.startsWith('-')) ?? null;
+const want = (n) => only === null || only === n;
 
 /**
  * 编过的份数**只许涨**。量出来的这几格（2026-09-27 一天之内）：
@@ -108,16 +183,19 @@ const groups = [
   ['xdr', 'src/extra/xdr', mkVar(join(RSRC, 'src/extra/xdr/Makefile.in'), 'SOURCES'), false],
   ['tzone', 'src/extra/tzone', mkVar(join(RSRC, 'src/extra/tzone/Makefile.in'), 'SOURCES'), false],
 ];
+/** 我们自己那两份也进符号表 —— 复数那 20 个桩与 `div` 就是它们来接的。 */
+const OURS = [['omni', join(ROOT, 'ext/r/rt'), ['omni_complex.c', 'omni_libc.c'], false]];
 
 const fails = [];
 /** 编出来的留着 —— 下面那一节要拿它们建符号表（"链接"就是这一步）。 */
 const mods = [];
 let okN = 0;
 let funcs = 0;
-for (const [label, dir, names, core] of groups) {
+for (const [label, dir, names, core] of (want('rt') ? [...groups, ...OURS] : [])) {
   for (const n of names) {
     try {
-      const mod = cMir(join(RSRC, dir, n), INCS, DEFS, [], undefined, undefined, { tu: true });
+      const path = dir.startsWith('/') ? join(dir, n) : join(RSRC, dir, n);
+      const mod = cMir(path, INCS, DEFS, [], undefined, undefined, { tu: true });
       mods.push({ tag: `${label}/${n}`, out: `${label}/${n}.mjs`, mir: mod });
       if (core) { okN += 1; funcs += mod.funcs.length; }
       if (verbose) process.stdout.write(`       ok   ${label}/${n}\n`);
@@ -130,7 +208,9 @@ for (const [label, dir, names, core] of groups) {
 }
 const total = okN + fails.filter(([f]) => /^(main|appl|unix)\//.test(f)).length;
 
-if (okN < FLOOR) {
+if (!want('rt')) {
+  /* 这一节没跑，下面两节各自独立 */
+} else if (okN < FLOOR) {
   no(`R 运行时编得过的份数（地板 ${FLOOR}）`, `这一趟只有 ${okN}/${total} ——`
     + `掉了 ${FLOOR - okN} 份。掉下去的那几份：\n       `
     + fails.map(([f, m]) => `${f}: ${m.slice(0, 120)}`).join('\n       ').slice(0, 2000));
@@ -168,9 +248,9 @@ if (kinds.size > 0) {
  *
  * 天花板只许降、地板只许涨。这两条合起来就是"这一套离链得起还差多少"的唯一口径。
  */
-const CEIL = { dup: 0, data: 3, thunk: 20, libc: 205 };
-const SYMS_FLOOR = 2529;
-{
+const CEIL = { dup: 0, data: 3, thunk: 0, libc: 205 };
+const SYMS_FLOOR = 2552;
+if (want('rt')) {
   const provide = new Map();
   const dups = [];
   for (const m of mods) {
@@ -216,7 +296,7 @@ const SYMS_FLOOR = 2529;
     no('符号表闭合（重名 / 硬缺 / 软缺）', bad.join('\n       '));
   } else {
     ok('符号表闭合', `${mods.length} 份、对外符号 ${provide.size} 个、重名 ${dups.length}；`
-      + `硬缺 数据 ${missData.size}（${show(missData)}）+ 桩 ${missThunk.size}；`
+      + `硬缺 数据 ${missData.size}（${show(missData)}）+ 桩 ${missThunk.size}（${show(missThunk)}）；`
       + `软缺 ${missLibc.size} 个 libc 也没有`);
   }
 }
@@ -231,16 +311,18 @@ const SYMS_FLOOR = 2529;
  * `-ffp-contract=off` —— 它默认把 `a*c + b*d` 收成一条 FMA，那条路上的最后几位与
  * 我们这条（分开的乘加）不一样，而这一格判的是**算法**，不是"谁的 FMA"。
  */
-{
+if (want('cx')) {
   const dir = join(ROOT, '.omni-cache', 'test', 'r-rtc');
   mkdirSync(dir, { recursive: true });
   const drv = join(dir, 'cx-drv.c');
   writeFileSync(drv, CX_DRV);
   const CX = join(ROOT, 'ext', 'r', 'rt', 'omni_complex.c');
+  const LC = join(ROOT, 'ext', 'r', 'rt', 'omni_libc.c');
   let ours = null;
   try {
     const linked = cJsModules([
       { path: CX, out: join(dir, 'omni_complex.mjs') },
+      { path: LC, out: join(dir, 'omni_libc.mjs') },
       { path: drv, out: join(dir, 'cx-drv.mjs') },
     ], { incs: [], defs: [], rtImport: join(ROOT, 'src/core/mir/js_rt.js') });
     for (const u of linked.units) writeFileSync(u.out, u.text);
@@ -252,20 +334,102 @@ const SYMS_FLOOR = 2529;
     ours = { code: -1, out: '', err: String(e instanceof Error ? e.message : e).slice(0, 300) };
   }
   const bin = join(dir, 'cx-cc.bin');
-  const cc = spawnSync(CC, ['-w', '-std=gnu17', '-ffp-contract=off', drv, CX, '-o', bin, '-lm'],
+  const cc = spawnSync(CC, ['-w', '-std=gnu17', '-ffp-contract=off', drv, CX, LC, '-o', bin, '-lm'],
     { encoding: 'utf8' });
   if (cc.status !== 0) {
     process.stdout.write(`  skip 复数运行时（clang 编不过尺子：${(cc.stderr ?? '').split('\n')[0].slice(0, 120)}）\n`);
   } else {
     const r = spawnSync(bin, [], { encoding: 'utf8' });
-    const want = `${r.status}\n${r.stdout ?? ''}`;
+    const wantOut = `${r.status}\n${r.stdout ?? ''}`;
     const got = `${ours.code}\n${ours.out}`;
-    if (got === want && (ours.out.match(/\n/g) ?? []).length >= 9) {
-      ok('复数运行时（__muldc3 / __divdc3 / creal / cimag / conj / cabs / carg）',
-        `${(ours.out.match(/\n/g) ?? []).length} 行与 clang 逐字节相同（含 Inf/NaN 那几格）`);
+    if (got === wantOut && (ours.out.match(/\n/g) ?? []).length >= 10) {
+      ok('复数运行时（__muldc3 / __divdc3 / creal / cimag / conj / cabs / carg）+ div',
+        `${(ours.out.match(/\n/g) ?? []).length} 行与 clang 逐字节相同（含 Inf/NaN 与跨模块按值回 struct）`);
     } else {
       no('复数运行时 == clang', `我们 code=${ours.code}\n${ours.out}${ours.err ? `       stderr: ${ours.err}\n` : ''}`
         + `       clang code=${r.status}\n${r.stdout ?? ''}`);
+    }
+  }
+}
+
+/* ---- 超越那一族 vs 平台 libm（第十八格）---------------------------------------
+ *
+ * 这一节与上一节的判据**有意不同**：`__muldc3`/`__divdc3` 是"与 clang 链进去的那份
+ * 逐字节相同"，而 `clog`/`csqrt`/`casin` 那 13 个**做不到逐位相同** —— Apple 的 libm
+ * 与任何一份公开实现都差最后几位。所以这儿判两件事：
+ *
+ *   * **每一格的相对误差 <= 记死的上界**（现在 4e-16，约 2 ulp）；
+ *   * **分类相同**：谁是 NaN、谁是 Inf、零的符号 —— 这几样不许差。
+ *
+ * 尺子那条腿只编驱动（链 libm），**不链我们那份 .c** —— 不然就是空对空。
+ */
+if (want('cx2')) {
+  const dir = join(ROOT, '.omni-cache', 'test', 'r-rtc');
+  mkdirSync(dir, { recursive: true });
+  const drv = join(dir, 'cx2-drv.c');
+  writeFileSync(drv, CX2_DRV);
+  const CX = join(ROOT, 'ext', 'r', 'rt', 'omni_complex.c');
+  const CEIL_REL = 4e-16;
+  let ours = null;
+  try {
+    const linked = cJsModules([
+      { path: CX, out: join(dir, 'omni_complex2.mjs') },
+      { path: drv, out: join(dir, 'cx2-drv.mjs') },
+    ], { incs: [], defs: [], rtImport: join(ROOT, 'src/core/mir/js_rt.js') });
+    for (const u of linked.units) writeFileSync(u.out, u.text);
+    const entry = join(dir, 'cx2-main.mjs');
+    writeFileSync(entry, cJsEntry(linked));
+    const r = spawnSync(process.execPath, [entry], { encoding: 'utf8', maxBuffer: 1 << 24 });
+    ours = { code: r.status, out: r.stdout ?? '', err: (r.stderr ?? '').split('\n')[0] };
+  } catch (e) {
+    ours = { code: -1, out: '', err: String(e instanceof Error ? e.message : e).slice(0, 300) };
+  }
+  const bin = join(dir, 'cx2-cc.bin');
+  /* 尺子：**只有驱动** + libm。 */
+  const cc = spawnSync(CC, ['-w', '-std=gnu17', drv, '-o', bin, '-lm'], { encoding: 'utf8' });
+  if (cc.status !== 0) {
+    process.stdout.write(`  skip 超越那一族（clang 编不过尺子：${(cc.stderr ?? '').split('\n')[0].slice(0, 120)}）\n`);
+  } else if (ours.code !== 0) {
+    no('超越那一族 vs libm', `我们 code=${ours.code} ${ours.err}\n       ${ours.out.slice(0, 400)}`);
+  } else {
+    const ref = spawnSync(bin, [], { encoding: 'utf8', maxBuffer: 1 << 24 });
+    const parse = (s) => new Map(s.trim().split('\n').map((L) => {
+      const [tag, re, im] = L.split('\t');
+      return [tag, [Number(re), Number(im)]];
+    }));
+    const A = parse(ours.out);
+    const B = parse(ref.stdout ?? '');
+    const bad = [];
+    let worst = 0;
+    let worstTag = '';
+    /* 相对误差按**整个复数的模**算，不按分量各自的大小：`ctan(2,40)` 的实部是
+       -2.7e-35 而虚部是 1，libm 那边实部直接下溢成 0 —— 按分量算那一格是"差了 100%"，
+       按模算是 2.7e-35，后者才是这一族该判的东西。 */
+    const cmp = (tag, a, b, scale, which) => {
+      if (Number.isNaN(a) !== Number.isNaN(b)
+        || (Number.isFinite(a) !== Number.isFinite(b) && !Number.isNaN(a))) {
+        bad.push(`${tag} ${which}: 我们 ${a}、libm ${b}（分类不同）`);
+        return;
+      }
+      if (Number.isNaN(a) || a === b) return;
+      const rel = Math.abs(a - b) / scale;
+      if (rel > worst) { worst = rel; worstTag = `${tag} ${which}`; }
+      if (rel > CEIL_REL) bad.push(`${tag} ${which}: 我们 ${a}、libm ${b}（相对差 ${rel.toExponential(2)}）`);
+    };
+    for (const [tag, [re, im]] of B) {
+      const got = A.get(tag);
+      if (got === undefined) { bad.push(`${tag}: 我们这边没有这一行`); continue; }
+      const scale = Math.max(Math.hypot(re, im), Number.MIN_VALUE);
+      cmp(tag, got[0], re, scale, '实部');
+      cmp(tag, got[1], im, scale, '虚部');
+    }
+    if (B.size < 13 * 12) bad.push(`尺子只印了 ${B.size} 行（要 ${13 * 12}）`);
+    if (bad.length > 0) {
+      no('超越那一族 vs libm', `${bad.length} 格超了上界 ${CEIL_REL.toExponential(0)}：\n       `
+        + bad.slice(0, 12).join('\n       '));
+    } else {
+      ok('超越那一族（cexp/clog/csqrt/cpow/c{sin,cos,tan}{,h}/ca{sin,cos,tan}）',
+        `${B.size} 格与 libm 的相对差都 <= ${CEIL_REL.toExponential(0)}，最大 ${worst.toExponential(2)}（${worstTag}）`);
     }
   }
 }
