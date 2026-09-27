@@ -183,6 +183,9 @@ const SHADER_FNS = new Map([
      带 `&r,&g,&b` 那一档（`pic/6`）还没接：那要"串 + 三格块"同时配对。 */
   ['pic/3', [0]],
   ['pic/4', [0]],
+  /* `pic(名字,x,y,&r,&g,&b)`：第 0 格是串，后三格是块（`BLOCK_ARGS` 那张表里也登记着）
+     —— 两张表同时生效那一格在 `callOf` 里（`blkAt`）。 */
+  ['pic/6', [0]],
   /* **KV6 体素模型**（`drawkv6("cow.kv6",scale,x,y,z,hang,vang)`，`evaldraw.txt:921`）：
      第 0 格是串。`drawspr` 七参那一档是它的别名（说明书原话 "same as drawkv6()"）。 */
   ['drawkv6/7', [0]],
@@ -281,6 +284,8 @@ const BLOCK_ARGS = new Map([
   ['getpicsiz/2', [0, 1]], ['getpicsiz/3', [1, 2]],
   /* 读像素那两格（`evaldraw.txt:1478`/`:1490`）：`&r,&g,&b` 三格都是块。 */
   ['getrgb/4', [1, 2, 3]], ['getpix/5', [2, 3, 4]],
+  /* `pic(名字,x,y,&r,&g,&b)`：后三格是块（第 0 格那个串在 `SHADER_FNS` 那张表里）。 */
+  ['pic/6', [3, 4, 5]],
 ]);
 
 /** 宿主那边**无参的函数**（`KLOCK()`）。 */
@@ -675,22 +680,33 @@ function callOf(x, C) {
          `glsettex(句柄)` 与 `glsettex("wood.png")` 是同一个名字/元数）。 */
       const strGot = [];
       const arrGot = [];
-      const as = raw.map((a, i) => {
+      /* **串 + 块可以同时配对**（`pic("a.png",x,y,&r,&g,&b)` 那一档：第 0 格是串、
+         后三格是块）。块那一格发**两个**实参（块本身 + 偏移），与 `g3_` 那条路同一手 ——
+         所以查表的键按**原实参个数**算，发出去的实参用摊开之后的那一串。 */
+      const blkAt = BLOCK_ARGS.get(`${n}/${raw.length}`) ?? [];
+      const as = [];
+      raw.forEach((a, i) => {
         if (strAt.includes(i) && isList(a) && tag(a) === 'str') {
           strGot.push(i);
-          return num(internStr(C, cUnescape(unquote(leaf(kids(a)[0])))));
+          as.push(num(internStr(C, cUnescape(unquote(leaf(kids(a)[0]))))));
+          return;
+        }
+        if (blkAt.includes(i)) {
+          const bl = blockArg(a, C, n);
+          as.push(nameRef(bl.name), bl.off);
+          return;
         }
         if (isList(a) && tag(a) === 'name' && C.arrs.has(idOf(a))) arrGot.push(i);
-        return exprOf(a, C);
+        as.push(exprOf(a, C));
       });
       /* **形状挑名字**：递了串的那几格拼成 `#str0`、递了整块的拼成 `#arr0`
          （多格就 `#str0,1`），按"串 -> 块 -> 光名字"的次序各查一次 ——
          同一个名字/元数在不同实参形状下是**不同的宿主函数**时用这一格
          （只有 EvalDraw 那三档 `glsettex` 用到，见 `gl-rt.js` 的 `EVALDRAW_TEX`）。 */
       const keys = [];
-      if (strGot.length > 0) keys.push(`${n}/${as.length}#str${strGot.join(',')}`);
-      if (arrGot.length > 0) keys.push(`${n}/${as.length}#arr${arrGot.join(',')}`);
-      keys.push(`${n}/${as.length}`);
+      if (strGot.length > 0) keys.push(`${n}/${raw.length}#str${strGot.join(',')}`);
+      if (arrGot.length > 0) keys.push(`${n}/${raw.length}#arr${arrGot.join(',')}`);
+      keys.push(`${n}/${raw.length}`);
       const glFn = C.host.glrt === true
         ? keys.map((k) => C.host.draw?.get(k)).find((v) => v !== undefined)
         : undefined;

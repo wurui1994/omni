@@ -95,6 +95,8 @@ export const EVALDRAW_3D = new Map([
      串那一格由 `SHADER_FNS` 换成名字下标，所以 `callOf` 查的是 `#str0` 那个键。 */
   ['pic/3#str0', 'g3_pic3'],
   ['pic/4#str0', 'g3_pic4'],
+  /* `pic(名字,x,y,&r,&g,&b)`：**串 + 三格块同时配对**（见 `g3_pic6` 的头注）。 */
+  ['pic/6#str0', 'g3_pic6'],
   ['getrgb/4', 'g3_getrgb4'],
   ['getpix/5', 'g3_getpix5'],
   /* **EvalDraw 的 `glBegin` 走这门自己的相机**（见 `g3_glbegin` 的头注）：那门语言的
@@ -475,6 +477,20 @@ export function gfx3FnDecls(host = false, withGL = false) {
        —— 我们抄过来的那一份本来就是 24 位 RGB。 */
     fn('g3_pic4', ['ni', 'x', 'y', 'fl'], [
       ret(call('g3_pic3', [nm('ni'), nm('x'), nm('y')])),
+    ]),
+    /**
+     * **`pic(名字,x,y,&r,&g,&b)`**（`evaldraw.txt:1341` 那一族的"拆成三格"写法）：
+     * 采样一格再把 0..255 三格写回调用方。`games/bowling/ball.kc` 那种**体素函数**脚本
+     * （`(x,y,z,&r,&g,&b)`）拿它给球面上色 —— 每个体素问一次。
+     *
+     * 落法就是现成的两格拼起来（`g3_pic3` + `g3_getrgb4`）：这一门的 `pic` 本来就是
+     * "抄过来一次、之后全是数组下标"，颜色怎么拆也已经有一份 —— 不再写第二份。
+     * 回值照 `getrgb`：**alpha**（我们抄过来的那一份是 24 位，所以一律 0）。
+     */
+    fnT('g3_pic6', [['ni'], ['x'], ['y'],
+      ['rb', ARR], ['ro'], ['gb', ARR], ['go'], ['bb', ARR], ['bo']], [
+      ret(call('g3_getrgb4', [call('g3_pic3', [nm('ni'), nm('x'), nm('y')]),
+        nm('rb'), nm('ro'), nm('gb'), nm('go'), nm('bb'), nm('bo')])),
     ]),
     /**
      * **KV6 体素模型那一族**（`drawkv6("cow.kv6",scale,x,y,z,hang,vang)`，

@@ -19,7 +19,7 @@
 // **像素算法与 `ext/polydraw/gfx-rt.js` 逐句相同**（Bresenham、中点画圆、沿线铺圆）——
 // 那是有意的：换路之后同一份例子的表面要**逐字节相同**，这条才是"搬家不改语义"的判据。
 
-import { writeBinary, readBinary, mkdirAll, stdout, stderr, env, nowMs, localStamp } from './native.js';
+import { writeBinary, readBinary, exists, mkdirAll, stdout, stderr, env, nowMs, localStamp } from './native.js';
 import { decodeKv6 } from './kv6.js';
 import { pngFromRgba, surfaceKind } from './png.js';
 import { dlopenAddon } from './ffi_host.js';
@@ -1486,7 +1486,27 @@ function texPath(idx) {
   for (let i = 0; i < s.length; i++) out += s[i] === '\\' ? '/' : s[i];
   if (out.startsWith('/')) return out;
   const d = env('OMNI_GFX_DIR');
-  return d === undefined || d === null || d === '' ? out : `${d}/${out}`;
+  const p = d === undefined || d === null || d === '' ? out : `${d}/${out}`;
+  return assetFind(p);
+}
+
+/**
+ * **资源的搜索路径**（EvalDraw 的那一套）：脚本里写的是"资源名"，不是相对路径 ——
+ * 正本把图与模型放在跟着程序走的 `data/` 里（`games/bowling/ball.kc` 写
+ * `pic("cloud.png",…)` 而文件在 `evaldraw/data/cloud.png`）。所以按三处找：
+ * 脚本旁边、`<脚本目录>/../data/`、`<脚本目录>/data/`。三处都没有就回原样
+ * （让下游那句"读不开"照旧报出来，别在这儿把名字改得面目全非）。
+ */
+function assetFind(p) {
+  if (exists(p)) return p;
+  const cut = p.lastIndexOf('/');
+  if (cut < 0) return p;
+  const dir = p.slice(0, cut);
+  const base = p.slice(cut + 1);
+  for (const c of [`${dir}/../data/${base}`, `${dir}/data/${base}`]) {
+    if (exists(c)) return c;
+  }
+  return p;
 }
 
 export const GFX_CPU = {
