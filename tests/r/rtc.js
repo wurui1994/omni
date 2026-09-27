@@ -14,11 +14,43 @@
 //   node tests/r/rtc.js
 //   node tests/r/rtc.js -v      # 连每一份的成败一起印
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cMir } from '../../src/core/lang/c.js';
+import { spawnSync } from 'node:child_process';
+import { cMir, cJsModules, cJsEntry } from '../../src/core/lang/c.js';
 import { refDir } from '../lib/refsrc.js';
+
+const CC = process.env.OMNI_CLANG ?? process.env.CC ?? 'clang';
+
+/** 复数那一格的驱动：一行一格 `名字<制表符>实部<制表符>虚部`，含 Inf/NaN 那几个边角。 */
+const CX_DRV = `int printf(const char*, ...);
+double _Complex __muldc3(double, double, double, double);
+double _Complex __divdc3(double, double, double, double);
+double creal(double _Complex);
+double cimag(double _Complex);
+double cabs(double _Complex);
+double carg(double _Complex);
+double _Complex conj(double _Complex);
+
+static void show(const char *tag, double _Complex z) {
+  printf("%s\\t%.17g\\t%.17g\\n", tag, creal(z), cimag(z));
+}
+
+int main(void) {
+  show("mul", __muldc3(1.5, 2.0, 0.5, -1.0));
+  show("div", __divdc3(1.5, 2.0, 0.5, -1.0));
+  show("conj", conj(__muldc3(3.0, -4.0, 1.0, 0.0)));
+  printf("cabs\\t%.17g\\n", cabs(__muldc3(3.0, 4.0, 1.0, 0.0)));
+  printf("carg\\t%.17g\\n", carg(__muldc3(0.0, 1.0, 1.0, 0.0)));
+  double inf = 1.0 / 0.0;
+  show("inf-mul", __muldc3(inf, 0.0, 2.0, 0.0));
+  show("inf-div", __divdc3(inf, 0.0, 2.0, 0.0));
+  show("zero-div", __divdc3(1.0, 1.0, 0.0, 0.0));
+  show("big-div", __divdc3(1e300, 1e300, 1e300, 1e300));
+  return (int)(creal(__muldc3(1.5, 2.0, 0.5, -1.0)) * 2);
+}
+`;
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
 const RSRC = refDir('r-source', 'R_SRC');
@@ -104,6 +136,55 @@ if (kinds.size > 0) {
   process.stdout.write(`       还没过的 ${fails.length} 份按类：\n`);
   for (const [k, n] of [...kinds].sort((a, b) => b[1] - a[1])) {
     process.stdout.write(`         ${String(n).padStart(3)}  ${k}\n`);
+  }
+}
+
+/* ---- 我们自己写的那份复数运行时（`ext/r/rt/omni_complex.c`） -------------------
+ *
+ * R 的复数乘除就是 C99 的运算符，而 clang 把它们发成 `__muldc3` / `__divdc3` ——
+ * 那两个里头有 Smith 算法与 Inf 回收。前端手写朴素公式在 Inf/NaN 上就是**静默答错**，
+ * 所以那两个由这一份 C 提供（照 compiler-rt 的算法），一份 .c 一份 .js 编进模块集。
+ *
+ * 判据：与 **clang 编同两份文件**的 stdout 逐字节相同。clang 那边要
+ * `-ffp-contract=off` —— 它默认把 `a*c + b*d` 收成一条 FMA，那条路上的最后几位与
+ * 我们这条（分开的乘加）不一样，而这一格判的是**算法**，不是"谁的 FMA"。
+ */
+{
+  const dir = join(ROOT, '.omni-cache', 'test', 'r-rtc');
+  mkdirSync(dir, { recursive: true });
+  const drv = join(dir, 'cx-drv.c');
+  writeFileSync(drv, CX_DRV);
+  const CX = join(ROOT, 'ext', 'r', 'rt', 'omni_complex.c');
+  let ours = null;
+  try {
+    const linked = cJsModules([
+      { path: CX, out: join(dir, 'omni_complex.mjs') },
+      { path: drv, out: join(dir, 'cx-drv.mjs') },
+    ], { incs: [], defs: [], rtImport: join(ROOT, 'src/core/mir/js_rt.js') });
+    for (const u of linked.units) writeFileSync(u.out, u.text);
+    const entry = join(dir, 'cx-main.mjs');
+    writeFileSync(entry, cJsEntry(linked));
+    const r = spawnSync(process.execPath, [entry], { encoding: 'utf8' });
+    ours = { code: r.status, out: r.stdout ?? '', err: (r.stderr ?? '').split('\n')[0] };
+  } catch (e) {
+    ours = { code: -1, out: '', err: String(e instanceof Error ? e.message : e).slice(0, 300) };
+  }
+  const bin = join(dir, 'cx-cc.bin');
+  const cc = spawnSync(CC, ['-w', '-std=gnu17', '-ffp-contract=off', drv, CX, '-o', bin, '-lm'],
+    { encoding: 'utf8' });
+  if (cc.status !== 0) {
+    process.stdout.write(`  skip 复数运行时（clang 编不过尺子：${(cc.stderr ?? '').split('\n')[0].slice(0, 120)}）\n`);
+  } else {
+    const r = spawnSync(bin, [], { encoding: 'utf8' });
+    const want = `${r.status}\n${r.stdout ?? ''}`;
+    const got = `${ours.code}\n${ours.out}`;
+    if (got === want && (ours.out.match(/\n/g) ?? []).length >= 9) {
+      ok('复数运行时（__muldc3 / __divdc3 / creal / cimag / conj / cabs / carg）',
+        `${(ours.out.match(/\n/g) ?? []).length} 行与 clang 逐字节相同（含 Inf/NaN 那几格）`);
+    } else {
+      no('复数运行时 == clang', `我们 code=${ours.code}\n${ours.out}${ours.err ? `       stderr: ${ours.err}\n` : ''}`
+        + `       clang code=${r.status}\n${r.stdout ?? ''}`);
+    }
   }
 }
 

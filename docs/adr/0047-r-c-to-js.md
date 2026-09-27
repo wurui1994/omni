@@ -713,3 +713,23 @@ typedef union { struct { double r; double i; }; double _Complex private_data_c; 
 
 判据：`tests/c/gen/` 加一格与 cc 比退出码（含 Inf/NaN 的几个边角），
 `tests/r/rtc.js` 的地板从 108 抬到 110。
+
+### 第 2 半先落了：`ext/r/rt/omni_complex.c`（已落，2026-09-27）
+
+`__muldc3` / `__divdc3` / `creal` / `cimag` / `conj` / `cabs` / `carg` 用 C 自己写完了，
+**而且不需要复数算术就能编**：分量靠 `union { double _Complex z; struct { double r, i; } p; }`
+取，于是只用到"`_Complex` 有多大"（第十三格）、struct 按值传/回、成员访问三件事。
+`isnan`/`isinf`/`isfinite`/`fabs`/`copysign`/`scalbn` 也在这份里自己写 —— 前四个在真 C 里
+是**宏**（按函数声明两边都链不上），`copysign` 要的是符号位（走 64 位整数的 union），
+`scalbn` 只在除法里缩放（乘 2 的幂是精确的）。
+
+判据在 `tests/r/rtc.js` 第二节：与 **clang 编同两份文件**的 stdout **9 行逐字节相同**，
+含 `(Inf+0i)*(2+0i)`、`(Inf+0i)/(2+0i)`、`(1+1i)/0`、`(1e300+1e300i)/(1e300+1e300i)`
+那几个 Inf/NaN 与溢出的边角 —— 那正是朴素公式会静默答错的地方。
+
+clang 那边要 `-ffp-contract=off`：它默认把 `a*c + b*d` 收成一条 FMA，最后几位与我们这条
+（分开的乘加）不一样（量出来 `big-div` 的虚部是 `-7.8e-18` 对 `0`）。这一格判的是**算法**，
+不是"谁的 FMA" —— 真要判 FMA 那是另一格（MIR 上还没有 FMA 这条指令）。
+
+于是下一刀只剩**前端那一半**：`+ - 一元-` 逐分量、`*` / `/` 发成对这两个函数的 `CALL`、
+虚数字面量。那 10 个超越函数（`clog`/`csqrt`/…）照同一个套路往这份 `.c` 里加。
