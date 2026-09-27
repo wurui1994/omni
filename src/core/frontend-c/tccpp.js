@@ -1389,13 +1389,26 @@ export class Cpp {
           }
           k++;
         } else {
-          this.tok = fr.str.toks[fr.i] & ~SYM_FIELD;
+          /* **不摘 `SYM_FIELD` 那个印**（tcc 这儿是光秃秃一句 `TOK_GET`，`tccpp.c:3211`）：
+           * 摘掉的话「正在展开它自己、已经打过印」的那个名字一旦被当作**另一个宏的实参**
+           * 读走，印就丢了，于是它在外层重扫时又展开一遍。量到的：
+           *   #define CAST(op) ((T*)(op))
+           *   #define GET(m) GET(CAST(m))      // 自指，第二个 GET 该带印
+           *   #define DEC(o) DEC(CAST(o))
+           *   DEC(GET(self))
+           * tcc 与 clang 出 `DEC(((T*)(GET(((T*)(self))))))`，我们从前多套一层
+           * `((T*)(…))`。CPython 的 `Include/cpython/classobject.h:65` 就是这个写法
+           * （`#define PyInstanceMethod_GET_FUNCTION(m) PyInstanceMethod_GET_FUNCTION(_PyObject_CAST(m))`），
+           * 症状是 `Objects/classobject.c` 报「隐式声明的函数 `_PyObject_CAST`」——
+           * 多出来的那一层把 `_PyObject_CAST` 推到了没人再展开它的位置上。
+           * 印在最后交给语法分析那一步才摘（见 `next()`，`tccpp.c:3491`）。 */
+          this.tok = fr.str.toks[fr.i];
           this.tokc = fr.str.vals[fr.i];
           fr.i++;
           return this.tok;
         }
       }
-      if (found) return fr.str.toks[k] & ~SYM_FIELD;
+      if (found) return fr.str.toks[k];
       this.endMacro();
       // 一层宏读完了，它的递归防护也跟着出栈（`tccpp.c:3219`）
       if (nested.list.length > 0) nested.list.pop();
