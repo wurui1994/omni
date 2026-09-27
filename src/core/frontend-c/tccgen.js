@@ -7059,6 +7059,17 @@ export class CGen {  /**
    */
   typeofType() {
     this.skip(LPAR);
+    /* `typeof(__extension__ ({ … }))`：这个词在这儿也得先吃掉，而且要在「这是类型名吗」
+     * 之前 —— `__extension__` 在我们这儿是个**类型起始记号**（声明说明符里真有它），
+     * 不先吃就会拐进 `typeName()`，撞在 `{` 上报 `')' expected`。与 `unary()` 里
+     * 括号那一格（上头 `(__extension__({ … }))` 那一段）同一条理由、同一手法。
+     *
+     * 逼出这一格的是 CPython 的 `Py_MIN`/`Py_MAX`（`Include/pymacro.h:119`）：它自己
+     * 就是 `__extension__ ({ _Py_TYPEOF(x) _x = (x); … })`，于是**嵌套**一层
+     * （`Py_MIN(len, Py_MAX(…))`，`Objects/unicode_formatter.c:197`）里层那一整块
+     * 正好落在外层的 `_Py_TYPEOF(...)` 括号里。单层不嵌套时不经过这儿，所以从前
+     * 只有这一份文件红。 */
+    while (this.tok === TOK_EXTENSION) this.next();
     let ty;
     if (this.isTypeStart(this.tok)) {
       ty = this.typeName();
