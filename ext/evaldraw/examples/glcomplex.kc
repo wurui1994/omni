@@ -1,0 +1,30 @@
+// ext/evaldraw/examples/glcomplex.kc —— **`GL_COMPLEX` + `glnextcontour()` + 顶点色是 `setcol`**
+//
+// 三件事挤在一格例子里，因为它们是同一个写法的三个面（`evaldraw.txt:1641` 那张表）：
+//
+//   1. `glbegin(GL_COMPLEX)` —— EvalDraw 自己的 mode（标准 GL 里没有这个名字）；
+//   2. `glnextcontour()` —— **一圈收掉、接着攒下一圈**（`evaldraw.txt:1658`）；
+//   3. **顶点色是当前 `setcol`**，而且取色的时机是**这一格顶点**，不是 `glBegin` ——
+//      语料里最常见的写法正是 `glbegin(…); setcol(…); glvertex(…)…`
+//      （`games/traffic.kc:639`、`games/backgammon.kc:623`）。
+//
+// 画两格**互不相交**的方块：第一圈红、第二圈绿。两圈不相交时我们这一档与正本逐像素相同
+// （正本的 `GL_COMPLEX` 是按奇偶规则填整个多边形；"外圈套内圈"那一档我们会把洞填上，
+// 明写偏差，见 `ext/polydraw/gl-rt.js` 的 `gl_nextcontour` 头注）。
+//
+// 相机是这门语言自己那套（`+z` 前、`y` 往下、`x` 往左）—— 所以 `x` 负的那一圈
+// 出现在画面**右**边。这一格顺带把那个约定钉住了。
+
+()
+{
+   cls(0);
+   glbegin(GL_COMPLEX);
+      //红那一圈（x 负 -> 画面右边）
+   setcol(255, 0, 0);
+   glvertex(-.8,-.4,-2); glvertex(-.2,-.4,-2); glvertex(-.2,.4,-2); glvertex(-.8,.4,-2);
+   glnextcontour();
+      //绿那一圈：同一次 glBegin 里换颜色 —— 取色在顶点那一刻，所以这一圈是绿的
+   setcol(0, 255, 0);
+   glvertex(.2,-.4,-2); glvertex(.8,-.4,-2); glvertex(.8,.4,-2); glvertex(.2,.4,-2);
+   glend();
+}

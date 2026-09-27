@@ -103,6 +103,14 @@ export const EVALDRAW_3D = new Map([
      GL 子集不是 OpenGL —— +z 是前、y 往下、顶点色是当前 `setcol`。这张表挂在
      `EVALDRAW_GL` 后头（同键后来者胜），所以 `.kc` 用这一份、`.pss` 照旧走 `gl_begin`。 */
   ['glbegin/1', 'g3_glbegin'],
+  /* **顶点色是"这一格顶点交出去那一刻的 `setcol`"，不是 `glBegin` 那一刻的**
+     （2026-09-27）：语料里最常见的写法就是 `glbegin(GL_QUADS); setcol(…); glvertex(…)…`
+     （`games/traffic.kc:639`、`:757`，`games/backgammon.kc:623` 的棋盘也是）——
+     先前在 `glBegin` 那一刻取一次，于是这一族整片画成**上一格颜色**（探针里是纯白）。
+     三十多份 `.kc` 在 `glbegin`/`glend` 之间改过 `setcol`，这一格是它们颜色的正误。 */
+  ['glvertex/2', 'g3_glvert2'],
+  ['glvertex/3', 'g3_glvert3'],
+  ['glvertex/4', 'g3_glvert4'],
   /* 声音那一族：收下不响（见头注）。 */
   ['playsound/1', 'g3_nop1'], ['playsound/2', 'g3_nop2'], ['playsound/3', 'g3_nop3'],
   ['playsound/4', 'g3_nop4'], ['playsound/5', 'g3_nop5'],
@@ -198,6 +206,29 @@ export function gfx3FnDecls(host = false, withGL = false) {
             nm('g3_cx'), nm('g3_cy'), nm('g3_cz'),
             nm('g3_hx'), nm('g3_hy'), nm('g3_hz'), D.xres(), D.yres()])),
         ]),
+        iff(bin('==', nm('g3_glz'), num(0)), [
+          set('g3_glz', num(1)),
+          ex(call('gl_enable', [num(0x0b71)])),
+        ]),
+        ex(call('gl_begin', [nm('mode')])),
+        ret(num(0)),
+      ]),
+      /**
+       * **EvalDraw 的 `glVertex`**：交顶点之前把顶点色摆成**这一刻**的 `setcol`。
+       *
+       * 那门语言没有 `glColor`（`evaldraw.txt:1641` 那张表里一格都没有），顶点色就是
+       * 当前 2D 颜色。**取色的时机是这一格顶点，不是 `glBegin`** —— 语料里最常见的写法
+       * 正是"先 `glbegin`，再 `setcol`，然后一串 `glvertex`"（`games/traffic.kc:639`
+       * 的天空盒、`:757` 的精灵、`games/backgammon.kc:623` 的棋盘），而一次 `glBegin`
+       * 里换几回颜色做渐变的也有（三十多份 `.kc` 在 `glbegin`/`glend` 之间改过 `setcol`）。
+       * 先前在 `glBegin` 那一刻取一次，这两种写法画出来都是**上一格颜色**。
+       *
+       * 代价是宿主那条路上**每格顶点问设备一句 `getcol`**。这是眼下最老实的落法：
+       * 颜色的正本住在设备里（`setcol` 直接发给它），语言这一侧再存一份就有两个正本、
+       * 而 `drawspr`/KV6 那几族内部也会改它。要省这一句就得把"当前 2D 颜色"整格搬进
+       * 语言层（`setcol` 也过一格包装），那是另一件活 —— 先把颜色画对。
+       */
+      fn('g3_glvcol', [], [
         letR('c', rm('floor', [D.getcol()])),
         letR('r', rm('floor', [bin('/', nm('c'), num(65536))])),
         letR('g', rm('floor', [bin('/', bin('-', nm('c'),
@@ -206,11 +237,21 @@ export function gfx3FnDecls(host = false, withGL = false) {
           bin('*', nm('g'), num(256))))),
         ex(call('gl_color3', [bin('/', nm('r'), num(255)),
           bin('/', nm('g'), num(255)), bin('/', nm('b'), num(255))])),
-        iff(bin('==', nm('g3_glz'), num(0)), [
-          set('g3_glz', num(1)),
-          ex(call('gl_enable', [num(0x0b71)])),
-        ]),
-        ex(call('gl_begin', [nm('mode')])),
+        ret(num(0)),
+      ]),
+      fn('g3_glvert2', ['x', 'y'], [
+        ex(call('g3_glvcol', [])),
+        ex(call('gl_vertex2', [nm('x'), nm('y')])),
+        ret(num(0)),
+      ]),
+      fn('g3_glvert3', ['x', 'y', 'z'], [
+        ex(call('g3_glvcol', [])),
+        ex(call('gl_vertex3', [nm('x'), nm('y'), nm('z')])),
+        ret(num(0)),
+      ]),
+      fn('g3_glvert4', ['x', 'y', 'z', 'w'], [
+        ex(call('g3_glvcol', [])),
+        ex(call('gl_vertex4', [nm('x'), nm('y'), nm('z'), nm('w')])),
         ret(num(0)),
       ]),
       /**

@@ -151,6 +151,11 @@ export const POLYDRAW_GL = uniqMap([
   ['glclear/1', 'gl_clear'],
   ['glbegin/1', 'gl_begin'],
   ['glend/0', 'gl_end'],
+  /* **`glnextcontour()`**（`evaldraw.txt:1658`：「For use with glBegin(GL_COMPLEX).
+     Use between contours.」）：把攒到这儿的这一圈**当一格多边形收掉**，接着攒下一圈。
+     语料里两份用它（`geeky/gltest.kc`、`games/backgammon.kc`）—— 先前它一路掉到设备上，
+     当场报"这格设备上没有 glnextcontour"。它是"顶点表怎么分段"，属于语言那一层。 */
+  ['glnextcontour/0', 'gl_nextcontour'],
   ['glvertex/2', 'gl_vertex2'],
   ['glvertex/3', 'gl_vertex3'],
   ['glvertex/4', 'gl_vertex4'],
@@ -1220,6 +1225,25 @@ function glDrawDecls() {
       ...copyV('gl_ob', 'gl_no', nm('i'), 'ta'),
       ...copyV('gl_ob', 'gl_no', nm('j'), 'tb'),
       ...copyV('gl_ob', 'gl_no', nm('k'), 'tc'),
+      ret(num(0)),
+    ]),
+    /**
+     * `glnextcontour()`：**这一圈收掉、接着攒下一圈**（`GL_COMPLEX` 那一族）。
+     *
+     * 落法就是 `GL_POLYGON` 那一句（扇形拆三角），然后把顶点数清零 —— `gl_mode` 不动，
+     * 后面的顶点照旧攒在同一次 `glBegin` 里。
+     *
+     * **明写偏差**：正本的 `GL_COMPLEX` 是**按奇偶规则一次填整个多边形**（多圈可以是洞）。
+     * 我们这儿每一圈各自成一格多边形 —— 几圈**互不相交**时逐像素相同
+     * （`games/backgammon.kc` 的棋盘就是两条互不相交的锯齿带），而"外圈套内圈"
+     * 那一档会把洞填上（`geeky/gltest.kc` 的圆环会变成整块圆）。要做对得在这一层
+     * 铺一趟扫描线奇偶填充，那是另一件活。
+     */
+    fn('gl_nextcontour', [], [
+      ex(call('gl_need', [])),
+      letR('n', nm('gl_n')),
+      set('gl_n', num(0)),
+      ...loop(num(2), 0, 1, [ex(call('gl_tri', [num(0), bin('-', nm('i'), num(1)), nm('i')]))]),
       ret(num(0)),
     ]),
     /**
