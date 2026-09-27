@@ -123,7 +123,9 @@ export function printMir(mod) {
     L.push(`memory ${mod.mem.min} ${mod.mem.max === 0 ? 'unbounded' : mod.mem.max} pages`);
     for (const d of mod.mem.data) {
       const hex = d.bytes.map((b) => (b < 16 ? `0${b.toString(16)}` : b.toString(16))).join('');
-      L.push(`data @${d.off} ${d.bytes.length} bytes  ${hex}`);
+      /* 装地址的那几格跟在后头印（`reloc @偏移`）—— 搬 data 段时要改的就是它们。 */
+      const rel = (d.relocs ?? []).map((r) => ` reloc @${r.at}`).join('');
+      L.push(`data @${d.off} ${d.bytes.length} bytes  ${hex}${rel}`);
     }
   }
   for (const c of mod.closures) L.push(`closure ${c.make} -> ${c.funcName}  captures: ${c.captures.join(' ')}`);

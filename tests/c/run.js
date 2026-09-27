@@ -790,6 +790,73 @@ for (const f of pick('diag')) {
   }
 }
 
+/* ------------------------------- data 段里的指针有重定位记录（ADR-0047 的"第 2 道坎"）
+ *
+ * 线性内存那条腿上地址是**烤成数**的：`static const char *s = "hi";` 出来是
+ * `data @65552 8 bytes 1800010000000000` —— 那 8 个字节里装着 `"hi"` 的地址。
+ * 两份模块的 data 段各自从 64K 起，**合并就得搬其中一份**，而搬完之后字节里这种地址
+ * 必须跟着加同一个差。MIR 从前没有这条记录，所以谁也不知道哪 8 个字节要改 ——
+ * 那正是"MIR 层的链接器"卡住的地方。
+ *
+ * 这一条钉的是**记录本身**：哪几段该有 `reloc @偏移`、哪几段一条都不许有。
+ * 三种写法各一格（串的地址 / `&另一个静态量` / struct 成员里的串），再加一格反面
+ * （纯数的 data 段不许冒出记录 —— 把整数错当地址去搬，出来的是一个乱指的指针）。
+ * 照记录真把 data 段搬起来是下一刀（那还要"哪几个 i64 常量是地址"那一半）。
+ */
+{
+  const rdir = workDir('c-reloc');
+  const cases = [
+    {
+      name: 'str-ptr',
+      src: 'static const char *s = "hi";\nint main(void){ return (int)s[0]; }\n',
+      want: 1,
+    },
+    {
+      name: 'addr-of-static',
+      src: 'static int arr[4] = {1,2,3,4};\nstatic int *p = &arr[1];\nint main(void){ return *p; }\n',
+      want: 1,
+    },
+    {
+      name: 'in-struct',
+      src: 'static struct { const char *a; int n; } g = { "x", 7 };\nint main(void){ return g.n + (int)g.a[0]; }\n',
+      want: 1,
+    },
+    {
+      name: 'plain-numbers',
+      src: 'static int a[3] = {11,22,33};\nstatic double d = 1.5;\nint main(void){ return a[2] + (int)d; }\n',
+      want: 0,
+    },
+    {
+      /* 整数常量当指针：不是地址，搬 data 段时一个字节都不该动。 */
+      name: 'int-as-ptr',
+      src: 'static int *p = (int*)4096;\nint main(void){ return (int)(long)p; }\n',
+      want: 0,
+    },
+  ];
+  for (const c of cases) {
+    const name = `reloc/${c.name}`;
+    const path = join(rdir, `${c.name}.c`);
+    writeFileSync(path, c.src);
+    const g = cliRun(['emit', 'mir', path]);
+    if (g.code !== 0) {
+      bad(name, `    emit mir 失败：${(g.err ?? '').split('\n')[0]}`);
+      continue;
+    }
+    const lines = g.out.split('\n').filter((l) => l.startsWith('data @'));
+    const relines = lines.filter((l) => l.includes(' reloc @'));
+    /* 有记录的那几段：记录必须正好落在那 8 个字节的头上（`reloc @0`），
+       而且那一段本身就是 8 字节 —— `emitPtrBytes` 一次写一格指针。 */
+    const shapeBad = relines.filter((l) => !/^data @\d+ 8 bytes {2}[0-9a-f]{16} reloc @0$/.test(l));
+    if (relines.length !== c.want) {
+      bad(name, `    想要 ${c.want} 条 reloc，实得 ${relines.length}\n      ${lines.join('\n      ')}`);
+    } else if (shapeBad.length > 0) {
+      bad(name, `    记录的形状不对：\n      ${shapeBad.join('\n      ')}`);
+    } else {
+      ok(`${name} [${lines.length} 段 data、${relines.length} 条 reloc]`);
+    }
+  }
+}
+
 const rep = cache.report();
 process.stdout.write(`\n${pass} passed, ${fail} failed${skip ? `, ${skip} skipped` : ''}${rep === '' ? '' : `  （${rep}）`}\n`);if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n`);

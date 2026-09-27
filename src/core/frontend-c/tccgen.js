@@ -812,6 +812,16 @@ export class CGen {  /**
     /** @type {{off:number,bytes:number[]}[]} 攒着的 data 段（内存要等 dataOff 定了才能声明） */
     this.pendingData = [];
     /**
+     * **线性内存腿**：data 段里哪几格装的是**地址**（每格 8 字节，`off` 是绝对偏移）。
+     *
+     * 这条腿上没有真符号，地址是烤成数的；两份模块的 data 段各自从 64K 起，合并要搬
+     * 其中一份，而搬完之后字节里这种地址得跟着加同一个差 —— 所以先把"哪几格是地址"
+     * 记下来（`emitPtrBytes` push、最后随 `pendingData` 交给 `mod.addData` 的 `relocs`）。
+     * 照它搬是下一刀（MIR 层的链接器，ADR-0047 的"第 2 道坎"）。
+     * @type {{off:number}[]}
+     */
+    this.pendingPtr = [];
+    /**
      * native：初值里的**地址**（第九刀第二十八片）。`off` 是那块暂存区上的绝对偏移，
      * 八个字节宽；`kind`/`no` 是它指着的符号（`g` 全局 / `f` 函数 / `s` 串常量）。
      * 加数照旧写进 `pendingData` 的那八个字节里 —— 目标文件里 `POINTER64` 就是
@@ -2202,6 +2212,36 @@ export class CGen {  /**
   }
 
   /**
+   * 往 data 段写**一格地址**（8 字节）—— 线性内存腿上指针的静态初始化式走这儿。
+   *
+   * 与 `emitBytes(addr, 8, v)` 的区别只有一样：**顺手记一条"这 8 个字节装的是地址"**
+   * （`pendingPtr`，最后随 `pendingData` 一起交给 `mod.addData` 的 `relocs`）。
+   * 为什么要记：这条腿上地址是烤成数的，两份模块的 data 段各自从 64K 起 ——
+   * 合并就得搬其中一份，而搬完之后字节里这种地址必须跟着加同一个差。
+   * 没有这条记录，没人知道哪 8 个字节要改（ADR-0047 的"第 2 道坎"）。
+   *
+   * native 那条腿不走这儿：它有真符号，落的是 `putSymBytes` 那种按符号号的重定位。
+   */
+  emitPtrBytes(addr, value) {
+    this.emitBytes(addr, 8, value);
+    /**
+     * **只记真指到这块 data 段里去的那些**（`[64K, dataOff)`）。
+     *
+     * `static int *p = (int*)4096;` 那种"整数常量当指针"不是地址 —— 搬 data 段时它
+     * 一个字节都不该动。这条腿上"是不是我们这块里的地址"恰好问得出来：所有静态量都在
+     * `[MEM_PAGE, dataOff)` 里（页 0 空着，`NULL` 打不中），与 native 那侧
+     * `anonFixOf` 按地址区间认匿名静态块是同一招。
+     *
+     * 留一条**说清楚的缝**：真有人写 `(int*)65552` 这种恰好落在区间里的整数常量，
+     * 这儿会把它当地址记下来。C 里那本来就是"实现定义"的写法，而两条腿今天都会把它
+     * 当成那块内存来用，所以记下来与不记的差别只在"搬了之后它指哪儿"——
+     * 搬 data 段那一刀要是碰上真实代码里有这种写法，账记在这儿。
+     */
+    const v = Number(BigInt.asUintN(64, value));
+    if (v >= MEM_PAGE && v < this.dataOff) this.pendingPtr.push({ off: addr });
+  }
+
+  /**
    * 按位往 data 段里**并**（静态位域的初始化式，第四十五片）。
    *
    * 与 `emitBytes` 的区别是它**回头改**同一条记录：一个访问单元里的几个位域来自好几条
@@ -2499,7 +2539,7 @@ export class CGen {  /**
           return;
         }
         const addr = this.strData(bytes);
-        this.emitBytes(dest.addr + off, 8, BigInt(addr));
+        this.emitPtrBytes(dest.addr + off, BigInt(addr));
         return;
       }
       /* 是个更大的表达式的开头：把并好的串放回去，交给常量求值器。 */
@@ -2516,7 +2556,7 @@ export class CGen {  /**
           this.putSymBytes(dest.addr + off, { kind: 's', no: this.wstrConst(vals), add: 0n });
           return;
         }
-        this.emitBytes(dest.addr + off, 8, BigInt(this.wstrData(vals)));
+        this.emitPtrBytes(dest.addr + off, BigInt(this.wstrData(vals)));
         return;
       }
       this.ungetWith(TOK_LSTR, vals);
@@ -2565,7 +2605,7 @@ export class CGen {  /**
         return;
       }
       if (k === null) this.err('initializer element is not constant');
-      this.emitBytes(dest.addr + off, 8, k);
+      this.emitPtrBytes(dest.addr + off, k);
       return;
     }
     if (isFloat(ty.t)) {
@@ -2733,6 +2773,9 @@ export class CGen {  /**
        * 按**偏移**挑而不是按 `mark` 挑：这一格是刚清零刚写的，别人的地址不会落在里面。
        * 漏掉这一句的症状是 `char *gs[4] = {[0 ... 1] = "BB"}` 的第二格是空指针。 */
       const freshFix = this.pendingFix.filter((x) => x.off >= lo && x.off + 8 <= lo + size);
+      /* 线性内存腿上"哪几格是地址"那张表同理（`pendingPtr`）—— 复制出来的那几格
+         也各是一格地址，搬 data 段时要跟着改。 */
+      const freshPtr = this.pendingPtr.filter((x) => x.off >= lo && x.off + 8 <= lo + size);
       for (let k = 1; k < nb; k++) {
         for (const d of fresh) {
           this.pendingData.push({ off: d.off + k * size, bytes: d.bytes });
@@ -2742,6 +2785,7 @@ export class CGen {  /**
             off: x.off + k * size, kind: x.kind, no: x.no, add: x.add, after: x.after,
           });
         }
+        for (const x of freshPtr) this.pendingPtr.push({ off: x.off + k * size });
       }
       return;
     }
@@ -8323,7 +8367,19 @@ export function lowerC(path, text, host, defs, args) {
     : Math.ceil(stackTop / MEM_PAGE);
   mod.setMem(pages, 0);
 
-  for (const d of gen.pendingData) mod.addData(d.off, d.bytes);
+  /* data 段：顺手把"哪几格装的是地址"（`pendingPtr`）按段挂上去 —— 一条记录落在
+     哪一段里由绝对偏移算（`emitPtrBytes` 一次写 8 字节，所以它一定整格落在一段里）。
+     谁也不看这张表就与从前一个字节都不差；搬 data 段那一刀（MIR 层的链接器）要它。 */
+  const ptrAt = new Set(gen.pendingPtr.map((p) => p.off));
+  for (const d of gen.pendingData) {
+    const relocs = [];
+    if (ptrAt.size > 0) {
+      for (let k = 0; k + 8 <= d.bytes.length; k += 1) {
+        if (ptrAt.has(d.off + k)) relocs.push({ at: k, size: 8 });
+      }
+    }
+    mod.addData(d.off, d.bytes, relocs);
+  }
 
   const entry = new MirFunc('omni_main', [], T_I32);
   mod.addFunc(entry);

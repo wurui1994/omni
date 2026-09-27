@@ -1204,10 +1204,31 @@ export class MirModule {
     this.mem = { min, max, data: [] };
   }
 
-  /** 加一段初始字节。`bytes` 是 0..255 的数组。 */
-  addData(off, bytes) {
+  /**
+   * 加一段初始字节。`bytes` 是 0..255 的数组。
+   *
+   * `relocs` 是这段字节里**哪几格装的是地址**：`[{at, size}]`，`at` 是段内偏移、
+   * `size` 只许 8（这条腿上指针 8 字节）。为什么要记这一格（ADR-0047 的"第 2 道坎"）：
+   * 线性内存腿上地址是**烤成数**的 —— `static const char *s = "hi";` 出来就是
+   * `data @65552 8 bytes 1800010000000000`（里头那个 65560 是 `"hi"` 的地址）。
+   * 两份模块的 data 段各自从 64K 起，**合并就得搬其中一份**，而搬完之后这种"字节里的
+   * 地址"必须跟着加同一个差 —— 没有这条记录就没人知道哪 8 个字节要改。
+   * 记下来先（这一刀），照它搬是下一刀（MIR 层的链接器）。
+   *
+   * native 那条腿早有这一格（`globalBlob` 的 `fixups`，按符号号记），这儿记的是
+   * **绝对地址**那一种：线性内存腿上每一块静态量的 `[addr, addr+size)` 都是确定的，
+   * 所以"地址 → 是谁"由地址区间反查得到（`tccgen.js` 的 `anonFixOf` 早这么干）。
+   */
+  addData(off, bytes, relocs) {
     if (this.mem === null) throw new Error('mir: 没有线性内存，data 段无处可放');
-    this.mem.data.push({ off, bytes });
+    const rs = relocs === undefined || relocs === null ? [] : relocs;
+    for (const r of rs) {
+      if (!Number.isInteger(r.at) || r.at < 0 || r.at + 8 > bytes.length) {
+        throw new Error(`mir: data 段的重定位越界：at=${r.at}，这一段 ${bytes.length} 字节`);
+      }
+      if (r.size !== 8) throw new Error(`mir: data 段的重定位只有 8 字节宽（给了 ${r.size}）`);
+    }
+    this.mem.data.push(rs.length > 0 ? { off, bytes, relocs: rs } : { off, bytes });
   }
 
   addFunc(f) {
