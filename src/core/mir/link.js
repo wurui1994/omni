@@ -81,7 +81,18 @@ export function linkMir(a, b) {
     return r < REF_BIAS ? r + cbase : r;
   };
 
-  /* 3. 函数表：先算"B 的第 i 格落在 A 的哪一格"。桩换定义时**沿用 A 那一格的号**，
+  /* 3. C 符号表接上：B 的第 i 条落在 A 的哪一条（有就复用、没有就追加）。
+        两份翻译单元用的 libc 函数几乎一定不一样，所以这一步是必须的 ——
+        少了它 B 的每条 `CCALL` 都会指到 A 表里**另一个**符号上（静默调错函数）。 */
+  const cabiMap = b.cabi.map((sym) => {
+    const at = a.cabi.indexOf(sym);
+    if (at >= 0) return at;
+    a.cabi.push(sym);
+    a.cabiIndex.set(sym, a.cabi.length - 1);
+    return a.cabi.length - 1;
+  });
+
+  /* 4. 函数表：先算"B 的第 i 格落在 A 的哪一格"。桩换定义时**沿用 A 那一格的号**，
         于是 A 里所有 `CALL` 一个字都不用改。 */
   const fmap = new Array(b.funcs.length).fill(-1);
   const appended = [];
@@ -95,16 +106,26 @@ export function linkMir(a, b) {
       const af = a.funcs[at];
       const aStub = isStub(a, af);
       const bStub = isStub(b, bf);
-      if (aStub && !bStub) { fmap[i] = at; return; }   // 桩换定义
-      if (!aStub && bStub) { fmap[i] = at; return; }   // B 那边是桩：用 A 的定义
-      if (aStub && bStub) { fmap[i] = at; return; }    // 两边都是桩：真外部符号
+      if (aStub || bStub) { fmap[i] = at; return; }   // 桩那几档：共用 A 那一格
+      /* **文件局部的那一格改名**：C 里 `static` 的函数是文件局部的，两份各有一个
+         `helper` 完全合法（`src/main` 那 99 份里这种撞车量出来 10 个名字、22 处）。
+         所以只要有一边是局部的，就给 B 那一格挂个后缀 —— 报"重复定义"是错的。
+         记号由 C 前端打（`MirFunc.local`，`static` 与 inline 都打）。 */
+      if (af.local === true || bf.local === true) {
+        let n = 2;
+        while (a.funcIndex.has(`${bf.name}__lk${n}`)) n += 1;
+        bf.name = `${bf.name}__lk${n}`;
+        fmap[i] = a.funcs.length + appended.length;
+        appended.push(i);
+        return;
+      }
       throw new Error(`mir-link: ${bf.name} 两份里都有定义（重复定义）`);
     }
     fmap[i] = a.funcs.length + appended.length;
     appended.push(i);
   });
 
-  /* 4. 改写 B 的函数体：常量号、实参池里的常量号、`CALL` 的函数号。
+  /* 5. 改写 B 的函数体：常量号、实参池里的常量号、`CALL` 的函数号。
         **丢掉的那两格（`omni_main` / `main`）不改** —— 它们里头的调用点指着 `fmap` 里
         没有的号，改写会当场报，而它们本来就不进新模块。 */
   const keep = (bf) => bf.name !== 'omni_main' && bf.name !== 'main';
@@ -113,6 +134,7 @@ export function linkMir(a, b) {
       const [ka, kb] = OP_MODES[bf.op[i]];
       if (ka === 'r') bf.a[i] = remapRef(bf.a[i]);
       if (kb === 'r') bf.b[i] = remapRef(bf.b[i]);
+      if (bf.op[i] === OP.CCALL) bf.a[i] = cabiMap[bf.a[i]];
       if (bf.op[i] === OP.CALL) {
         const to = fmap[bf.a[i]];
         if (to < 0) throw new Error(`mir-link: ${bf.name} 调的那一格函数没落在新表里`);
@@ -126,7 +148,7 @@ export function linkMir(a, b) {
     }
   }
 
-  /* 5. 桩换定义：把 A 那一格的**身子**换成 B 的（名字与号都不动）。 */
+  /* 6. 桩换定义：把 A 那一格的**身子**换成 B 的（名字与号都不动）。 */
   b.funcs.forEach((bf, i) => {
     if (!keep(bf)) return;
     const at = fmap[i];
@@ -137,23 +159,18 @@ export function linkMir(a, b) {
     }
   });
 
-  /* 6. 新来的那几格追加。 */
+  /* 7. 新来的那几格追加。 */
   for (const i of appended) {
     const bf = b.funcs[i];
     a.funcIndex.set(bf.name, a.funcs.length);
     a.funcs.push(bf);
   }
 
-  /* 7. data 段与页数。B 的 `cabi` 里那些名字：A 已经有的不重复添
+  /* 8. data 段与页数。B 的 `cabi` 里那些名字：A 已经有的不重复添
         （CCALL 的号在上一步随函数体一起搬进来了 —— 所以两份的 cabi 表必须同号，
         这一刀的做法是**要求 B 的 cabi 是 A 的前缀**，不是就报：真要不同表得改写
         CCALL 的 `a`，那一格等有真例子再做）。 */
   for (const seg of b.mem.data) a.mem.data.push(seg);
   a.mem.min = a.mem.min + b.mem.min;
-  b.cabi.forEach((sym, i) => {
-    if (a.cabi[i] === sym) return;
-    throw new Error(`mir-link: 两份的 C 符号表对不上（第 ${i} 格：${a.cabi[i]} vs ${sym}）`
-      + ' —— 这一刀要求 B 的那张表是 A 的前缀');
-  });
   return a;
 }

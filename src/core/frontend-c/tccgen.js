@@ -7639,7 +7639,11 @@ export class CGen {  /**
      * （`__STDC_VERSION__` 是 199901L、没有 `__GNUC__`），于是 `__header_inline`
      * 展成的是**光秃秃的 `inline`**，`__sputc` 这种头里的函数身上没有 `static`。
      * 当外部符号发的话，十二个翻译单元一链就是十二个 `___sputc`。 */
-    if (this.native && (info.isStatic === true || isInline === true)) info.f.local = true;
+    /* **两条腿都打这个记号**（2026-09-27）：原来只有 native 打，因为只有写目标文件那一步
+       看它。可 MIR 层的链接器也要看它 —— C 里 `static` 的函数是**文件局部**的，两份
+       翻译单元各有一个 `helper` 是合法的，链的时候该给其中一个改名而不是报"重复定义"
+       （`src/core/mir/link.js`）。记号本身在别的腿上一个字节都不影响。 */
+    if (info.isStatic === true || isInline === true) info.f.local = true;
     /* K&R 的形参声明串（`tccgen.c:8811-8819`）：`)` 与 `{` 之间那几行。
      * 只有老式的函数、而且在文件作用域才认 —— 与 tcc 同一个条件。 */
     if (global && fnTy.ref.old === true) this.oldParamDecls(fnTy.ref.params);
