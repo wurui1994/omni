@@ -1501,7 +1501,57 @@ function loopEntryStmt(s, C, flag, name) {
  * 套一层 `if (旗子 == 0)`，循环的条件上再 `&& 旗子 == 0`（见 `stmtsOf` 头上那段）。
  */
 function stmtOf(s, C) {
-  return applyGuards(stmtOf1(s, C), C);
+  const pre = hoistSteps(s, C);
+  return applyGuards([...pre, ...stmtOf1(s, C)], C);
+}
+
+/**
+ * **表达式位置的 `++` / `--`**：把那一格副作用**提到这一句前头**，原地换成一格临时量。
+ *
+ *     a2[nbux[b]++] = a[i];        ->   let t = nbux[b];  nbux[b] = nbux[b] + 1;
+ *                                       a2[t] = a[i];
+ *
+ * （`geeky/sorttest.kc:180` 的桶排序就是这个写法。）
+ *
+ * 为什么用"改一遍 CST"而不是在 `exprOf` 里挂一格语句槽：这条路上 `exprOf` 被几十处调，
+ * 给它加一格"副作用往哪儿放"的出参要动整棵调用链；而 CST 这一层本来就已经在改
+ * （形参改名、static 改名都是原地改的）。
+ *
+ * **只在这两种语句上做**（`expr` 与 `retexpr`）：循环的**条件**里提出来是错的
+ * （那一格每转一圈都要算一次），所以那儿照旧当场报。语句位置的 `i++` 本身也不动
+ * （`stmtOf1` 那一格就是它）。
+ *
+ * 一句里有好几格时按**后序**提（里头的先提）—— C 里同一句的多个副作用之间本来就
+ * 没有定序，这儿取"从里到外、从左到右"，明写在这儿。
+ */
+function hoistSteps(s, C) {
+  const t = tag(s);
+  if (t !== 'expr' && t !== 'retexpr') return [];
+  const root = kids(s)[0];
+  if (root === undefined) return [];
+  const STEP = ['postinc', 'postdec', 'preinc', 'predec'];
+  /* 语句位置那一格自己不算（`i++;` 照旧走 `stmtOf1`）。 */
+  const skip = isList(root) && STEP.includes(tag(root)) ? root : null;
+  const out = [];
+  const walk = (x) => {
+    if (!isList(x)) return;
+    for (const k of kids(x)) walk(k);                  /* 后序：里头的先提 */
+    if (x === skip || !STEP.includes(tag(x))) return;
+    const ty = tag(x);
+    const step = stepOf(x, C, ty === 'postinc' || ty === 'preinc' ? +1 : -1);
+    const v = exprOf(kids(x)[0], C);
+    const tmp = C.fresh('pd_step');
+    /* 后缀取**旧值**（先存再加）、前缀取**新值**（先加再存）。 */
+    if (ty === 'postinc' || ty === 'postdec') {
+      out.push({ kind: 'let', name: tmp, type: REAL, init: v }, step);
+    } else {
+      out.push(step, { kind: 'let', name: tmp, type: REAL, init: v });
+    }
+    /* 原地换成 `(name 临时量)`。 */
+    x.items = [{ kind: 'atom', value: 'name' }, { kind: 'atom', value: tmp }];
+  };
+  walk(root);
+  return out;
 }
 
 /** 正在降的那几格旗子都套上护卫（`C.gotoActive` 空着就原样回）。 */

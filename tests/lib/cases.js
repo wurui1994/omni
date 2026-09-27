@@ -708,7 +708,11 @@ export const PDNOISE = [
  * `break` **不在循环里**（方言当场报，语料里 `geeky/mandel.kc` 就是这个写法）、
  * `continue` 也会跳出而不是回去重测条件。这两行钉住的正是那两件事。
  */
-export const EVDOWHILE = ['i=5 n=10', 'j=7 s=16'];
+export const EVDOWHILE = ['i=5 n=10', 'j=7 s=16',
+  /* **表达式位置的 `++`**（副作用提到这一句前头，见 adapter 的 `hoistSteps`）：
+     `a[p++]=7` 取**旧值** 2 => a[2]=7、p 变 3；`a[++q]=9` 取**新值** 6 => a[6]=9、q 变 6。
+     前后缀搞反的话这四个数会变成 7,9,3,6 -> 0,9,3,6（a[3] 而不是 a[2]）。 */
+  'step=7,9,3,6'];
 
 /**
  * **末尾那句不带分号的表达式就是返回值**（`ext/evaldraw/examples/tailexpr.kc`）。

@@ -20,4 +20,12 @@
    j = 0; s = 0;
    do { j++; if (j % 2 == 0) continue; s += j; } while (j < 7);
    printf("j=%g s=%g\n", j, s);
+
+      //**表达式位置的 `++`/`--`**（`geeky/sorttest.kc:180` 的桶排序那个写法）：
+      //后缀取旧值、前缀取新值 —— 副作用提到这一句前头（见 adapter 的 `hoistSteps`）
+   static a[8];
+   p = 2; q = 5;
+   a[p++] = 7;                   //旧值 2 => a[2]=7，p 变 3
+   a[++q] = 9;                   //新值 6 => a[6]=9，q 变 6
+   printf("step=%g,%g,%g,%g\n", a[2], a[6], p, q);
 }
