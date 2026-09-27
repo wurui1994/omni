@@ -74,13 +74,19 @@ const legsArg = (() => {
 })();
 const filters = argv.filter((a) => !a.startsWith('--') && a !== legsArg?.join(','));
 /**
- * **默认只跑"编出来的"那两条腿：`--mode js` 与 `omni build` 的 C。**
+ * **默认只跑 `--mode js` 这一条**（`--legs js,c` 才带上 C，`--legs interp,js,c` 才带解释器）。
  *
- * 主线是**编到 C**（SPEC §一之二），而 JS 那条腿走的是同一条编译管线（IR → MIR → JS 后端）。
- * 解释器那条腿最慢、也最不重要 —— 它不是这门语言的去处。要量它就明着写
- * `--legs interp,js,c`。
+ * 为什么够：三条腿走的是**同一条编译管线**（python → 标准 IR → MIR），只有最后一段
+ * 发射不同。语义上答错的那几格几乎都在管线里，js 这一条就照得出来；C 那条腿每份例子要多
+ * 一次"编 C + 链"（量出来一份两三秒），提交之前带上它（`--legs js,c`）就够。
+ *
+ * **真正的低效不在腿数上，在每份例子都重起一个进程**：`print(1)` 这么一份
+ * `node src/cli.js run --mode js` 要 **1.59s**，其中 node 自己启动 0.54s，
+ * 剩下 **~1.05s 是我们这台编译器每个进程都要重付的**（整棵 `src/core` 的模块加载 +
+ * 语法表）。26 份例子就是 27 秒白付。**下一刀是把这一格去掉**：一个进程里把编译器
+ * 加载一次、循环编所有例子（`drive.js` 的 `sxTextOf` 那条口子），而不是靠并行去盖住它。
  */
-const LEGS = legsArg ?? ['js', 'c'];
+const LEGS = legsArg ?? ['js'];
 
 const files = readdirSync(examples).filter((f) => f.endsWith('.py')).sort()
   .filter((f) => filters.length === 0 || filters.some((x) => f.includes(x)));
