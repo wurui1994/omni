@@ -33,7 +33,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { filesIn, flagsFor, perFileDefs, pyconfExtra } from './scope.js';
+import { filesIn, flagsFor, incDirFor, perFileFlags, pyconfExtra } from './scope.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..', '..');
@@ -50,9 +50,10 @@ const filters = argv.filter((a, i) => !a.startsWith('-')
 const SRC = argOf('--src', process.env.OMNI_CPYTHON
   ?? join(homedir(), 'Documents', 'Lang', 'reference', 'cpython'));
 const WORK = join(root, '.omni-cache', 'py-rt');
-const INC = argOf('--inc', join(WORK, 'inc'));
 const DIRS = argOf('--dirs', 'Objects,Python,Parser,Modules').split(',');
 const ALL_MODULES = argv.includes('--all-modules');
+/* 探出来的 `pyconfig.h` 落哪儿 —— **按范围分开放**（见 scope.js 的 `incDirFor`）。 */
+const INC = argOf('--inc', null) ?? incDirFor(WORK, ALL_MODULES);
 const CC = argOf('--cc', process.env.CC ?? 'clang');
 const JOBS = Number(argOf('--jobs', '4'));
 /** 对不上的份数上限（棘轮）。0 = 一份都不许对不上。 */
@@ -121,7 +122,11 @@ const KNOWN_BAD = new Map([
     '同一族的另一面：`HAS_APPLE_SYSTEM_LOG` 看 `MAC_OS_X_VERSION_MIN_REQUIRED`，那一格是 '
     + '`AvailabilityMacros.h` 从 clang 给的 `__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__` '
     + '推出来的（量到 clang 给 270000），我们没有 -> 算成 0 -> apple system log 那一整块'
-    + '（`os_log` 那几个名字）我们没编。下一刀：给 osx 的预定义表补上那一格'],
+    + '（`os_log` 那几个名字）我们没编。'
+    + '**补那一格不够**：试过 `-D__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__=270000`，'
+    + '下一道门是 `os/log.h:35` 的 `#if !__has_builtin(__builtin_os_log_format)` 自己 `#error`。'
+    + '也就是说这一笔的真价钱是那个内建（它要在编译期把格式串与实参打成一个缓冲区），'
+    + '不是那格版本宏 —— 记着，别再去试第二遍'],
 ]);
 
 if (!existsSync(join(SRC, 'Include', 'Python.h'))) {
@@ -190,7 +195,7 @@ async function one(d, f) {
   const src = join(SRC, d, f);
   const ours = `${stem}-ours.o`;
   const theirs = `${stem}-cc.o`;
-  const defs = perFileDefs(name, SRC);
+  const defs = perFileFlags(name, SRC);
   const a = await run(process.execPath, [CLI, ...flagsFor(ours, INC, SRC, defs), src]);
   if (!a.out.includes(ours)) return { name, kind: 'skip', why: '我们还编不出（sweep 那把尺子的账）' };
   const b = await run(CC, [...ccFlags(theirs, SRC, defs), src]);

@@ -176,6 +176,48 @@ const gccAsmMc68881 = () => links('int main(void){\n'
 const unistdDefinesPosixThreads = () => compiles('#include <unistd.h>\n'
   + '#ifndef _POSIX_THREADS\n#error no\n#endif\nint main(void){ return 0; }\n');
 
+/* ---- `Modules/` 那一棵带进来的几格（扩面那一刀补的）--------------------------
+ *
+ * 这几格全在 `Modules/` 下才读得到，所以要 `--extra …,Modules` 才进名单。
+ * 四个真探针照 `configure.ac` 的程序原样跑，剩下的是"借不借那个第三方库"的决定。 */
+
+/** IPv6 能不能真开（`configure.ac:5028-5050`：建一个 `AF_INET6` 的 socket 看成不成）。 */
+const ipv6Works = () => {
+  const r = runs('#include <sys/types.h>\n#include <sys/socket.h>\n'
+    + 'int main(void){ int s = socket(AF_INET6, SOCK_STREAM, 0);\n'
+    + '  if (s < 0) return 1; return 0; }\n');
+  return r !== null && r.status === 0;
+};
+
+/** `getpgrp(0)` 编得过吗（`configure.ac:5980-5986`）。 */
+const getpgrpHasArg = () => compiles('#include <unistd.h>\nint main(void){ getpgrp(0); return 0; }\n');
+
+/**
+ * `major` / `minor` / `makedev` 从哪个头来（`configure.ac:6042` 那段链接测试，**三选一**：
+ * 先试只 `<sys/types.h>`，不成试 `<sys/mkdev.h>`，再不成试 `<sys/sysmacros.h>`）。
+ * 探一次记住 —— 两格宏问的是同一件事。
+ */
+let devMacros = 'not-yet';
+function deviceMacrosIn() {
+  if (devMacros !== 'not-yet') return devMacros;
+  const prog = (inc) => `${inc}int main(void){ makedev(major(0), minor(0)); return 0; }\n`;
+  if (links(prog('#include <sys/types.h>\n'))) devMacros = null;
+  else if (links(prog('#include <sys/mkdev.h>\n#include <sys/types.h>\n'))) devMacros = 'MAJOR_IN_MKDEV';
+  else if (links(prog('#include <sys/types.h>\n#include <sys/sysmacros.h>\n'))) devMacros = 'MAJOR_IN_SYSMACROS';
+  else devMacros = null;
+  return devMacros;
+}
+
+/** POSIX 信号量真能用吗（`configure.ac:6560-6585` 那个程序原样跑）。 */
+const posixSemaphoresWork = () => {
+  const r = runs('#include <unistd.h>\n#include <fcntl.h>\n#include <stdio.h>\n'
+    + '#include <semaphore.h>\n#include <sys/stat.h>\n'
+    + 'int main(void){ sem_t *a = sem_open("/autoconf", O_CREAT, S_IRUSR|S_IWUSR, 0);\n'
+    + '  if (a == SEM_FAILED) { perror("sem_open"); return 1; }\n'
+    + '  sem_close(a); sem_unlink("/autoconf"); return 0; }\n');
+  return r !== null && r.status === 0;
+};
+
 /* ---- 算名单：`pyconfig.h.in 能定义的` ∩ `这几份源码真测到的` ---------------- */
 
 const conf = readFileSync(join(SRC, 'pyconfig.h.in'), 'utf8');
@@ -339,6 +381,42 @@ for (const name of needed) {
   }
 }
 
+/**
+ * **`PY_CHECK_FUNC` 那一族要换一种问法** —— 从 `configure.ac` 里**读出来**，不写死。
+ *
+ * CPython 自己有两种"有没有这个函数"的检查，而宏名上看不出是哪一种：
+ *   * `AC_CHECK_FUNCS(x)` 问的是**链得上吗**（上面那个 `hasFunc`）；
+ *   * `PY_CHECK_FUNC(x, [头])`（`configure.ac:57-70`）问的是**这几份头声明了它吗**
+ *     —— 它的程序体就是 `void *x = 函数名;`，连都不连。
+ *
+ * 差别会咬人：`fdatasync` 在 macOS 上 libSystem **真有这个符号**（链得上、还跑得通），
+ * 可 `<unistd.h>` 里**没有声明**。于是链法答"有"、`PY_CHECK_FUNC` 答"没有" ——
+ * 本机那份真 CPython 的 pyconfig 写的就是 `/* #undef HAVE_FDATASYNC *​/`。
+ * 我们从前答"有"，`Modules/posixmodule.c:4478` 于是去拿 `fdatasync` 的地址，
+ * 报 `'fdatasync' undeclared` —— **clang 在同一份配置下一字不差地也报这一句**，
+ * 所以那不是前端的欠账，是这一格答错了。
+ *
+ * 这儿的办法是**照 `configure.ac` 的原文来**：把每一处 `PY_CHECK_FUNC` 的名字、头、
+ * 宏名解析出来，按它的问法探。换棵 CPython 树就跟着变，不用改这儿一个字。
+ */
+const PY_CHECK_RE = /PY_CHECK_FUNC\(\s*\[(\w+)\]\s*,\s*\[([\s\S]*?)\]\s*(?:,\s*\[(\w+)\]\s*)?\)/g;
+const confAc = readFileSync(join(SRC, 'configure.ac'), 'utf8');
+let pyCheckN = 0;
+for (const m of confAc.matchAll(PY_CHECK_RE)) {
+  const fn = m[1];
+  /* m4 的四联字 `@%:@` 就是 `#`（`configure.ac` 里的 `@%:@include <unistd.h>`） */
+  const heads = m[2].replaceAll('@%:@', '#').trim();
+  const macro = m[3] ?? `HAVE_${fn.toUpperCase()}`;
+  if (!needed.has(macro)) continue;
+  pyCheckN += 1;
+  HOW.set(macro, () => (compiles(`${heads}\nint main(void){ void *x = ${fn}; return x != 0; }\n`)
+    ? 1 : null));
+}
+if (pyCheckN === 0) {
+  process.stderr.write('gen-pyconf.js: 从 configure.ac 里一条 `PY_CHECK_FUNC` 都没解析出来'
+    + ' —— 那份文件的形状变了，这一族会静悄悄退回"链得上吗"那种问法\n');
+}
+
 
 /* ---- 两格真探针（照 configure.ac，按族认不出来的那种）--------------------- */
 
@@ -480,6 +558,47 @@ const DECIDED = [
   ['_PYTHREAD_NAME_MAXLEN', process.platform === 'darwin' ? 63 : (process.platform === 'linux' ? 15 : null),
     '**按平台一张表**，照 `configure.ac:8284-8292`（Darwin 63、Linux/Android 15、'
     + 'SunOS 31、FreeBSD 19…，表外的不定义）。线程名超了要截断，`Python/thread_pthread.h` 用它'],
+
+  /* ---- `Modules/` 整棵带进来的那十三格（扩面那一刀补的）。
+   *
+   * 四格是真探针（照 `configure.ac` 的程序原样跑），剩下九格是**借不借那个第三方库 /
+   * 可选模块**的决定 —— 那不是编译器的活，所以由我们直接答。答"不借"的代价很清楚：
+   * 那几份模块的 `.c` 编不出来，而那**不是我们的欠账**（它要的库压根不在）。 */
+  ['ENABLE_IPV6', 'probe:ipv6',
+    '`configure.ac:5003-5055`：`--enable-ipv6` 缺省 **yes（如果支持）**，而"支持"是**真跑**'
+    + '一个建 `AF_INET6` socket 的程序。这一格是语义（`socketmodule.c` 拿它开整片 IPv6 的路），'
+    + '所以照它探'],
+  ['GETPGRP_HAVE_ARG', 'probe:getpgrp-arg',
+    '`configure.ac:5980-5986`：`getpgrp(0);` 编得过才定义（SysV 那一支的签名）。'
+    + '`posixmodule.c` 拿它挑怎么调'],
+  ['MAJOR_IN_MKDEV', 'probe:major-mkdev',
+    '`configure.ac:6042-6060` 那段三选一的链接测试：`major`/`minor`/`makedev` 只在 '
+    + '`<sys/types.h>` 里就不定义这两格，在 `<sys/mkdev.h>` 里定这一格，在 '
+    + '`<sys/sysmacros.h>` 里定另一格'],
+  ['MAJOR_IN_SYSMACROS', 'probe:major-sysmacros', '同上（同一次探针的另一半）'],
+  ['POSIX_SEMAPHORES_NOT_ENABLED', 'probe:posix-sem',
+    '`configure.ac:6560-6590`：**真跑** `sem_open` + `sem_close` + `sem_unlink`，跑不成才定义'
+    + '（注意是反着的：这一格的名字是"没有"）。`_multiprocessing` 拿它挑后端'],
+  ['HAVE__GETPTY', null,
+    'IRIX 专有的 `_getpty`（`AC_CHECK_FUNCS`）—— 这台机器上没有。'
+    + '它没落进"函数探针"那一族是因为名字里那个额外的下划线（`HAVE__GETPTY` -> `_getpty`）'],
+  ['PY_SQLITE_ENABLE_LOAD_EXTENSION', null,
+    '**不借 sqlite**（`configure.ac:4580` 一带那一族要 `libsqlite3`）。'
+    + '代价是 `Modules/_sqlite/` 编不出来 —— 它要的库不在，不是我们缺一格'],
+  ['PY_SQLITE_HAVE_SERIALIZE', null, '同上'],
+  ['PY_SSL_DEFAULT_CIPHERS', null,
+    '**不借 OpenSSL**（`configure.ac:8095-8125`）。代价是 `Modules/_ssl.c` / `_hashopenssl.c` '
+    + '编不出来'],
+  ['PY_SSL_DEFAULT_CIPHER_STRING', null, '同上'],
+  ['WITH_EDITLINE', null,
+    '**不借 libedit**（`configure.ac:6887-6940`：`readline` 模块拿它当后端）'],
+  ['WITH_DECIMAL_CONTEXTVAR', 1,
+    '照 configure 的缺省 **yes**（`configure.ac:4518-4534`：不给值就是 yes）。'
+    + '这一格**是语义**：`_decimal` 的上下文存在 contextvar 里（协程本地）而不是线程本地。'
+    + '就算哪天不借 `_decimal`，答对了也不亏'],
+  ['WITH_NEXT_FRAMEWORK', null,
+    '非 framework 构建（`configure.ac:3461` 只在 `--enable-framework` 那一支定义）——'
+    + '与 `_PYTHONFRAMEWORK` 是空串那一格一致'],
 ];
 for (const [name, value, why] of DECIDED) {
   WHY.set(name, why);
@@ -490,6 +609,21 @@ for (const [name, value, why] of DECIDED) {
   if (value === 'probe:unistd-pthreads') {
     /* 反着来：unistd.h 自己定了，这一格就**不**定义 */
     HOW.set(name, () => (unistdDefinesPosixThreads() ? null : 1));
+    continue;
+  }
+  if (value === 'probe:ipv6') { HOW.set(name, () => (ipv6Works() ? 1 : null)); continue; }
+  if (value === 'probe:getpgrp-arg') { HOW.set(name, () => (getpgrpHasArg() ? 1 : null)); continue; }
+  if (value === 'probe:major-mkdev') {
+    HOW.set(name, () => (deviceMacrosIn() === 'MAJOR_IN_MKDEV' ? 1 : null));
+    continue;
+  }
+  if (value === 'probe:major-sysmacros') {
+    HOW.set(name, () => (deviceMacrosIn() === 'MAJOR_IN_SYSMACROS' ? 1 : null));
+    continue;
+  }
+  if (value === 'probe:posix-sem') {
+    /* 反着来：跑得成就**不**定义（这一格的名字是"没有"） */
+    HOW.set(name, () => (posixSemaphoresWork() ? null : 1));
     continue;
   }
   HOW.set(name, () => value);

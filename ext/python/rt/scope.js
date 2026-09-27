@@ -94,14 +94,37 @@ export function soabi(src) {
 }
 
 /**
- * **按文件加的 `-D`**：CPython 的 `Makefile` 给某几份单独加开关，我们站在构建系统的
- * 位置上就得照它给。现在只有一条 —— `Python/dynload_shlib.c` 要 `SOABI`
- * （`Makefile.pre.in:1922-1925` 那条规则，一模一样的形状）。
+ * 那几份**摘 HACL\* 的**（CPython 把那套形式验证过的密码学实现 vendored 在
+ * `Modules/_hacl/` 里）。它们 `#include "krml/internal/types.h"` 一类，而那些头在
+ * `Modules/_hacl/include` 下 —— `Makefile` 给它们加的是 `LIBHACL_CFLAGS`
+ * （`Makefile.pre.in:239`，configure 里拼的第一条就是那个 `-I`）。
+ * **不是"不借第三方库"**：这套代码就在借来的那棵树里，少的只是一格 `-I`。
  */
-export function perFileDefs(name, src) {
+const HACL_MODULES = new Set([
+  'blake2module.c', 'hmacmodule.c', 'md5module.c',
+  'sha1module.c', 'sha2module.c', 'sha3module.c',
+]);
+
+/**
+ * **按文件加的开关**：CPython 的 `Makefile` 给某几份单独加东西，我们站在构建系统的
+ * 位置上就得照它给。两条：
+ *   * `Python/dynload_shlib.c` 要 `-DSOABI`（`Makefile.pre.in:1922` 那条规则）；
+ *   * 摘 HACL\* 那六份要 `-I Modules/_hacl/include`（`LIBHACL_CFLAGS`）。
+ */
+export function perFileFlags(name, src) {
   if (name === 'Python/dynload_shlib.c') return [`-DSOABI="${soabi(src)}"`];
+  if (name.startsWith('Modules/') && HACL_MODULES.has(name.slice('Modules/'.length))) {
+    return ['-I', join(src, 'Modules', '_hacl', 'include')];
+  }
   return [];
 }
+
+/**
+ * 探出来的 `pyconfig.h` 落哪儿。**按范围分开放**：名单是"能定义的宏 ∩ 源码真读到的"，
+ * 所以 `--all-modules` 那一趟的名单比缺省那一趟大（多出 `Modules/` 整棵带进来的十三格）。
+ * 共用一份就会拿"少几格的那份"去编整棵 `Modules/` —— 那是静悄悄答错。
+ */
+export const incDirFor = (work, allModules = false) => join(work, allModules ? 'inc-all' : 'inc');
 
 /**
  * 要量的那一串 `[目录, 文件名]`。`filters` 非空时只留名字里带那几个词的。

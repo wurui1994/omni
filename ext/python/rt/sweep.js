@@ -30,7 +30,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CORE_MODULES, filesIn, flagsFor, perFileDefs, pyconfExtra } from './scope.js';
+import { CORE_MODULES, filesIn, flagsFor, incDirFor, perFileFlags, pyconfExtra } from './scope.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..', '..');
@@ -46,7 +46,6 @@ const filters = argv.filter((a, i) => !a.startsWith('-')
 const SRC = argOf('--src', process.env.OMNI_CPYTHON
   ?? join(homedir(), 'Documents', 'Lang', 'reference', 'cpython'));
 const WORK = join(root, '.omni-cache', 'py-rt');
-const INC = argOf('--inc', join(WORK, 'inc'));
 /* 三棵都量（`gen-pyconf.js` 那七格 `Python/` 带进来的宏已经照 `configure.ac` 决定过）。 */
 const DIRS = argOf('--dirs', 'Objects,Python,Parser,Modules').split(',');
 
@@ -55,6 +54,8 @@ const DIRS = argOf('--dirs', 'Objects,Python,Parser,Modules').split(',');
  * 名单与理由在 `scope.js` 的 `CORE_MODULES`。整棵都想量：`--all-modules`。
  */
 const ALL_MODULES = argv.includes('--all-modules');
+/* 探出来的 `pyconfig.h` 落哪儿 —— **按范围分开放**（见 scope.js 的 `incDirFor`）。 */
+const INC = argOf('--inc', null) ?? incDirFor(WORK, ALL_MODULES);
 /** 编得出 `.o` 的最少份数（ok + warn）。往上走是好事，往下走是回归。 */
 const MIN_OK = Number(argOf('--min', '172'));
 const JOBS = Number(argOf('--jobs', '4'));
@@ -83,7 +84,7 @@ if (!existsSync(PYCONF)) {
 }
 
 /** 一份 `.c` 的编译开关在 `scope.js`（两把尺子共用 —— 少一格数就变了）。 */
-const flags = (out, name) => flagsFor(out, INC, SRC, perFileDefs(name, SRC));
+const flags = (out, name) => flagsFor(out, INC, SRC, perFileFlags(name, SRC));
 
 /**
  * 一条诊断归到哪一族。**「22 份编不出」这个数没有意义**，

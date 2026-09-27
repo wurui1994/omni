@@ -475,11 +475,57 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
          （`pytime.c`：clang 编"带运行期回退"的两支，我们只编 `clock_gettime` 那支）与
          `__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__`（`pylifecycle.c`：
          `HAS_APPLE_SYSTEM_LOG` 因此是 0，`os_log` 那一块我们没编。clang 给 270000）。
+         **补那格版本宏不够**（试过）：下一道门是 `os/log.h:35` 的
+         `#if !__has_builtin(__builtin_os_log_format)` 自己 `#error` —— 这一笔的真价钱是
+         那个内建（编译期把格式串与实参打成一个缓冲区），不是版本宏。
       3. **`realpath` 的 `$DARWIN_EXTSN` 改名**我们故意不改（量过：本机两个符号给同一个答案）。
     - **这把尺子第一次跑就抓出一格配置错**：`import.c` 从前多要一个
       `PyModule_FromSlotsAndSpec` —— 顺着查下去是 `HAVE_DYNAMIC_LOADING` 被当成函数探针、
       答成了"没有"，于是**我们少编了一整块代码**（见第 11 条那一段）。
       "编得出"那把尺子对此一无所知：少编一块，`.o` 照样干干净净地出来。
+
+14. **`Modules/` 整棵量了一遍**（`npm run py:sweep -- --all-modules`）。
+
+    先给那 13 个还没决定的宏一格一格写了决定（`gen-pyconf.js` 的 `DECIDED`）：四格是**真探针**
+    （照 `configure.ac` 的程序原样跑：IPv6 真建一个 `AF_INET6` socket、`getpgrp(0)` 编不编得过、
+    `major`/`minor` 从哪个头来的三选一、POSIX 信号量真 `sem_open` 一次），
+    九格是**借不借那个第三方库**的决定（sqlite / OpenSSL / libedit / Tk…，一律不借），
+    外加 `WITH_DECIMAL_CONTEXTVAR` 照 configure 缺省给 1（那是语义，不是"借不借"）。
+
+    ```
+    $ npm run py:sweep -- --all-modules
+    共 255 份：**编出 .o 241**（干净 241 + 带警告 0）、编不出 14（108s）
+    ```
+
+    编不出那 14 份，按**根因**（不是按诊断）：
+    - **7 份是"那个库我们不借"**：`_dbmmodule`(ndbm) / `_gdbmmodule`(gdbm) /
+      `_lzmamodule`(lzma) / `_ssl` + `_hashopenssl`(OpenSSL) / `_tkinter` + `tkappinit`(X11+Tk)。
+    - **2 份是别的平台**：`_winapi`(windows.h) / `overlapped`(winsock2.h)。
+    - **1 份压根不该在核心构建里编**：`_testcapimodule.c` 自己 `#error`
+      （"_testcapi must test the public Python C API"）。
+    - **2 份要构建系统先跑一步**：`frozen.c` 与 `Modules/getpath.c`（都要生成的 frozen 头）。
+    - **2 份是我们的欠账**（下一刀）：`_scproxy.c` 报 `'}' expected (got '__attribute__')`、
+      `socketmodule.c` 报 `bad preprocessor expression: #if ! 0 || ! 0 ( 0 )`
+      （那是 `TargetConditionals.h` 里 clang 的 `__is_target_os(...)` —— 与 tcc 同一句诊断）。
+
+    路上量出两格**配置错**，两格都是"答案看着合理、其实答错了"：
+    - **摘 HACL\* 那六份**（`md5module` / `sha1` / `sha2` / `sha3` / `blake2` / `hmac`）报
+      `krml/internal/types.h` 不在。那**不是"不借第三方库"** —— HACL\* 就 vendored 在借来的
+      那棵树里（`Modules/_hacl/include`），少的只是 `Makefile` 给它们加的那一格 `-I`
+      （`LIBHACL_CFLAGS`）。补进 `scope.js` 的 `perFileFlags` 之后六份全出 `.o`。
+    - **`HAVE_FDATASYNC` 从前答"有"，真 CPython 答"没有"**。根因是 CPython 有**两种**
+      "有没有这个函数"的检查，而宏名上看不出是哪一种：`AC_CHECK_FUNCS` 问"链得上吗"，
+      `PY_CHECK_FUNC`（`configure.ac:57-70`）问"**这几份头声明了它吗**"（程序体是
+      `void *x = 函数名;`）。macOS 上 `fdatasync` 真有这个符号、却没在 `<unistd.h>` 里声明，
+      于是两种问法答案相反。答错的代价：`posixmodule.c:4478` 去拿它的地址、报 undeclared ——
+      **clang 在同一份配置下一字不差地报同一句**，所以那不是前端的欠账。
+      修法是**照 `configure.ac` 的原文来**：把每一处 `PY_CHECK_FUNC` 的名字/头/宏名解析出来，
+      按它的问法探（换棵树自己跟着变）。量完拿**本机那份真 python 的 `pyconfig.h`** 对了六格
+      （`CHROOT`/`CTERMID_R`/`FDATASYNC`/`FSYNC`/`GETPAGESIZE`/`KQUEUE`），一格不差。
+
+    顺手记一条**下一把尺子的点子**：本机装着的真 python 的 `pyconfig.h` 是个**免费的 oracle**
+    —— 纯机器探针那一族（`HAVE_*` / `SIZEOF_*`）可以逐格对账。版本与构建选项不同的那几格
+    （借不借哪个库）要先排掉。
 
 ## 二、进度
 
