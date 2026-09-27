@@ -202,11 +202,35 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
    走到哪儿了：`unicodeobject.c` 现在过了原子那一格、也过了那格数组，**新的边界在
    Argument Clinic 生成的那张关键字元组**上 —— `Objects/clinic/unicodeobject.c.h:230`
    的 `_kwtuple` 静态初始化式报 `constant expression expected`。
-   已经排除的（各写了最小复现，与 clang 逐字节相同）：`(long)(3ULL<<30) | ((long)5<<48)`
+   这一轮把它**收到两行**，而且顺手照出一处**静静答错**的：
+
+   ```c
+   static PyObject o = PyObject_HEAD_INIT(&PyTuple_Type);   // 两行就复现
+   ```
+
+   根子是 `PyObject` 的第一格是个**匿名 union**（`object.h:127`：
+   `int64_t ob_refcnt_full` / `struct { uint32_t ob_refcnt; … }` /
+   `_Py_ALIGNED_DEF(…) char _aligner` 三选一），而我们这台前端在这两处上还不对：
+
+   - **匿名 union 的成员用嵌套花括号初始化 —— 答错，而且不报**（比编不过坏）：
+
+     ```c
+     struct S { union { long full; struct { unsigned r; …; }; char pad; }; void *t; };
+     static struct S s = { { 7 }, 0 };
+     printf("%ld %u\n", s.full, s.r);   // clang: 7 7    我们: 0 0
+     ```
+
+     具名的嵌套结构体是对的（`struct In in;` 那一档答 7），所以缺的正是"匿名成员
+     算不算一层花括号"。
+   - **`_Alignas` 不认**（`_Py_ALIGNED_DEF` 展开成它）：`error: ';' expected (got '_Alignas')`。
+     顺带记一条已有的账：`__attribute__((aligned))` 在这台前端是**吃掉**的
+     （见 `tccdefs.js` 的 `COMPILE_PREAMBLE` 那段注释）—— 对齐这件事整体还没落地，
+     而 CPython 的对象头正好指着它。
+
+   已经排除的嫌疑（各写了最小复现，与 clang 逐字节相同）：`(long)(3ULL<<30) | ((long)5<<48)`
    那种折叠、`&extern结构.成员.子成员` 与 `&extern数组[2].成员` 那种地址常量、
-   `.ob_base = { { {…}, (&T) }, (2) }` 这种嵌套指定初始化。所以剩下的那一格更窄
-   （嫌疑在 `PyGC_Head _this_is_not_used;` 那个被 `.ob_base` 跳过的成员，
-   或者真 `PyObject_VAR_HEAD` 里那一格的形状），下一刀从那儿接着量。
+   `.ob_base = { { {…}, (&T) }, (2) }` 这种**具名**的嵌套指定初始化。
+   下一刀就从那两格接着走（匿名 union 那一格优先 —— 它是"答错"，不是"还没接"）。
 
 ## 二、进度
 
