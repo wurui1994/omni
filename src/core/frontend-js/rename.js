@@ -257,24 +257,33 @@ export function applyRenames(m, ren) {
  * @returns {Set<string>} 已经靠改写解决掉的本地名
  */
 /**
- * 这个模块里**任何一层**绑过的名字（形参 / 局部 / catch / 类名 / for 头 都算）。
+ * 这个模块里**任何一层局部作用域**声明过的名字（`shadowed` 那张同一份规矩，加 catch 的形参）。
  *
- * 谁要它：`renameImports` 要判"改名的**落点**会不会被某一层的局部名遮住"。
- * `walk` 那份遮蔽表管的是**旧名**（`mkSpan` 被局部遮住就不动它），而真正咬人的是**新名**：
- * `import { span as mkSpan }` 改写成 `span(…)` 之后，`glr/lex.js` 里那两句
- * `const span = mkSpan(file, at, end);` 反过来把它遮住了 —— 于是调用的是**那个 Span 对象**。
- * 症状：原生腿上凡是走语法的语言（asy 与 `ext/` 那十一门）一律
- * `runtime error: undefined is not a function`，而 node 那条腿全绿（那儿没有改写这件事）。
+ * 为什么要它：下面那一格把 `import { span as mkSpan }` 的引用**改写成 `span`**。可这个模块
+ * 里如果有一格局部的 `const span = …`，改写之后 `mkSpan(…)` 就落到那格局部量上 ——
+ * 一路静默，直到真跑时报 `TypeError: not a function`。
+ *
+ * 量到的那一格（2026-09-27）：`glr/lex.js:79` 是 `import { span as mkSpan } from
+ * '../source/diag.js'`，而它自己第 824 行有 `const span = mkSpan(file, i, bestEnd);`。
+ * 于是**自己编出来的那份 omni** 一读任何"借来的语言"就炸在词法器里（`.py` / `.go` / `.pss`
+ * 全中），而 `emit js` / `emit c` 一声不响地编过去 —— 没有一条判据压着这条组合。
+ *
+ * 收得**偏保守**（哪怕遮蔽发生在别的函数里也算）：代价只是那一格回落到老办法
+ * （`link.js` 摊一句模块级 `const mkSpan = span;`，那句不会被函数体里的局部量遮住），
+ * 好处是这条判断不必与 `walk` 的作用域栈严丝合缝 —— 判错的方向永远是"少改一格"。
  */
 function boundAnywhere(x, out) {
-  if (Array.isArray(x)) { for (const y of x) boundAnywhere(y, out); return out; }
+  if (Array.isArray(x)) {
+    for (const y of x) boundAnywhere(y, out);
+    return out;
+  }
   if (x === null || typeof x !== 'object') return out;
   if (isNode(x)) {
-    const own = shadowed(x);
-    if (own !== null) for (const n of own) out.add(n);
-    /* catch 的形参不走 `shadowed`（那一格只遮 handler 那一段）—— 这儿只问"绑过没有"。 */
+    const names = shadowed(x);
+    if (names !== null) for (const nm of names) out.add(nm);
+    /* `catch (e)` 的形参：`shadowed` 不管它（`walk` 里单独处理），这儿一并收。 */
     if (x.type === 'Try' && x.param !== null && x.param !== undefined) {
-      for (const n of patNames(x.param, [])) out.add(n);
+      for (const nm of patNames(x.param, [])) out.add(nm);
     }
   }
   for (const k of Object.keys(x)) {
@@ -287,9 +296,8 @@ function boundAnywhere(x, out) {
 export function renameImports(m, mods) {
   const ren = new Map();
   const done = new Set();
-  /* 落点被某一层局部名遮住的那几格**不改写** —— 回落到 `link.js` 摊一句
-     `const 本地名 = 提供方名;`。那一句在**模块级**，那儿没有局部遮蔽，所以它是对的。 */
-  const inner = boundAnywhere(m.body, new Set());
+  /* 改写的**目标名**被这个模块里某格局部声明遮住时，这一格不改写（见 `boundAnywhere`）。 */
+  const bound = boundAnywhere(m.body, new Set());
   for (const imp of m.imports) {
     const target = mods.get(imp.path);
     if (target === undefined) continue;
@@ -297,7 +305,7 @@ export function renameImports(m, mods) {
       if (sp.kind !== 'named') continue;
       const provider = target.exports.get(sp.imported);
       if (provider === undefined || provider === sp.local) continue;
-      if (inner.has(provider)) continue;
+      if (bound.has(provider)) continue;
       ren.set(sp.local, provider);
       done.add(sp.local);
     }
