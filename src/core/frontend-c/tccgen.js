@@ -606,6 +606,20 @@ function cmpOpOf(t, uns) {
  * tcc 那边把关系运算符写成两段（`TOK_ULT/TOK_UGE` 与 `TOK_ULE..TOK_GT` 的区间），
  * 这里照原样判：那两段之间有编号空隙，写成一条 `>=` 会把空隙里的东西也当成关系运算符。
  */
+/**
+ * 常量折叠认得的比较（给 `kfoldOf` 用）。无符号那四条按 **64 位位模式**比 ——
+ * 折出来的是数学值，而 `ULT` 一族比的是位。`EQ`/`NE` 两种解释的位相同，不分岔
+ * （与 `cmpOpOf` 的注一致）。
+ */
+const U64 = (v) => BigInt.asUintN(64, v);
+const CMP_FOLD = new Map([
+  [OP.EQ, (a, b) => a === b], [OP.NE, (a, b) => a !== b],
+  [OP.LT, (a, b) => a < b], [OP.GE, (a, b) => a >= b],
+  [OP.LE, (a, b) => a <= b], [OP.GT, (a, b) => a > b],
+  [OP.ULT, (a, b) => U64(a) < U64(b)], [OP.UGE, (a, b) => U64(a) >= U64(b)],
+  [OP.ULE, (a, b) => U64(a) <= U64(b)], [OP.UGT, (a, b) => U64(a) > U64(b)],
+]);
+
 function precedence(t) {
   if (t === TOK_LOR) return 1;
   if (t === TOK_LAND) return 2;
@@ -922,6 +936,11 @@ export class CGen {  /**
      * @type {{name:string,gno:number,addr:number,size:number,align:number}[]}
      */
     this.anonStatics = [];
+    /** 正在算一个**静态初始化式**里的指针值吗（`initScalar` 那一格置）。
+     * 只有这一格上 `常量 ? a : b` 会**只发被选中那一支** —— 见 `exprCond`。
+     * 为什么不在整条表达式一路上都折：那会改掉每个函数体里 `? :` 发出的指令，
+     * 而那一层的纪律是"不做常量折叠"（文件头偏离 3），一堆 MIR 快照判据也跟着变。 */
+    this.staticInit = false;
     /** @type {Map<number,{off:number,bytes:number[]}>} 静态位域按地址找那一条记录（见 `emitBitfield`） */
     this.statBits = new Map();
     /** 这个单元用到堆了吗（`malloc` 那一族）。用到才发那条 `__omni_heap_init` */
@@ -1449,6 +1468,15 @@ export class CGen {  /**
       const v = this.kfoldOf(f, f.a[i]);
       if (v === null || (f.aux[i] === CVT_ZEXT && v < 0n)) return null;
       return v;
+    }
+    /* **比较**：静态初始化式里 `常量 ? a : b` 的那个条件多半就是一次比较
+     * （CPython 的 `_Py_LATIN1_CHR(CH)` 是 `(CH) < 128 ? … : …`）。见 `CMP_FOLD`。 */
+    if (CMP_FOLD.has(op)) {
+      const x = this.kfoldOf(f, f.a[i]);
+      if (x === null) return null;
+      const y = this.kfoldOf(f, f.b[i]);
+      if (y === null) return null;
+      return CMP_FOLD.get(op)(x, y) ? 1n : 0n;
     }
     if (op !== OP.ADD && op !== OP.SUB && op !== OP.MUL) return null;
     const a = this.kfoldOf(f, f.a[i]);
@@ -2972,6 +3000,7 @@ export class CGen {  /**
       let fix = null;
       /* 收尾（`this.f = outer`）**抄在两条路上**而不是写一个 `finally`：
          `finally` 不在自编译子集里（ADR-0011），而这一格的收尾只有一句。 */
+      this.staticInit = true;
       try {
         const v = this.decay(this.exprEq());
         /* 地址是不是常量：先问常量池，再让 `kfoldOf` 把那一小段指令折一遍 ——
@@ -3000,8 +3029,10 @@ export class CGen {  /**
           if (k !== null && this.native) fix = this.anonFixOf(k);
         }
         this.f = outer;
+        this.staticInit = false;
       } catch (e) {
         this.f = outer;
+        this.staticInit = false;
         throw e;
       }
       if (fix !== null) {
@@ -4935,9 +4966,63 @@ export class CGen {  /**
    * 「不必知道第二支的类型就能给第一支开槽」—— 也就是不必为此再扫一遍记号。
    * f64 装得下 float 的每一个值，所以公共类型是 `float` 时最后那次 FCVT 是精确的。
    */
+  /**
+   * 静态初始化式里 `常量 ? a : b` 那个**没走到的支**：按深度把它的记号跳掉，一条指令不发。
+   *
+   * 纯词法，止于**深度 0** 上的 `:`（我们这一层的那个）、`,`、`;`，或任何一个把我们
+   * 带出当前层的收尾符（`)` `]` `}`）。嵌在里头的 `? :` 自己配对（`q` 那个计数）。
+   * 为什么不"解析但不发指令"：那需要 tcc 的 `nocode_wanted` 那套全局开关，这一片没有，
+   * 而死支的记号本来就不必看懂 —— C 说它不求值。
+   */
+  skipCondArm() {
+    let d = 0;
+    let q = 0;
+    for (;;) {
+      const t = this.tok;
+      if (t === TOK_EOF) this.err("':' expected");
+      if (t === LPAR || t === LBRACK || t === LBRACE) { d++; this.next(); continue; }
+      if (t === RPAR || t === RBRACK || t === RBRACE) {
+        if (d === 0) return;
+        d--; this.next(); continue;
+      }
+      if (d === 0 && t === QUEST) { q++; this.next(); continue; }
+      if (d === 0 && t === COLON) {
+        if (q === 0) return;
+        q--; this.next(); continue;
+      }
+      if (d === 0 && (t === COMMA || t === SEMI)) return;
+      this.next();
+    }
+  }
+
   exprCond() {
     const v = this.exprLor();
     if (this.tok !== QUEST) return v;
+    /* **静态初始化式**里的 `常量 ? a : b`（`this.staticInit`）：条件折得出来就只发被
+     * 选中那一支，另一支的记号纯词法跳掉（`skipCondArm`）。C 本来就说没走到的那一支
+     * 不求值，所以这不是"优化"，是让这一格**算得出来**：下面那条路发的是 IF + 两个槽，
+     * 而静态初始化式要的是一个编译期的数（或一条重定位），反着读读不出分支。
+     *
+     * 逼出这一格的是 CPython 的 `_Py_LATIN1_CHR(CH)`（`pycore_global_strings.h:936`）：
+     *   `(CH) < 128 ? (PyObject*)&…strings.ascii[(CH)] : (PyObject*)&…latin1[(CH) - 128]`
+     * Argument Clinic 生成的每一份 `_kwtuple` 里都可能有它（量到 75 处、8 份头），
+     * 于是 `Modules/itertoolsmodule.c` 一族整份卡在 `initializer element is not constant`。 */
+    if (this.staticInit && v.mem === null && v.slot === null) {
+      const k = this.kfoldOf(this.f, v.ref);
+      if (k !== null) {
+        this.next();
+        if (k !== 0n) {
+          /* GNU 的 `x ? : y` 里第一支省掉就是 x 自己 —— 条件是常量、只求值了一次。 */
+          const a = this.tok === COLON ? v : this.gexpr();
+          this.skip(COLON);
+          this.skipCondArm();
+          return a;
+        }
+        if (this.tok !== COLON) this.skipCondArm();
+        this.skip(COLON);
+        return this.exprCond();
+      }
+    }
     this.next();
     const f = this.f;
     /* GNU 的 `x ? : y`（第三十六片，tcctest.c:1304）：中间那一项省掉就是
