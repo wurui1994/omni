@@ -401,7 +401,21 @@ function exprOf(x, C, want = 'val') {
     return want === 'cond' ? truthy(v) : v;
   }
   if (t === 'str') {
-    return { kind: 'string', value: cUnescape(unquote(leaf(kids(x)[0]))) };
+    /**
+     * **串字面量在值的位置上是一格数**（串表下标，见 `initVals` / `strOfDecl` 的头注）。
+     *
+     * 这门语言的值只有 double：`static fmt = "You %s a%s %s.\n"`（`geeky/rscr_strings.kc:11`）
+     * 里那个 `fmt` 是个普通变量，装的是句柄。**串只能来自字面量**（这门语言没有串运算），
+     * 所以"任何一格串值都是表里的某一格"是条**定理**，不是近似 —— 运行期格式串因此能
+     * 靠"按下标分派"落地（见 `printfOf` 的动态那一支），不必带一台格式串解析器。
+     *
+     * 真要一格串的那几处（`printf` 的格式串字面量、着色器源码、宿主调用里的文件名）
+     * **都不走这儿**：它们各自在 `printfOf` / `SHADER_FNS` / `callOf` 里按 CST 直接取。
+     */
+    const v = cUnescape(unquote(leaf(kids(x)[0])));
+    const i = internStr(C, v);
+    C.strVals.add(i);
+    return num(i);
   }
   /* **字符字面量**（`'+'`、`'\n'`）：值是那个字符的编码（`RScript.htm` 算子表第二行
      "substitutes a character for its integer value"）。空的 `''` 当 0、多字符取第一个。 */
@@ -2154,27 +2168,86 @@ function strOfDecl(C) {
   };
 }
 
+/** 运行期格式串那几格函数的名字（按元数分）。 */
+const prfName = (n) => `pd_prf${n}`;
+
+/**
+ * **运行期格式串那一格函数**（`pd_prfN(下标, a0…)`）：串表里每一格"落在值的位置上的串"
+ * 一支 `if`，支里是照那个格式串编译期展开的那几句（见 `printfOf` 动态那一支的头注）。
+ *
+ * 只对 `C.strVals` 那几格发（值位置上的串），着色器源码/文件名那些不进来 ——
+ * 它们压根不会被当格式串用，进来只是白发一堆代码。
+ */
+function prfDecl(C, n) {
+  const params = ['fi'];
+  for (let i = 0; i < n; i += 1) params.push(`a${i}`);
+  const vals = [];
+  for (let i = 0; i < n; i += 1) vals.push(nameRef(`a${i}`));
+  const body = [];
+  for (const [text, idx] of C.strs) {
+    if (!C.strVals.has(idx)) continue;
+    let stmts;
+    try {
+      stmts = fmtBodyOf(text, vals, C);
+    } catch { continue; }   /* 那一格串不是能用的格式串（实参个数对不上）—— 不发这一支 */
+    body.push({
+      kind: 'if', cond: bin('==', nameRef('fi'), num(idx)), then: stmts, else_: [],
+    });
+  }
+  body.push({ kind: 'return', values: [num(0)] });
+  return {
+    kind: 'fn',
+    name: prfName(n),
+    params: params.map((p) => ({ name: p, type: REAL })),
+    ret: REAL,
+    body,
+  };
+}
+
 function printfOf(e, C) {
   const args = kids(e).slice(1);
   const fmtTok = args[0];
-  if (fmtTok === undefined || tag(fmtTok) !== 'str') {
-    throw new Error('eval->IR: `printf` 的格式串不是字面量（运行期格式化还没接）');
+  if (fmtTok === undefined) throw new Error('eval->IR: `printf` 一个实参都没给');
+  /**
+   * **格式串是个变量**（`geeky/rscr_strings.kc:18` 的 `printf(fmt,verb[i],art[j],noun[j])`）。
+   *
+   * 不必带一台运行期的格式串解析器：串只能来自字面量（这门语言没有串运算），所以那一格
+   * 值必然是**串表里的某一格**（见 `exprOf` 的 `str` 分支）。落法是**按下标分派** ——
+   * `pd_prfN(下标, 实参…)` 里一格串一支，每支都是照那个格式串**编译期**展开的那几句。
+   */
+  if (tag(fmtTok) !== 'str') {
+    const fi = exprOf(fmtTok, C);
+    const vals = args.slice(1).map((a) => exprOf(a, C));
+    C.dynPrf.add(vals.length);
+    C.fns.set(prfName(vals.length), { params: [REAL, ...vals.map(() => REAL)], ret: REAL });
+    return [{
+      kind: 'expr-stmt',
+      expr: { kind: 'call', fn: nameRef(prfName(vals.length)), args: [fi, ...vals] },
+    }];
   }
   const fmt = cUnescape(unquote(leaf(kids(fmtTok)[0])));
   /* `%s` 那几格实参：拿到的可能是**串表下标**（串摆进数组之后就只剩一个数，
      见 `initVals` 与 `strOfDecl` 的头注）—— 那就在这儿换回串。 */
+  const vals = args.slice(1).map((a) => exprOf(a, C));
+  return fmtBodyOf(fmt, vals, C);
+}
+
+/**
+ * **一句 `printf` 的身体**：格式串（编译期已知）+ 那几格实参表达式 -> 语句表。
+ * 两处用它：格式串是字面量那一支，与运行期按串表分派那几支（`prfDecl`）。
+ *
+ * `%s` 那几格实参**可能是串表下标**（串摆进变量/数组之后就只剩一个数）—— 那就套一层
+ * `pd_strof` 换回串。末尾那个 `true` = **多给的实参丢掉不报**：这门语言的正本就是 C 的
+ * `printf`（`polydraw_src` 里直接转给 libc），语料里 `geeky/remez8.kc:112` 就多给一格。
+ */
+function fmtBodyOf(fmt, vals0, C) {
   const convs = argConvs(fmt);
-  const vals = args.slice(1).map((a, i) => {
-    const v = exprOf(a, C);
+  const vals = vals0.map((v, i) => {
     if (convs[i] !== 's' || v.kind === 'string') return v;
     C.needStrOf = true;
     C.fns.set('pd_strof', { params: [REAL], ret: { kind: 'string' } });
     return { kind: 'call', fn: nameRef('pd_strof'), args: [v] };
   });
-  /* 末尾那个 `true` = **多给的实参丢掉不报**：这门语言的正本就是 C 的 `printf`
-     （`polydraw_src` 里 `printf` 直接转给 libc），多给的那几格由 C 丢掉。语料里
-     `geeky/remez8.kc:112` 写的是 `fprintf("%+.12f",coef[b][i],i)` —— 多给一格。
-     公共层的默认仍然是"多给少给都报"（那条纪律见 `fmt.js` 的 `fmtToIR` 头注）。 */
   const stmts = fmtToStmts(fmt, vals, C.tyCtx(), 'eval->IR', C.fresh, true);
   if (C.host.who !== 'evaldraw') return stmts;
   return textAndStdout(stmts, C);
@@ -3591,6 +3664,8 @@ export function evalToIR(cst, host, src = '') {
     needNoise: false,                   /* 用过 `NOISE`/`NOISE3D` 没有（`noise-rt.js`） */
     needNet: false,                     /* 用过 `net_send`/`net_recv` 没有（`net-rt.js`） */
     needStrOf: false,                   /* 用过"串表下标 -> 串"没有（见 `strOfDecl`） */
+    strVals: new Set(),                 /* 落在**值的位置**上的那几格串（下标）—— 运行期格式串按它分派 */
+    dynPrf: new Set(),                  /* 运行期格式串要发哪几个元数（`pd_prfN`） */
     usedGL: false,                      /* 这份脚本用过 GL 那一族没有（每帧初态要不要发） */
     /* 用到了宿主那"每帧盖一次"的哪几格（`xres`/`yres`/`mousx`/`mousy`）——
        用到的那几格各有一格模块级量，每帧开头问设备一次盖上去。 */
@@ -3929,9 +4004,6 @@ export function evalToIR(cst, host, src = '') {
     decls.unshift(...rt(C, netGlobalDecls()));
     decls.push(...rt(C, netFnDecls()));
   }
-  /* **串表那一格**（`pd_strof`）：摆在最后 —— 那张表要等整份程序都降完才全
-     （见 `strOfDecl` 的头注）。 */
-  if (C.needStrOf) decls.push(...rt(C, [strOfDecl(C)]));
   /* `static x = 3;` 的初值：**在入口里做一次**（方言的 `(global 名 类型)` 不许带初值 ——
      `lower/lower.js` 那一段写着"要非零初值就让 adapter 在入口里摆一句 set"）。
      摆在帧循环**之前**，所以它一辈子只跑一趟 —— 那正是 static 的意思。 */
@@ -3972,6 +4044,13 @@ export function evalToIR(cst, host, src = '') {
     /* 2D graphing 那一档：网格摆成默认（`setgrid(-4,3,4,-3)`）+ 颜色那三格箱子开出来。 */
     ...(C.graph !== null ? graphInitStmts(C.graph.col) : []),
   ];
+  /* **串那两族摆在最后发**（`pd_prfN` / `pd_strof`）：入口里那几句 `static x = "…"` 的初值
+     也往串表里添东西（`initStmts` 是上面刚拼的），所以这两格必须等它之后再发 ——
+     先前摆在前头，于是"入口里才第一次出现的那个格式串"没有分支，脚本安静地什么都不印
+     （`geeky/rscr_strings.kc` 的 `static fmt = ""` 就是这一格）。
+     `pd_prfN` 自己会用到 `pd_strof`，所以在它前头。 */
+  for (const n of [...C.dynPrf].sort((a, b) => a - b)) decls.push(...rt(C, [prfDecl(C, n)]));
+  if (C.needStrOf) decls.push(...rt(C, [strOfDecl(C)]));
   /* **用过画图那一族就把设备带上**（`gfx-rt.js` 生成的那十几格函数 + 一块帧缓冲），
      并在入口末尾补一句 `gfx_present()` —— EvalDraw 的脚本多半不自己调 `refresh()`
      （宿主每帧替它交一次），所以"一帧画完就交出去"是这条腿上的默认。 */

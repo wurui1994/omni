@@ -24,4 +24,12 @@ static names[3] = {"alpha", "beta", "alpha"};
    printf("same=%g\n", names[0] == names[2]);
       //越出那张表的下标：回空串（不报）
    printf("none=[%s]\n", 999);
+
+      //**格式串本身是个变量**（`geeky/rscr_strings.kc:18`）：串只能来自字面量，
+      //所以那一格值必然是表里的某一格 ⇒ 按下标分派（`pd_prfN`），不必带解析器
+   static f1 = "one %g [%s]\n";
+   printf(f1, 5, names[1]);
+   f2 = f1; printf(f2, 6, names[0]);
+   if (1) f3 = "two %s-%s\n"; else f3 = f1;
+   printf(f3, names[0], names[1]);
 }

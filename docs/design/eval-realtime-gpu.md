@@ -3658,3 +3658,35 @@ redo: …
 判据：`ext/evaldraw/examples/gotoentry.kc`（两行数都是照 C 手算的：`deep n=21 i=5`、
 `back s=15 c=6`），`tests/lower/run.js --only gotoentry` 2/2；
 goto 那一族八份语料脚本逐份跑过（kenken/calend/morse/chess/bowling/backgammon/hull3d/stratego）。
+
+### 36.21 **格式串是个变量**（`rscr_strings.kc` 通了，语料 227 / 228）
+
+`geeky/rscr_strings.kc` 把格式串摆进数组、再取出来印：
+
+    static msg[2] = {"You awakened %s.\n", "You awakened a%s.\n"};
+    printf(msg[vowel], name);
+
+先前 `printfOf` 只认"第一个实参是字面串"，其余一律报不接。现在分两条路：
+
+* **字面串那条**（老路）：编译期把格式串切开，直接铺一串 `putn`/`puts`；
+* **变量那条**（新路）：`printf(表达式, v…)` 降成一格调用 `pd_prfN(下标, v…)`，
+  `N` 是实参个数。`pd_prfN` 的体是**按串表下标分支**：串表里第 `i` 格如果长得像格式串，
+  就生成一支"照第 `i` 格那份字面量铺出来的印法"。
+
+这一手能成立是因为一条定理，不是近似：**这门语言里的串只可能来自字面量**
+（值只有 double；串在值位上就是 §36.18 那个串表下标；语言没有任何串运算能造出新串）。
+所以"运行时拿到的格式串"必然是编译期见过的某一格 —— 分支表是**完全**的。
+
+踩过的坑（都静默）：
+
+* **发射次序**：`pd_prfN` 与 `pd_strof` 的体必须在 `initStmts` 建完**之后**再压进去。
+  静态初值里的串（`static msg[2] = {…}`）是在建 `initStmts` 那一步才 intern 的，
+  先发射就只看得见"函数体里出现过"的那几格 —— 症状是**一个字都不印**。
+* 查这一格不许用管道里的 printf（§36.13 那条：块缓冲 + `$exit` 不冲）。当时是把
+  rscr_strings 那段套进 40 趟的循环、把输出撑大才看见 `You awakened an anvil.` /
+  `You awakened a bomb.` —— `%s` 与 `a%s` 两支冠词都对。
+
+判据：`ext/evaldraw/examples/strtab.kc` 末尾三行（格式串走变量 / 走赋值 / 走两支 `if`），
+`tests/lower/run.js --only strtab` 2/2。
+
+语料账 **227 / 228**，剩的一份是 `magsword.kc` —— 脚本自己的毛病（见 §36.8）。

@@ -802,7 +802,11 @@ export const EVNETBOX = ['field=1,102,3', 'slot=10,20,130,40', 'plain=107',
  * （`same=1`）、没登记过的下标回空串。`geeky/calend.kc:100` 的那七个星期名靠它。
  */
 export const EVSTRTAB = ['n0=[alpha]', 'n1=[beta]', 'n2=[alpha]',
-  'mix=[lit][beta]', 'same=1', 'none=[]'];
+  'mix=[lit][beta]', 'same=1', 'none=[]',
+  /* **格式串是个变量**那三行（`printf(f1,…)` / 抄过一手的 `f2` / 两支 `if` 里给的 `f3`）：
+     串只能来自字面量 ⇒ 那一格值必然是串表里的某一格，所以按下标分派就够
+     （`pd_prfN`，见 adapter 的 `prfDecl`）——`geeky/rscr_strings.kc` 靠的就是它。 */
+  'one 5 [beta]', 'one 6 [alpha]', 'two alpha-beta'];
 
 /**
  * **`goto` 的两格硬骨头**（`ext/evaldraw/examples/gotoentry.kc`）。两个数都是照 C 的
