@@ -7,7 +7,11 @@
 // 只放"口径"，不放跑法：怎么并发、门定多少，各自的脚本自己说。
 
 import { readdirSync, existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/** 这一份自己在哪儿 —— 算"冻出来的头落哪儿"要用（见 `perFileFlags`）。 */
+const here = dirname(fileURLToPath(import.meta.url));
 
 /**
  * `Modules/` 那张名单：**真进 libpython 的那几份**，从借来的那棵树里**读出来**，不写死。
@@ -137,13 +141,22 @@ export const flagsFor = (out, inc, src, extra = []) => ['c', 'obj', '-std=c11',
  * `gen-pyconf.js` 里对 `SOABI_PLATFORM` 的决定 —— **不定义**，所以这儿也不加后缀。
  */
 export function soabi(src) {
+  const [maj, min] = pyVersion(src);
+  return `cpython-${maj}${min}`;
+}
+
+/**
+ * 参考树的版本号（`Include/patchlevel.h` 里**读**出来的两段）。
+ * `Makefile` 的 `$(VERSION)` 就是 `大.小`，`getpath.c` 要它（见 `perFileFlags`）。
+ */
+export function pyVersion(src) {
   const t = readFileSync(join(src, 'Include', 'patchlevel.h'), 'utf8');
   const maj = t.match(/#\s*define\s+PY_MAJOR_VERSION\s+(\d+)/);
   const min = t.match(/#\s*define\s+PY_MINOR_VERSION\s+(\d+)/);
   if (maj === null || min === null) {
     throw new Error('scope.js: 读不出 Include/patchlevel.h 里的版本号 —— 那份头的形状变了');
   }
-  return `cpython-${maj[1]}${min[1]}`;
+  return [maj[1], min[1]];
 }
 
 /**
@@ -168,6 +181,31 @@ export function perFileFlags(name, src) {
   if (name === 'Python/dynload_shlib.c') return [`-DSOABI="${soabi(src)}"`];
   if (name.startsWith('Modules/') && HACL_MODULES.has(name.slice('Modules/'.length))) {
     return ['-I', join(src, 'Modules', '_hacl', 'include')];
+  }
+  /* **冻出来的那些头在我们这边**（参考树只读，所以落 `.omni-cache/py-rt/gen/`）。
+   * 两份的写法不一样，所以两个 `-I` 都给：
+   *   `Python/frozen.c` 写 `#include "frozen_modules/os.h"`（相对 `Python/`）；
+   *   `Modules/getpath.c` 写 `#include "Python/frozen_modules/getpath.h"`。
+   * 头是 `freeze.js`（第四把尺子）拿**我们自己编出来的 `_freeze_module`** 冻的；
+   * 没冻过的时候这两份照旧编不出（`sweep` 那边按"要构建系统先跑一步"记着）。 */
+  if (name === 'Python/frozen.c' || name === 'Modules/getpath.c') {
+    const gen = join(here, '..', '..', '..', '.omni-cache', 'py-rt', 'gen');
+    const inc = ['-I', join(gen, 'Python'), '-I', gen];
+    if (name === 'Python/frozen.c') return inc;
+    /* `getpath.c` 另有七格 `-D`（`Makefile.pre.in:1885-1891` 那条规则）——
+     * 它们是**构建系统与 configure 的答案**，不是探得出来的，所以在这儿明着定：
+     *   `PREFIX` / `EXEC_PREFIX` —— configure 的 `--prefix` 缺省值 `/usr/local`；
+     *   `VERSION` —— 从参考树的 `patchlevel.h` **读**（换棵树跟着变）；
+     *   `PLATLIBDIR` —— configure 缺省 `lib`；
+     *   `VPATH` / `PYTHONPATH` / `PYTHONFRAMEWORK` —— 空（不是 VPATH 构建、
+     *     `COREPYTHONPATH` 缺省空、不是 framework 构建）。
+     * 这几格只决定"装到哪儿之后去哪里找标准库"，而我们现在根本不装 —— 定成缺省值
+     * 就够编、够链；哪天真要装，这三格要跟着装的位置改。 */
+    const [maj, min] = pyVersion(src);
+    return [...inc,
+      '-DPREFIX="/usr/local"', '-DEXEC_PREFIX="/usr/local"',
+      `-DVERSION="${maj}.${min}"`, '-DVPATH=""', '-DPLATLIBDIR="lib"',
+      '-DPYTHONPATH=""', '-DPYTHONFRAMEWORK=""'];
   }
   return [];
 }

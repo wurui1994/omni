@@ -701,6 +701,34 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     **能跑的 `_freeze_module`**，所以那一步是"拿它把那几十份标准库 `.py` 冻出来"，
     不再是自举环。参考树只读，所以那些头落 `.omni-cache/py-rt/gen/` 再用 `-I` 指过去。
 
+19. **第四把尺子进仓库了，而且那最后两份也编出来了 —— 201/201、链接 0 缺口**
+    （`ext/python/rt/freeze.js`，`npm run py:freeze`，**8s**；`--oracle` 再多一步比对）。
+
+    这一份把上面那一趟变成**能回归的尺子**，一趟四问连着答：
+    1. 三份构建系统产物我们自己站着做（`config.c` 现生成、`getpath_noop.c`、`_freeze_module.c`）；
+    2. 与那 199 份链出 `_freeze_module`；
+    3. **真跑**：冻哪几份、模块名与源码路径**照 `Makefile.pre.in` 里那几条规则读**
+       （`:1728` 起，26 条），头落 `.omni-cache/py-rt/gen/Python/frozen_modules/`；
+    4. 顺着往下：`Python/frozen.c` 与 `Modules/getpath.c` 现在**编得出**了
+       （`getpath.c` 另要七格 `-D`，照 `Makefile.pre.in:1885-1891` 那条规则给 ——
+       `PREFIX` / `PLATLIBDIR` 是 configure 缺省值、`VERSION` 从 `patchlevel.h` 读）。
+
+    `--oracle` 那一步的判据最硬：**26 份头与"clang 编的同一套 199 份"出的逐字节相同**
+    —— 不只是"跑起来不崩"，是**编出来的字节码一模一样**。
+    （clang 那一套 `.o` 是 `py:symbols` 顺手缓在 `sym/` 里的，所以这一步不另花时间。）
+
+    四把尺子现在的读数（都在 2 分钟以内，改完就能跑）：
+    - `py:sweep` **201 份里 201 编得出、0 警告、0 编不出**（`--min` 跟着"冻没冻过"走：
+      冻过是 201，刚 clone 是 199 —— 定成一个固定的数必有一边在骗人）
+    - `py:symbols` **194** 份的外部符号与 clang 一模一样、5 笔按文件记账、没账的 0
+    - `py:link` **202 份 .o 摞成 21.1M 的 dylib，一个未定义符号都没有**
+      （多出来那一份是我们自己生成的 `Modules/config.c`）
+    - `py:freeze` **26/26 份 frozen 头冻得出、与 clang 编的同一套逐字节相同**，
+      下游那两份也编得出
+
+    也就是说：**借来的那份 CPython 运行时，我们自己那台 C 前端从头编到尾、链得完整、
+    跑起来与 clang 编的同一套给出一样的字节。** 剩下的是语言层怎么用它（§一之二 第 0 刀）。
+
 ## 二、进度
 
 ### 已落地

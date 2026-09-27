@@ -56,8 +56,17 @@ const DIRS = argOf('--dirs', 'Objects,Python,Parser,Modules').split(',');
 const ALL_MODULES = argv.includes('--all-modules');
 /* 探出来的 `pyconfig.h` 落哪儿 —— **按范围分开放**（见 scope.js 的 `incDirFor`）。 */
 const INC = argOf('--inc', null) ?? incDirFor(WORK, ALL_MODULES);
-/** 编得出 `.o` 的最少份数（ok + warn）。往上走是好事，往下走是回归。 */
-const MIN_OK = Number(argOf('--min', '199'));
+/**
+ * 编得出 `.o` 的最少份数（ok + warn）。往上走是好事，往下走是回归。
+ *
+ * **门跟着"冻没冻过"走**：`Python/frozen.c` 与 `Modules/getpath.c` 要
+ * `Python/frozen_modules/*.h`，而那些头是第四把尺子（`npm run py:freeze`）拿
+ * **我们自己编出来的 `_freeze_module`** 冻的、落在 `.omni-cache/py-rt/gen/` 里。
+ * 冻过了这两份就该编得出（201），没冻过（比如刚 clone）照旧是 199 ——
+ * 定成一个固定的数必有一边在骗人。
+ */
+const FROZEN_READY = existsSync(join(WORK, 'gen', 'Python', 'frozen_modules', 'getpath.h'));
+const MIN_OK = Number(argOf('--min', FROZEN_READY ? '201' : '199'));
 const JOBS = Number(argOf('--jobs', '4'));
 
 if (!existsSync(join(SRC, 'Include', 'Python.h'))) {

@@ -57,6 +57,11 @@ const KEEP = argv.includes('--keep');
  *
  * 也就是说：**这三份不是我们编不出来，是它们的输入还没生成**。哪天站到构建系统的位置上
  * 把那几份头生成出来（那一步要一个能跑的 `_freeze_module`，是个自举环），这张表就该空。
+ *
+ * **2026-09-28：空了。** 第四把尺子（`freeze.js`，`npm run py:freeze`）拿**我们自己编出来的**
+ * `_freeze_module` 把那 26 份 frozen 头冻了出来，`frozen.c` / `getpath.c` 就编得出了，
+ * `config.c` 由 `gen-config.js` 生成 —— 跑过那一趟之后这儿是"一个未定义符号都没有"。
+ * 这张表留着：没跑过 `py:freeze` 的时候（比如刚 clone）那三份照旧缺，它们得有账。
  */
 const EXPECTED = new Map([
   ['_PyImport_FrozenModules', 'Python/frozen.c'],
@@ -85,6 +90,20 @@ for (const it of files) {
 if (have.length === 0) {
   process.stdout.write('py-rt/link: 一份 .o 都没有 —— 先跑 `npm run py:sweep`\n');
   process.exit(1);
+}
+/* **树上压根没有、但我们自己生成了**的那几份（现在只有 `Modules/config.c` ——
+ * `gen-config.js` 按 `config.c.in` 生成、第四把尺子 `freeze.js` 编成
+ * `obj/Modules-config-c.o`）。它在 `LIBRARY_OBJS` 里（`Makefile.pre.in:355` 的
+ * `MODULE_OBJS`），所以有就摞进来 —— 于是那几个"有账的"缺口会一个一个消掉。 */
+const genExtra = [];
+for (const name of GENERATED) {
+  if (files.some(([d, f]) => `${d}/${f}` === name)) continue;   // 树上有的那两份上面已经收了
+  const i = name.indexOf('/');
+  const o = objOf([name.slice(0, i), name.slice(i + 1)]);
+  if (existsSync(o)) { have.push(o); genExtra.push(name); }
+}
+if (genExtra.length > 0) {
+  process.stdout.write(`py-rt/link: 另收我们自己生成的 ${genExtra.join(' ')}\n`);
 }
 process.stdout.write(`py-rt/link: 范围 ${files.length} 份，手上有 ${have.length} 份 .o\n`);
 if (missing.length > 0) {
@@ -154,4 +173,4 @@ if (orphan.length > 0) {
   process.exit(1);
 }
 process.stdout.write(`\n门：没账的未定义符号 0 个 —— 过（${have.length} 份 .o 摞起来，`
-  + `只等那 ${EXPECTED.size} 个构建系统产物）\n`);
+  + `${byOwner.size === 0 ? '**一个缺口都没有**' : `只等那 ${[...byOwner.values()].flat().length} 个构建系统产物`}）\n`);
