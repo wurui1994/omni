@@ -680,3 +680,36 @@ typedef union { struct { double r; double i; }; double _Complex private_data_c; 
   判"没被叠在一起"，退出码与 cc 逐字节相同（102）。
 * 一个已知的洞写在明处：占位块上**折出来的内部地址**（`&x[2]`，x 是长度不知道的
   extern 数组）认不回符号 —— R 里没有这种写法，真撞上要在常量折叠那一处按名字记。
+
+## 下一刀：复数**算术**（形状量出来了，2026-09-27）
+
+`tests/r/rtc.js` 剩下的 3 份里有 2 份要它（`complex.c`、`array.c`），而 R 的复数运算
+**就是 C99 的运算符**（`src/main/complex.c` 的 TIMESOP / DIVOP 写的是
+`SET_C99_COMPLEX(pans, i, toC99(&ps1[i1]) * toC99(&ps2[i2]))`）—— 所以这一格不能"差不多对"。
+
+### 量出来的需求
+
+* 运算符：`+ - * /` 与一元 `-`；`creal` 22 处、`cimag` 19 处（`src/main` + `src/appl`）；
+  `clog` 4、`catan`/`casin` 各 3、`ctan`/`csin`/`cexp`/`ccos`/`cacos`/`cabs` 各 2，
+  `csqrt`/`cpow`/`carg`/`csinh`/`ccosh`/`ctanh` 各 1。
+* 虚数字面量：`complex.c:138` 的 `1.0iF`（`invalid number` 就是这一条）。
+
+### 形状（分两半，与"运行时是 R 的 C + 我们自己编"这条路一致）
+
+1. **前端**（`tccgen.js`）：复数值就是那个两格的 struct（第十三格已经有了），
+   所以算术落成"分量算术 + 一个帧上的临时"——`sMem(cty, this.fpRef, this.frameAlloc(cty,0,0))`
+   与 `ARGSRET` 那条路数一样，成员按 `sMem(fld.ty, base.mem.addr, base.mem.off + fld.off)` 取。
+   `+ - 一元-` 是逐分量的，**精确**，没有边角。
+2. **`*` 与 `/` 不许在前端手写朴素公式**：朴素式在 Inf/NaN 上与 clang 不一样
+   （clang 发的是 `__muldc3` / `__divdc3`，那两个有 Smith 算法 + Inf 回收），
+   而 R 的复数算术明着按 C99 走 —— 手写就是**静默答错**的边角。
+   所以 `*` / `/` 落成对 `__muldc3` / `__divdc3` 的 `CALL`，那两个函数
+   **用 C 自己写**（`ext/r/rt/omni_complex.c`，照 compiler-rt 的算法），
+   连同 `clog`/`csqrt`/… 那 17 个一起 —— 它们内部用 `union { double _Complex z; struct { double re, im; } p; }`
+   取分量，所以**不需要复数算术就能写出来**（这也是为什么这一半能先落）。
+   单文件那条路（`omni c run x.c`）上这几个名字会是 `undefined symbol` —— 响的，
+   要用就把那份 `.c` 一起编进去。
+3. 虚数字面量：词法上给浮点常量认 `i`/`I`/`j`/`J` 后缀，值进虚部。
+
+判据：`tests/c/gen/` 加一格与 cc 比退出码（含 Inf/NaN 的几个边角），
+`tests/r/rtc.js` 的地板从 108 抬到 110。
