@@ -56,6 +56,7 @@
     "test:go": "node tests/go/run.js",
     "test:python": "node tests/python/run.js",
     "test:python-rt": "node tests/python/rt.js",
+    "py:sweep": "node ext/python/rt/sweep.js",
     "build:python-rt": "node ext/python/build.js",
     "bench:go": "node bench/go/run.js"
   },

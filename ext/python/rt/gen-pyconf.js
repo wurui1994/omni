@@ -375,6 +375,10 @@ const DECIDED = [
   ['MVWDELCH_IS_EXPRESSION', null,
     'curses 专有，是扫整棵 Include/ 扫进来的（py_curses.h）—— 我们不借 curses'],
   ['WINDOW_HAS_FLAGS', null, '同上（curses 的 WINDOW 里有没有 _flags）'],
+  ['WITH_VALGRIND', null,
+    '照 configure 的缺省：不定义（`configure.ac:5357` 的 `with_valgrind=no`，'
+    + '要 `--with-valgrind` 才开）。开着的话 `Objects/obmalloc.c` 那三处 `#ifdef` 会'
+    + '在 valgrind 下绕开 pymalloc —— 我们不接 valgrind，所以让它走原路'],
 ];
 for (const [name, value, why] of DECIDED) {
   WHY.set(name, why);

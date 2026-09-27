@@ -336,12 +336,40 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
       `O_WRONLY` / `F_GETFD` 看不见（我们那份 pyconfig 少了 HAVE_FCNTL_H 一类的格子）2 份
     ```
 
-    也就是说：**除掉「等自带汇编器」这一笔，`Objects/` 下已经一格不剩**（51 份里 45 份
-    干净出 `.o`、6 份卡在 `__asm__`），而 `Python/` 与 `Parser/` 上我们自己的语法/语义
-    一格都不缺 —— 剩下的全是构建系统与平台的事。那 8 条 warning 是三个内建
-    （`__builtin_clzl` / `__builtin_ctzll` / `__builtin_popcount`）与 `_PyObject_CAST`
-    的隐式声明：**将来会变链接错**，所以记在这儿当下一笔（tcc 那边它们在
-    `lib/builtin.c` 里，我们得有对应的一份）。
+    也就是说：**除掉「等自带汇编器」这一笔，`Objects/` 下已经一格不剩**，而 `Python/` 与
+    `Parser/` 上我们自己的语法/语义一格都不缺 —— 剩下的全是构建系统与平台的事。
+
+11. **那把尺子进仓库了**（`ext/python/rt/sweep.js`，`npm run py:sweep`）。
+
+    上面那张表从前是手工数的 —— 一行 shell 循环跑一遍、数字写进提交信息。那种数字**没人守**：
+    下一刀退一格也看不见。现在它是一把能回归的尺子：
+
+    ```
+    $ npm run py:sweep
+    共 50 份：**编出 .o 44**（干净 44 + 带警告 0）、编不出 6（22s）
+    编不出的按族：
+        6 份  非空的 __asm__ 模板（等自带汇编器）
+    门：>= 44 份编得出 —— 过
+    ```
+
+    几处口径写在这儿：
+    - **门是 `--min`**（缺省 44，像 `tests/c/native-gen.js` 的 `MIN_OK`）：少于它 exit 1。
+    - **按族印**，因为「编不出 6 份」没有意义，「6 份卡在同一句 `__asm__`」才有。
+    - 三档分开数：`ok`（一条诊断都没有）/ `warn`（出了 `.o` 但有警告 —— 那多半是
+      "链接那天才炸"的隐式声明）/ `fail`。位计数那一刀之后 `Objects/` 的 warn 是 **0**。
+    - `pyconfig.h` 缺了就现调 `gen-pyconf.js` 探一份，落 `.omni-cache/py-rt/inc` ——
+      **参考树一个字节不写**。`--extra` 必须带上 `Include` 整棵：漏了它，线程那几格
+      （`HAVE_PTHREAD_H` …）不进名单，探出来的配置少 17 条，于是**每一份**都报
+      `#error "Require native threads"`（量到过，50 份全红）。
+    - 缺省只量 `Objects`。**不是懒**：`gen-pyconf.js` 的纪律是"读得到的宏一个都不许悄悄
+      留空"，而 `Python/` 整棵又带进七个还没决定的格子 ——
+      `USE_COMPUTED_GOTOS`、`PTHREAD_KEY_T_IS_COMPATIBLE_WITH_INT`、
+      `PTHREAD_SYSTEM_SCHED_SUPPORTED`、`PY_COERCE_C_LOCALE`、`SOABI_PLATFORM`、
+      `ALT_SOABI`、`ANDROID_API_LEVEL`。**照 `configure.ac` 一格一格决定就是下一刀**
+      （其中 `USE_COMPUTED_GOTOS` 会顺带问出一个真语言问题：`goto *p` 我们收不收）。
+      补齐之前把 `Python,Parser` 写进缺省只会让这把尺子自己红，那是假的红。
+    - 上面第 10 条那张「163 份 / 133 份」是**另一套口径**（三个目录 + 上一轮手工探的那份
+      pyconfig），留着当那一刻的快照；能自动回归的是这一条。
 
 ## 二、进度
 
