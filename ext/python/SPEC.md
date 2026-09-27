@@ -299,6 +299,50 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
      朴素复现（`static int a[7]; static char b[sizeof(a)/sizeof(a[0])];`）是**绿**的，
      所以真因还没定位 —— 下一刀就是它。二分的办法见上面第 8 条（`scanTopLevel` + `ppBalance`）。
 
+10. **`typeobject.c` 过了，`Objects/` 只剩 `__asm__` 那一族；量尺推到 `Python/` 与
+    `Parser/`**（这一轮六刀，`-std=c11` 起）。
+
+    `typeobject.c:11720` 的真因**不是** `sizeof` 也不是"由初始化式定长"（上一条那个
+    猜想是错的）：`Py_ARRAY_LENGTH`（`Include/pymacro.h:205`）走的是 GCC 扩展那一支，
+    长度算式里明着带着 `__builtin_types_compatible_p` 与
+    `Py_BUILD_ASSERT_EXPR`（`((void)sizeof(struct{… _Static_assert …}), 0)`）。
+    那一问**表达式那一路早就有**（`gen/74`），缺的是我们那台**只认记号的常量求值器** ——
+    它不认那一问、不认 `(void)` 强制转换、也不认括号里的逗号。三格一起补上，
+    13007 行一个字不改编出 512KB 的 `.o`（判据 `gen/89`）。
+
+    同一轮顺手落的五刀（每一刀都由 CPython 的某一行逼出来，判据都在 `tests/c`）：
+    - `typeof(__extension__ ({ … }))` —— 嵌套的 `Py_MIN`/`Py_MAX`（`pymacro.h:119`）。
+      `unicode_formatter.c:197` 那一行是 `Py_MIN(len, Py_MAX(…))`，里层那一整块正好落在
+      外层的 `_Py_TYPEOF(...)` 括号里。判据 `gen/90`。
+    - `-std=c11` / `-std=gnu11`（tcc 的 `TCC_OPTION_std`）—— macOS 的
+      `_static_assert.h` 只在 `__STDC_VERSION__ >= 201112L` 时给 `static_assert`，
+      CPython 的 `object.h:145` 也只在那一支上用 `_Alignas`。判据 `cpp/10-std.c` 五格。
+    - `_Alignas`（C11 6.7.5）—— `_Py_ALIGNED_DEF`。判据 `gen/91`。
+    - 静态初始化式里「算式下标的地址常量」（`&buckets[0+2+1].root`，`parking_lot.c:49`）
+      与「带非 ASCII 字节的串」（latin1 单字符表，`pystate.c:309`）。判据 `gen/92`；
+      `tests/c/native-gen.js` 的「还没到」那张单子**空了**（90/90，MIN_OK 83 -> 90）。
+    - `char d[] = ("abc")`（gcc/clang 的扩展，tcc 不收）—— `pycore_runtime_init.h` 一族的
+      `._data = ("<dictcomp>")`。为它新开一组 `tests/c/gnu/`，**尺子换成 clang**。
+
+    量到的账（`Objects` + `Python` + `Parser` 共 **163 份 .c**，同一套开关逐份 `omni c obj`）：
+
+    ```
+    编出 .o        133 份（其中 8 份带 warning，见下）
+    还编不出        22 份
+      非空 __asm__（pycore_pystate.h:325 那一句 `mov %0, sp`）   11 份  <- 我们唯一的真欠账
+      头文件不在（emscripten / windows / dl / 生成的 frozen_modules、optimizer.h…） 7 份
+      要构建系统给的宏（dynload_shlib.c 的 `SOABI`）              1 份
+      `__VERSION__`（gcc/clang 才有，tcc 也没有）                 1 份
+      `O_WRONLY` / `F_GETFD` 看不见（我们那份 pyconfig 少了 HAVE_FCNTL_H 一类的格子）2 份
+    ```
+
+    也就是说：**除掉「等自带汇编器」这一笔，`Objects/` 下已经一格不剩**（51 份里 45 份
+    干净出 `.o`、6 份卡在 `__asm__`），而 `Python/` 与 `Parser/` 上我们自己的语法/语义
+    一格都不缺 —— 剩下的全是构建系统与平台的事。那 8 条 warning 是三个内建
+    （`__builtin_clzl` / `__builtin_ctzll` / `__builtin_popcount`）与 `_PyObject_CAST`
+    的隐式声明：**将来会变链接错**，所以记在这儿当下一笔（tcc 那边它们在
+    `lib/builtin.c` 里，我们得有对应的一份）。
+
 ## 二、进度
 
 ### 已落地
