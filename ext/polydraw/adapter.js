@@ -187,6 +187,9 @@ const SHADER_FNS = new Map([
      第 0 格是串。`drawspr` 七参那一档是它的别名（说明书原话 "same as drawkv6()"）。 */
   ['drawkv6/7', [0]],
   ['drawspr/7', [0]],
+  /* 十三参那一档（位置 + 3×3，`evaldraw.txt:750`）：第 0 格照旧是串。 */
+  ['drawkv6/13', [0]],
+  ['drawspr/13', [0]],
   ['glgetattribloc/1', [0]],
   ['glvertexattrib1f/2', []],
   ['glvertexattrib2f/3', []],

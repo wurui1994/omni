@@ -123,6 +123,9 @@ export const EVALDRAW_3D = new Map([
      （`evaldraw.txt:544`："same as drawkv6()"）。 */
   ['drawkv6/7', 'g3_kv67'],
   ['drawspr/7', 'g3_kv67'],
+  /* 十三参那一档：位置 + 一张 3×3（见 `g3_kv613` 的头注）。 */
+  ['drawkv6/13', 'g3_kv613'],
+  ['drawspr/13', 'g3_kv613'],
 ]);
 
 /* ─── 生成出来的那一摊 ────────────────────────────────────────────────── */
@@ -512,24 +515,52 @@ export function gfx3FnDecls(host = false, withGL = false) {
       iff(bin('<=', nm('g3_kvc'), num(0)), [ret(num(0))]),
       letR('ch', rm('cos', [nm('ha')])), letR('sh', rm('sin', [nm('ha')])),
       letR('cv', rm('cos', [nm('va')])), letR('sv', rm('sin', [nm('va')])),
-      /* 一格体素的半径：半个体素乘上缩放（相邻两格正好挨上）。 */
-      letR('r', bin('*', rm('fabs', [nm('sc')]), num(0.5))),
+      /* 偏航（x-y）再俯仰（x-z）摊成一张 3×3 —— 与十三参那一档共用一个画法。 */
+      ret(call('g3_kv6m', [nm('ni'), nm('x'), nm('y'), nm('z'),
+        bin('*', nm('sc'), bin('*', nm('ch'), nm('cv'))),
+        bin('*', nm('sc'), nm('sh')),
+        bin('*', nm('sc'), bin('*', nm('ch'), nm('sv'))),
+        bin('*', nm('sc'), bin('-', num(0), bin('*', nm('sh'), nm('cv')))),
+        bin('*', nm('sc'), nm('ch')),
+        bin('*', nm('sc'), bin('-', num(0), bin('*', nm('sh'), nm('sv')))),
+        bin('*', nm('sc'), bin('-', num(0), nm('sv'))),
+        num(0),
+        bin('*', nm('sc'), nm('cv'))])),
+    ]),
+    /**
+     * **十三参那一档**（`evaldraw.txt:750`："full control of transform/rotation/shear"；
+     * `drawspr` 十三参是同一格的别名，`:547`）：位置 + **一张 3×3**（三行是模型那三根轴
+     * 转过来的样子）。`games/bowling/bowling.kc:186` 就是这么画保龄球的
+     * （`bmat[0..8]*.2` —— 自己积出来的旋转矩阵）。
+     */
+    fn('g3_kv613', ['ni', 'x', 'y', 'z', 'ax', 'ay', 'az', 'bx', 'by', 'bz', 'cx', 'cy', 'cz'], [
+      ret(call('g3_kv6m', [nm('ni'), nm('x'), nm('y'), nm('z'),
+        nm('ax'), nm('ay'), nm('az'), nm('bx'), nm('by'), nm('bz'),
+        nm('cx'), nm('cy'), nm('cz')])),
+    ]),
+    /** 画那一份模型：位置 + 3×3（**两档共用这一格**）。 */
+    fn('g3_kv6m', ['ni', 'x', 'y', 'z', 'ax', 'ay', 'az', 'bx', 'by', 'bz', 'cx', 'cy', 'cz'], [
+      ex(call('g3_kv6need', [nm('ni')])),
+      iff(bin('<=', nm('g3_kvc'), num(0)), [ret(num(0))]),
+      /* 一格体素的半径：那三根轴里第一根的长度的一半（相邻两格正好挨上）。 */
+      letR('r', bin('*', num(0.5), rm('sqrt', [bin('+', bin('+',
+        bin('*', nm('ax'), nm('ax')), bin('*', nm('ay'), nm('ay'))),
+      bin('*', nm('az'), nm('az')))]))),
+      iff(bin('<=', nm('r'), num(0)), [set('r', num(0.5))]),
       letR('i', num(0)),
       whil(bin('<', nm('i'), nm('g3_kvc')), [
         letR('o', bin('*', nm('i'), num(4))),
         letR('vx', aget('g3_kvb', nm('o'))),
         letR('vy', aget('g3_kvb', bin('+', nm('o'), num(1)))),
         letR('vz', aget('g3_kvb', bin('+', nm('o'), num(2)))),
-        /* 偏航（x-y）再俯仰（x-z）。 */
-        letR('ax', bin('-', bin('*', nm('vx'), nm('ch')), bin('*', nm('vy'), nm('sh')))),
-        letR('ay', bin('+', bin('*', nm('vx'), nm('sh')), bin('*', nm('vy'), nm('ch')))),
-        letR('bx', bin('-', bin('*', nm('ax'), nm('cv')), bin('*', nm('vz'), nm('sv')))),
-        letR('bz', bin('+', bin('*', nm('ax'), nm('sv')), bin('*', nm('vz'), nm('cv')))),
         ex(D.setcol1(aget('g3_kvb', bin('+', nm('o'), num(3))))),
         ex(call('g3_sph', [
-          bin('+', nm('x'), bin('*', nm('sc'), nm('bx'))),
-          bin('+', nm('y'), bin('*', nm('sc'), nm('ay'))),
-          bin('+', nm('z'), bin('*', nm('sc'), nm('bz'))),
+          bin('+', nm('x'), bin('+', bin('+', bin('*', nm('vx'), nm('ax')),
+            bin('*', nm('vy'), nm('bx'))), bin('*', nm('vz'), nm('cx')))),
+          bin('+', nm('y'), bin('+', bin('+', bin('*', nm('vx'), nm('ay')),
+            bin('*', nm('vy'), nm('by'))), bin('*', nm('vz'), nm('cy')))),
+          bin('+', nm('z'), bin('+', bin('+', bin('*', nm('vx'), nm('az')),
+            bin('*', nm('vy'), nm('bz'))), bin('*', nm('vz'), nm('cz')))),
           nm('r'),
         ])),
         set('i', bin('+', nm('i'), num(1))),
