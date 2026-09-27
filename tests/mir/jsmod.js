@@ -38,10 +38,10 @@ const bad = (label, detail) => {
   process.stdout.write(`  FAIL ${label}\n`);
 };
 
-const build = (name, src) => {
+const build = (name, src, tu) => {
   const path = join(dir, `${name}.c`);
   writeFileSync(path, src);
-  return lowerC(path, src, host, [], []).mod;
+  return lowerC(path, src, host, [], [], tu === true ? { tu: true } : undefined).mod;
 };
 
 /**
@@ -188,6 +188,113 @@ for (const c of cases) {
   const n2 = 'jsmod/反面：抹掉 addrConsts 就必须不一样';
   if (got2 === baked) bad(n2, `    抹掉 addrConsts 居然还是 ${baked} —— 地址常量那一半没在判`);
   else ok(`${n2} [抹掉之后是 ${got2}]`);
+}
+
+/* ---- 两份 .c 两份 .js：符号靠 import/export 接上 ---------------------------- */
+/**
+ * 一份"程序"由 N 份 .c 组成时，每份单独编一份 MIR、单独发一份 .js：
+ *   * 谁提供哪个符号由**定义方**说（函数看 `f.thunk === null && !f.local`，
+ *     数据看 `mod.dataSyms`）；
+ *   * 引用方那边发成 `import`（函数是桩那一格、数据是 `mod.dataRefs` 那几条常量）；
+ *   * 于是依赖关系就是 ESM 的依赖图 —— node 与浏览器自己排装载次序。
+ */
+function linkRun(name, units) {
+  const mods = units.map((u) => ({
+    name: u.name,
+    file: join(dir, `${name}-${u.name}.mjs`),
+    mir: build(`${name}-${u.name}`, u.src, true),
+  }));
+  /* 符号表：名字 -> 提供它的那份模块的路径。这一步就是"链接"。 */
+  const provide = new Map();
+  for (const m of mods) {
+    for (const f of m.mir.funcs) {
+      if (f.local === true || (f.thunk !== null && f.thunk !== undefined)) continue;
+      if (!provide.has(f.name)) provide.set(f.name, m.file);
+    }
+    for (const [sym] of m.mir.dataSyms) if (!provide.has(sym)) provide.set(sym, m.file);
+  }
+  let entry = null;
+  for (const m of mods) {
+    /* 自己提供的那些不算"外部" —— 不然 `main` 会 import 自己。 */
+    const syms = new Map();
+    for (const [sym, file] of provide) if (file !== m.file) syms.set(sym, file);
+    writeFileSync(m.file, emitMirJs(m.mir, { rtImport: RT, module: true, symbols: syms }));
+    m.lib = !m.mir.funcIndex.has('main');
+    if (!m.lib) entry = m;
+  }
+  if (entry === null) return '没有 main';
+  const drv = join(dir, `${name}.drv.mjs`);
+  /* 每份库先 `$init()`（它的"序"：`$sp` 的初值那几格），再跑有 `main` 那一份的 `$run()`。
+     data 段不在这儿铺 —— 那是**装载期**的事（`import` 一到就铺好了）。 */
+  const lines = [];
+  let n = 0;
+  for (const m of mods) {
+    if (m.lib) lines.push(`import { $init as $i${n++} } from ${JSON.stringify(m.file)};`);
+  }
+  lines.push(`import { $run } from ${JSON.stringify(entry.file)};`);
+  for (let k = 0; k < n; k++) lines.push(`$i${k}();`);
+  lines.push('process.exit($run());');
+  writeFileSync(drv, lines.join('\n') + '\n');
+  return run(drv, name);
+}
+
+const twoUnits = [
+  {
+    name: 'call-across',
+    units: [
+      { name: 'a', src: `${P}int add(int, int);\nint main(void){ int r = add(2, 3); printf("a:%d\\n", r); return r; }\n` },
+      { name: 'b', src: 'int add(int x, int y){ return x + y; }\n' },
+    ],
+    want: 'code=5 out="a:5\\n"',
+  },
+  {
+    name: 'extern-var',
+    units: [
+      { name: 'a', src: `${P}extern int base;\nextern int arr[4];\nint main(void){ printf("%d %d %d\\n", base, arr[0], arr[3]); return base + arr[3]; }\n` },
+      { name: 'b', src: 'int base = 7;\nint arr[4] = {10,20,30,40};\n' },
+    ],
+    want: 'code=47 out="7 10 40\\n"',
+  },
+  {
+    /* `&arr[2]` 会在常量折叠里变成"基址 + 8"的**另一条**常量 —— 那一条也得记进
+       `dataRefs`，不然它还指着本模块预留的那块空白（静默答错）。 */
+    name: 'extern-inner-addr',
+    units: [
+      { name: 'a', src: `${P}extern int arr[4];\nint *p = &arr[2];\nint main(void){ printf("%d %d\\n", *p, arr[2]); return *p; }\n` },
+      { name: 'b', src: 'int arr[4] = {10,20,30,40};\n' },
+    ],
+    want: 'code=30 out="30 30\\n"',
+  },
+  {
+    /* 两份模块各有一个同名 `static` —— 文件局部，互不相干（不导出、不改名）。 */
+    name: 'same-static',
+    units: [
+      { name: 'a', src: `${P}int bval(void);\nstatic int hid = 1;\nint main(void){ printf("%d %d\\n", hid, bval()); return hid + bval(); }\n` },
+      { name: 'b', src: 'static int hid = 40;\nint bval(void){ return hid; }\n' },
+    ],
+    want: 'code=41 out="1 40\\n"',
+  },
+  {
+    /* 三份：a 调 b，b 调 c，c 用自己的字符串（三份的 data 段各占一块，谁也别踩谁）。 */
+    name: 'three-units',
+    units: [
+      { name: 'a', src: `${P}const char *cname(void);\nint bnum(void);\nint main(void){ printf("%s/%d\\n", cname(), bnum()); return bnum(); }\n` },
+      { name: 'b', src: 'int cnum(void);\nint bnum(void){ return cnum() + 1; }\n' },
+      { name: 'c', src: 'int cnum(void){ return 41; }\nconst char *cname(void){ return "cee"; }\n' },
+    ],
+    want: 'code=42 out="cee/42\\n"',
+  },
+];
+
+for (const t of twoUnits) {
+  let got;
+  try {
+    got = linkRun(t.name, t.units);
+  } catch (e) {
+    got = `发不出来：${e.message}`;
+  }
+  if (got !== t.want) bad(`jsmod/多份/${t.name}`, `    要 ${t.want}\n    得 ${got}`);
+  else ok(`jsmod/多份/${t.name} [${got}]`);
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

@@ -821,6 +821,9 @@ export class CGen {  /**
      * @type {{off:number}[]}
      */
     this.pendingPtr = [];
+    /** 外部数据符号在本单元里预留的那几块地方（`{name, lo, hi}`）—— 见 `unit()` 末尾。 */
+    this.extSpans = [];
+
     /** 地址常量的去重表（值的十进制 -> 常量池里那一条）—— 见 `kaddr`。 @type {Map<string,number>} */
     this.addrRefs = new Map();
     /**
@@ -4330,6 +4333,10 @@ export class CGen {  /**
 
   externThunk(name, info) {
     const f = info.f;
+    /* **这是一个桩**（记录在编译、连接在成品）：真身在这个翻译单元之外。
+       一个 .c 一个 .js 那条路靠它分"我自己定义的"与"别人提供的" —— 线性内存腿上
+       两者都有函数体，光看身子分不出来（ADR-0047 第十一格）。 */
+    f.setThunk(name);
     /* native 上**没有桩这一说**（第一百二十八片）：调用点那条 `CALL` 现在按符号名发
      * （第一百二十七片），所以没有函数体的被调者压根不需要代码 —— 打上「这个模块里
      * 没有它」，两个后端跳过它，名字靠那条重定位进「未定义的外部符号」那一段。
@@ -8273,17 +8280,35 @@ export class CGen {  /**
       }
       /**
        * **线性内存腿：声明了没定义的全局量不再当场报**（2026-09-27）——
-       * 记一条"待回填的数据符号引用"，交给 MIR 层的链接器（`src/core/mir/link.js`）。
-       * 地址那一格照旧预留着（一遍过里引用发生在定义之前，代码得先有个地址可发），
-       * 链接时把**那条地址常量**改成提供方的地址就行 —— 引用去重过，所以一条就够。
+       * 记一条"待回填的数据符号引用"，由成品那一层（`omni run x.c` / `cMir`）报错，
+       * 或者由**一个 .c 一个 .js** 那条路发成一句 `import`（ADR-0047 第十一格）。
+       * 地址那一格照旧预留着（一遍过里引用发生在定义之前，代码得先有个地址可发）。
        *
-       * 拿不到那条常量（不该发生：`used` 就意味着 `gvarLval` 走过 `kaddr`）时照旧报 ——
-       * 悄悄放过去会得到一个指着自己那块空白的指针，那是静默答错。
+       * 记的是**这块地方里的每一条地址常量**，不只是基址那一条：`&arr[2]` 与 `arr + 1`
+       * 会在 `castTo`/`ptrAdd` 里折成新的常量（那几条也走 `kaddr`，所以都在
+       * `addrRefs` 这张表里）。只记基址的话，折出来的那几条在装载期还指着**本模块**
+       * 预留的那块空白 —— 静默答错，而且是最难查的那一种。
        */
-      const kref = this.addrRefs.get(String(e.addr));
-      if (kref === undefined) { this.err(`undefined symbol '${name}'`); continue; }
-      this.mod.dataRefs.push({ name, ref: kref });
+      const s = typeSize(e.ty);
+      const span = s.size + (e.extra === undefined ? 0 : e.extra);
+      /* 这块预留地方的范围也记一条：**data 段里**也可能躺着指进来的指针
+         （`static int *p = &arr[2];`），那一格要按符号名回填而不是"加一个差"
+         —— 见 `lowerC` 末尾那张 relocs 表。 */
+      this.extSpans.push({ name, lo: e.addr, hi: e.addr + Math.max(span, 1) });
+      let n = 0;
+
+      for (const [text, ref] of this.addrRefs) {
+        const v = Number(text);
+        /* 尺寸是 0（`int gz[0];`、不完整的 extern）时只认基址那一条 —— 那时"里头"是空的。 */
+        if (v < e.addr || (span === 0 ? v !== e.addr : v >= e.addr + span)) continue;
+        this.mod.dataRefs.push({ name, ref, add: v - e.addr });
+        n += 1;
+      }
+      /* 一条都没有不该发生（`used` 就意味着 `gvarLval` 走过 `kaddr`）——
+         悄悄放过去会得到一个指着自己那块空白的指针，那是静默答错。 */
+      if (n === 0) { this.err(`undefined symbol '${name}'`); continue; }
     }
+
     /* 本模块**定义**的、外部看得见的那些：链接时它们是提供方。 */
     for (const [name, e] of this.gvars) {
       if (!e.defined || e.local === true || e.addr < 0) continue;
@@ -8328,8 +8353,12 @@ function genUtf8Bytes(s) {
  *          dirname?: (p: string) => string, join?: (a: string, b: string) => string}} host
  * @param {{name: string, body?: string}[]} [defs] 命令行上的 `-D`
  * @param {string[]} [args] 被跑的程序自己的命令行实参（`argv[1]` 起；`argv[0]` 是 `path`）
+ * @param {{tu?: boolean}} [opts] `tu: true` = **一份 .c 一份产物**（ADR-0047 的 JS 路径）：
+ *   `main` 不是必须的（没有就只发序：`$sp`/errno/strerror/流那几格 + `RET 0`），
+ *   堆也不烤进像里（记一条 `mod.wantsHeap`，装载全完之后由运行时在内存尾上要）。
  */
-export function lowerC(path, text, host, defs, args) {
+export function lowerC(path, text, host, defs, args, opts) {
+  const tu = opts !== undefined && opts.tu === true;
   /* 下面三格是**这条腿自己的 ABI**（那个虚拟目标），与 `host.arch`/`host.os` 无关 ——
    * 后两格只管**预定义宏**，因为这条腿读的是这台机器**真的**系统头，而头文件按
    * `__x86_64__` / `__linux__` 分支（见 `lang/c.js` 的 `cMir`）。
@@ -8369,8 +8398,11 @@ export function lowerC(path, text, host, defs, args) {
    * 内存一定已经够 —— 那条初始化不必自己先长内存。 */
   /* `main` 的形参表要在**摆版图之前**问 —— `argv` 那几个串与那张指针表也住 data 段。 */
   const info = gen.funcs.get('main');
-  if (info === undefined) throw new OmniError(`${path}: error: undefined symbol 'main'`);
-  const mainParams = info.params ?? [];
+  /* `tu` 档里 `main` 可以没有（一份库那样的翻译单元 —— R 运行时那 122 份里的每一份都是）。
+     没有就只发"序"：`$sp`/errno/strerror/流那几格，末尾 `RET 0`。 */
+  if (info === undefined && !tu) throw new OmniError(`${path}: error: undefined symbol 'main'`);
+  const mainParams = info === undefined ? [] : (info.params ?? []);
+
   if (mainParams.length !== 0 && mainParams.length !== 2) {
     throw new OmniError(`${path}: error: 第八刀：'main' 只认 () 与 (int, char **)`
       + `（这份有 ${mainParams.length} 个形参）`);
@@ -8425,20 +8457,38 @@ export function lowerC(path, text, host, defs, args) {
   const stackBase = alignUp(gen.dataOff, 16);
   const stackTop = stackBase + C_STACK_BYTES;
   const heapBase = alignUp(stackTop, MEM_PAGE);
-  const pages = gen.heapUsed
+  /* `tu` 档：堆不在这份模块的像里（见 `MirModule.wantsHeap` 头上那段）——
+     所以页数只按栈顶算，基址也不烤。 */
+  const ownHeap = gen.heapUsed && !tu;
+  if (gen.heapUsed && tu) mod.wantsHeap = true;
+  const pages = ownHeap
     ? heapBase / MEM_PAGE + 1
     : Math.ceil(stackTop / MEM_PAGE);
   mod.setMem(pages, 0);
 
   /* data 段：顺手把"哪几格装的是地址"（`pendingPtr`）按段挂上去 —— 一条记录落在
      哪一段里由绝对偏移算（`emitPtrBytes` 一次写 8 字节，所以它一定整格落在一段里）。
-     谁也不看这张表就与从前一个字节都不差；搬 data 段那一刀（MIR 层的链接器）要它。 */
+     谁也不看这张表就与从前一个字节都不差；搬 data 段那一刀要它。
+
+     **指进外部符号的那几格带上符号名**（`static int *p = &arr[2];`）：那一格不是
+     "加一个差"能对的 —— 它要等提供方的地址，所以记 `{sym, add}`，由
+     一个 .c 一个 .js 那条路发成 `$sym_arr + add`（ADR-0047 第十一格）。 */
   const ptrAt = new Set(gen.pendingPtr.map((p) => p.off));
+  const rd8 = (bytes, at) => {
+    let v = 0n;
+    for (let i = 7; i >= 0; i -= 1) v = (v << 8n) | BigInt(bytes[at + i]);
+    return v;
+  };
   for (const d of gen.pendingData) {
     const relocs = [];
     if (ptrAt.size > 0) {
       for (let k = 0; k + 8 <= d.bytes.length; k += 1) {
-        if (ptrAt.has(d.off + k)) relocs.push({ at: k, size: 8 });
+        if (!ptrAt.has(d.off + k)) continue;
+        const v = Number(rd8(d.bytes, k));
+        let sp = null;
+        for (const s of gen.extSpans) if (v >= s.lo && v < s.hi) { sp = s; break; }
+        if (sp === null) relocs.push({ at: k, size: 8 });
+        else relocs.push({ at: k, size: 8, sym: sp.name, add: v - sp.lo });
       }
     }
     mod.addData(d.off, d.bytes, relocs);
@@ -8454,7 +8504,7 @@ export function lowerC(path, text, host, defs, args) {
   }
   /* 堆的起点交给宿主那份分配器（`interp/libc.js`）。**只有用到堆才发** —— 没用到的
    * 模块不该多一个外部符号（将来自带后端那条路上它是一次真的链接）。 */
-  if (gen.heapUsed) {
+  if (ownHeap) {
     entry.emit(OP.CCALL, T_VOID, mod.cabiNo('__omni_heap_init'),
       entry.pushArgs([gen.kaddr(heapBase)]), 0);
   }
@@ -8474,6 +8524,11 @@ export function lowerC(path, text, host, defs, args) {
   for (const s of gen.streamGvars) {
     entry.emit(OP.CCALL, T_VOID, mod.cabiNo('__omni_stream_init'),
       entry.pushArgs([mod.consts.int(BigInt(s.addr)), mod.consts.i32(s.which)]), 0);
+  }
+  /* `tu` 档里没有 `main`：这份模块只提供符号，入口只是上面那一串"序"。 */
+  if (info === undefined) {
+    entry.emit(OP.RET, T_I32, mod.consts.i32(0), REF_NONE, 0);
+    return { mod, warnings: cpp.warnings };
   }
   const rt = mirTypeOf(info.ret);
   /* `main` 的实参：要么一个都没有，要么就是 `argc` 与 `argv`（上面只放过这两种）。

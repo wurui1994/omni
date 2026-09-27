@@ -143,7 +143,7 @@ const JS_CMP = new Map([
  * 它靠 `$W32` 回绕），两处的差别是有意的，别"顺手补齐"。
  */
 const JS_PROLOGUE = `'use strict';
-const { memInit, memData, memAlloc, memPut, memSize, memGrow,
+const { memInit, memData, memAlloc, memPut, memHeap, memSize, memGrow,
   memLoadFn, memStoreFn, memLoadFnN, memStoreFnN,
   callLibc, hasLibc, isExitCall, failRt, flushOut, libcAtExit, setFnPtrCaller,
   sjTok, sjSet, sjThrow, sjCatch } = $rt;
@@ -201,12 +201,24 @@ const JS_NUM_LD = new Set(['i8s', 'i8u', 'i16s', 'i16u', 'i32s', 'i32u']);
 const JS_NUM_ST = new Set(['i8', 'i16', 'i32']);
 
 class JsFromMir {
-  constructor(mir, modular) {
+  constructor(mir, modular, syms) {
     this.mir = mir;
-    /** module 档：地址不烤成数，落成"模块基址 + 偏移"（见 `emitMirJs` 头注）。 */
+    /** module 档：地址不烤死，落成"模块基址 + 偏移"（见 `emitMirJs` 头注）。 */
     this.modular = modular === true;
     /** module 档里用到的地址常量：常量池下标 -> 顶层那条 `const $k<下标>`。 */
     this.addrRefs = new Set();
+    /**
+     * **别的模块提供的符号** name -> 那个模块的 specifier（`opts.symbols`）。
+     * 函数与数据同一张表 —— C 的符号表就是一张（`add` 与 `R_NilValue` 没有区别）。
+     */
+    this.syms = syms === undefined || syms === null ? new Map() : syms;
+    /** 常量池下标 -> 那条"其实是外部数据符号的地址"（`{name, add}`）。 */
+    this.extRef = new Map();
+    for (const r of this.mir.dataRefs === undefined ? [] : this.mir.dataRefs) {
+      if (this.syms.has(r.name)) this.extRef.set(r.ref, { name: r.name, add: r.add === undefined ? 0 : r.add });
+    }
+    /** specifier -> 这一句 import 里的那几格（`$fn_x as $f3` / `$sym_y`）。 */
+    this.imports = new Map();
     this.out = [];
     /** 用到的内存访问器：kind -> 变量名（只发用到的那几个，一个 kind 一次查表）。 */
     this.ldFns = new Map();
@@ -216,15 +228,31 @@ class JsFromMir {
     this.stFnsN = new Map();
   }
 
+  /** 记一格 import（按 specifier 归拢，一个 specifier 一句）。 */
+  needImport(spec, item) {
+    let l = this.imports.get(spec);
+    if (l === undefined) { l = []; this.imports.set(spec, l); }
+    if (!l.includes(item)) l.push(item);
+  }
+
   /** 一条 ref 的读文本。常量在**发代码期**就变成字面量，指令引用是一个局部变量。 */
   ref(f, r) {
     if (r === REF_NONE) return 'undefined';
     if (isConstRef(r)) {
-      /* module 档：地址那几条不是字面量，是顶层算出来的 `$k<下标>`（= 基址 + 偏移）。
-         哪几条是地址由前端记在 `addrConsts` 上 —— 这张表漏一条就是静默错地址。 */
-      if (this.modular && this.mir.addrConsts.has(r)) {
-        this.addrRefs.add(r);
-        return `$k${r}`;
+      if (this.modular) {
+        /* 这一条其实是**别人**那个全局量的地址：发成 `import` 进来的那一格。
+           活绑定，所以有环也不怕 —— 用它的时候（函数体里）所有模块都装载完了。 */
+        const ext = this.extRef.get(r);
+        if (ext !== undefined) {
+          this.needImport(this.syms.get(ext.name), `$sym_${ext.name}`);
+          return ext.add === 0 ? `$sym_${ext.name}` : `($sym_${ext.name} + ${ext.add}n)`;
+        }
+        /* 自己这张像里的地址：顶层算出来的 `$k<下标>`（= 基址 + 偏移）。
+           哪几条是地址由前端记的 `addrConsts` 说 —— 漏一条就是静默错地址。 */
+        if (this.mir.addrConsts.has(r)) {
+          this.addrRefs.add(r);
+          return `$k${r}`;
+        }
       }
       return jsConstText(this.mir.consts.items[r]);
     }
@@ -666,7 +694,18 @@ class JsFromMir {
     const L = [JS_PROLOGUE];
     for (let i = 0; i < mir.globals.length; i++) L.push(`let $g${i} = undefined;`);
     const bodies = [];
-    for (let no = 0; no < mir.funcs.length; no++) bodies.push(...this.func(no));
+    for (let no = 0; no < mir.funcs.length; no++) {
+      /* **别的模块提供的那个函数**：桩的身子不发，直接 `import` 那一格当 `$f<no>`。
+         线性内存腿上外部函数一律有桩（落点是 `CCALL name`），所以"这个名字是不是
+         我自己定义的"只能问 `f.thunk`（前端记的，见 `externThunk`）。
+         表里没有的名字照旧留桩 —— 那是 libc，宿主提供。 */
+      const f = mir.funcs[no];
+      if (this.modular && f.thunk !== null && f.thunk !== undefined && this.syms.has(f.thunk)) {
+        this.needImport(this.syms.get(f.thunk), `$fn_${f.thunk} as $f${no}`);
+        continue;
+      }
+      bodies.push(...this.func(no));
+    }
     // 访问器在函数体发完之后才知道用了哪几个，但声明要在前面 —— 所以这里才拼
     for (const [kind, name] of this.ldFns) L.push(`const ${name} = memLoadFn(${JSON.stringify(kind)});`);
     for (const [kind, name] of this.stFns) L.push(`const ${name} = memStoreFn(${JSON.stringify(kind)});`);
@@ -706,7 +745,39 @@ const $callFromLibc = (fp, args) => {
   return $FNR[no] === 1 && typeof r === 'number' ? BigInt(r) : r;
 };`);
     L.push(...this.runner());
-    return L.join('\n') + '\n';
+    L.push(...this.linkage());
+    /* import 是**最后**才拼的（哪几格要 import 得等函数体发完才知道），但 ESM 里
+       import 语句可以在顶层任何位置 —— 声明是提升的，次序不影响。 */
+    const head = [];
+    for (const [spec, items] of this.imports) {
+      head.push(`import { ${items.join(', ')} } from ${JSON.stringify(spec)};`);
+    }
+    return head.concat(L).join('\n') + '\n';
+  }
+
+  /**
+   * module 档的**连接面**：我这份模块给外面什么。
+   *
+   * 两样，与 C 的符号表一一对应：
+   *   * 函数 —— 本模块真定义的、非 `static` 的那些（`export { $f3 as $fn_add }`）；
+   *   * 数据 —— `mod.dataSyms` 那些全局量的**地址**（`export const $sym_base = …`）。
+   *     导出地址而不是值：C 那边它就是一块内存，读写都按地址走。
+   *
+   * 桩不导出（那是别人的符号），`static` 不导出（文件局部，两份模块可以同名）。
+   */
+  linkage() {
+    if (!this.modular) return [];
+    const mir = this.mir;
+    const L = [];
+    const items = [];
+    for (let no = 0; no < mir.funcs.length; no++) {
+      const f = mir.funcs[no];
+      if (f.local === true) continue;
+      if (f.thunk !== null && f.thunk !== undefined) continue;
+      items.push(`$f${no} as $fn_${f.name}`);
+    }
+    if (items.length > 0) L.push(`export { ${items.join(', ')} };`);
+    return L;
   }
 
   /**
@@ -734,13 +805,35 @@ const $callFromLibc = (fp, args) => {
     for (const r of this.addrRefs) {
       L.push(`const $k${r} = ${BigInt(mir.consts.items[r].text)}n + $Dn;`);
     }
+    /* 本模块定义的全局量：把**地址**导出去（C 那边它就是一块内存）。
+       别人那句 `import { $sym_base }` 接的就是这一格。 */
+    for (const [name, addr] of mir.dataSyms === undefined ? [] : mir.dataSyms) {
+      L.push(`export const $sym_${name} = ${BigInt(addr)}n + $Dn;`);
+    }
     /* data 段在**装载期**就铺好（不像烤死那一版是在 `$run()` 里）：一份 .c 一份 .js
        之后，别人的代码可能先跑起来，那时我这一段必须已经在内存里。
        搬了一段之后段里装地址的那几格要跟着加同一个差 —— 哪几格由
        `mem.data[].relocs` 记着（这张表漏一条就是指向搬之前那块地方）。 */
     for (const d of mir.mem.data) {
-      const rs = (d.relocs === undefined ? [] : d.relocs).map((r) => `[${r.at},${r.size}]`);
-      L.push(`memPut(${d.off} + $D, [${d.bytes.join(',')}], [${rs.join(',')}], $D);`);
+      const rs = [];
+      const fix = [];
+      for (const r of d.relocs === undefined ? [] : d.relocs) {
+        /* 这一格装的是**别人**那个符号的地址（`static int *p = &arr[2];`）：
+           不是"加一个差"，而是"等提供方的地址" —— 发成一句写死的 `$sym_x + add`。
+           表里找不到提供方就当场抛（成品那一层会把它报成 undefined symbol）——
+           悄悄按"加一个差"铺下去会指着本模块预留的那块空白，那是静默答错。 */
+        if (r.sym !== undefined) {
+          if (!this.syms.has(r.sym)) {
+            throw new OmniError(`mir.emit_js: data 段里指着外部符号 '${r.sym}'，但没人提供它`);
+          }
+          this.needImport(this.syms.get(r.sym), `$sym_${r.sym}`);
+          fix.push(`[${r.at},$sym_${r.sym} + ${r.add === undefined ? 0 : r.add}n]`);
+          continue;
+        }
+        rs.push(`[${r.at},${r.size}]`);
+      }
+      L.push(`memPut(${d.off} + $D, [${d.bytes.join(',')}], [${rs.join(',')}], $D`
+        + `${fix.length > 0 ? `, [${fix.join(',')}]` : ''});`);
     }
     return L;
   }
@@ -754,7 +847,16 @@ const $callFromLibc = (fp, args) => {
     const mir = this.mir;
     const no = mir.funcIndex.get(mir.entry);
     if (no === undefined) throw new OmniError(`mir.emit_js: no entry function '${mir.entry}'`);
-    const L = ['function $run() {'];
+    /**
+     * module 档里**有的模块只是一个库**（没有 `main` —— R 运行时那 122 份里的每一份都是）。
+     * 那时它的入口函数只有"序"（`$sp` 的初值、errno/strerror/流那几格），没有 `main` 可调，
+     * 所以发的是 `$init()` 而不是 `$run()`：
+     *   * 不收退出码、不 `libcAtExit`（atexit 的手还没登记，收摊是程序的事，不是库的事）；
+     *   * 由入口那一层在跑 `main` **之前**把每一份库的 `$init()` 叫一遍。
+     */
+    const lib = this.modular && !mir.funcIndex.has('main');
+    this.hasRun = lib ? 'init' : true;
+    const L = [lib ? 'function $init() {' : 'function $run() {'];
     if (mir.mem !== null && !this.modular) {
       L.push(`  memInit(${mir.mem.min}, ${mir.mem.max});`);
       /* data 段就是一串数字字面量。不走 base64/`Buffer`：**这一份自己也要能被 omni
@@ -766,6 +868,14 @@ const $callFromLibc = (fp, args) => {
       }
     }
     L.push(`  setFnPtrCaller((ptr, args) => $callFromLibc(ptr, args));`);
+    /* 共用的那个堆（module 档）：装载全完之后在内存尾上要一页，幂等。
+       前端在 `tu` 档里只记一条 `wantsHeap`，基址不烤 —— 见那一格头上的账。 */
+    if (this.modular && mir.wantsHeap === true) L.push('  memHeap();');
+    if (lib) {
+      L.push(`  $f${no}();`);
+      L.push('}');
+      return L;
+    }
     L.push('  let code = 0;');
     L.push('  try {');
     L.push(`    const r = $f${no}();`);
@@ -807,10 +917,15 @@ const $callFromLibc = (fp, args) => {
  */
 export function emitMirJs(mir, opts) {
   const modular = opts !== undefined && opts.module === true;
-  const src = new JsFromMir(mir, modular).emit();
+  const syms = opts === undefined ? undefined : opts.symbols;
+  const gen = new JsFromMir(mir, modular, syms);
+  const src = gen.emit();
   const spec = opts === undefined ? undefined : opts.rtImport;
   if (spec === undefined) return src;
   const head = `import { RT as $rt } from ${JSON.stringify(spec)};\n`;
-  if (modular) return `${head}${src}\nexport { $run };\n`;
+  if (modular) {
+    /* 库那一档导出的是 `$init`（没有 `main` 可跑），程序那一档导出 `$run`。 */
+    return `${head}${src}\nexport { ${gen.hasRun === 'init' ? '$init' : '$run'} };\n`;
+  }
   return `${head}${src}\nprocess.exit($run());\n`;
 }

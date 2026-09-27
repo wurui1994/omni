@@ -957,7 +957,21 @@ export class MirFunc {
      * 逼出这一格的是 REPL 会话：第二批调第一批定义的函数，两批是两份产物。
      */
     this.decl = false;
+    /**
+     * **这个函数体只是一个转发桩**，真身在这个翻译单元之外（`externThunk` 打上它，
+     * 值是那个外部符号的名字）。线性内存那条腿上外部函数一律有桩（落点是 `CCALL`），
+     * 所以"哪些名字是我自己定义的、哪些是别人提供的"光看有没有函数体分不出来 ——
+     * 这一条就是那个分界。
+     *
+     * 谁看它：**一个 .c 一个 .js** 那条路（ADR-0047）。桩的名字在别的模块里有定义时，
+     * 发出来的 JS 直接 `import` 那一格、不发桩的身子；没有定义的才留桩（那是 libc）。
+     * 别的腿一个字不改。
+     */
+    this.thunk = null;
   }
+
+  /** 声明「这个身子只是转发给外部符号 `name` 的桩」。见 `thunk` 头上那段。 */
+  setThunk(name) { this.thunk = name; }
 
   /** 声明「正文在别的产物里，调用约定还是我们自己的」。见 `decl` 头上那段。 */
   setDecl() { this.decl = true; }
@@ -1201,8 +1215,17 @@ export class MirModule {
      * @type {Map<string, number>}
      */
     this.dataSyms = new Map();
-    /** @type {{name:string, ref:number}[]} */
+    /** @type {{name:string, ref:number, add:number}[]} */
     this.dataRefs = [];
+    /**
+     * **这份模块要一个堆，但堆不在它自己的像里**（一个 .c 一个 .js 那条路，ADR-0047）。
+     *
+     * 整个程序一份 MIR 时堆是最后一段、基址烤进入口那条 `__omni_heap_init`。N 份模块
+     * 各占一段之后那样不成立：堆靠 `MGROW` 往**内存尾上**长，而谁在尾上要等所有模块
+     * 装载完才知道。所以这一档里堆改成"装载全完之后由运行时在尾上要一块"
+     * （`js_rt.js` 的 `memHeap`，幂等），前端只**记一条**"我用到堆了"。
+     */
+    this.wantsHeap = false;
     /* 地址模型（第九刀第十九片）。`false` = 地址是**线性内存里的偏移**（wasm 与解释器
      * 那两条腿）；`true` = 地址是**真地址**（native 那两条腿：`FRAME` 回来的、libc
      * 给的、数据符号的，都在同一个地址空间里）。
@@ -1256,6 +1279,10 @@ export class MirModule {
    * native 那条腿早有这一格（`globalBlob` 的 `fixups`，按符号号记），这儿记的是
    * **绝对地址**那一种：线性内存腿上每一块静态量的 `[addr, addr+size)` 都是确定的，
    * 所以"地址 → 是谁"由地址区间反查得到（`tccgen.js` 的 `anonFixOf` 早这么干）。
+   *
+   * 一条记录还可以带 `{sym, add}`：那一格装的是**别的翻译单元**那个符号的地址
+   * （`static int *p = &arr[2];`）—— 它不是"加一个差"能对的，要等提供方的地址。
+   * 一个 .c 一个 .js 那条路把它发成 `$sym_arr + add`（ADR-0047 第十一格）。
    */
   addData(off, bytes, relocs) {
     if (this.mem === null) throw new Error('mir: 没有线性内存，data 段无处可放');

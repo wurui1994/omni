@@ -219,7 +219,8 @@ export function cMir(path, incs, defs, args, sysIncs, tgt) {
    * 拿到的是一个指着自己那块空白的指针（静默答错）。
    */
   if (mod.dataRefs !== undefined && mod.dataRefs.length > 0) {
-    const names = mod.dataRefs.map((r) => `'${r.name}'`).join('、');
+    /* 同一个符号可能记了好几条（基址那一条 + `&arr[2]` 折出来的那几条），报错只说名字。 */
+    const names = [...new Set(mod.dataRefs.map((r) => `'${r.name}'`))].join('、');
     throw new OmniError(`${path}: error: undefined symbol ${names}`);
   }
   const errs = verifyMir(mod);

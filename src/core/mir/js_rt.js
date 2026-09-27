@@ -108,8 +108,11 @@ function memAlloc(bytes, align) {
 /**
  * 铺一段 data 段，顺手把里头装地址的那几格加上 `delta`。
  * `relocs` 是 `[[at, size], …]`（`mem.data[].relocs` 那张表发出来的样子）。
+ *
+ * `fixes` 是 `[[at, 地址], …]`：那几格装的是**别的模块**那个符号的地址
+ * （`static int *p = &arr[2];`）—— 不是"加一个差"能对的，所以直接写进去。
  */
-function memPut(off, bytes, relocs, delta) {
+function memPut(off, bytes, relocs, delta, fixes) {
   if (delta !== 0) {
     for (const r of relocs) {
       const at = r[0];
@@ -120,7 +123,29 @@ function memPut(off, bytes, relocs, delta) {
       for (let i = 0; i < size; i += 1) bytes[at + i] = Number((v >> BigInt(i * 8)) & 255n);
     }
   }
+  if (fixes !== undefined) {
+    for (const fx of fixes) {
+      const at = fx[0];
+      const v = BigInt.asUintN(64, fx[1]);
+      for (let i = 0; i < 8; i += 1) bytes[at + i] = Number((v >> BigInt(i * 8)) & 255n);
+    }
+  }
   memData(off, bytes);
+}
+
+/**
+ * **整个程序共用的那个堆**，在内存**尾上**要一页（幂等：第一次叫的时候才要）。
+ *
+ * 为什么不像单份模块那样把堆底烤进去：堆靠 `MGROW` 往内存尾上长，而 N 份模块各占一段
+ * 之后"谁在尾上"要等全部装载完才知道。所以这一档里堆由**入口跑起来的时候**要 ——
+ * 那一刻所有模块的 `memAlloc` 都走完了，这一块一定在最后。
+ */
+let heapDone = false;
+function memHeap() {
+  if (heapDone) return;
+  heapDone = true;
+  const base = memAlloc(MEM_PAGE, MEM_PAGE);
+  callLibc('__omni_heap_init', [BigInt(base)]);
 }
 
 export const RT = {
@@ -128,6 +153,7 @@ export const RT = {
   memData,
   memAlloc,
   memPut,
+  memHeap,
   memSize,
   memGrow,
   memLoadFn,
