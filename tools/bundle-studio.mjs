@@ -40,6 +40,12 @@ const SWAP = {
    * 浏览器这条腿上既没有 `require` 也没有 `dlopen`，而这份打包器只认静态 import，
    * 所以换成 web 那一份。代价明写：八门语言 + 三格扩展全进这份 HTML（体积账见 `--split`）。 */
   'src/core/lang/builtin.js': 'src/core/lang/builtin-web.js',
+  /* **借来的那十三格 adapter** 同一条道理（接缝在 `lower/borrow-pick.js`）：源码腿那一份用
+   * `createRequire` 按需装（一门只装一门），而浏览器上既没有 `require` 也没有 `dlopen`，
+   * 这份打包器又只认静态 import —— 所以换成 fat 那一份（十三条静态 import）。
+   * 少了这一句，页面上 `.pss` / `.kc` 那几门会在装 adapter 那一步炸，而它们的代码明明
+   * 就在这份 HTML 里（与 `builtin-web.js` 文件头记的是同一个坑）。 */
+  'src/core/lower/borrow.js': 'src/core/lower/borrow-fat.js',
 };
 
 /**

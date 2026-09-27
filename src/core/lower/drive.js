@@ -17,6 +17,9 @@ import {
 } from '../host/native.js';
 import { pickLang, LANGS } from './langs.js';
 import { treeRoot } from '../host/treeroot.js';
+/* **这门语言的代码用到才装**（`docs/design/on-demand-loading.md` 第五节第 1 刀）：
+   登记处只有数据，adapter 那份文件由这一格在被问到的那一刻装进来。 */
+import { borrowRt, borrowOne } from './borrow.js';
 
 /**
  * **换行当分号**（登记处那一行的 `asi`，EVAL 那两门要）。
@@ -68,9 +71,9 @@ if (globalThis.__OMNI_GFX === undefined) globalThis.__OMNI_GFX = GFX_CPU;
 /** 一份路径的目录（宿主那侧不供这一格）。 */
 const dirOf = (p) => (p.lastIndexOf('/') >= 0 ? p.slice(0, p.lastIndexOf('/')) : '.');
 
-/** 一门语言迁到公共降级器了没有（登记处那一格 `toIR` 就是答案）。 */
+/** 一门语言迁到公共降级器了没有（登记处那一格 `adapter` 就是答案 —— **不装代码**）。 */
 export function hasAdapter(lang) {
-  return lang !== null && lang !== undefined && typeof lang.toIR === 'function';
+  return lang !== null && lang !== undefined && typeof lang.adapter === 'string';
 }
 
 /**
@@ -90,8 +93,11 @@ export function hasAdapter(lang) {
 export function sxTextOf(path, argv = [], out = null, opts = {}) {
   const lang = pickLang(path, cliArg(argv, '--lang'));
   if (!hasAdapter(lang)) {
-    throw new OmniError(`${lang.name} 还没有 adapter —— 这条路（ADR-0044）要登记处那一格 toIR`);
+    throw new OmniError(`${lang.name} 还没有 adapter —— 这条路（ADR-0044）要登记处那一格 adapter`);
   }
+  /* **到这一刻才装这一门的代码**（`toIR` / `hooks` / `imports` / `pre` 那几格）。
+     在 `--pkgs-root` 那两句之后、读语法表之前：前面那两句是"这条命令行说不通"，
+     一门语言都不该为此被装进来。 */
   /* **`--pkgs-root` 还没接**（那是"扫主包的 import 自己找依赖"，go 编译器自举那一轴要它）。 */
   for (const flag of ['--pkg', '--pkgs-root']) {
     if (argv.includes(flag)) {
@@ -99,6 +105,7 @@ export function sxTextOf(path, argv = [], out = null, opts = {}) {
         + ' 那一格是"自己去找依赖"，比 `--pkgs`（名单写在命令行上）多一层');
     }
   }
+  const rt = borrowRt(lang);
   const { tb, g } = loadGrammarTable(`${treeRoot()}/${lang.grammar}`);
   const diags = new Diagnostics();
   /* 主文件的**原文**：有几门语言的 adapter 除了树还要它 —— `.pss` 后半那些
@@ -110,7 +117,7 @@ export function sxTextOf(path, argv = [], out = null, opts = {}) {
     if (p === path) mainSrc = text;
     /* **预处理那一格**（登记处那一行的 `pre`）：EVAL 两门有 `#define` / `#if` 那一族，
        它得在词法之前跑。行数不变，所以诊断里的行号还是原文的行号。 */
-    const lexed = lang.pre === undefined ? text : lang.pre(text, p);
+    const lexed = rt.pre === undefined ? text : rt.pre(text, p);
     const toks = lexText(g.lex, new SourceFile(p, lexed), diags);
     if (toks === null || diags.hasErrors()) return null;
     const t = lang.asi === true
@@ -146,8 +153,8 @@ export function sxTextOf(path, argv = [], out = null, opts = {}) {
   }
 
   const load = (p, t) => {
-    if (lang.imports === undefined) return true;
-    for (const spec of lang.imports(t)) {
+    if (rt.imports === undefined) return true;
+    for (const spec of rt.imports(t)) {
       const rel = spec.startsWith('./') ? spec.slice(2) : spec;
       let hit = null;
       for (const e of lang.exts) {
@@ -183,7 +190,7 @@ export function sxTextOf(path, argv = [], out = null, opts = {}) {
       const t = glrParse(tb, toks, diags);
       return t === null || diags.errorCount() > n0 ? null : t;
     };
-    const ir = lang.toIR(tree, {
+    const ir = rt.toIR(tree, {
       also, src: mainSrc, parseExpr, root: treeRoot(),
     });
     /* **顺手把"哪些名字是那门语言的运行时层"带出去**（`out.rtNames`，EVAL 两门在用）：
@@ -204,8 +211,7 @@ export function sxTextOf(path, argv = [], out = null, opts = {}) {
     const skip = typeof opts.skipBodies === 'function'
       ? opts.skipBodies(Array.isArray(ir.rtNames) ? ir.rtNames : [])
       : null;
-    return lower(ir, lang.hooks ?? {}, skip instanceof Set ? { skipBodies: skip } : {});
-
+    return lower(ir, rt.hooks ?? {}, skip instanceof Set ? { skipBodies: skip } : {});
   } catch (err) {
     throw new OmniError(`${path}：${lang.name} 这一格还没接住 —— ${err.message}`);
   }
@@ -220,7 +226,9 @@ export function sxTextOf(path, argv = [], out = null, opts = {}) {
  */
 export function unitsBuilderOf(path, argv = []) {
   const l = pickLang(path, cliArg(argv, '--lang'));
-  return l !== null && l !== undefined && typeof l.units === 'function' ? l.units : null;
+  /* `units` 在登记处是**数据**（`{ adapter, name }`，见 `langs.js` 表头）——
+     真函数由 `borrowOne` 在被问到的这一刻装。 */
+  return l !== null && l !== undefined && l.units !== undefined ? borrowOne(l.units) : null;
 }
 
 /** 一格 `--flag VALUE`（不认 `--flag=VALUE` —— 整条链一条规矩）。 */
@@ -262,7 +270,7 @@ export function coreSxText(path, argv, out = null, opts = {}) {
 export function runFallbackOf(path) {
   for (const [, d] of LANGS) {
     if (d.guess === false || d.runFallback === undefined) continue;
-    if (d.exts.some((e) => path.endsWith(`.${e}`))) return d.runFallback;
+    if (d.exts.some((e) => path.endsWith(`.${e}`))) return borrowOne(d.runFallback);
   }
   return null;
 }

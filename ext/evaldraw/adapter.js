@@ -33,6 +33,12 @@ import { EVALDRAW_TEXT } from '../polydraw/text-rt.js';
 import { GL_CONSTS, POLYDRAW_GL, EVALDRAW_TEX } from '../polydraw/gl-rt.js';
 import { NET_CONSTS } from '../polydraw/net-rt.js';
 
+/* **预处理那一格转手出去**（登记处 `src/core/lower/langs.js` 的 `exports.pre` 指的就是
+   这个名字）：登记处按需装载时只读"这门语言那一格入口"，不去第二份文件里取东西。
+   两门用的是同一份 `preprocess`（`#define` / `#if` 那一族，词法之前跑）。 */
+import { preprocess } from '../polydraw/pre.js';
+export { preprocess };
+
 /**
  * **GL 那个子集两门共用同一份**（`gl-rt.js`）—— 只有一个模型：命令变顶点、合批、拆 mode
  * 全在语言这一侧（`docs/design/eval-realtime-gpu.md` 第 9 节）。

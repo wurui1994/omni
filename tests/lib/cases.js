@@ -928,8 +928,12 @@ const fam = (family, expect, langs) => langs.map((lang) => {
     d.grammar, `ext/${lang}/examples/${family}.${d.exts[0]}`, expect);
 });
 
-/** 登记处上那几门（一门语言一格 `toIR`，ADR-0044）。 */
-const ALL = [...LANGS].filter(([, d]) => typeof d.toIR === 'function').map(([n]) => n);
+/** 登记处上那几门（一门语言一格 `adapter`，ADR-0044）。
+ *
+ * 判据是 **`adapter`**（那门语言的 adapter 模块路径），不是 `toIR` ——
+ * 登记处现在只有数据，代码由 `lower/borrow.js` 用到才装（按需装载那一刀）。
+ * 问 `typeof d.toIR === 'function'` 会一律答假，于是这张表变空、整套判据静静少跑。 */
+const ALL = [...LANGS].filter(([, d]) => typeof d.adapter === 'string').map(([n]) => n);
 
 export const CASES = [
   // 第一个家族：含全部基础要素的完整例子（九门全有）

@@ -127,46 +127,44 @@ supported (the module graph is fixed at link time)`）。所以正解**不是** 
 也要它。ADR-0030 禁的是核心 import 别人的**代码**，不是核心知道有这么一门语言
 （`plugin.js` 的声明表本来就是这个道理：`name` 不装也要说得出来）。
 
-**cap 的名字与形状**：一门语言一格 `borrow.<name>`，回它的运行时那半：
+**装进来那一格的形状**：登记处那一行 -> `{ toIR, hooks?, imports?, pre? }`，机制在
+`lower/borrow-core.js` 的 `mkBorrowRt(load)`（一门只装一次、记住；导出名取不到当场抛
+「登记处与代码走散了」—— 与 `plugin.js` 那格 `pendingMismatch` 同一条纪律）。
 
-```js
-api.registerCap('borrow.python', () => ({ toIR: pyToIR, hooks: PY_HOOKS }));
-// 可选那几栏：imports / pre / jsRuntime，谁有谁给
-```
+**为什么不走 `plugin.js` 的 provider 注册表**：借来的语言**不是 provider** —— 它们不认领后缀
+（`cli.js` 判"这是借来的语言"靠 `lang(path) === null && borrowedExts()`，抢过去就改了路）、
+也不答 cap。塞进 provider 只会把语义扭一道，而"按名字装一份模块并记住"三十行就写完了。
 
-`cap('borrow.python')()` 与 `cap('c.sysInclude')()` 同形（`registerCap` 收的就是函数）。
-
-**`drive.js` 的改法**（`sxTextOf` 开头两行）：
+**`drive.js` 的改法**（`sxTextOf` 里）：
 
 ```js
 const lang = pickLang(path, cliArg(argv, '--lang'));   // 纯数据，不装代码
-const rt = cap(`borrow.${lang.name}`)();               // 到这一刻才装这一门
+const rt = borrowRt(lang);                             // 到这一刻才装这一门
 ```
 底下 `lang.toIR` / `lang.hooks` / `lang.pre` / `lang.imports` 全改成 `rt.*`。
-`hasAdapter(lang)` 改成问 `hasCap('borrow.'+name)`（**只查声明、不装** —— `plugin.js` 那格
-`hasCap` 刻意就是这个语义）。
+`hasAdapter(lang)` 改成问 `typeof lang.adapter === 'string'`（**只看数据、不装代码**）。
 
-**三条腿各自怎么装**（照 `builtin.js` / `builtin-fat.js` / `builtin-web.js` 那个接缝，一格不新造）：
+**三条腿各自怎么装**（照 `lang/builtin-pick.js` 那个接缝，一格不新造）：
 
-- **node 源码腿**：每门语言加一份 `ext/<name>/omni-ext.json`（`provides.caps:
-  ["borrow.<name>"]`）+ 一份薄入口 `ext/<name>/omni-lang.js`。`lang/builtin.js` 里那句
-  `declareExts((dir, entry) => require_(join(dir, entry)), api)` 已经在扫了，**核心一行都不用改**。
-- **浏览器腿**：`lang/builtin-web.js` 的 `STATIC_EXTS` 加十三行（页面里没有 `require`）。
-  少了这一格，studio 里 `.pss` / `.kc` 会报"没这格扩展的代码" —— 那份文件头已经写着这条。
-- **产物腿**（`emit js` / `emit c` / `dist/omni`）：新增 `lower/langs-fat.js`（十三条静态 import
-  + 同一条 `declareProvider` 声明出去）与 `lower/langs-pick.js`，挂到 `cli.js` 的 `readModule`
-  接缝上 —— 与 `builtin-pick.js` 同构。**产物里一格不少、行为一格不变**，省下来的是源码腿那 135ms。
-  （为什么不直接让产物腿也走插件：那会把 `dist/omni run x.py` 从"能跑"变成"报没装"。那是
-  ADR-0030 的终局，但它是**另一笔账**——要给 `PLUGIN_SET` 加十一格 `lang-*`——不混在这一刀里。）
+- **node 源码腿**：`lower/borrow.js` —— `createRequire` 按需装。
+- **产物腿**（`emit js` / `emit c` / `dist/omni`）：`lower/borrow-fat.js`（十三条静态 import
+  + 一张"adapter 路径 -> 导出"的表），挂在 `cli.js` 的 `readModule` 上（`borrow-pick.js`）。
+  **产物里一格不少、行为一格不变**，省下来的是源码腿那 135ms。
+  （为什么不直接让产物腿也走插件：那会把 `dist/omni run x.py` 从"能跑"变成"报没装"。
+  那是 ADR-0030 的终局，但它是**另一笔账**——要给 `PLUGIN_SET` 加十一格 `lang-*`。）
+- **浏览器腿**：`tools/bundle-studio.mjs` 的 `SWAP` 里加一行，也换成 fat 那份
+  （页面里既没有 `require` 也没有 `dlopen`，打包器只认静态 import）。
 
-判据：
-- `node src/cli.js run --mode js -v /tmp/tiny.py` 的「启动」一栏掉 **≥130ms**；
-  用 `--cpu-prof` 确认 `ext/` 下**只有 python 那一份** adapter 出现在栈里。
-- `node tests/python/run.js`（14.6s 基线）不变红、跟着变快。
-- `node tests/lower/run.js`、`node tests/glr/run.js`、`tests/c`（106 passed / 2 failed）不动。
-- `npm run check:self` 绿；`npm run build:native` 编得出来，`./dist/omni run x.py` 照旧跑。
-- `tests/lib/cases.js:828` 那句 `typeof d.toIR === 'function'`（拿它算"哪几门有 adapter"）
-  要改成问注册表 —— 不然那张表会变空，整套判据静静少跑。
+判据（**已达成**）：
+- `run --mode js -v /tmp/tiny.py` 的「启动」最小值 **681ms → 257ms**；
+  `--cpu-prof` 里栈上出现过的 `ext/` 目录**只有 `python` 一格**（从前十三格全在）。
+- `npm run check:self` 两条腿都绿（这一刀之前是红的）。
+- `tests/lower` 325 passed / 0 failed、`tests/python` 25 passed / 0 failed / 1 skipped、
+  `tests/glr` 41 passed / 1 failed（`table/minidia` 那条是 `654184f6` 留下的快照欠账，
+  与这一刀无关 —— 一个 `.grammar` 都没动）。
+- `tools/bundle-studio.mjs` 照旧打得出来（279 份模块）。
+- `tests/lib/cases.js` 与 `tests/lower/run.js` 里那两句 `typeof d.toIR === 'function'`
+  跟着改成问 `d.adapter` —— 不改的话那张"哪几门有 adapter"的表会变空，整套判据静静少跑。
 
 ### 第 2 刀：核心自己那几摊也按动词分
 
@@ -190,13 +188,29 @@ const rt = cap(`borrow.${lang.name}`)();               // 到这一刻才装这�
   **第三条就是本文这条**（注册表 + 同步 require），所以它该跟着挪
 - **报表那三份**（`cli/flame.js` / `statgraph.js` / `layers.js`，5ms）
 
-手法与第 1 刀**同一套**（声明 + 被问到才装），差别只在声明表放哪儿：这些是核心自己的部件，
-不走 `ext/` 自述，而是往 `lang/builtin.js` 的 `BUILTINS` 表里加一类 `core-*` 声明
-（`caps: ['link.macho']` 这种）。成本要写明：那张表**有三份**（`builtin.js` 迟装 /
-`builtin-fat.js` 产物 / `builtin-web.js` 浏览器），加一格要改三处 —— 这是现有接缝的既定代价，
-`resolvePending` 的核对机制会在走散时当场响。
+手法与第 1 刀**同一套**（用到才装 + 产物腿走 fat 接缝），机制也共用一格：
+`lower/borrow-core.js` 那个 `mkBorrowRt` 的兄弟 —— 一格 `coreMod('link/macho.js')`，
+`lazy.js`（node `createRequire`）/ `lazy-fat.js`（静态表）/ `lazy-pick.js`，三份文件、一处接缝，
+所有组共用（不是一组三份）。
 
-预估省 **≥250ms**。这一刀调用点多（几十处），所以按上面的分组**一组一刀**地做，每组的判据是
+**先量了调用点才排序**（这决定了这一刀有多便宜）：
+
+- **三条死 import**：`lowerWat` / `lowerJs` / `linkJs` 在 `cli.js` 里**只出现在 import 行**
+  （`linkJs` 第 634 行那处是注释）。它们的真正使用者是 `lang/js.js` 与 `lang/wat.js`，
+  而那两门本来就在迟装表里 —— 这三条纯属白付 **≈36ms**，直接删。
+- **`host/src_eval.js` 69ms，1 个调用点**（`installSrcEvalHook`）—— 性价比最高的一格。
+- **`link/` 九份 61ms，一共 13 个调用点**（`writeObject` / `writeElfObject` / `peLoad` /
+  `peWrite` / `elfExe` / `machoExe` / `mergeElfObjects` / `parseLdScript` / `isDefSyms` /
+  `flatImage`，大多只用 1 次）。
+- **`arm64/from_mir` + `x64/from_mir` 45ms，各 1 个调用点**（`genArm64` / `genX64`）。
+- **`build/cli.js` 26ms、`repl.js` 19ms、`bootstrap.js` 4.7ms、`interp/eval.js`**——各 1 个。
+- **`mir/interp.js` 15ms 3 处、`mir/emit_js.js` 3 处、`mir/js_rt.js` 1 处**。
+
+**刻意不动的几格**（调用点多而装载便宜，改了只是把账搬个地方）：
+`runtime/c_runtime.js`（41 处 / 4.2ms）、`build/modules.js` + `modcache.js`（26 处 / 14ms）、
+`cli/flame.js`（12 处 / 2ms）、`frontend-c/split.js`（8 处 / 4.7ms）。
+
+预估省 **≥250ms**，而要改的调用点只有二十来处。按上面的顺序**一组一刀**地做，每组的判据是
 「那一组的命令照旧过它自己那条测试轴」+「`tiny.py` 的启动再掉一格」。
 
 ### 第 3 刀（收尾，没有性能收益）：数据那半也挪进自述

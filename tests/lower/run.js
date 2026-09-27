@@ -167,11 +167,13 @@ function omni(args, extraEnv) {
   return { code: r.status ?? 1, out, err: r.stderr ?? '' };
 }
 
-/* 登记处与这张表要对得上：迁过来的语言必须真的有 `toIR`（漏登记就是"测试绿、命令行没有"）。 */
+/* 登记处与这张表要对得上：迁过来的语言必须真的有 `adapter`（漏登记就是"测试绿、命令行没有"）。
+   问的是 **`adapter`**（模块路径）而不是 `toIR`：登记处现在只有数据，代码由
+   `lower/borrow.js` 用到才装 —— 问 `typeof d.toIR` 会一律答假，那就成了"整套静静少跑"。 */
 for (const name of Object.keys(MIGRATED)) {
   const d = LANGS.get(name);
-  if (d === undefined || typeof d.toIR !== 'function') {
-    no(`${name} 登记`, '这张表说它迁过来了，可登记处（langs.js）没有 toIR 那一格');
+  if (d === undefined || typeof d.adapter !== 'string') {
+    no(`${name} 登记`, '这张表说它迁过来了，可登记处（langs.js）没有 adapter 那一格');
   }
 }
 

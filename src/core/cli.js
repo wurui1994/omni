@@ -95,6 +95,9 @@ import {
  * —— 两条路在注册表那一层看不出区别。 */
 import { registerBuiltins } from './lang/builtin.js';
 import { builtinAlt } from './lang/builtin-pick.js';
+/* 借来的那十三格 adapter 的同一条接缝（源码腿按需装 / 产物腿静态全装）——
+   见 `lower/borrow-pick.js` 与 `docs/design/on-demand-loading.md`。 */
+import { borrowAlt } from './lower/borrow-pick.js';
 import { PLUGIN_SET, pluginRegName, CORE_DATA } from './plugin-set.js';
 import { RUNTIME_DIR, JIT_DIR, GL_DIR, SCHED_DIR, runtimeSources } from './runtime/c_runtime.js';
 import { loadProgram, MODE_BY_EXT } from './module/load.js';
@@ -1402,6 +1405,14 @@ function readModule(p) {
   if (alt !== null) {
     vStep(`builtins ${LANGS_FAT ? 'fat ' : 'core'}  ${alt}`);
     return readText(alt);
+  }
+  /* **借来的那十三格 adapter 同一条接缝**（`lower/borrow-pick.js`）：源码腿那一份用
+     `createRequire` 按需装（一门只装一门），而我们自己的前端不认 `node:module` ——
+     编的时候换成 `borrow-fat.js`（十三条静态 import，产物里一格不少）。 */
+  const bAlt = borrowAlt(p);
+  if (bAlt !== null) {
+    vStep(`borrowed fat  ${bAlt}`);
+    return readText(bAlt);
   }
   return exists(p) ? readText(p) : null;
 }

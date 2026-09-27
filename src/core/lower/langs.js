@@ -20,99 +20,95 @@
 // 声明一栏"支持哪些特性"就等于给自己开一处会过期的账（见设计文档里那几次教训）。
 
 import { OmniError } from '../source/diag.js';
-/* "镜像在哪儿"这一格由宿主答（封闭 ABI 的 `js_install_dir`）—— 见 `treeRoot()` 那段账。 */
-import { installDir, exists } from '../host/native.js';
 
-import { GO_RT } from '../../../ext/go/go-rt.js';
-/* **迁过来的那几门**（ADR-0044）：`toIR` 是 adapter（CST → 标准 IR），语义降级走
-   `src/core/lower/`。有 `toIR` 的语言**没有** `toGraph` —— 图那一层不再有它。 */
-import { awkToIR, AWK_HOOKS } from '../../../ext/awk/adapter.js';
-import { polydrawToIR } from '../../../ext/polydraw/adapter.js';
-import { preprocess } from '../../../ext/polydraw/pre.js';
-/* **按单元产物那条路**（EVAL 两门：运行时那一层是所有脚本共用的一格，只编一次只发一次）——
-   登记在这张表里的 `units` 上，于是 `cli.js` 不必 import `ext/`（见
-   `docs/design/omni-serve-studio.md` §9.3/§9.4）。 */
-import { evalUnitsBuild } from '../../../ext/polydraw/units.js';
-import { evaldrawToIR } from '../../../ext/evaldraw/adapter.js';
-import { chezToIR } from '../../../ext/chez/adapter/index.js';
-import { sbclToIR } from '../../../ext/sbcl/adapter/index.js';
-import { fbToIR } from '../../../ext/freebasic/adapter/index.js';
-import { mojoToIR } from '../../../ext/mojo/adapter/index.js';
-import { pyToIR, PY_HOOKS } from '../../../ext/python/adapter/index.js';
-import { cppToIR } from '../../../ext/cpp/adapter/index.js';
-import { nimToIR, nimImports } from '../../../ext/nim/adapter/index.js';
-import { vlangToIR, vlangImports } from '../../../ext/vlang/adapter/index.js';
-import { goToIR, goImports } from '../../../ext/go/adapter/index.js';
-import { rToIR } from '../../../ext/r/adapter.js';
-import { runWithLibR } from '../../../ext/r/libr-run.js';
+/* 这一份**一条 `ext/` 的 import 都没有**（从前有十三条）。理由与量到的账见
+ * `docs/design/on-demand-loading.md`：
+ *   * 跑一行 `print(1)` 也要装十二门别的语言的 adapter —— 逐条量出来 134.7ms；
+ *   * 核心静态 import `ext/` 之后，ext 里一份文件用了 `node:fs` 就能把自编译轴弄红
+ *     （真发生过：`ext/python/adapter/pylib.js`）。方向该是单向的（ADR-0030 第 4 节）。
+ * 于是这张表只留**数据**：叫什么、语法在哪、认哪些后缀、adapter 是哪份文件、
+ * 从那份文件里取哪几个导出。**代码**由 `borrow.js` 在被问到的那一刻装（一门只装一门）。 */
 
-/**
- * 这棵树的根。**从宿主那格 `installDir()` 走上去**（`src/core/host` 往上三层）——
- * 从前这儿直接读 `import.meta.url`，而那一格在自编译轴上是一条硬错
- * （`import.meta is not supported`：它不在这门语言的子集里）。宿主那一格是封闭 ABI 的
- * `js_install_dir`，两代产物各自答得出来 —— 于是这一份跟着编译器被降级时也说得通。
- *
- * 明写一格边界：原生那一代的 `installDir()` 回的是**可执行文件所在目录**，布局与源码树
- * 不一样，所以那时候 `ext/*.grammar` 不在这条相对路径上 —— 那是"产物怎么装"的另一笔账
- * （与 runtime/ 和 lib/ 一样），不是这一格的事。
- */
-/**
- * 这棵树的根**不在这一份上了** —— 搬到 `host/treeroot.js`（要它的人从那儿 import）。
- *
- * 为什么搬走：任何想知道树根的人本来都得 import 这一份（语言登记处），而这一份要
- * import 各门语言的 adapter —— 于是 adapter 一旦反过来要树根，**环就合上了**
- * （`ext/r/rt/ffi.js` 与 `ext/r/libr-run.js` 撞的正是这一格，`tests/mir/run.js` 的
- * `lower/cli.js` 那道门不收 import 环）。树根与语言无关，它只问宿主两句话
- * （`installDir` 与 `exists`），所以它该在 `host/` 那一层。
- */
+/* **这棵树的根只答一份** —— 正本在 `host/treeroot.js`（它只问宿主两句话，与语言无关，
+   所以它该在 `host/` 那一层；单开一份的缘由见那边的文件头）。这儿再导出一次，
+   老的 import 路径照旧能用。 */
+export { treeRoot } from '../host/treeroot.js';
 
 /**
  * 一门语言一格：`grammar` 是相对这棵树根的路径，`exts` 是它的源文件后缀
  * （不带点，`exts[0]` 就是例子文件用的那个）。`guess: false` = 那些后缀**不参与按文件名猜**。
  *
- * **降级那一格有两种**（ADR-0044 迁移期里两者并存）：
- *   * `toIR` + `hooks` —— 迁完了的那几门：CST → 标准 IR，语义降级走 `src/core/lower/`
- *     那一份公共降级器（默认、也是唯一的一条路）。
- *   * `toGraph` —— 还没迁的那几门：CST → 节点图 → `backend-core.js` → `.sx`。
- * 一门语言只该有其中一格。`toIR` 一落地，那门语言的 `tograph.js` 当场删掉 ——
- * 留着就是"两条路各自一套"，而那正是这一版要去掉的东西。
+ * **降级那一格**（ADR-0044）：`adapter` 是那门语言的 adapter 模块（相对树根的路径），
+ * `exports` 是"从它那儿取哪几个名字"：
+ *   toIR      必给 —— CST → 标准 IR（语义降级走 `src/core/lower/` 那一份公共降级器）
+ *   hooks     可选 —— 交给公共降级器的那几格钩子（python 只有"数组的零值"一格）
+ *   imports   可选 —— 答"这份文件 import 了什么"（驱动据此读同目录的同语言文件）
+ *   pre       可选 —— 词法之前的预处理（EVAL 两门的 `#define` / `#if` 那一族）
+ * **这儿只写名字，不 import** —— 真装是 `borrow.js` 的事，而且只装被问到的那一门。
+ * 名字对不上（adapter 里没这个导出）当场抛「登记处与代码走散了」。
+ *
+ * 不在"一门一个 adapter 入口"里的另有两格（R 的 libR 那一档、EVAL 两门的按单元产物），
+ * 各自记成 `{ adapter, name }` —— **同样只写数据**，装载走 `borrow.js` 的 `borrowOne`：
+ *   runFallback 可选 —— "编译器这一档接不住时，`omni run` 还能怎么跑"（R 是 libR 那一档）
+ *   units       可选 —— 按单元产物那条路的建造者（EVAL 两门，见
+ *                      `docs/design/omni-serve-studio.md` §9.3/§9.4）
  */
 export const LANGS = new Map([
-  ['chez', { grammar: 'ext/chez/chez.grammar', toIR: chezToIR, exts: ['ss', 'scm'] }],
-  ['sbcl', { grammar: 'ext/sbcl/sbcl.grammar', toIR: sbclToIR, exts: ['lisp', 'cl'] }],
+  ['chez', {
+    grammar: 'ext/chez/chez.grammar', exts: ['ss', 'scm'],
+    adapter: 'ext/chez/adapter/index.js', exports: { toIR: 'chezToIR' },
+  }],
+  ['sbcl', {
+    grammar: 'ext/sbcl/sbcl.grammar', exts: ['lisp', 'cl'],
+    adapter: 'ext/sbcl/adapter/index.js', exports: { toIR: 'sbclToIR' },
+  }],
   /* **lua 与 gsl-shell 不在这张表里了**（ADR-0044，2026-09-22）：
-     `.lua` 的主人是那台字节码 VM + tier1 JIT（`src/lang/lua.js` 那格插件，ADR-0037 的
-     `#lang gsl-shell` 也归它），比这边的映射全得多 —— `omni run x.lua` 走的一直是它。
-     图那一层里那份 `ext/lua/tograph.js`（476 行）与 `ext/gsl-shell/tograph.js`（17 行，
-     代理 lua）是**第二份实现**，而且在 HEAD 上就是红的（`lua->graph: 这一格还没接：sumto`、
-     gsl-shell 的语法在图那条路上炸）。所以它们跟着这一版直接删掉，不补 adapter：
+     `.lua` 的主人是 `ext/lua` 那格扩展（`omni-ext.json` + `omni-lang.js`，ADR-0030），
+     比这边的映射全得多 —— `omni run x.lua` 走的一直是它。图那一层里那份
+     `ext/lua/tograph.js`（476 行）与 `ext/gsl-shell/tograph.js`（17 行，代理 lua）是
+     **第二份实现**，而且在 HEAD 上就是红的（`lua->graph: 这一格还没接：sumto`、
+     gsl-shell 的语法在图那条路上炸）。所以它们跟着那一版直接删掉，不补 adapter：
      一门语言有自己的前端时，"借来"那条路不该再有它。 */
   /* `imports` 是**可选**的一格（第一百五十一片第二格）：这门语言答"这份文件 import 了什么"。
-     给了它，驱动那一层就能把**同目录下的同语言文件**真的读进来（`run.js` 的 `graphOf`）；
+     给了它，驱动那一层就能把**同目录下的同语言文件**真的读进来（`drive.js` 的 `load`）；
      不给就是老样子（import 那一行由映射自己丢掉 —— 标准库那几格靠映射接）。
      知识按语言分：驱动不认识 go 的 `(import (path "…"))` 与 nim 的 `(import (name …))`。 */
   ['go', {
-    grammar: 'ext/go/go.grammar', toIR: goToIR, imports: goImports, exts: ['go'], jsRuntime: GO_RT,
+    grammar: 'ext/go/go.grammar', exts: ['go'],
+    adapter: 'ext/go/adapter/index.js', exports: { toIR: 'goToIR', imports: 'goImports' },
   }],
   ['vlang', {
-    grammar: 'ext/vlang/vlang.grammar', toIR: vlangToIR, imports: vlangImports, exts: ['v'],
+    grammar: 'ext/vlang/vlang.grammar', exts: ['v'],
+    adapter: 'ext/vlang/adapter/index.js', exports: { toIR: 'vlangToIR', imports: 'vlangImports' },
   }],
   ['awk', {
-    grammar: 'ext/awk/awk.grammar', toIR: awkToIR, hooks: AWK_HOOKS, exts: ['awk'],
+    grammar: 'ext/awk/awk.grammar', exts: ['awk'],
+    adapter: 'ext/awk/adapter.js', exports: { toIR: 'awkToIR', hooks: 'AWK_HOOKS' },
   }],
-  ['freebasic', { grammar: 'ext/freebasic/freebasic.grammar', toIR: fbToIR, exts: ['bas', 'bi'] }],
-  ['mojo', { grammar: 'ext/mojo/mojo.grammar', toIR: mojoToIR, exts: ['mojo'] }],
+  ['freebasic', {
+    grammar: 'ext/freebasic/freebasic.grammar', exts: ['bas', 'bi'],
+    adapter: 'ext/freebasic/adapter/index.js', exports: { toIR: 'fbToIR' },
+  }],
+  ['mojo', {
+    grammar: 'ext/mojo/mojo.grammar', exts: ['mojo'],
+    adapter: 'ext/mojo/adapter/index.js', exports: { toIR: 'mojoToIR' },
+  }],
   /* python（CPython 3.16 的语法）。**这一门的类型一格都不写** —— 形参与返回类型从标注或
      调用点推、模块级变量从初值推，整个扫三轮（口径在 `ext/python/adapter/index.js` 文件头）。
      `hooks` 里只有一格：数组的零值（公共那张 `zeroOf` 表上没有 `arr`，而这一门把局部量
      全提到函数体开头零初始化）。 */
   ['python', {
-    grammar: 'ext/python/python.grammar', toIR: pyToIR, hooks: PY_HOOKS, exts: ['py'],
+    grammar: 'ext/python/python.grammar', exts: ['py'],
+    adapter: 'ext/python/adapter/index.js', exports: { toIR: 'pyToIR', hooks: 'PY_HOOKS' },
   }],
   ['nim', {
-    grammar: 'ext/nim/nim.grammar', toIR: nimToIR, imports: nimImports, exts: ['nim'],
+    grammar: 'ext/nim/nim.grammar', exts: ['nim'],
+    adapter: 'ext/nim/adapter/index.js', exports: { toIR: 'nimToIR', imports: 'nimImports' },
   }],
-  ['cpp', { grammar: 'ext/cpp/cpp.grammar', toIR: cppToIR, exts: ['cpp', 'cc', 'cxx', 'hpp'] }],
+  ['cpp', {
+    grammar: 'ext/cpp/cpp.grammar', exts: ['cpp', 'cc', 'cxx', 'hpp'],
+    adapter: 'ext/cpp/adapter/index.js', exports: { toIR: 'cppToIR' },
+  }],
   /* R（GNU R）。语法是**照 R 自己那份 bison 复刻的**（`r-source/src/main/gram.y`，
      ADR-0034 的导入器本来就读得动它）—— 这一门的正确性有真口径：本机有 `Rscript`，
      例子逐字节对它（`tests/r/oracle.js`）。
@@ -121,22 +117,31 @@ export const LANGS = new Map([
      R 是两档（ADR-0046）—— 编译器那一档接不住的（`library(ggplot2)` 那种）由 `omni run`
      自己换到 libR 那一档，而不是要人手敲一串 `R_HOME=… bin/exec/R --vanilla -f …`。
      别的语言不给这一格就是老样子（接不住就报"这一格还没接"）。 */
-  ['r', { grammar: 'ext/r/r.grammar', toIR: rToIR, exts: ['R', 'r'], runFallback: runWithLibR }],
+  ['r', {
+    grammar: 'ext/r/r.grammar', exts: ['R', 'r'],
+    adapter: 'ext/r/adapter.js', exports: { toIR: 'rToIR' },
+    runFallback: { adapter: 'ext/r/libr-run.js', name: 'runWithLibR' },
+  }],
+  /* **按单元产物那条路**（EVAL 两门：运行时那一层是所有脚本共用的一格，只编一次只发一次）
+     —— 登记在这两格的 `units` 上，于是 `cli.js` 不必 import `ext/`（见
+     `docs/design/omni-serve-studio.md` §9.3/§9.4）。 */
   /* PolyDraw 的脚本（Ken Silverman 的 EVAL）。正确性口径是那棵参考树里的
      `polydraw_src/`（`eval.c` + `eval.txt`）—— 新写的 `c_impl` / `js_impl` 有已知偏差。
-     `pre` 是**预处理**那一格（`#define` / `#if` 那一族，语料里真在用）—— 词法之前跑。 */
+     `pre` 是**预处理**那一格（`#define` / `#if` 那一族，语料里真在用）—— 词法之前跑。
+     两门的 `pre` 都是 `ext/polydraw/pre.js` 的 `preprocess`，各自的 adapter 转手导出它
+     （这一层只认"一门语言一格入口"，不去第二份文件里取东西）。 */
   ['polydraw', {
-    grammar: 'ext/polydraw/polydraw.grammar', toIR: polydrawToIR, pre: preprocess, exts: ['pss'],
-    units: evalUnitsBuild,
-    asi: true,
+    grammar: 'ext/polydraw/polydraw.grammar', exts: ['pss'], asi: true,
+    adapter: 'ext/polydraw/adapter.js', exports: { toIR: 'polydrawToIR', pre: 'preprocess' },
+    units: { adapter: 'ext/polydraw/units.js', name: 'evalUnitsBuild' },
   }],
   /* EvalDraw（Ken 的另一个程序，**同一门语言**）—— 指的就是上面那份语法：
      它不改一条规则读下了 141/142 份 `.kc`。差别只有那张宿主表（`ext/evaldraw/adapter.js`）。
      那棵树里**没有源码**（只有 .exe），所以口径是 `evaldraw.txt` / `evaldraw_ref.md`。 */
   ['evaldraw', {
-    grammar: 'ext/polydraw/polydraw.grammar', toIR: evaldrawToIR, pre: preprocess, exts: ['kc'],
-    units: evalUnitsBuild,
-    asi: true,
+    grammar: 'ext/polydraw/polydraw.grammar', exts: ['kc'], asi: true,
+    adapter: 'ext/evaldraw/adapter.js', exports: { toIR: 'evaldrawToIR', pre: 'preprocess' },
+    units: { adapter: 'ext/polydraw/units.js', name: 'evalUnitsBuild' },
   }],
 ]);
 

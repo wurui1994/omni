@@ -42,6 +42,11 @@ import {
 } from './graph-rt.js';
 import { env } from '../../src/core/host/native.js';
 
+/* **预处理那一格转手出去**（登记处 `src/core/lower/langs.js` 的 `exports.pre` 指的就是
+   这个名字）：登记处按需装载时只读"这门语言那一格入口"，不去第二份文件里取东西。 */
+import { preprocess } from './pre.js';
+export { preprocess };
+
 /**
  * **图形那一层走哪条路**（`OMNI_GFX`，口径在 `docs/design/eval-realtime-gpu.md`）：
  *
