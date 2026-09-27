@@ -174,6 +174,50 @@ export function graphFrameStmts(pix, shape) {
   ];
 }
 
+/* ============================================================ 1D 那两档（画曲线）
+ *
+ * 口径（`evaldraw.txt:1245`）：`(x)` 是"简单的 1D 画图"、`(x,t)` 是"会动的 1D 画图"，
+ * `x` 就是**网格里的那个 x 坐标**（与 2D 那几档同一把 `setgrid` 标尺）。
+ *
+ * 落法：一列一格 —— `x` 按列取样、回值当 `y`，按标尺换回屏幕行，`moveto`/`lineto`
+ * 连成一条折线。循环在语言这一侧（与别的几档同一条规矩）。
+ *
+ * **明写偏差两处**：
+ *   1. 颜色钉成白的（正本那条曲线的颜色是编辑器设的，语料里没人读它）；
+ *   2. 坐标轴与网格线不画（正本的图形窗口里有）—— 判的是"那条曲线在不在、在哪儿"。
+ *
+ * **这两档在正本那儿还兼着"乐器"**（说明书同一节）：那条路上 `x` 是**采样计数器**
+ * （`insts/*.kc` 拿它当下标：`smp[x]`）。我们这边喂的是网格坐标（小数、可能是负的）——
+ * 下标那一层本来就夹着（0..长度-1），所以不会炸；出的图不是"那份乐器的波形"，
+ * 而是"把它当函数画出来"的样子。那两份出的本来是**声音**，这条腿上没有音频设备。
+ */
+export function graph1dFrameStmts(pix, shape) {
+  const args = (x) => [x, ...(shape.t ? [nm('ev_tv')] : [])];
+  return [
+    letR('ev_tv', dev('klock')),
+    letR('ev_w', dev('xres')),
+    letR('ev_h', dev('yres')),
+    /* `frameinit` 那一趟（与 2D 那几档同一手，`evaldraw.txt:1428`）。 */
+    set('ev_fi', num(1)),
+    ex(call(pix, args(num(0)))),
+    set('ev_fi', num(0)),
+    ex(dev('setcol', [num(255), num(255), num(255)])),
+    letR('ev_px', num(0)),
+    whil(bin('<', nm('ev_px'), nm('ev_w')), [
+      letR('ev_x', bin('+', nm('ev_gx0'), bin('*', bin('/', bin('+', nm('ev_px'), num(0.5)),
+        nm('ev_w')), bin('-', nm('ev_gx1'), nm('ev_gx0'))))),
+      letR('ev_yv', call(pix, args(nm('ev_x')))),
+      /* 屏幕行：`y0` 在上（`setgrid` 的默认是 `(-4,3,4,-3)`，y 是反的）。 */
+      letR('ev_py', bin('*', bin('/', bin('-', nm('ev_yv'), nm('ev_gy0')),
+        bin('-', nm('ev_gy1'), nm('ev_gy0'))), nm('ev_h'))),
+      iff(bin('<', nm('ev_px'), num(0.5)),
+        [ex(dev('moveto', [nm('ev_px'), nm('ev_py')]))],
+        [ex(dev('lineto', [nm('ev_px'), nm('ev_py')]))]),
+      set('ev_px', bin('+', nm('ev_px'), num(1))),
+    ]),
+  ];
+}
+
 /* ============================================================ 3D 体素那两档
  *
  * 口径（`evaldraw.txt:1311`）：函数在**单位立方体 (-1,-1,-1)..(1,1,1) 里的网格**上

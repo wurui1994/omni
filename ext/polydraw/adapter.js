@@ -37,6 +37,7 @@ import { glslAlign } from './glsl.js';
 import { NOISE_FNS, noiseGlobalDecls, noiseFnDecls } from './noise-rt.js';
 import {
   graphGlobalDecls, graphFnDecls, graphInitStmts, graphFrameStmts, graph3dFrameStmts,
+  graph1dFrameStmts,
 } from './graph-rt.js';
 import { env } from '../../src/core/host/native.js';
 
@@ -3115,11 +3116,10 @@ function graphModeOf(infos, C) {
   if (key === 'x,y,t' && reals === 3) return { t: true, col: false };
   if (key === 'x,y,r,g,b' && reals === 2) return { t: false, col: true };
   if (key === 'x,y,t,r,g,b' && reals === 3) return { t: true, col: true };
-  /* 该出图、可这条腿还没接的那几档 —— 名字写清楚（`evaldraw.txt:1237` 那张表）。 */
-  if (key === 'x' || key === 'x,t') {
-    throw new Error(`eval->IR: 主函数 \`(${key})\` 是 **1D 画曲线**那一档`
-      + '（evaldraw.txt:1245），这条腿还没接 —— 接住的是 `()` 与 2D 那四档');
-  }
+  /* **1D 那两档**（`evaldraw.txt:1245`）：`x` 就是网格里那个 x 坐标，回值当 y 连折线
+     （落法与两处明写偏差见 `graph-rt.js` 的 `graph1dFrameStmts`）。 */
+  if (key === 'x' && reals === 1) return { t: false, col: false, d1: true };
+  if (key === 'x,t' && reals === 2) return { t: true, col: false, d1: true };
   if (key === 'x,y,z,r,g,b' && reals === 3) return { t: false, col: true, d3: true };
   if (key === 'x,y,z,t,r,g,b' && reals === 4) return { t: true, col: true, d3: true };
   /* 别的（`(a[16])` 那种乐器、或者随便起的形参名）照旧：形参当零值的局部量。 */
@@ -3485,7 +3485,9 @@ export function evalToIR(cst, host, src = '') {
     });
     mainBody = C.graph.d3 === true
       ? graph3dFrameStmts('ev$pix', C.graph)
-      : graphFrameStmts('ev$pix', C.graph);
+      : (C.graph.d1 === true
+        ? graph1dFrameStmts('ev$pix', C.graph)
+        : graphFrameStmts('ev$pix', C.graph));
   } else {
     /**
      * **帧体末尾那句不许是 `return`**（`()` 那一档）。
