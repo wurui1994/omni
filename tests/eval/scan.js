@@ -177,6 +177,7 @@ const rows = [];
 const t0 = Date.now();
 let over = 0;
 let carried = 0;                          /* 照抄上趟那一行的份数 */
+let ran = 0;                              /* 这一趟真跑了几份 */
 let nbad = 0;                             /* 这一趟真跑出来的红 */
 let stopped = false;                      /* 到 `--max-bad` 收摊了 */
 
@@ -220,6 +221,7 @@ for (const f of files) {
   });
   const ms = Number(/ total=([\d.]+)ms/.exec(r.stderr ?? '')?.[1] ?? NaN);
   const fps = Number(/ fps=([\d.]+)/.exec(r.stderr ?? '')?.[1] ?? NaN);
+  ran += 1;
   if (r.error !== undefined && r.error !== null && r.error.code === 'ETIMEDOUT') {
     rows.push({ f, ok: false, cls: 'timeout', key: `>${CFG.timeout / 1000}s`, hash, stamp: STAMP });
   } else if (r.status === 0) {
@@ -248,7 +250,7 @@ const P = (s) => process.stdout.write(s);
 P(`\nEVAL 语料扫描（腿=${CFG.leg} 设备=${CFG.gfx} 帧=${CFG.frame} ${CFG.w}x${CFG.h}`
   + `${CFG.all ? ' 全量' : ` 增量 印记=${STAMP}`}）`
   + `：${rows.length} 份在账上，${okRows.length} 份 ok，${rows.length - okRows.length} 份没过`
-  + `（这一趟真跑了 ${rows.length - carried - over} 份，照抄上趟 ${carried} 份）`
+  + `（这一趟真跑了 ${ran} 份，照抄上趟 ${carried} 份）`
   + `${stopped ? `，**到 ${CFG.maxBad} 个红就收摊了**（剩下的没问）` : ''}`
   + `${over > 0 ? `，${over} 份没来得及` : ''}\n\n`);
 
