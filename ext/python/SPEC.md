@@ -550,6 +550,9 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     **下一刀就是这个**：把这把尺子写成脚本（`ext/python/rt/pyconf-diff.js` 一类），
     按族给差异标上"我们的决定 / 真缺口 / 版本差"，门定在"真缺口 = 0"。
 
+    **那 20 多格真缺口当场补完了**（第 16 条）：非库那族的差从 35 格降到 **12 格**，
+    而 12 格全都解释得清 —— 8 格是我们自己的决定、4 格是版本/SDK 差，**真缺口 0**。
+
 15. **那两格前端欠账清了**（`Modules/` 那 14 份里我们自己的两份）。
 
     - **枚举常量上的 `__attribute__`**（`tccgen.js` 的 `enumDecl`）：名字之后读掉属性。
@@ -564,6 +567,40 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
       `||` 在 `#if` 里**不短路语法**：右边没定义时变成 `0 (0)`，整行是语法错（tcc 也一样报）。
       放 `COMPILE_DEFS` 而不是 `predefs`，`tcc -dM` 那组判据才继续逐行相同。
       `socketmodule.c` 于是往下走了一步 —— 下一道门是上面那格 `HAVE_ADDRINFO`。
+
+16. **那把 oracle 对出来的缺口补完了：`HAVE_X` 这个名字不一定是个函数**
+    （`gen-pyconf.js`，二十多格）。
+
+    分四族补：
+    - **`HAVE_STRUCT_<类型>_<成员>`**（`AC_CHECK_MEMBERS`，九格）：机械可推 ——
+      名字里哪个下划线是分界看不出来，所以**每种切法都试一遍**（与 `headerCandidates`
+      同一手法）。从前它们全落进"链得上一个叫 `struct_stat_st_blksize` 的函数吗"、
+      一律答"没有" —— 代价是 `os.stat()` 那几格属性在借来的运行时里会**静悄悄少掉**。
+    - **类型在不在**（三格）：`HAVE_ADDRINFO` / `HAVE_SOCKADDR_STORAGE` / `HAVE_SSIZE_T`。
+      答错 `HAVE_ADDRINFO` 的代价看得见：`Modules/addrinfo.h:129` 自己又定义一遍
+      `struct addrinfo`，`socketmodule.c` 报 `redefinition of 'struct addrinfo'`。
+    - **各有自己的程序**（十格）：`makedev`/`HAVE_DEVICE_MACROS`（宏不是函数）、
+      `/dev/ptmx` 在不在（`AC_CHECK_FILE` —— 这一格连编译器都不用）、
+      `struct dirent.d_type`、`struct sockaddr.sa_len`、`siginfo_t.si_band`
+      （typedef，所以宏名里没有 `STRUCT`）、`st_mtimespec.tv_nsec`、
+      两个常量（`MAXLOGNAME` / `UT_NAMESIZE`）、`tzset` 真跑一遍、
+      `sem_getvalue` 坏不坏（名字是反的：坏才定义）。
+    - **问的是编译器、不是机器**（两格，是决定不是探针）：`HAVE_GCC_UINT128_T` 与
+      `HAVE_COMPUTED_GOTOS`。探针用的是 clang，clang 两样都有；**我们没有**
+      （`__uint128_t` 在 `tccdefs.js` 里只是个占位 struct、`&&label`/`goto *p` 不支持）。
+      定义了它们 CPython 就会走那两条我们编不出来的路。**从前答对是碰巧** ——
+      那一族按"链得上吗"问、答了"没有"。这条分界值得单记一笔：
+      **探针只回答"这台机器怎样"，凡是问"这台编译器怎样"的都得我们自己答。**
+
+    量出来的：
+    - 与真 pyconfig 的非库差异 **35 -> 12**，12 格全解释得清（8 格我们的决定 +
+      4 格版本/SDK 差：`HAVE_DUP3`/`HAVE_PIPE2`/`HAVE_DECL_TZNAME`/`HAVE_SYS_DIR_H`），
+      **真缺口 0**。
+    - `--all-modules`：**255 份里 243 编出 .o**（242 干净 + 1 带警告）、编不出 12 ——
+      `socketmodule.c` 出来了，而剩下 12 份里**我们自己的欠账是 0**
+      （7 份"库不借"、2 份别的平台、1 份不该在核心构建里编、2 份要构建系统先跑）。
+    - 那 1 条警告是 `socketmodule.c:9454` 的 `__builtin_constant_p` 隐式声明。
+      那是**下一格小刀**：答 0 在语义上永远安全（"不是编译期常量"），tcc 有这个内建、我们还没有。
 
 ## 二、进度
 

@@ -218,6 +218,63 @@ const posixSemaphoresWork = () => {
   return r !== null && r.status === 0;
 };
 
+/**
+ * `sem_getvalue` 坏不坏（`configure.ac:6600-6627` 那个程序）：开一个信号量、问它的值，
+ * **问不出来就算坏**（macOS 上 `sem_getvalue` 压根没实现，回 -1/ENOSYS）。
+ * 与上面那格一样是"名字反着的"：坏才定义。
+ */
+const semGetvalueBroken = () => {
+  const r = runs('#include <unistd.h>\n#include <fcntl.h>\n#include <semaphore.h>\n'
+    + '#include <sys/stat.h>\n'
+    + 'int main(void){ sem_t *a = sem_open("/autocvt", O_CREAT, S_IRUSR|S_IWUSR, 0);\n'
+    + '  int v; int bad = 0;\n'
+    + '  if (a == SEM_FAILED) return 1;\n'
+    + '  if (sem_getvalue(a, &v) < 0) bad = 1;\n'
+    + '  sem_close(a); sem_unlink("/autocvt"); return bad; }\n');
+  /* 跑不起来（连不上、编不过）就不下结论 —— 与 configure 的 cross-compile 缺省一致：不坏 */
+  return r !== null && r.status === 1;
+};
+
+/** `/dev/ptmx` 在不在（`configure.ac:7547` 的 `AC_CHECK_FILE`）—— 这一格不用编译器，看文件。 */
+const devPtmxExists = () => existsSync('/dev/ptmx');
+
+/** `struct dirent` 有 `d_type` 吗（`configure.ac:7878-7882`：还要 `DT_UNKNOWN` 在）。 */
+const direntHasDType = () => compiles('#include <dirent.h>\n'
+  + 'int main(void){ struct dirent e; return e.d_type == DT_UNKNOWN; }\n');
+
+/** `struct sockaddr` 有 `sa_len` 吗（`configure.ac:6304-6307`，BSD 一族才有）。 */
+const sockaddrHasSaLen = () => compiles('#include <sys/types.h>\n#include <sys/socket.h>\n'
+  + 'int main(void){ struct sockaddr x; x.sa_len = 0; return 0; }\n');
+
+/** `siginfo_t` 有 `si_band` 吗（`AC_CHECK_MEMBERS([siginfo_t.si_band])` —— 它是 typedef，
+ * 所以宏名里**没有** `STRUCT`，`hasMember` 那一族接不到它）。 */
+const siginfoHasSiBand = () => compiles('#include <signal.h>\n'
+  + 'int main(void){ siginfo_t x; (void)x.si_band; return 0; }\n');
+
+/** `struct stat` 的纳秒那一格是 `st_mtimespec.tv_nsec`（BSD 写法，`configure.ac:7215-7221`）。 */
+const statHasTvNsec2 = () => compiles('#include <sys/types.h>\n#include <sys/stat.h>\n'
+  + 'int main(void){ struct stat st; st.st_mtimespec.tv_nsec = 1; return 0; }\n');
+
+/** 一个常量在不在（`MAXLOGNAME` / `UT_NAMESIZE`，`configure.ac:5935-5950`）。 */
+const hasConst = (name, head) => compiles(`#include <${head}>\n`
+  + `int main(void){ return (int)${name}; }\n`);
+
+/**
+ * `tzset` 管不管用（`configure.ac:7150-7193` 那个程序的**短版**）：换 `TZ` 再 `tzset`，
+ * 看 `localtime` 跟不跟着变。CPython 那份还多查几个时区与 `altzone`；这儿只要"跟着变"
+ * 这一条 —— 记一笔：短了，所以它只会答得比 configure **保守**（不会把坏的说成好的）。
+ */
+const tzsetWorks = () => {
+  const r = runs('#include <stdlib.h>\n#include <time.h>\n#include <string.h>\n'
+    + 'int main(void){ time_t t = 1234567890;\n'
+    + '  setenv("TZ", "UTC+0", 1); tzset();\n'
+    + '  struct tm a = *localtime(&t);\n'
+    + '  setenv("TZ", "EST+5EDT", 1); tzset();\n'
+    + '  struct tm b = *localtime(&t);\n'
+    + '  return (a.tm_hour == b.tm_hour) ? 1 : 0; }\n');
+  return r !== null && r.status === 0;
+};
+
 /* ---- 算名单：`pyconfig.h.in 能定义的` ∩ `这几份源码真测到的` ---------------- */
 
 const conf = readFileSync(join(SRC, 'pyconfig.h.in'), 'utf8');
@@ -320,6 +377,32 @@ const hasHeader = (macro) => headerCandidates(macro)
  */
 const hasFunc = (name) => links(`char ${name}(void);\nint main(void){ return (int)(long)&${name}; }\n`);
 
+/**
+ * `HAVE_STRUCT_TM_TM_ZONE` 那一族（autoconf 的 `AC_CHECK_MEMBERS`）：**问的不是函数，
+ * 是"这个结构体有这个成员吗"**。名字是 `HAVE_STRUCT_<类型>_<成员>`，而**哪个下划线是分界
+ * 看不出来**（`STRUCT_STAT_ST_BLKSIZE` 是 `struct stat` 的 `st_blksize`），所以每种切法
+ * 都试一遍 —— 与 `headerCandidates` 同一手法。
+ *
+ * 头包得宽（`AC_CHECK_MEMBERS` 在 CPython 那边是一处一处指定的）：这一问是"存在吗"，
+ * 多包几份头只会让答案更容易是"有"，而这一族的正确答案本来就是"有"。
+ * 从前它落进"链得上一个叫 `struct_stat_st_blksize` 的函数吗"那一族、一律答"没有" ——
+ * 代价是 `os.stat()` 那几格属性在借来的运行时里会**静悄悄少掉**。
+ */
+const MEMBER_HEADS = ['sys/types.h', 'sys/stat.h', 'sys/socket.h', 'sys/time.h', 'time.h',
+  'pwd.h', 'grp.h', 'dirent.h', 'signal.h', 'netdb.h', 'unistd.h']
+  .map((h) => `#include <${h}>\n`).join('');
+function hasMember(macro) {
+  const parts = macro.slice('HAVE_STRUCT_'.length).toLowerCase().split('_');
+  for (let i = 1; i < parts.length; i += 1) {
+    const ty = parts.slice(0, i).join('_');
+    const mem = parts.slice(i).join('_');
+    if (compiles(`${MEMBER_HEADS}int main(void){ struct ${ty} x; (void)x.${mem}; return 0; }\n`)) {
+      return 1;
+    }
+  }
+  return null;
+}
+
 /** `SIZEOF_VOID_P` / `ALIGNOF_MAX_ALIGN_T` -> C 里那个类型（认不出来交 null）。 */
 function typeOfSizeMacro(macro) {
   const KNOWN = new Map([
@@ -368,6 +451,7 @@ function hasDecl(macro) {
 for (const name of needed) {
   if (HOW.has(name)) continue;
   if (name.startsWith('HAVE_DECL_')) { HOW.set(name, () => hasDecl(name)); continue; }
+  if (name.startsWith('HAVE_STRUCT_')) { HOW.set(name, () => hasMember(name)); continue; }
   if (/^HAVE_[A-Z0-9_]+_H$/.test(name)) { HOW.set(name, () => (hasHeader(name) ? 1 : null)); continue; }
   if (/^(SIZEOF|ALIGNOF)_/.test(name) && typeOfSizeMacro(name) !== null) {
     HOW.set(name, () => sizeOrAlign(name));
@@ -599,6 +683,60 @@ const DECIDED = [
   ['WITH_NEXT_FRAMEWORK', null,
     '非 framework 构建（`configure.ac:3461` 只在 `--enable-framework` 那一支定义）——'
     + '与 `_PYTHONFRAMEWORK` 是空串那一格一致'],
+
+  /* ---- 三格"类型在不在"（不是函数！）+ 两格"编译器自己的事"。
+   *
+   * 这几格是拿**本机那份真 python 的 `pyconfig.h` 当 oracle 对出来的**（SPEC §14 末尾）：
+   * `HAVE_X` 这个名字**不一定是个函数**，从前它们全落进"链得上一个同名函数吗"那一族、
+   * 一律答"没有"。代价看得见：`Modules/addrinfo.h:129` 于是自己又定义一遍
+   * `struct addrinfo`，`socketmodule.c` 报 `redefinition of 'struct addrinfo'`。
+   *
+   * 还有一条更要紧的分界：**探针只回答"这台机器怎样"，不回答"我们这台编译器怎样"**。
+   * 探针用的是 clang，所以凡是问"编译器支持某个扩展吗"的格子都不能拿它探 —— 那是决定。 */
+  ['HAVE_ADDRINFO', 'probe:type-addrinfo',
+    '**结构体**检查（`configure.ac:6244`：`struct addrinfo a;` 编得过吗），不是函数'],
+  ['HAVE_SOCKADDR_STORAGE', 'probe:type-sockaddr-storage',
+    '**结构体**检查（`configure.ac:6252`：`struct sockaddr_storage s;`）'],
+  ['HAVE_SSIZE_T', 'probe:type-ssize-t', '**类型**检查（`AC_CHECK_TYPE([ssize_t])`）'],
+  ['HAVE_GCC_UINT128_T', null,
+    '**这一格问的是编译器，不是机器**：clang 有 `__uint128_t`，我们**没有** ——'
+    + '`tccdefs.js` 把 `__uint128_t` 映成 `struct __uint128__`（占位，不能做算术）。'
+    + '定义它会让 `Objects/longobject.c` 一族走 128 位那条快路，我们编不出来。'
+    + '所以这一格是决定：不定义。（从前答对是**碰巧** —— 那一族按"链得上吗"问、答了"没有"）'],
+  ['HAVE_COMPUTED_GOTOS', null,
+    '同上，问的是编译器：`&&label` 与 `goto *p`（GNU 的 computed goto）我们不支持。'
+    + '注意这一格与 `USE_COMPUTED_GOTOS` 是两回事 —— 那一格是"用不用"（照 configure 不定义、'
+    + '让 CPython 自己挑），这一格是"能不能"'],
+
+  /* ---- 再十格"不是函数"的（同一把 oracle 对出来的第二批）。 */
+  ['HAVE_MAKEDEV', 'probe:makedev',
+    '`makedev(major(0),minor(0));` 编得过吗（`configure.ac:3285-3293`）—— 宏，不是函数'],
+  ['HAVE_DEVICE_MACROS', 'probe:makedev',
+    '同一个程序（`configure.ac:6042-6057`）：设备号那三个宏在不在'],
+  ['HAVE_DEV_PTMX', 'probe:dev-ptmx',
+    '`/dev/ptmx` 这个**文件**在不在（`configure.ac:7547` 的 `AC_CHECK_FILE`）——'
+    + '这一格连编译器都不用'],
+  ['HAVE_DIRENT_D_TYPE', 'probe:dirent-d-type',
+    '`struct dirent` 有 `d_type` 吗（`configure.ac:7878`）。少了它 `os.scandir` 的快路走不成'],
+  ['HAVE_SOCKADDR_SA_LEN', 'probe:sockaddr-sa-len',
+    '`struct sockaddr` 有 `sa_len` 吗（`configure.ac:6304`，BSD 一族才有）——'
+    + '`socketmodule.c` 拿它决定怎么填地址长度'],
+  ['HAVE_SIGINFO_T_SI_BAND', 'probe:siginfo-si-band',
+    '`AC_CHECK_MEMBERS([siginfo_t.si_band])`。`siginfo_t` 是 typedef，所以宏名里**没有**'
+    + '`STRUCT` —— `HAVE_STRUCT_*` 那一族接不到它，单列一格'],
+  ['HAVE_STAT_TV_NSEC2', 'probe:stat-tv-nsec2',
+    '`struct stat` 的纳秒那一格是 `st_mtimespec.tv_nsec`（BSD 写法，`configure.ac:7215`）。'
+    + '少了它 `os.stat()` 的时间戳只剩秒'],
+  ['HAVE_MAXLOGNAME', 'probe:const-maxlogname',
+    '`<sys/param.h>` 里那个 `MAXLOGNAME` **常量**在不在（`configure.ac:5941`）'],
+  ['HAVE_UT_NAMESIZE', 'probe:const-ut-namesize',
+    '`<utmp.h>` 里那个 `UT_NAMESIZE` **常量**在不在（`configure.ac:5947`）'],
+  ['HAVE_WORKING_TZSET', 'probe:tzset',
+    '`tzset` 管不管用（`configure.ac:7150-7193`，真跑）。`timemodule.c` 拿它决定'
+    + '`time.tzset()` 露不露出来'],
+  ['HAVE_BROKEN_SEM_GETVALUE', 'probe:sem-getvalue',
+    '`sem_getvalue` 坏不坏（`configure.ac:6600-6627`，真跑 —— macOS 上它压根没实现）。'
+    + '名字是反的：**坏**才定义'],
 ];
 for (const [name, value, why] of DECIDED) {
   WHY.set(name, why);
@@ -626,6 +764,45 @@ for (const [name, value, why] of DECIDED) {
     HOW.set(name, () => (posixSemaphoresWork() ? null : 1));
     continue;
   }
+  if (value === 'probe:type-addrinfo') {
+    HOW.set(name, () => (compiles('#include <sys/types.h>\n#include <sys/socket.h>\n'
+      + '#include <netdb.h>\nint main(void){ struct addrinfo a; (void)a; return 0; }\n') ? 1 : null));
+    continue;
+  }
+  if (value === 'probe:type-sockaddr-storage') {
+    HOW.set(name, () => (compiles('#include <sys/types.h>\n#include <sys/socket.h>\n'
+      + 'int main(void){ struct sockaddr_storage s; (void)s; return 0; }\n') ? 1 : null));
+    continue;
+  }
+  if (value === 'probe:type-ssize-t') {
+    HOW.set(name, () => (compiles('#include <sys/types.h>\n'
+      + 'int main(void){ ssize_t x = 0; (void)x; return 0; }\n') ? 1 : null));
+    continue;
+  }
+  if (value === 'probe:makedev') {
+    /* 三种头都试一遍（与 `deviceMacrosIn` 同一组程序）：能编出来就算有 */
+    HOW.set(name, () => (['#include <sys/types.h>\n',
+      '#include <sys/mkdev.h>\n#include <sys/types.h>\n',
+      '#include <sys/types.h>\n#include <sys/sysmacros.h>\n']
+      .some((inc) => compiles(`${inc}int main(void){ makedev(major(0), minor(0)); return 0; }\n`))
+      ? 1 : null));
+    continue;
+  }
+  if (value === 'probe:dev-ptmx') { HOW.set(name, () => (devPtmxExists() ? 1 : null)); continue; }
+  if (value === 'probe:dirent-d-type') { HOW.set(name, () => (direntHasDType() ? 1 : null)); continue; }
+  if (value === 'probe:sockaddr-sa-len') { HOW.set(name, () => (sockaddrHasSaLen() ? 1 : null)); continue; }
+  if (value === 'probe:siginfo-si-band') { HOW.set(name, () => (siginfoHasSiBand() ? 1 : null)); continue; }
+  if (value === 'probe:stat-tv-nsec2') { HOW.set(name, () => (statHasTvNsec2() ? 1 : null)); continue; }
+  if (value === 'probe:const-maxlogname') {
+    HOW.set(name, () => (hasConst('MAXLOGNAME', 'sys/param.h') ? 1 : null));
+    continue;
+  }
+  if (value === 'probe:const-ut-namesize') {
+    HOW.set(name, () => (hasConst('UT_NAMESIZE', 'utmp.h') ? 1 : null));
+    continue;
+  }
+  if (value === 'probe:tzset') { HOW.set(name, () => (tzsetWorks() ? 1 : null)); continue; }
+  if (value === 'probe:sem-getvalue') { HOW.set(name, () => (semGetvalueBroken() ? 1 : null)); continue; }
   HOW.set(name, () => value);
 }
 
