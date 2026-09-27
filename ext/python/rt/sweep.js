@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // ext/python/rt/sweep.js —— **量尺：借来的那棵 CPython，我们这台 C 前端能编出多少份**
 //
-//   node ext/python/rt/sweep.js                      # 默认 Objects + Python + Parser
+//   node ext/python/rt/sweep.js                      # 默认 Objects + Python + Parser + 核心 Modules
 //   node ext/python/rt/sweep.js --dirs Objects        # 只量一棵
+//   node ext/python/rt/sweep.js --dirs Modules       # 核心扩展模块那张名单（见 CORE_MODULES）
 //   node ext/python/rt/sweep.js unicode               # 只量名字里带 unicode 的
 //   node ext/python/rt/sweep.js --min 0               # 不设门（探路用）
 //
@@ -46,9 +47,27 @@ const SRC = argOf('--src', process.env.OMNI_CPYTHON
 const WORK = join(root, '.omni-cache', 'py-rt');
 const INC = argOf('--inc', join(WORK, 'inc'));
 /* 三棵都量（`gen-pyconf.js` 那七格 `Python/` 带进来的宏已经照 `configure.ac` 决定过）。 */
-const DIRS = argOf('--dirs', 'Objects,Python,Parser').split(',');
+const DIRS = argOf('--dirs', 'Objects,Python,Parser,Modules').split(',');
+
+/**
+ * `Modules/` 那一棵**按名单量**（`--dirs …,Modules`），不整棵走。
+ *
+ * 理由是量出来的：整棵 101 份会给 `gen-pyconf.js` 带进 13 个还没决定的宏，而那 13 个
+ * 几乎全是"要不要借那个第三方库 / 可选模块"（sqlite / ssl / editline / decimal / ipv6…）
+ * 的决定，不是编译器的活。这张名单里的是**核心扩展模块**：不依赖任何第三方库，
+ * 而且量过 —— 它们一个新宏都不带（同一套 `--extra` 算出来的名单不变）。
+ *
+ * 整棵都想量：`--all-modules`（那时得先给那 13 个宏一格一格写决定）。
+ */
+const CORE_MODULES = new Set([
+  '_abc.c', '_bisectmodule.c', '_codecsmodule.c', '_collectionsmodule.c', '_datetimemodule.c',
+  '_functoolsmodule.c', '_heapqmodule.c', '_operator.c', '_randommodule.c', '_stat.c',
+  '_typingmodule.c', '_weakref.c', 'atexitmodule.c', 'cmathmodule.c', 'errnomodule.c',
+  'itertoolsmodule.c', 'mathmodule.c', 'symtablemodule.c', 'timemodule.c',
+]);
+const ALL_MODULES = argv.includes('--all-modules');
 /** 编得出 `.o` 的最少份数（ok + warn）。往上走是好事，往下走是回归。 */
-const MIN_OK = Number(argOf('--min', '142'));
+const MIN_OK = Number(argOf('--min', '161'));
 const JOBS = Number(argOf('--jobs', '4'));
 
 if (!existsSync(join(SRC, 'Include', 'Python.h'))) {
@@ -69,7 +88,8 @@ if (!existsSync(PYCONF)) {
      * `Include/internal/pycore_pythread.h` 读的 —— 漏了它，探出来的 pyconfig 少 17 条，
      * 于是**每一份都**报 `#error "Require native threads"`（量到过，一份都编不出）。 */
     [join(here, 'gen-pyconf.js'), '--src', SRC, '--out', PYCONF,
-      '--extra', ['Include', ...DIRS].join(',')],
+      '--extra', ['Include', ...DIRS.flatMap((d) => (d === 'Modules' && !ALL_MODULES
+        ? [...CORE_MODULES].map((f) => `Modules/${f}`) : [d]))].join(',')],
     { encoding: 'utf8' });
   if (g.status !== 0) {
     process.stdout.write(`py-rt/sweep: gen-pyconf 没过：\n${g.stderr}${g.stdout}`);
@@ -104,6 +124,7 @@ for (const d of DIRS) {
   const dir = join(SRC, d);
   if (!existsSync(dir)) continue;
   for (const f of readdirSync(dir).filter((x) => x.endsWith('.c')).sort()) {
+    if (d === 'Modules' && !ALL_MODULES && !CORE_MODULES.has(f)) continue;
     if (filters.length === 0 || filters.some((x) => f.includes(x))) files.push([d, f]);
   }
 }

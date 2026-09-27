@@ -346,7 +346,7 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 
     ```
     $ npm run py:sweep
-    共 163 份：**编出 .o 142**（干净 141 + 带警告 1）、编不出 21（85s）
+    共 182 份：**编出 .o 161**（干净 160 + 带警告 1）、编不出 21（73s）
     编不出的按族：
        11 份  非空的 __asm__ 模板（等自带汇编器）      <- 我们唯一的真欠账
         7 份  头文件不在（emscripten ×2 / windows / dl / optimizer.h /
@@ -360,7 +360,13 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     ```
 
     几处口径写在这儿：
-    - **门是 `--min`**（缺省 142，像 `tests/c/native-gen.js` 的 `MIN_OK`）：少于它 exit 1。
+    - **门是 `--min`**（缺省 161，像 `tests/c/native-gen.js` 的 `MIN_OK`）：少于它 exit 1。
+    - 量的是 `Objects` + `Python` + `Parser` 三棵 **加上 `Modules/` 那张名单**（19 份
+      "核心扩展模块"：`_abc` / `_bisect` / `_codecs` / `_collections` / `_datetime` /
+      `_functools` / `_heapq` / `_operator` / `_random` / `_stat` / `_typing` / `_weakref` /
+      `atexit` / `cmath` / `errno` / `itertools` / `math` / `symtable` / `time`）——
+      它们**19 份全部干净出 `.o`、一条警告都没有**，而且量过：一个新宏都不带。
+      整棵 `Modules/`（101 份）要 `--all-modules`，那得先把那 13 个宏一格一格决定（见下）。
     - **按族印**，因为「编不出 21 份」没有意义，「11 份卡在同一句 `__asm__`」才有。
     - 三档分开数：`ok`（一条诊断都没有）/ `warn`（出了 `.o` 但有警告 —— 那多半是
       "链接那天才炸"的隐式声明）/ `fail`。位计数那一刀之后**只剩 1 条警告**，
