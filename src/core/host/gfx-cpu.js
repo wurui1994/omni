@@ -96,9 +96,18 @@ function recOn() {
   return REC !== null;
 }
 
-/** 录制那一档里**仍然要给真答案**的那几格（脚本靠它们分支 / 帧循环靠它转）。 */
+/**
+ * 录制那一档里**仍然要给真答案**的那几格（脚本靠它们分支 / 帧循环靠它转）。
+ *
+ * **`refresh` 也在这张表里**（2026-09-27）：语料里二十来份把帧循环写在自己身上
+ * （`do { …; refresh(); } while(1)`），那个 `while` 的**唯一出口就是 `refresh` 里
+ * 那格帧预算**。先前录制这一档把它当"画图那一族"截下来回 0 —— 于是 `games/arm.kc`
+ * 那一族在 `--gfx null` 上**永远转不出来**，扫描记成"超时"，而同一份在 `--gfx host`
+ * 上一帧就出图。尺子自己把活着的例子判成死的，这一类假红最贵。
+ */
 const QUERY = new Set(['nextframe', 'numframes', 'klock', 'xres', 'yres',
-  'mousx', 'mousy', 'bstatus', 'setbstatus', 'keystatus', 'setkeystatus', 'rgb']);
+  'mousx', 'mousy', 'bstatus', 'setbstatus', 'keystatus', 'setkeystatus', 'rgb',
+  'refresh']);
 
 /**
  * **`klock()` / `klock(0)` 的秒数**。`view` 模式是真墙上时间；`render` 模式是
@@ -1032,6 +1041,9 @@ function outPath() {
  */
 function present() {
   if (!D.on) return;
+  /* **录制那一档**（`OMNI_GFX=null`）：一格像素都没画过，交图这件事整格免了 ——
+     但帧记账与出口（`refresh`/`nextframe` 里那两格）照旧走，不然自循环的脚本出不来。 */
+  if (REC !== null) { D.dirty = false; return; }
   /* GL 那一档：把 GPU 那一层读回来（一帧只读一次），宿主那一层（-1 = 没画）盖上去 ——
      合成在 `rgbaBytes` 里按格做（那儿本来就要逐格取一次）。 */
   if (G.on) {

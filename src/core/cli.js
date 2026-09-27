@@ -4536,14 +4536,33 @@ function buildPluginSet(core, dir, want, argv) {
  * `--work DIR` 会把可执行文件和生成的 C 都留在 DIR 里，方便事后看。
  */
 /** 解释器（ADR-0013）：不经过任何别的执行器，OIR 直接跑 */function runInterp(mod) {
-  const code = interpret(mod);
+  /* **带 `$exit` 的错是"正常收摊"**（与 js 腿那条路同一句话，见 `evalJs` 那儿的注）：
+     图形那一格用它停下**脚本自己写的那个 `while(1)`**（`host/gfx-cpu.js` 的 `refresh`，
+     帧数够了就抛）。这条腿先前不接它 —— 自循环的 `.kc` 在 interp 上是一片栈 + 退出码 1，
+     而同一份在 js/c 两条腿上好好地退 0。 */
+  let code = 0;
+  try {
+    code = interpret(mod);
+  } catch (e) {
+    if (e === null || typeof e !== 'object' || !('$exit' in e)) throw e;
+    vStep(`exec interp  OIR ${mod.funcs.length} funcs  exit=${e.$exit}（脚本自己那个 while 靠 $exit 收摊）`);
+    return e.$exit;
+  }
   vStep(`exec interp  OIR ${mod.funcs.length} funcs  exit=${code}`);
   return code;
 }
 
 /** MIR 上的闭包编译解释器（ADR-0014 决策 7）：降级 -> verify -> 编成闭包 -> 跑 */
 function runInterpMir(mod) {
-  const code = interpretMir(mod);
+  /* `$exit` 那一格与上头 `runInterp` 同一句话（图形那一格靠它收摊）。 */
+  let code = 0;
+  try {
+    code = interpretMir(mod);
+  } catch (e) {
+    if (e === null || typeof e !== 'object' || !('$exit' in e)) throw e;
+    vStep(`exec interp --mir  ${mod.funcs.length} funcs  exit=${e.$exit}（$exit 收摊）`);
+    return e.$exit;
+  }
   vStep(`exec interp --mir  ${mod.funcs.length} funcs  exit=${code}`);
   return code;
 }

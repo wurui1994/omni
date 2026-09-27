@@ -338,6 +338,29 @@ const GFX_CASES = [
       [10, 10, 0, 0, 0],              /* 模型外头：没画 */
     ],
   },
+  /* **帧循环写在脚本自己身上**那一族（`do{ …; refresh(); }while(1)`，语料里二十来份）：
+     那个 `while` 的唯一出口是 `refresh()` 里那格帧预算。这一格判 CPU 帧缓冲那一档
+     （每回 `refresh` 一行指针 + 末帧那条线在它该在的位置上）；录制那一档（`--gfx null`，
+     扫描的尺子）另有一格，见下头"自循环脚本在录制那一档也得出来"。
+
+     **为什么 `OMNI_FRAMES=3` 给的是四行**：`refresh` 那一格分两种写法 —— 一次 body 里
+     **第一回只交图**（宿主每帧调一次 body 那一族的边界是 `nextframe`，不能在这儿重复记账），
+     第二回起才是帧边界。于是自循环的脚本画 N+1 帧、交 N+1 次。这是明写的偏差，不是漏：
+     要改成"正好 N 帧"得动帧号与 `--frame N` 的对应关系，而 `.pss` 逐像素那一轴（43 份）
+     的参考全钉在现在这个对应上。 */
+  {
+    who: 'evaldraw+selfloop',
+    file: 'ext/evaldraw/examples/selfloop.kc',
+    w: 320,
+    h: 240,
+    frames: 4,
+    env: { OMNI_GFX: 'host', OMNI_FRAMES: '3' },
+    probes: [
+      [20, 53, 255, 75, 0],           /* 末帧（n=3）那条线：y=53，颜色随 n 变 */
+      [20, 52, 0, 0, 0],              /* 上一帧那条线已经被 cls 清掉了 */
+      [20, 50, 0, 0, 0],              /* 第一帧那条也没留下 */
+    ],
+  },
   /* **顶点批那一格 op**（`(gfxbatch 类 数 顶点)`，手写 `.sx`）。只有一个模型：变换 /
      拆 mode / 2D 图元变顶点 / **合批**全在语言那一侧，交到设备手里的就是一段顶点
      （`docs/design/eval-realtime-gpu.md` 第 9 节 —— 用户的口径是"绝对不要硬件对应的
@@ -556,6 +579,39 @@ console.log('##' + JSON.stringify({ setpix: ops.get('setpix') ?? 0 }));
       no('一页里连着跑两份：第二份画的还得是它自己',
         `单独跑 ${alone} 次 setpix，跟在 draw2d 后面变成 ${after} 次 —— 单件表串味了`);
     } else ok(`一页里连着跑两份：第二份画的还是它自己（setpix ${alone}）`);
+  }
+}
+
+/* ── **自循环的脚本在录制那一档（`--gfx null`）也得走出来** ─────────────────────────
+ *
+ * 录制那一档是扫描的**尺子**（`tests/eval/scan.js` 的默认设备）：画图那一族记一笔就回 0，
+ * 只有"查询 + 帧循环"那几格给真答案。`refresh` 从前不在那张名单里 —— 于是
+ * `do{ …; refresh(); }while(1)` 这个形状（语料里二十来份）**在尺子上永远转不出来**，
+ * 被记成"超时"，而同一份在 `--gfx host` 上一帧就出图。**尺子把活着的例子判成死的**
+ * 是最贵的一类假红：它会把人引去查"为什么这份慢"，而那儿压根没有慢。
+ *
+ * 这一格判的就是那条契约：录制那一档里 `refresh()` 仍然是帧边界（记账 + 出口），
+ * 但**一个字节的图都不写**（`present` 在那一档里整格免了）。js 与 c 两条腿各一趟。
+ */
+if (only.length === 0 || only.some((x) => 'selfloop'.includes(x) || 'gfx'.includes(x))) {
+  const src = 'ext/evaldraw/examples/selfloop.kc';
+  const png = join(ROOT, gfxOutOf({ file: src }));
+  for (const [leg, flags] of [['js', []], ['c', ['--backend', 'c']]]) {
+    rmSync(png, { force: true });
+    const t0 = Date.now();
+    const r = spawnSync(process.execPath, [CLI, 'run', ...flags, join(ROOT, src)],
+      { encoding: 'utf8', env: { ...process.env, OMNI_GFX: 'null', OMNI_FRAMES: '3' }, timeout: 60000 });
+    const ms = Date.now() - t0;
+    const label = `evaldraw+selfloop(${leg}) 录制那一档`;
+    if (r.error !== undefined && r.error !== null) {
+      no(label, `${r.error.message}（${ms}ms）—— 自循环的脚本在 --gfx null 上出不来`);
+    } else if (r.status !== 0) {
+      no(label, `退出码 ${r.status}：${(r.stderr ?? '').split('\n').slice(-2).join(' ')}`);
+    } else if ((r.stdout ?? '').includes('#gfx ')) {
+      no(label, `录制那一档不许交图，stdout 上却有指针行：${(r.stdout ?? '').trim()}`);
+    } else if (existsSync(png)) {
+      no(label, `录制那一档不许写表面文件，却写出了 ${gfxOutOf({ file: src })}`);
+    } else ok(`${label}：三帧走完就退出、一个字节都没写（${ms}ms）`);
   }
 }
 

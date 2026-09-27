@@ -442,10 +442,15 @@ static int gfx_rec(void) {
   return g_grec;
 }
 
-/* 录制那一档里仍然要给真答案的那几格（与 JS 那侧的 QUERY 一字不差）。 */
+/* 录制那一档里仍然要给真答案的那几格（与 JS 那侧的 QUERY 一字不差）。
+
+   `refresh` 也在这张表里（2026-09-27）：自己写帧循环那一族（do{ …; refresh(); }while(1)）
+   的唯一出口就是 refresh 里那格帧预算 —— 先前把它当画图那一族截下来回 0，
+   games/arm.kc 那一族在 --gfx null 上永远转不出来，扫描记成"超时"。 */
 static int gfx_is_query(const char *nm) {
   static const char *q[] = { "nextframe", "numframes", "klock", "xres", "yres",
-    "mousx", "mousy", "bstatus", "setbstatus", "keystatus", "setkeystatus", "rgb", NULL };
+    "mousx", "mousy", "bstatus", "setbstatus", "keystatus", "setkeystatus", "rgb",
+    "refresh", NULL };
   for (int i = 0; q[i] != NULL; i++) if (!strcmp(nm, q[i])) return 1;
   return 0;
 }
@@ -1273,6 +1278,9 @@ static void gfx_cone (double x0, double y0, double r0, double x1, double y1, dou
 /* `refresh()`：交出这一帧 —— 写表面文件 + stdout 上印一行指针（与 JS 那一侧一字不差）。 */
 static void gfx_present(void) {
   if (!g_gon) return;
+  /* 录制那一档（OMNI_GFX=null）：一格像素都没画过，交图整格免了 —— 但帧记账与出口
+     （refresh/nextframe 那两格）照旧走，不然自循环的脚本出不来（与 JS 那侧同一句）。 */
+  if (gfx_rec()) { g_gdirty = 0; return; }
   /* **窗口那一档**（`--mode view`）：贴到窗口上就是"交帧"。合成那一步与下面离屏那一档
      **同一句话**（GPU 那层当底、宿主那层盖上去）—— 所以 view 与 render 两档的画面
      逐字节相同，判据可以直接比。`OMNI_GFX_OUT` 给了的话顺带把这一帧也写出去
