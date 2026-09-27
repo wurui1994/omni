@@ -875,8 +875,27 @@ function callOf(x, C) {
   if (n === 'log' && args.length === 2) {
     return bin('/', rmath('log', [args[0]]), rmath('log', [args[1]]));
   }
-  if (n === 'min' && args.length === 2) return tern(bin('<', args[0], args[1]), args[0], args[1]);
-  if (n === 'max' && args.length === 2) return tern(bin('>', args[0], args[1]), args[0], args[1]);
+  /**
+   * **`MIN`/`MAX` 是"比较说换才换"，不是"挑大的那个"** —— 差别只在**有一头是 NaN** 的时候。
+   *
+   * `eval_bench` 量的（真 kasm87 的机器码）：
+   *
+   *     max(0/0,0) -> nan     max(0,0/0) -> 0
+   *     min(0/0,0) -> nan     min(0,0/0) -> 0
+   *
+   * 也就是 `max(a,b)` = `a<b ? b : a`、`min(a,b)` = `a>b ? b : a`：**两边无序时留头一个**
+   * （x87 的 `fcom` + 条件换那一手，比较为假就不动）。
+   * 从前我们写的是 `a>b ? a : b` / `a<b ? a : b` —— 有序时一模一样，
+   * **NaN 那一头正好反了**（会把 NaN 换成另一个数）。
+   *
+   * 代价是一份图：`ken/drawcone2.pss:187` 的
+   * `cosang2 = max(1.0 - (pr1-pr0)^2/((px1-px0)^2+…), 0.0)`
+   * 在"两端同点同半径"那颗球（正中那颗蓝核）上算的是 `max(NaN, 0)` ——
+   * 正本给 NaN（于是 `cosang`/`nr0` 全 NaN，片元那一趟整个 discard、**那颗球不该出现**），
+   * 我们给 0 ⇒ 多画出 2081 格核色。三路都问过：参考与原版都不画它，只有我们画。
+   */
+  if (n === 'min' && args.length === 2) return tern(bin('>', args[0], args[1]), args[1], args[0]);
+  if (n === 'max' && args.length === 2) return tern(bin('<', args[0], args[1]), args[1], args[0]);
   /* `INT` 朝零取整（**不是** floor）：负数走 ceil。 */
   if (n === 'int' && args.length === 1) {
     return tern(bin('<', args[0], num(0)), rmath('ceil', [args[0]]), rmath('floor', [args[0]]));
