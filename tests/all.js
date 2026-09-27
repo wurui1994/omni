@@ -143,6 +143,11 @@ const SUITES = [
   { s: 'js-roundtrip/run.js', slow: true },
   { s: 'js-exec/run.js', slow: true },
   { s: 'bootstrap/link.js', solo: true },
+  /* 自编链的第三格（14s）：`link.js` 管"编得出"、`run.js` 管整条不动点，这一门管
+     **编出来的那份真跑一趟借来的语言**。三笔静静躲过全部判据的债就是这么被抓出来的
+     （import 别名遮蔽、C 侧正则缺 `[\s\S]` 与 `\2`）—— 别的轴全跑在 node 源码腿上。
+     不 solo：它落在 `.omni-cache/test/selfrun/`，不碰 `dist/`。 */
+  { s: 'bootstrap/selfrun.js' },
   { s: 'bootstrap/run.js', solo: true, slow: true },
 ];
 const SCRIPTS = SUITES.map((x) => x.s);

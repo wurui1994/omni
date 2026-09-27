@@ -47,6 +47,7 @@
     "test:jit": "node tests/jit/run.js",
     "test:gpu": "node tests/gpu/run.js",
     "test:bootstrap": "node tests/bootstrap/run.js",
+    "test:selfrun": "node tests/bootstrap/selfrun.js",
     "test:all": "node tests/all.js",
     "bench": "node bench/compare.js",
     "bench:grammars": "node bench/grammars.js",
