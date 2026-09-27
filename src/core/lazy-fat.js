@@ -23,6 +23,16 @@ import { interpretMir, runMirModule } from './mir/interp.js';
 import { emitMirJs } from './mir/emit_js.js';
 import { runMirJs } from './mir/js_rt.js';
 import { dumpBytes } from './mir/bytes.js';
+import { writeObject } from './link/macho.js';
+import { writeElfObject } from './link/elf.js';
+import { mergeObjects } from './link/elf_merge.js';
+import { peLoad, PE_GUI } from './link/pe_load.js';
+import { peWrite } from './link/pe_link.js';
+import { elfExe } from './link/elf_exe.js';
+import { parseLdScript } from './link/ldscript.js';
+import { isDefSyms } from './link/defsyms.js';
+import { machoExe, isMachoBinary } from './link/macho_exe.js';
+import { flatImage } from './link/flat_image.js';
 
 /**
  * 相对 `src/core/` 的路径 -> 那份模块的导出。键与调用点写的那个字符串**逐字相同**
@@ -40,6 +50,17 @@ const MODS = new Map([
   ['mir/emit_js.js', { emitMirJs }],
   ['mir/js_rt.js', { runMirJs }],
   ['mir/bytes.js', { dumpBytes }],
+  /* 链接器那九份（`omni c link` / `build` / `bootstrap` 才要，逐条量出来合计 61ms）。 */
+  ['link/macho.js', { writeObject }],
+  ['link/elf.js', { writeElfObject }],
+  ['link/elf_merge.js', { mergeObjects }],
+  ['link/pe_load.js', { peLoad, PE_GUI }],
+  ['link/pe_link.js', { peWrite }],
+  ['link/elf_exe.js', { elfExe }],
+  ['link/ldscript.js', { parseLdScript }],
+  ['link/defsyms.js', { isDefSyms }],
+  ['link/macho_exe.js', { machoExe, isMachoBinary }],
+  ['link/flat_image.js', { flatImage }],
 ]);
 
 /** 相对 `src/core/` 的路径 -> 那份模块。 */

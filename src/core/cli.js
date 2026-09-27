@@ -51,15 +51,6 @@ import { layerModel, layerTable, countNodes, stepTable, kindStat, kindTable } fr
  * 而那两门本来就在迟装表里（`lang/builtin.js`）。于是这三条只是让**每一条命令**都白装
  * 一整套 JS 前端与 wat 前端：逐条量出来 **≈36ms**（`frontend-wat/lower.js` 一份就 26ms）。
  * 记在这儿是因为"删掉一条没人用的 import"这件事看不出痕迹 —— 而它是这一刀里最便宜的一格。 */
-import { writeObject } from './link/macho.js';
-import { writeElfObject } from './link/elf.js';
-import { mergeObjects as mergeElfObjects } from './link/elf_merge.js';
-import { peLoad, PE_GUI } from './link/pe_load.js';
-import { peWrite } from './link/pe_link.js';
-import { elfExe } from './link/elf_exe.js';
-import { parseLdScript } from './link/ldscript.js';
-import { isDefSyms } from './link/defsyms.js';
-import { machoExe, isMachoBinary } from './link/macho_exe.js';
 import { lowerToMir } from './mir/from_oir.js';
 import { printMir } from './mir/print.js';
 import { verifyMir } from './mir/verify.js';
@@ -83,7 +74,6 @@ import { check } from './hir/check.js';
 import { pruneFuncs } from './hir/prune.js';
 import { cAbiLibs, cSysLib } from './hir/c_abi.js';
 import { cffiNeeded, cffiSource } from './backend-js/cffi.js';
-import { flatImage } from './link/flat_image.js';
 import { dlopenAddon, publishCffi, hasAddonLoader } from './host/ffi_host.js';
 import {
   target, registerTarget, registerLang, lang, registerRunner, runner, noteUnloadable,
@@ -461,7 +451,7 @@ function cObj(path, out, arch, incs, defs, fmt, os, sysIncs, instr) {
   const write = fmt === 'elf'
     /* STT_FILE 那一条印的是**命令行上给的那一串**（第一百〇七片量的：`tcc -c s.c` 写
      * `s.c`、`tcc -c ./s.c` 写 `./s.c`、给绝对路径就写绝对路径）—— 不是基名。 */
-    ? (t, d, ds, rs, a, al) => writeElfObject(t, d, ds, rs, a, al,
+    ? (t, d, ds, rs, a, al) => coreMod('link/elf.js').writeElfObject(t, d, ds, rs, a, al,
       {
         file: path,
         /* 符号名前缀（第一百二十一片改对）：**只有 osx 加那条下划线**。
@@ -482,7 +472,7 @@ function cObj(path, out, arch, incs, defs, fmt, os, sysIncs, instr) {
         seq: relaSeq(blob),
       })
     /* Mach-O 那一头只有两节，只读那一段与 `.bss` 都折进 `__data` 的尾巴（`macho.js` 的 `foldRo`）。 */
-    : (t, d, ds, rs, a, al) => writeObject(t, d, ds, rs, a, al,
+    : (t, d, ds, rs, a, al) => coreMod('link/macho.js').writeObject(t, d, ds, rs, a, al,
       { rodata: blob.rodata, bssSize: blob.bssSize });
   writeBinary(out, write(blob.bytes, blob.data,
     orderSyms([...syms, ...blob.dataSyms]),
@@ -4894,7 +4884,7 @@ function ffiInject(mod) {
   }
   const obj = ffiObject(mod);
   let mem = null;
-  const img = flatImage({
+  const img = coreMod('link/flat_image.js').flatImage({
     objs: [obj],
     page: h.page(),
     reserve: (n) => { mem = h.mem(n); return Number(mem.addr); },
@@ -7525,7 +7515,7 @@ function main(argv) {
         for (let k = 0; k < s.length; k++) b[k] = s.charCodeAt(k);
         return b;
       };
-      writeBinary(out, mergeElfObjects(files.map(bytesOf), {
+      writeBinary(out, coreMod('link/elf_merge.js').mergeObjects(files.map(bytesOf), {
         rdata: ri >= 0 ? rest[ri + 1] : '.data.ro',
         unwind: rest.includes('--unwind'),
       }));
@@ -7602,19 +7592,19 @@ function main(argv) {
         return null;
       };
       const objs = files.map(bytesOf);
-      const loaded = peLoad({
+      const loaded = coreMod('link/pe_load.js').peLoad({
         objs: files.map((p, i) => ({ path: p, bytes: objs[i] })),
         libtcc1: `${target}-libtcc1.a`,
         open,
         ...opt,
       });
-      const r = peWrite({
+      const r = coreMod('link/pe_link.js').peWrite({
         objs: [...loaded.objs, ...loaded.members.map((m) => m.bytes)],
         dlls: loaded.dlls,
         res: loaded.res,
         startName: loaded.entryName,
         declare: [{ name: loaded.start, after: loaded.objs.length }],
-        gui: loaded.peType === PE_GUI,
+        gui: loaded.peType === coreMod('link/pe_load.js').PE_GUI,
         outName: out,
         ...opt,
       });
@@ -7697,11 +7687,11 @@ function main(argv) {
           archives.push(b);
           return;
         }
-        const names = depth > 4 ? null : parseLdScript(readText(p));
+        const names = depth > 4 ? null : coreMod('link/ldscript.js').parseLdScript(readText(p));
         if (names === null) {
           /* 不是 ld 脚本 —— 看看是不是 `.def`（符号预设，交叉编译那一路）。 */
           const txt = readText(p);
-          if (isDefSyms(txt)) {
+          if (coreMod('link/defsyms.js').isDefSyms(txt)) {
             dlls.push({ bytes: bytesOf(p), name: p });
             return;
           }
@@ -7729,7 +7719,7 @@ function main(argv) {
         if (p.endsWith('.a')) archives.push(bytesOf(p));
         else objs.push(bytesOf(p));
       }
-      const r = elfExe({
+      const r = coreMod('link/elf_exe.js').elfExe({
         objs,
         entryName,
         static: rest.includes('--static'),
@@ -7776,7 +7766,7 @@ function main(argv) {
       const takeLib = (p) => {
         const b = bytesOf(p);
         if (p.endsWith('.a')) archives.push(b);
-        else dylibs.push(isMachoBinary(b) ? { name: p, bytes: b } : readText(p));
+        else dylibs.push(coreMod('link/macho_exe.js').isMachoBinary(b) ? { name: p, bytes: b } : readText(p));
       };
       for (let k = 0; k < rest.length - 1; k++) {
         if (rest[k] === '--dylib') takeLib(rest[k + 1]);
@@ -7858,7 +7848,7 @@ function main(argv) {
       /* `--stack-size N`：主线程的栈（`LC_MAIN.stacksize`，`ld` 的 `-stack_size`）。
        * 十六进制也认 —— 那一路的值一向写成 `0x20000000`。 */
       const ssi = rest.indexOf('--stack-size');
-      const r = machoExe({
+      const r = coreMod('link/macho_exe.js').machoExe({
         objs: files.map(bytesOf),
         entryName,
         dylibs,

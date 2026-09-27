@@ -222,10 +222,17 @@ const rt = borrowRt(lang);                             // 到这一刻才装这�
 ```
 
 **批 A 已落**（三条死 import + `src_eval` + 两个汇编器 + `build/cli` + `repl` + `bootstrap`
-+ `interp/eval` + `mir/interp|emit_js|js_rt|bytes`）：`cli.js` 的静态 import 60 条 -> 48 条。
-机制是 `lazy-core.js`（`mkCoreMod(load)`）+ `lazy.js`（node `createRequire`）+
-`lazy-fat.js`（静态表）+ `lazy-pick.js`（接缝，**同时管** `lower/borrow.js` 那一格；
-原来的 `borrow-pick.js` 并进它）。调用点写成 `coreMod('repl.js').startRepl(…)`。
++ `interp/eval` + `mir/interp|emit_js|js_rt|bytes`）与**批 B 已落**（`link/` 九份）：
+`cli.js` 的静态 import 60 条 -> 38 条。机制是 `lazy-core.js`（`modOr(m, p)`）+
+`lazy.js`（node `createRequire`）+ `lazy-fat.js`（静态表）+ `lazy-pick.js`（接缝，
+**同时管** `lower/borrow.js` 那一格；原来的 `borrow-pick.js` 并进它）。
+调用点写成 `coreMod('repl.js').startRepl(…)`。
+
+```
+第 0/1 刀之前   173 份模块、3859 KB 源码
+批 A 之后       106 份模块、1948 KB 源码
+批 B 之后        90 份模块、1586 KB 源码      -48% 份数 / -59% 字节
+```
 
 踩到一处**接缝有第二个入口**：`tests/mir/run.js` 自己也有一份 readModule 回调（它把 cli.js
 降到 MIR），只过了 `builtinAlt`。`lazy-pick.js` 的文件头预言了这件事，而它当场就发生了 ——
@@ -264,6 +271,13 @@ const rt = borrowRt(lang);                             // 到这一刻才装这�
 
 **这两笔照出同一件事**：判据里长期缺"**自己编出来的那份真跑一趟借来的语言**"。
 `check:self` 只管编得出，`tests/*` 都跑在 node 源码腿上。这条组合该有一格判据。
+
+**另有一格环境陷阱**（不是回归，但会把人骗住）：`dist/plugins/` 一在场，**node 源码腿的
+`tests/c` 就从 106 passed 变成 20 passed / 88 failed**。理由是 `plugin.js` 的
+`noteUnloadable`：目录里躺着 `omni-lang-c.dylib` 时，node 腿认的是"c 这门语言装着插件，
+而这条腿装不动它"（没有 dlopen），于是不再走内建那份迟装的 `lang/c.js`。
+所以**跑 `tests/c` 之前别让 `dist/` 在场**（`npm run build:native` 会造出它）。
+我在批 B 上被这一格骗了一轮，先以为是自己改坏了链接器。
 
 ### 第 3 刀（收尾，没有性能收益）：数据那半也挪进自述
 
