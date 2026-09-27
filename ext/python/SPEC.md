@@ -181,10 +181,32 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
    C11 `<stdatomic.h>` 走标准那份、MSVC 走它那份，都不成就 `#error`。
    量出来我们这台是 `__GNUC__ = 4`（没有 `__GNUC_MINOR__`）、`__STDC_VERSION__ = 199901L`，
    而 `__atomic_load_n` 与 `<stdatomic.h>` **两样都还没有**（各当场报）。
-   所以第 0 刀 (b) 的下一格是**给 C 前端补原子操作**（两条路选一条）。
-   有一处必须写在前头：这一版没有线程，落成普通读写**也能跑**，
-   可那是在"claim 了原子性却不提供"——接线程之前一定要换成真的，
-   否则症状是那种最难查的静默错。
+
+6. **补上那两格之后往前走了两大步**（这一刀真做了，不只是量）：
+
+   - **C 前端多了 `__atomic_*` 那一族**（`src/core/frontend-c/tccdefs.js`，落成宏 ——
+     借了那台前端已经有的语句表达式 `({ … })` 与 `__typeof__`，于是"要一格临时量"的
+     exchange / fetch_add 不必按宽度各写一份）。六格算下来与 clang 逐字节相同
+     （`41 42 7 1 10 99`）。**这一版落成普通读写**：这条链现在一个线程都不起，
+     可观察行为一样；**接线程之前必须换成真的**（那时要落到 MIR 的原子算子上）。
+     python 这一侧不去改全局的 `__GNUC_MINOR__`，而是编借来的 C 时明着给
+     `-D_Py_USE_GCC_BUILTIN_ATOMICS=1` —— 一处借的决定，不是整条链的声明。
+   - **修了一处真的 C 不合规**（`mergeTentative`）：`extern T a[];` 之后
+     `T a[] = {…}` 报"incompatible types for redefinition"。三处都错：那个门拿
+     `sameType(a,b)` 判（它自己就把"长度不一样"判成不同型）、`extern T a[]` 在这台前端里
+     记成 **count 0** 而不是 -1（"没写长度"与"零长"撞一格）、以及"长度是从初始化式数出来的"
+     这件事没记。现在门开在**元素类型**上，长度按 C11 6.2.7 第 3 段合并
+     （写下来的那个赢），判据是 `sizeof` 与 clang 相同（`[128]` + `{1,2,3}` 出 128）。
+     真冲突（`int a[3]; int a[5];`）照旧当场报。
+
+   走到哪儿了：`unicodeobject.c` 现在过了原子那一格、也过了那格数组，**新的边界在
+   Argument Clinic 生成的那张关键字元组**上 —— `Objects/clinic/unicodeobject.c.h:230`
+   的 `_kwtuple` 静态初始化式报 `constant expression expected`。
+   已经排除的（各写了最小复现，与 clang 逐字节相同）：`(long)(3ULL<<30) | ((long)5<<48)`
+   那种折叠、`&extern结构.成员.子成员` 与 `&extern数组[2].成员` 那种地址常量、
+   `.ob_base = { { {…}, (&T) }, (2) }` 这种嵌套指定初始化。所以剩下的那一格更窄
+   （嫌疑在 `PyGC_Head _this_is_not_used;` 那个被 `.ob_base` 跳过的成员，
+   或者真 `PyObject_VAR_HEAD` 里那一格的形状），下一刀从那儿接着量。
 
 ## 二、进度
 

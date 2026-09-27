@@ -266,6 +266,59 @@ export const COMPILE_DEFS = [
   ['__builtin_bzero(p,ignored)', 'bzero(p, sizeof(*(p)))'],
   ['__int128_t', 'struct __uint128__'],
   ['__uint128_t', 'struct __uint128__'],
+
+  /* ---- `__atomic_*` 那一族（GCC / clang 的内建原子操作）--------------------
+   *
+   * 为什么要有：**借来的 C 里到处是它**。最先撞上的是 CPython 的
+   * `Include/cpython/pyatomic.h` —— 它按编译器挑后端（`__atomic_*` 内建 / C11 的
+   * `<stdatomic.h>` / MSVC），三条都挑不中就 `#error "no available pyatomic
+   * implementation"`，于是**一份对象层的 .c 都编不了**（量出来的，见
+   * `ext/python/SPEC.md` §一之二）。
+   *
+   * **这一版落成普通读写**，理由写在前头：这条链现在一个线程都不起（后端没有线程，
+   * 解释器腿是单线程的 JS），所以"原子"与"普通"在**可观察行为上一样**。
+   * 代价说清：这是"claim 了原子性却不提供"。**接线程之前必须换掉** ——
+   * 那时这一族要落到 MIR 的原子算子上（现在 MIR 里还没有那一族），
+   * 而不是继续用这几条宏。顺序参数（memorder）一律吃掉，两格屏障落成空语句。
+   *
+   * 写法上借了两样这台前端已经有的：**语句表达式** `({ … })` 与 `__typeof__`
+   * （两样都量过能用）—— 于是"要一格临时量"的那几个（exchange / fetch_add）
+   * 不必按宽度各写一份。
+   */
+  ['__ATOMIC_RELAXED', '0'],
+  ['__ATOMIC_CONSUME', '1'],
+  ['__ATOMIC_ACQUIRE', '2'],
+  ['__ATOMIC_RELEASE', '3'],
+  ['__ATOMIC_ACQ_REL', '4'],
+  ['__ATOMIC_SEQ_CST', '5'],
+  ['__atomic_load_n(p,m)', '(*(p))'],
+  ['__atomic_store_n(p,v,m)', '((void)(*(p) = (v)))'],
+  /* 地址形式（`__atomic_load(p, ret, m)`）—— clang 那条 `__has_builtin` 问的就是它。 */
+  ['__atomic_load(p,r,m)', '((void)(*(r) = *(p)))'],
+  ['__atomic_store(p,v,m)', '((void)(*(p) = *(v)))'],
+  ['__atomic_exchange_n(p,v,m)', '({ __typeof__(*(p)) __ao_old = *(p); *(p) = (v); __ao_old; })'],
+  ['__atomic_exchange(p,v,r,m)', '((void)(*(r) = __atomic_exchange_n(p, *(v), m)))'],
+  /* 比较交换：成了给 1；没成把**现值写回 expected**（这一条是语义，漏了就成死循环）。 */
+  ['__atomic_compare_exchange_n(p,e,d,weak,ms,mf)',
+    '({ int __ao_ok = (*(p) == *(e)); if (__ao_ok) *(p) = (d); else *(e) = *(p); __ao_ok; })'],
+  ['__atomic_compare_exchange(p,e,d,weak,ms,mf)',
+    '__atomic_compare_exchange_n(p, e, *(d), weak, ms, mf)'],
+  ['__atomic_fetch_add(p,v,m)', '({ __typeof__(*(p)) __ao_old = *(p); *(p) = __ao_old + (v); __ao_old; })'],
+  ['__atomic_fetch_sub(p,v,m)', '({ __typeof__(*(p)) __ao_old = *(p); *(p) = __ao_old - (v); __ao_old; })'],
+  ['__atomic_fetch_and(p,v,m)', '({ __typeof__(*(p)) __ao_old = *(p); *(p) = __ao_old & (v); __ao_old; })'],
+  ['__atomic_fetch_or(p,v,m)', '({ __typeof__(*(p)) __ao_old = *(p); *(p) = __ao_old | (v); __ao_old; })'],
+  ['__atomic_fetch_xor(p,v,m)', '({ __typeof__(*(p)) __ao_old = *(p); *(p) = __ao_old ^ (v); __ao_old; })'],
+  ['__atomic_add_fetch(p,v,m)', '(*(p) = *(p) + (v))'],
+  ['__atomic_sub_fetch(p,v,m)', '(*(p) = *(p) - (v))'],
+  ['__atomic_and_fetch(p,v,m)', '(*(p) = *(p) & (v))'],
+  ['__atomic_or_fetch(p,v,m)', '(*(p) = *(p) | (v))'],
+  ['__atomic_xor_fetch(p,v,m)', '(*(p) = *(p) ^ (v))'],
+  ['__atomic_test_and_set(p,m)', '({ char __ao_old = *(char *)(p); *(char *)(p) = 1; __ao_old; })'],
+  ['__atomic_clear(p,m)', '((void)(*(char *)(p) = 0))'],
+  ['__atomic_thread_fence(m)', '((void)0)'],
+  ['__atomic_signal_fence(m)', '((void)0)'],
+  ['__atomic_is_lock_free(sz,p)', '1'],
+  ['__atomic_always_lock_free(sz,p)', '1'],
 ];
 
 /**

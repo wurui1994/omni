@@ -691,7 +691,15 @@ function cefApply(t, x, y, err) {
  * 「没长度」类型，长度就永远补不上了。
  */
 function mergeTentative(a, b) {
-  if (isArray(a.t) && isArray(b.t) && sameType(a, b)) {
+  /* 数组那一档**不能拿 `sameType(a, b)` 当门**：它自己就把"两条长度都写了而且不一样"
+     判成不同型（`compareTypes` 里那一句），于是下面按长度合并的几条一格都走不到。
+     门要开在**元素类型**上（多维的元素自己又是数组，递归比就对），长度由下面那几条判。
+     **也不能拿 `a.t === b.t` 当门**：存储类（`extern`）是记在那个类型字里的，而
+     `extern const unsigned char t[];` 与定义处的 `const unsigned char t[] = {…}`
+     正是"一条带 extern 一条不带"—— 量出来就是 CPython 的 `_Py_ascii_whitespace`。
+     数组的 const 挂在**元素**上（`const int a[]` 是"const int 的数组"），所以元素比过了
+     就够；真不同型的（`int a[3]` 对 `char a[]`）在元素那一比上就拦下了。 */
+  if (isArray(a.t) && isArray(b.t) && sameType(a.ref, b.ref)) {
     /* `extern T x[];` 的长度是**不知道**（登记成 0，见 declarator 里那一段）——
        另一条写了长度就算另一条的。少这两句，同一个单元里"头里 extern、这儿定义"
        的那一对会被判成"长度 0 与长度 N 冲突"。 */
@@ -699,7 +707,20 @@ function mergeTentative(a, b) {
     if (b.unsized === true && a.unsized !== true) return a;
     if (a.count === b.count || b.count < 0) return a;
     if (a.count < 0) return b;
-    return null; /* 两条都写了长度，而且不一样 */
+    /* **`extern T a[];` 在这台前端里记成 count 0**（上头 `mkArray(vty.ref, 0)` 那一句：
+       带 extern、没写长度的那一档）—— 也就是说"没写长度"与"零长"撞在同一格上。
+       所以 0 与一个正数合并时取那个正数：`extern const unsigned char t[];` 后头跟
+       `const unsigned char t[] = {…}` 是 CPython 里最常见的一对（`_Py_ascii_whitespace`）。 */
+    if (a.count === 0 && b.count > 0) return b;
+    if (b.count === 0 && a.count > 0) return a;
+    /* 两条都有长度而且不一样。只有一种情形合法：**其中一条的长度是从初始化式数出来的**，
+     * 而另一条是源码写下的 —— 那时这个对象的类型取**写下来的那个**，初始化式只填前一段
+     * （C11 6.2.7 第 3 段的复合类型；余下的字节照静态存储期的规矩是零）。
+     * 判据在 `tests/c/`：`extern const unsigned char t[128]; const unsigned char t[] = {1,2,3};`
+     * 的 `sizeof` 是 128，与 clang 一样。CPython 的 `_Py_ascii_whitespace` 就是这个形状。 */
+    if (b.countFromInit === true && a.countFromInit !== true && b.count <= a.count) return a;
+    if (a.countFromInit === true && b.countFromInit !== true && a.count <= b.count) return b;
+    return null; /* 两条都是写下来的，而且不一样 */
   }
 
   if (sameType(a, b)) return a;
@@ -7880,6 +7901,14 @@ export class CGen {  /**
               body = r.body;
             }
             if (vty.count === 0 && hasInit) this.err(`zero-sized array '${name}'`);
+            /* **这个长度是从初始化式数出来的**，不是源码写下的（上面那几支都走到这儿：
+             * `[]` + `{…}` / 字符串字面量）。差别只在一处：前头若已经有一条
+             * `extern T a[N];`，C 说这个对象的类型取**写下来的那个 N**，初始化式只填前一段
+             * （C11 6.2.7 第 3 段的复合类型；`mergeTentative` 里按这一格判）。
+             * 量出来的原话：`unicodeobject.c:413` 报"incompatible types for redefinition of
+             * '_Py_ascii_whitespace'" —— 那一格头里是 `[128]`、定义处是 `[] = {…}` 数出 128
+             * 之外还少几格（clang 那边 sizeof 是 128）。 */
+            if (hasInit && isArray(vty.t) && vty.count >= 0) vty.countFromInit = true;
           }
 
           /* 柔性数组成员配初始化式（第六十二片）：`sizeof` 不变，但这块地方要真的够大 ——

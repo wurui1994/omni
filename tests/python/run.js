@@ -10,9 +10,13 @@
 //               （这棵参考树是 3.16.0a0，`lazy import` / `except A, B:` 在 3.14 上是语法错）。
 //   * `FAIL` —— 编得出来、跑得起来，但**答得不一样**，或者崩了。那是真错。
 //
-// 三条腿都量：默认那条（`omni run`，走解释器）、`--mode js`（发 JS 再跑）、以及
-// `omni build`（发 C 再编再跑）。浮点转串、负数取模这些格子在三条腿上**各有一份实现**
-// （`host/pure.js` / `backend-js/prelude.js` / `runtime/omni_fmt.c`），只量一条就等于只量了三分之一。
+// **默认量两条腿**：`--mode js`（发 JS 再跑）与 `omni build`（发 C 再编再跑）——
+// 两条都是**编出来的**，也就是这门语言的去处（主线是编到 C，JS 那条走同一条管线）。
+// 解释器那条最慢、最不重要，默认不跑；要它就 `--legs interp,js,c`。
+// 为什么至少两条：浮点转串、负数取模这些格子**每条腿各有一份实现**
+// （`backend-js/prelude.js` / `runtime/omni_fmt.c`），只量一条等于只量了一半。
+//
+// 挑着跑：`node tests/python/run.js kwargs listops`（名字里带这几个字的例子）。
 
 import { execFileSync } from 'node:child_process';
 import { readdirSync, mkdirSync } from 'node:fs';
@@ -36,7 +40,31 @@ let pass = 0;
 let fail = 0;
 let skip = 0;
 
-const files = readdirSync(examples).filter((f) => f.endsWith('.py')).sort();
+/**
+ * **挑着跑**（`node tests/python/run.js kwargs listops` / `--legs interp,c`）。
+ *
+ * 为什么要有：整套是 26 份例子 × 3 条腿，一趟三分钟 —— 改一格东西要等三分钟才知道结果，
+ * 那就没人会在改完之后立刻跑它。口径与 `tests/glr/run.js` 一条：不带参数照旧跑全套。
+ *
+ * 判据这件事不打折：**提交之前跑全套**。挑着跑是改的过程里用的。
+ */
+const argv = process.argv.slice(2);
+const legsArg = (() => {
+  const i = argv.indexOf('--legs');
+  return i >= 0 && i + 1 < argv.length ? argv[i + 1].split(',') : null;
+})();
+const filters = argv.filter((a) => !a.startsWith('--') && a !== legsArg?.join(','));
+/**
+ * **默认只跑"编出来的"那两条腿：`--mode js` 与 `omni build` 的 C。**
+ *
+ * 主线是**编到 C**（SPEC §一之二），而 JS 那条腿走的是同一条编译管线（IR → MIR → JS 后端）。
+ * 解释器那条腿最慢、也最不重要 —— 它不是这门语言的去处。要量它就明着写
+ * `--legs interp,js,c`。
+ */
+const LEGS = legsArg ?? ['js', 'c'];
+
+const files = readdirSync(examples).filter((f) => f.endsWith('.py')).sort()
+  .filter((f) => filters.length === 0 || filters.some((x) => f.includes(x)));
 for (const f of files) {
   const src = join(examples, f);
   let want = null;
@@ -49,7 +77,7 @@ for (const f of files) {
     continue;
   }
   /* 三条腿：默认（解释器）、`--mode js`（发 JS 再跑）、`build`（发 C 再编再跑）。 */
-  for (const leg of ['interp', 'js', 'c']) {
+  for (const leg of LEGS) {
     let got = null;
     try {
       if (leg === 'c') {
