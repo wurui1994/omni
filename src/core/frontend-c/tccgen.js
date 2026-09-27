@@ -823,6 +823,9 @@ export class CGen {  /**
     this.pendingPtr = [];
     /** `_Complex` 那几种类型，一个翻译单元一份（见 `complexType`）。 @type {Map<string,object>} */
     this.cplxTags = new Map();
+    /** **一份 .c 一份产物**那一档吗（`lowerC` 的 `opts.tu`）—— 见 `externThunk` 里那一段。 */
+    this.tu = false;
+
 
     /** 外部数据符号在本单元里预留的那几块地方（`{name, lo, hi}`）—— 见 `unit()` 末尾。 */
     this.extSpans = [];
@@ -4340,6 +4343,24 @@ export class CGen {  /**
        一个 .c 一个 .js 那条路靠它分"我自己定义的"与"别人提供的" —— 线性内存腿上
        两者都有函数体，光看身子分不出来（ADR-0047 第十一格）。 */
     f.setThunk(name);
+    /**
+     * `tu` 档（一份 .c 一份产物）里**转不了手的那几种就不发身子**（ADR-0047 第十四格）。
+     *
+     * 桩的身子是"读进形参、发一条 CCALL 转给宿主"，而按值收发 struct 转不过去
+     * （我们的 struct 在自家线性内存里，宿主的 libc 按真 ABI 读寄存器）。从前这是一条
+     * 硬错；但在**一份 .c 一份 .js** 那条路上，这种名字十有八九根本不是 libc，而是
+     * **别的翻译单元**里我们自己编的函数（R 的 `ALTCOMPLEX_ELT` 返回 `Rcomplex`、
+     * `R_findVarLocInFrame` 返回 `R_varloc_t` —— 量出来 13 份 `.c` 卡在这儿）。
+     * 那时正确的落法是"没有身子、等链接"：调用点照旧按**我们自己的** ABI 发 CALL，
+     * 谁提供它由符号表说（`cJsModules`）；没人提供就是 `undefined symbol`，
+     * 报得响 —— 而不是在这儿先把整份文件判死。
+     */
+    if (this.tu && !this.native) {
+      const ps = info.params === null ? [] : info.params;
+      let hard = isStruct(info.ret.t);
+      for (const p of ps) if (isStruct(p.ty.t)) hard = true;
+      if (hard) { f.setExtern(); return; }
+    }
     /* native 上**没有桩这一说**（第一百二十八片）：调用点那条 `CALL` 现在按符号名发
      * （第一百二十七片），所以没有函数体的被调者压根不需要代码 —— 打上「这个模块里
      * 没有它」，两个后端跳过它，名字靠那条重定位进「未定义的外部符号」那一段。
@@ -8439,6 +8460,7 @@ export function lowerC(path, text, host, defs, args, opts) {
   }
   const mod = new MirModule('omni_main');
   const gen = new CGen(cpp, mod);
+  gen.tu = tu;
   gen.preamble(COMPILE_PREAMBLE);
   cpp.startParse(path, text);
   gen.unit();

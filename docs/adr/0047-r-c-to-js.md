@@ -613,3 +613,38 @@ typedef union { struct { double r; double i; }; double _Complex private_data_c; 
   嵌进 struct 的偏移，**退出码与 cc 逐字节相同**（196）。
 * 顺带掉出一个真 bug：`structLayout` 的成员记录少 `aligned`/`packed` 两格时算出 `NaN`
   尺寸，`sizeof` 那条路当场抛 `RangeError` —— 自己造成员表时那两格必须给。
+
+## 第十四格：按值收发 struct 的外部函数**不发桩、等链接** —— 90/111 变 103/111（已落）
+
+第十三格之后剩下 21 份，头两类占了 13 份：
+
+```
+9 份  外部函数 'ALTCOMPLEX_ELT' 返回 struct 还没到（要真的 ABI）
+4 份  外部函数按值收 struct 还没到（要真的 ABI）
+```
+
+看名字就知道这条错**归错了类**：`ALTCOMPLEX_ELT`（回 `Rcomplex`）、
+`R_findVarLocInFrame`（回 `R_varloc_t`）不是 libc，是**R 自己另一份 `.c` 里的函数**。
+"转不了手给宿主"这句话只对 libc 成立 —— 桩的身子是"读进形参、发一条 CCALL 转给宿主"，
+而我们的 struct 躺在自家线性内存里，宿主按真 ABI 读寄存器，所以那条路确实走不通。
+
+但在**一份 .c 一份 .js** 那条路上根本不必走那条路：
+
+* `tu` 档里遇到"按值收发 struct 的外部函数"时**不发身子**（`f.setExtern()` + `f.setThunk(name)`）；
+* 调用点照旧按**我们自己的** ABI 发 `CALL`（与模块内调用一模一样）；
+* 谁提供它由符号表说（`cJsModules`）。没人提供就是 `undefined symbol` ——
+  发一个空身子出去才是静默答错（调它什么都不做、回 `undefined`），所以那一格
+  在 `emit_js` 与 `cJsModules` 两处都当场抛。
+
+代价写在明处：真的 libc 里按值收发 struct 的那几个（`div` / `ldiv`）现在从"编译期硬错"
+变成"链接期 undefined symbol" —— 同一件事晚一步报，而且多了一条出路：
+用 C 自己写一份 `div` 编进模块集里就补上了。
+
+### 账
+
+* `tests/r/rtc.js`：**103/111**（地板抬到 103）。剩下 8 份 8 类，都是单点：
+  `Rstrptime.h` 里两处 `constant expression expected`、hershey 字库两处
+  `incompatible types for redefinition`、`complex.c` 的 `1.0iF` 虚数字面量、
+  `array.c` 一处把复数当整数用、`eval.c` 的计算跳转、`memory.c` 要 `stdalign.h`。
+* `tests/mir/jsmod.js` 新增一格 `struct-byval-across`：两份模块之间**按值传/按值回**
+  一个 `{double r; double i;}`，`(1.5+2i)(0.5-1i) = 2.75-0.5i`，退出码与输出都对上。

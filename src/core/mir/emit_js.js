@@ -704,6 +704,13 @@ class JsFromMir {
         this.needImport(this.syms.get(f.thunk), `$fn_${f.thunk} as $f${no}`);
         continue;
       }
+      /* **没有身子的桩**（`tu` 档里按值收发 struct 的那几种，见 `externThunk`）：
+         它只能由别的模块提供。表里没有就当场抛 —— 发一个空身子出去是静默答错
+         （调它什么都不做，回 undefined）。 */
+      if (this.modular && f.extern === true) {
+        throw new OmniError(`mir.emit_js: undefined symbol '${f.thunk === null ? f.name : f.thunk}'`
+          + '（按值收发 struct 的外部函数只能由别的模块提供）');
+      }
       bodies.push(...this.func(no));
     }
     // 访问器在函数体发完之后才知道用了哪几个，但声明要在前面 —— 所以这里才拼

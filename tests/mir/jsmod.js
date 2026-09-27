@@ -284,6 +284,21 @@ const twoUnits = [
     ],
     want: 'code=42 out="cee/42\\n"',
   },
+  {
+    /* **按值收发 struct 的跨模块调用**（ADR-0047 第十四格）：`tu` 档里这种外部函数
+       不再发桩（桩转不了手给宿主），而是"没有身子、等链接" —— 调用点照旧按我们自己的
+       ABI 发 CALL。R 的 `ALTCOMPLEX_ELT`（返回 `Rcomplex`）就是这一类，量出来 13 份
+       `.c` 卡在这儿。 */
+    name: 'struct-byval-across',
+    units: [
+      { name: 'a', src: `${P}typedef struct { double r; double i; } Cpx;\nCpx cmul(Cpx, Cpx);\n`
+        + 'int main(void){ Cpx x = {1.5, 2.0}, y = {0.5, -1.0};\n'
+        + '  Cpx z = cmul(x, y); printf("%g %g\\n", z.r, z.i); return (int)(z.r * 2); }\n' },
+      { name: 'b', src: 'typedef struct { double r; double i; } Cpx;\n'
+        + 'Cpx cmul(Cpx a, Cpx b){ Cpx r; r.r = a.r*b.r - a.i*b.i; r.i = a.r*b.i + a.i*b.r; return r; }\n' },
+    ],
+    want: 'code=5 out="2.75 -0.5\\n"',
+  },
 ];
 
 for (const t of twoUnits) {

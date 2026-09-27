@@ -282,10 +282,17 @@ export function cJsModules(units, opts) {
     for (const [sym] of m.mir.dataSyms) claim(sym, m);
   }
   /* 数据那一侧没人提供就是 `undefined symbol`：函数还能落到 libc 上，数据不能 ——
-     悄悄放过去会得到一个指着自己那块空白的指针（静默答错）。 */
+     悄悄放过去会得到一个指着自己那块空白的指针（静默答错）。
+     函数那一侧**没有身子的桩**同理（`tu` 档里按值收发 struct 的那几种，见
+     `externThunk`）：它转不了手给宿主，只能由别的模块提供。 */
   const missing = new Set();
   for (const m of mods) {
     for (const r of m.mir.dataRefs) if (!provide.has(r.name)) missing.add(r.name);
+    for (const f of m.mir.funcs) {
+      if (f.extern !== true) continue;
+      const nm = f.thunk === null || f.thunk === undefined ? f.name : f.thunk;
+      if (!provide.has(nm)) missing.add(nm);
+    }
   }
   if (missing.size > 0) {
     throw new OmniError(`omni c jsmod: undefined symbol ${[...missing].map((n) => `'${n}'`).join('、')}`);

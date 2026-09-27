@@ -29,8 +29,14 @@ const INCS = [GEN, join(RSRC, 'src/include'), join(RSRC, 'src/nmath'), join(RSRC
 const DEFS = [['HAVE_CONFIG_H', '1']];
 const verbose = process.argv.includes('-v');
 
-/** 编过的份数**只许涨**（2026-09-27 量到 90/111 —— `_Complex` 那一刀之前是 0）。 */
-const FLOOR = 90;
+/**
+ * 编过的份数**只许涨**。量出来的三格（2026-09-27 一天之内）：
+ *   * `_Complex` 当布局收下之前 **0/111**（`R_ext/Complex.h` 一行挡住 107 份）；
+ *   * 那一刀之后 **90/111**；
+ *   * 再加"按值收发 struct 的外部函数不发桩、等链接"那一刀 **103/111**。
+ */
+const FLOOR = 103;
+
 
 let pass = 0;
 let fail = 0;
