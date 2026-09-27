@@ -324,6 +324,9 @@ export const TOK_SIZEOF = fixed('sizeof');
 export const TOK_ALIGNOF1 = fixed('__alignof');
 export const TOK_ALIGNOF2 = fixed('__alignof__');
 export const TOK_ALIGNOF3 = fixed('_Alignof');
+/** `_Alignas(N)` / `_Alignas(类型)`（C11 6.7.5，`tcctok.h:66`）：它是一位**说明符**
+ * （落在 `__attribute__((aligned(N)))` 同一格上），不是 `_Alignof` 那种算子。 */
+export const TOK_ALIGNAS = fixed('_Alignas');
 /* GNU 的 `typeof`（第八刀第五十一片，`tcctok.h:67-69`）。三种拼法，一条 case 三个入口；
  * C23 把它写进了标准（`typeof`），系统头里用的多半是 `__typeof__`。 */
 export const TOK_TYPEOF1 = fixed('typeof');

@@ -162,7 +162,7 @@ import {
   TOK_ATTRIBUTE1, TOK_ATTRIBUTE2, TOK_ASM1, TOK_ASM2, TOK_ASM3,
   TOK_ALIGNED1, TOK_ALIGNED2, TOK_PACKED1, TOK_PACKED2, TOK_WEAK1, TOK_WEAK2,
   TOK_ALIAS1, TOK_ALIAS2, TOK_VISIBILITY1, TOK_VISIBILITY2,
-  TOK_ALIGNOF1, TOK_ALIGNOF2, TOK_ALIGNOF3,
+  TOK_ALIGNOF1, TOK_ALIGNOF2, TOK_ALIGNOF3, TOK_ALIGNAS,
   TOK_TYPEOF1, TOK_TYPEOF2, TOK_TYPEOF3, TOK_LABEL,
   TOK_BUILTIN_VA_START, TOK_BUILTIN_VA_ARG, TOK_BUILTIN_VA_END, TOK_BUILTIN_VA_COPY,
   TOK_BUILTIN_EXPECT, TOK_BUILTIN_TYPES_COMPATIBLE_P,
@@ -6129,7 +6129,10 @@ export class CGen {  /**
       /* `typeof(x) y;` 也是一条声明的开头，而 `(typeof(x))v` 是一次强制转换 ——
        * 两处都靠这一问（第五十一片）。 */
       || t === TOK_TYPEOF1 || t === TOK_TYPEOF2 || t === TOK_TYPEOF3
-      || t === TOK_ATTRIBUTE1 || t === TOK_ATTRIBUTE2;
+      || t === TOK_ATTRIBUTE1 || t === TOK_ATTRIBUTE2
+      /* `_Alignas(16) char c;` 也能打头（C11 6.7.5：它是一位说明符）—— CPython 的
+       * `Include/object.h:145` 就是这么一个成员声明。 */
+      || t === TOK_ALIGNAS;
   }
 
   /**
@@ -6896,6 +6899,32 @@ export class CGen {  /**
         any = true; this.next(); continue;
       }
       if (t === TOK_ATTRIBUTE1 || t === TOK_ATTRIBUTE2) { any = true; this.parseAttrs(ad); continue; }
+      /* `_Alignas(N)` 与 `_Alignas(类型)`（C11 6.7.5，`tccgen.c:4773`）：它落在与
+       * `__attribute__((aligned(N)))` **同一格** `ad.aligned` 上 —— 两种写法要的是同一件事，
+       * 所以后头 struct 布局、变量对齐那几段一个字都不必改。括号里是类型名的那一种
+       * （`_Alignas(double)`）取那个类型的对齐，是数的那一种必须是正的 2 的幂。
+       *
+       * 逼出这一格的是 CPython 的 `_Py_ALIGNED_DEF`：`Include/object.h:145` 的
+       * `_Py_ALIGNED_DEF(_PyObject_MIN_ALIGNMENT, char) _aligner;` 展开成
+       * `_Alignas(N) char _aligner;` —— 那一支只在 `__STDC_VERSION__ >= 201112L`
+       * （也就是 `-std=c11`）时才走到，所以从前报 C99 的我们从没撞见过它。 */
+      if (t === TOK_ALIGNAS) {
+        this.next();
+        this.skip(LPAR);
+        let n;
+        if (this.isTypeStart(this.tok)) {
+          n = typeSize(this.typeName()).align;
+        } else {
+          n = Number(this.constExpr());
+          if (n <= 0 || (n & (n - 1)) !== 0) {
+            this.err('alignment must be a positive power of two');
+          }
+        }
+        this.skip(RPAR);
+        if (ad !== null) ad.aligned = n;
+        any = true;
+        continue;
+      }
       if (t === TOK_SIGNED1 || t === TOK_SIGNED2) {
         if (sign !== 0) this.err('two or more sign specifiers');
         sign = 1; any = true; this.next(); continue;
