@@ -508,6 +508,8 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
       `socketmodule.c` 报 `bad preprocessor expression: #if ! 0 || ! 0 ( 0 )`
       （那是 `TargetConditionals.h` 里 clang 的 `__is_target_os(...)` —— 与 tcc 同一句诊断）。
 
+    那两份的账当场就清了两格（第 15 条）。
+
     路上量出两格**配置错**，两格都是"答案看着合理、其实答错了"：
     - **摘 HACL\* 那六份**（`md5module` / `sha1` / `sha2` / `sha3` / `blake2` / `hmac`）报
       `krml/internal/types.h` 不在。那**不是"不借第三方库"** —— HACL\* 就 vendored 在借来的
@@ -523,9 +525,45 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
       按它的问法探（换棵树自己跟着变）。量完拿**本机那份真 python 的 `pyconfig.h`** 对了六格
       （`CHROOT`/`CTERMID_R`/`FDATASYNC`/`FSYNC`/`GETPAGESIZE`/`KQUEUE`），一格不差。
 
-    顺手记一条**下一把尺子的点子**：本机装着的真 python 的 `pyconfig.h` 是个**免费的 oracle**
-    —— 纯机器探针那一族（`HAVE_*` / `SIZEOF_*`）可以逐格对账。版本与构建选项不同的那几格
-    （借不借哪个库）要先排掉。
+    顺手记一条**下一把尺子的点子，已经试过一次、抓到东西了**：本机装着的真 python 的
+    `pyconfig.h` 是个**免费的 oracle**。拿它与我们探出来的那份逐格对（只对两份都有的名字）：
+
+    ```
+    两份都有的宏 513、定义与否一致 450、不一致 63
+    ```
+
+    63 格里大半是**我们自己的决定**（不借 curses / libffi / …，那几族一看就明白），
+    剩下的是**真探针缺口**，而且都是"`HAVE_X` 这个名字不一定是个函数"：
+    - `HAVE_ADDRINFO` / `HAVE_SOCKADDR_STORAGE` —— 那是**结构体**检查
+      （`configure.ac:6244` / `:6252` 的 `AC_COMPILE_IFELSE`：`struct addrinfo a;` 编得过吗）。
+      我们那一族按"链得上一个叫 addrinfo 的函数吗"问，自然答"没有" ——
+      代价是 `Modules/addrinfo.h:129` 自己又定义一遍 `struct addrinfo`，
+      于是 `socketmodule.c` 报 `redefinition of 'struct addrinfo'`。
+    - `HAVE_STRUCT_*` 那一族（`AC_CHECK_MEMBERS`，如 `HAVE_DIRENT_D_TYPE`）—— 问的是
+      "这个结构体有这个成员吗"，同样不是函数。
+    - `HAVE_DEVICE_MACROS` / `HAVE_MAKEDEV` / `HAVE_GCC_UINT128_T` /
+      `HAVE_COMPUTED_GOTOS` / `HAVE_DEV_PTMX` / `HAVE_BROKEN_SEM_GETVALUE` ——
+      各自有自己的程序要跑。
+    - 两格是**版本差**（那份 pyconfig 出自 3.14 与更老的 SDK）：`HAVE_DUP3`、
+      `HAVE_DECL_TZNAME`。对账时要把这类排掉，别当 bug 修。
+
+    **下一刀就是这个**：把这把尺子写成脚本（`ext/python/rt/pyconf-diff.js` 一类），
+    按族给差异标上"我们的决定 / 真缺口 / 版本差"，门定在"真缺口 = 0"。
+
+15. **那两格前端欠账清了**（`Modules/` 那 14 份里我们自己的两份）。
+
+    - **枚举常量上的 `__attribute__`**（`tccgen.js` 的 `enumDecl`）：名字之后读掉属性。
+      gcc/clang 收（C23 把它写进标准了），**tcc 不收**（`tccgen.c:4520-4528` 名字之后直接看
+      `=`），所以判据在 `tests/c/gnu/04-enum-attr.c`（尺子 clang）——
+      考的是**值**：带属性那一格与不带的一样参与"上一格 + 1"，两处属性连着写也认。
+      逼出它的是 macOS 的 `Security.framework/Headers/SecBase.h:329`
+      （`errSecDskFull __attribute__((deprecated(…))) = errSecDiskFull,`）。`_scproxy.c` 出 `.o` 了。
+    - **`__has_extension` 补进 `COMPILE_DEFS`**（回 0，与 `__has_builtin` 一族一致）。
+      tcc 的 `include/tccdefs.h:152-154` 只有三个探测宏，而 `TargetConditionals.h:147` 写的是
+      `#if !defined(__has_extension) || !__has_extension(define_target_os_macros)` ——
+      `||` 在 `#if` 里**不短路语法**：右边没定义时变成 `0 (0)`，整行是语法错（tcc 也一样报）。
+      放 `COMPILE_DEFS` 而不是 `predefs`，`tcc -dM` 那组判据才继续逐行相同。
+      `socketmodule.c` 于是往下走了一步 —— 下一道门是上面那格 `HAVE_ADDRINFO`。
 
 ## 二、进度
 

@@ -6807,6 +6807,13 @@ export class CGen {  /**
       if (this.tok === TOK_EOF) this.err("'}' expected");
       const en = this.identName();
       if (this.ecScope().has(en)) this.err(`redefinition of enumerator '${en}'`);
+      /* **枚举常量上的属性**（`errSecDskFull __attribute__((deprecated(…))) = …`）。
+       * gcc/clang 收（C23 把"枚举项上的属性"写进标准了），**tcc 不收**
+       * （`tccgen.c:4520-4528` 那个循环里名字之后直接看 `=`）—— 所以这一格超出 tcc，
+       * 判据在 `tests/c/gnu/`。逼出它的是 macOS 的
+       * `Security.framework/Headers/SecBase.h:329`（`Modules/_scproxy.c` 要它）。
+       * 属性本身对我们没有意义（`deprecated` 只影响诊断），读掉。 */
+      this.parseAttrs();
       if (this.tok === ASSIGN) {
         this.next();
         val = this.constExpr();

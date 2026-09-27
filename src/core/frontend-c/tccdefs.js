@@ -279,6 +279,20 @@ export const COMPILE_DEFS = [
    * 我们在 osx 上装成 APPLE-GCC 4（见 `OS_EXTRA`），所以也从 `4.2.1 Compatible` 起。 */
   ['__VERSION__', '"4.2.1 Compatible Omni C"'],
 
+  /* `__has_extension` —— **只在编译那一路补上的第四个探测宏**。
+   *
+   * tcc 的 `include/tccdefs.h:152-154` 只有 `__has_builtin` / `__has_feature` /
+   * `__has_attribute` 三个（我们的 `predefs` 照抄那三个，`-dM` 那张表才逐行对得上），
+   * 可 macOS 的 `TargetConditionals.h:147` 写的是
+   *     #if !defined(__has_extension) || !__has_extension(define_target_os_macros)
+   * —— `||` 在 `#if` 里**不短路语法**：右边那一半照样要能解析，而 `__has_extension` 没定义
+   * 时它变成 `0 (0)`，于是整行是语法错（`bad preprocessor expression`，tcc 也一样报）。
+   * 量到的后果：`Modules/socketmodule.c` 编不出来。
+   *
+   * 回 0 的意思是"这编译器什么扩展都没有"，与那三个一致：头文件于是走它的保守那一支。
+   * 放 `COMPILE_DEFS` 而不是 `predefs`，是为了让 `tcc -dM` 那组判据继续逐行相同。 */
+  ['__has_extension(x)', '0'],
+
   /* ---- `__atomic_*` 那一族（GCC / clang 的内建原子操作）--------------------
    *
    * 为什么要有：**借来的 C 里到处是它**。最先撞上的是 CPython 的
