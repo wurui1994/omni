@@ -804,6 +804,34 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     **C 前端按块作用域复用槽位**（`declareLocal` 那一路：出了 `}` 的名字再也访问不到，
     所以那个槽可以给下一个同类型的局部量）。那一刀落下去这个函数的帧该掉到 2KB 上下。
 
+22. **槽位也按块作用域复用了（C 前端）—— 帧 33KB -> 24KB；帧上那一半试了两回都退回来**。
+
+    上面那一格的下一刀：`declareLocal` 里那个 `f.slot(name, …)` 改成**先问空闲表**
+    （按 MIR 类型分桶），`popScope` 把这一层领的槽还回去。判据就一条 C 的规矩：
+    **出了 `}` 的名字再也访问不到**，所以那个槽可以给下一个同类型的局部量。
+    语句表达式那一层例外（`noReclaim`）—— `({ int t = f(); t; })` 的值就住在块里那个
+    局部量上，交出去之后外头还要读一次。
+
+    读数：`_PyEval_EvalFrameDefault` 的帧 **33120 -> 24048 字节**（一路下来
+    464032 -> 24048，**19 倍**）。
+
+    **帧上那一半（`frameAlloc` 出块回收）试了两回，两回都退回来了** —— 这一条记在
+    `frameOff` 的注上，免得再试第三遍：拨回游标之后，我们自己编出来的 `_freeze_module`
+    冻大一点的 `.py`（`os` / `_collections_abc` / `importlib._bootstrap_external` /
+    `_pybuiltins`）就崩在 `_PyCfg_OptimizedCfgToInstructionSequence` 收场那条 `ldp`
+    上（读到 `0xffffffffffffffff` —— 调用者保存的 x29/x30 被写坏了，
+    也就是**有人把帧上的地址活过了它那个块**）。同样的回收在**槽位**那一侧是绿的，
+    区别就是槽位没有地址。要再试，先把"谁的地址活过了块"找出来。
+
+    这一趟还顺手修了第四把尺子的一处**会骗人的地方**：`freeze.js` 从前不删旧文件，
+    于是这一趟崩了、上一趟的头还躺着，"与 clang 逐字节相同"就拿旧文件去比、报一片绿
+    （量到过一次）。现在两侧都先 `rmSync`。
+
+    判据（这一刀）：`tests/c` 339 过 0 败、`native-gen` 93 过、arm64 207+88、
+    x86_64 188+90、`selfc` 6 过、`lower` 325 过、`go` 46 过、`mir` 51 过、
+    `py:sweep` 201/201、`py:freeze` 26/26 + oracle 26/26、`py:link` 0 缺口，
+    以及**我们自己编出来的 python 跑那份 smoke 与 clang 编的逐行相同**。
+
 ## 二、进度
 
 ### 已落地

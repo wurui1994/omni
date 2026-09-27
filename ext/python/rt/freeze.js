@@ -26,7 +26,7 @@
 //   * 冻哪几份、名字与源码路径**照 `Makefile.pre.in` 里那几条规则读**，不写死。
 //   * 参考树只读：头一律落 `.omni-cache/py-rt/gen/Python/frozen_modules/`。
 //   * 门：那几份头一份都不许少；`--oracle` 时还要与 clang 编的同一套出的**逐字节相同**。
-import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -163,6 +163,9 @@ const list = frozenList();
 const bad = [];
 for (const it of list) {
   const hdr = join(HDR, it.hdr);
+  /* **先删掉上一趟的那一份**：不删的话这一趟崩了也还有一个旧文件躺着，
+   * 下面"与 clang 逐字节相同"就会拿旧文件去比、报一片绿。量到过一次（别再犯）。 */
+  rmSync(hdr, { force: true });
   const r = spawnSync(BIN, [it.name, join(SRC, it.src), hdr], { encoding: 'utf8' });
   if (r.status !== 0 || !existsSync(hdr) || statSync(hdr).size === 0) {
     bad.push(`${it.name} —— exit=${r.status} ${(r.stderr ?? '').trim().split('\n')[0] ?? ''}`);
@@ -211,6 +214,7 @@ if (ORACLE) {
   for (const it of list) {
     const a = join(HDR, it.hdr);
     const b = join(ccHdr, it.hdr);
+    rmSync(b, { force: true });
     const r = spawnSync(ccBin, [it.name, join(SRC, it.src), b], { encoding: 'utf8' });
     if (r.status !== 0 || !existsSync(b) || !existsSync(a)) { off.push(`${it.name}（oracle 那侧没出来）`); continue; }
     if (readFileSync(a).equals(readFileSync(b))) same += 1;

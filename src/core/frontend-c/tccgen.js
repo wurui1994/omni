@@ -853,7 +853,15 @@ export class CGen {  /**
     /** 变参函数里那个隐藏的**变参区指针**（第十六片的 ABI，见 `runBody` 与 `vaBlock`） */
     this.vaRef = REF_NONE;
     this.frameSize = 0;
-    /** 帧内的下一个空位。**不回收** —— 见 finishFunc 头上「平铺的帧」那一节 */
+    /**
+     * 帧内的下一个空位。**不回收** —— 见 finishFunc 头上「平铺的帧」那一节。
+     *
+     * **出块回收试过两回，两回都退回来了**（第一百四十五片）：`popScope` 把这根游标拨回去
+     * 之后，我们自己编出来的 `_freeze_module` 冻大一点的 `.py` 就崩
+     * （`_PyCfg_OptimizedCfgToInstructionSequence` 收场那条 `ldp` 读到 0xffff… ——
+     * 有人把帧上的地址活过了它那个块）。槽位那一侧同样的回收是绿的（见 `slotFree`）。
+     * 要再试第三遍，先把"谁的地址活过了它的块"找出来。
+     */
     this.frameOff = 0;
     /** 第一遍（收集期）吗 */
     this.pass1 = false;
@@ -1141,7 +1149,7 @@ export class CGen {  /**
   }
 
   /**
-   * 在当前帧里划一块，回帧内偏移。**不回收**（见 finishFunc 头上「平铺的帧」）。
+   * 在当前帧里划一块，回帧内偏移。**不回收**（见 `frameOff` 的注）。
    * `align` 非 0 就用它 —— `__attribute__((aligned(N)))` 写在变量上的那一格。
    */
   frameAlloc(ty, align = 0, extra = 0) {
@@ -1183,7 +1191,16 @@ export class CGen {  /**
       const s = typeSize(ty);
       this.declScalars.push({ name, size: s.size, align: s.align });
     }
-    const e = { ty, slot: this.f.slot(name, mirTypeOf(ty)), off: -1 };
+    /* 槽位按块作用域复用（第一百四十五片，见 `slotFree` 的注）：同类型的空闲槽先拿来用。
+     * **名字按第一个领它的那个变量记**（MIR 的槽名只给人看，`omni c mir` 的文本会显出
+     * 第一个名字；判据一律看行为，不看那串文本）。 */
+    const mt = mirTypeOf(ty);
+    const pool = this.slotFree.get(mt);
+    const slot = pool !== undefined && pool.length > 0 ? pool.pop() : this.f.slot(name, mt);
+    if (this.scopeSlots.length > 0) {
+      this.scopeSlots[this.scopeSlots.length - 1].push({ slot, mt });
+    }
+    const e = { ty, slot, off: -1 };
     scope.set(name, e);
     return e;
   }
@@ -6226,7 +6243,11 @@ export class CGen {  /**
       this.open(OP.LOOP, 'gotoloop', REF_NONE);
     }
     this.seStack.push(frame);
+    /* 这一层里的块**不还槽**（第一百四十五片）：语句表达式的值就是块里那个局部量，
+     * 交出去之后外头还要读一次。 */
+    this.noReclaim += 1;
     this.block();
+    this.noReclaim -= 1;
     this.seStack.pop();
     if (labeled) {
       this.f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, this.levelOf('gotoend'));
@@ -6417,12 +6438,23 @@ export class CGen {  /**
     this.ecStack.push(new Map());
     this.tdefStack.push(new Map());
     this.vlaStack.push({ sp: -1, regionLen: this.regions.length });
+    this.scopeSlots.push([]);
   }
 
   /** 出一层块。这一层里划过变长数组的话，`$sp` 在这儿收回去。 */
   popScope() {
     const v = this.vlaStack.pop();
     if (v !== undefined && v.sp >= 0) this.spRestore(v.sp);
+    /* 这一层领的槽还回空闲表（第一百四十五片）：块里的名字出了 `}` 再也访问不到。
+     * 语句表达式那一层例外（`noReclaim`）—— 它的值就住在块里的那个局部量上。 */
+    const mine = this.scopeSlots.pop();
+    if (mine !== undefined && this.noReclaim === 0) {
+      for (const s of mine) {
+        const pool = this.slotFree.get(s.mt);
+        if (pool === undefined) this.slotFree.set(s.mt, [s.slot]);
+        else pool.push(s.slot);
+      }
+    }
     this.scopes.pop();
     this.tagStack.pop();
     this.ecStack.pop();
@@ -8755,6 +8787,24 @@ export class CGen {  /**
     this.funcRet = ret;
     this.funcName = name;
     this.scopes = [new Map()];
+    /* **槽位按块作用域复用**（第一百四十五片）：出了 `}` 的名字再也访问不到，所以那个槽
+     * 可以让给下一个同类型的局部量。空闲表按 MIR 类型分（`slotFree`），每一层块自己记
+     * 这一层要还回去的那几个（`scopeSlots`）。
+     *
+     * 为什么要这一格：后端给**每个槽**都留一格栈位，而 `_PyEval_EvalFrameDefault`
+     * （`generated_cases.c.h` 展开出几千个 case、每个 case 自己一层块）有 3900 个槽 ——
+     * 一个槽一格就是 31KB。栈位那一侧的区间复用（`regalloc.js` 的 `slotHomes`）救不了它：
+     * 解释器整段身子在一个大 `LOOP` 里，区间被撑成"整段活着"，一格都共用不了。
+     * 源头在这儿：那几千个 case 的局部量本来就不同时活着。 */
+    this.slotFree = new Map();
+    /** @type {{slot:number,mt:number}[][]} 每层块里新领的槽（出块还回 `slotFree`） */
+    this.scopeSlots = [];
+    /**
+     * 大于 0 时**不还**。只有语句表达式那一层：`({ int t = f(); t; })` 的值就是块里那个
+     * 局部量，交出去之后外头还要读一次（聚合那一档交的是地址）。那一层不还（多占几格，
+     * 不会错）。
+     */
+    this.noReclaim = 0;
     /* 函数体这一层的 tag 也要新的一份：两遍走同一串记号，第二遍必须重新认识块里
      * 定义的那些 `struct S {…}` —— 第一遍留下的那份成员已经填好了。 */
     this.tagStack = [this.tags, new Map()];
