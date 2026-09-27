@@ -729,6 +729,39 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     也就是说：**借来的那份 CPython 运行时，我们自己那台 C 前端从头编到尾、链得完整、
     跑起来与 clang 编的同一套给出一样的字节。** 剩下的是语言层怎么用它（§一之二 第 0 刀）。
 
+20. **整个解释器也跑起来了**（`python -c "print(...)"`），但要 `ulimit -s 65520` ——
+    卡点已经量清楚，在**后端**，不在 C 前端。
+
+    做法：那 202 份 `.o` 再加 `Programs/python.c`（`Py_BytesMain`）链成 22M 的可执行，
+    `PYTHONHOME` 指到一份 `lib/python3.16 -> <参考树>/Lib` 的软链上：
+
+    ```
+    $ (ulimit -s 65520 && PYTHONHOME=/tmp/ic/home ./ourpython \
+         -c "import sys; print('ours', sys.version.split()[0]); print(sum(i*i for i in range(10)))")
+    ours 3.16.0a0
+    285
+    ```
+
+    也就是说 **importlib 的整套自举、encodings、site、sys 模块、字节码解释器全跑通了**。
+    默认 8MB 栈上崩在 `_PyEval_EvalFrameDefault+16` 的第一条 `str`（栈踩穿），原因是
+    **那个函数的帧要 0x6e1e0 ≈ 451KB**（clang 给的是几百字节）。
+
+    量清楚了帧是谁吃掉的（这一格值得记住，别再猜）：
+    - C 前端自己算的帧（`frameAlloc` 那一路：数组、聚合、被取地址的标量）只有 **304 字节**；
+    - 451KB 是**后端给每个 MIR 值一个栈位**（见 `gvarLval` 的注："这一层的两个后端把
+      每个值都落在栈位上"）。`generated_cases.c.h` 展开出几千个 case、几万个值，
+      于是每个值 8 字节就是几百 KB。
+    - 所以下一刀在后端：**按活跃区间复用栈位**（或至少让同一个块里死掉的值让位）。
+      试过在前端做"出块回收帧"（`popScope` 把 `frameOff` 拨回去）——
+      前端那 304 字节确实更小了，但 451KB 一格没动，所以那一刀**撤回了**，
+      留给后端那一刀一起做（判据现成：这一格的 `sub sp` 要从 0x6e1e0 掉到几 KB）。
+
+    **另一格记在账上的事**（不是缺陷，是口径）：把"clang 全套 + 我们一份"混起来链时，
+    我们那一份若读 `_Py_thread_local` 的变量（`_Py_tss_tstate`）就会拿错地址 ——
+    我们现在把 TLS 当**普通全局**编（`symbols.js` 的 `KNOWN_BAD` 里记着那笔
+    `__tlv_bootstrap`）。所以混链的结果只能用来定位，不能当"跑得对"的判据；
+    **全用我们自己编的那一套**才是。（真正的多线程也要等这一格补上。）
+
 ## 二、进度
 
 ### 已落地
