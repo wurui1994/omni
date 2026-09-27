@@ -35,7 +35,7 @@ import { OmniError } from '../source/diag.js';
 import {
   OP, OP_NAMES, OP_MODES, REF_NONE, REF_BIAS, isConstRef,
   T_VOID, T_I64, T_F64, T_STR, T_I32, T_F32,
-  MLOAD_KINDS, MSTORE_KINDS, memKindNo, memOff,
+  MLOAD_KINDS, MSTORE_KINDS, memKindNo, memOff, MEM_PAGE,
   CVT_I2F, CVT_F2I, CVT_F2U, CVT_BOX, CVT_U2F, CVT_SEXT, CVT_ZEXT, CVT_TRUNC,
   CVT_SEXT8, CVT_SEXT16, CVT_FCVT, CVT_NAMES,
 } from './ir.js';
@@ -143,7 +143,8 @@ const JS_CMP = new Map([
  * 它靠 `$W32` 回绕），两处的差别是有意的，别"顺手补齐"。
  */
 const JS_PROLOGUE = `'use strict';
-const { memInit, memData, memSize, memGrow, memLoadFn, memStoreFn, memLoadFnN, memStoreFnN,
+const { memInit, memData, memAlloc, memPut, memSize, memGrow,
+  memLoadFn, memStoreFn, memLoadFnN, memStoreFnN,
   callLibc, hasLibc, isExitCall, failRt, flushOut, libcAtExit, setFnPtrCaller,
   sjTok, sjSet, sjThrow, sjCatch } = $rt;
 const $W = (x) => BigInt.asIntN(64, x);
@@ -200,8 +201,12 @@ const JS_NUM_LD = new Set(['i8s', 'i8u', 'i16s', 'i16u', 'i32s', 'i32u']);
 const JS_NUM_ST = new Set(['i8', 'i16', 'i32']);
 
 class JsFromMir {
-  constructor(mir) {
+  constructor(mir, modular) {
     this.mir = mir;
+    /** module 档：地址不烤成数，落成"模块基址 + 偏移"（见 `emitMirJs` 头注）。 */
+    this.modular = modular === true;
+    /** module 档里用到的地址常量：常量池下标 -> 顶层那条 `const $k<下标>`。 */
+    this.addrRefs = new Set();
     this.out = [];
     /** 用到的内存访问器：kind -> 变量名（只发用到的那几个，一个 kind 一次查表）。 */
     this.ldFns = new Map();
@@ -214,7 +219,15 @@ class JsFromMir {
   /** 一条 ref 的读文本。常量在**发代码期**就变成字面量，指令引用是一个局部变量。 */
   ref(f, r) {
     if (r === REF_NONE) return 'undefined';
-    if (isConstRef(r)) return jsConstText(this.mir.consts.items[r]);
+    if (isConstRef(r)) {
+      /* module 档：地址那几条不是字面量，是顶层算出来的 `$k<下标>`（= 基址 + 偏移）。
+         哪几条是地址由前端记在 `addrConsts` 上 —— 这张表漏一条就是静默错地址。 */
+      if (this.modular && this.mir.addrConsts.has(r)) {
+        this.addrRefs.add(r);
+        return `$k${r}`;
+      }
+      return jsConstText(this.mir.consts.items[r]);
+    }
     return `v${r - REF_BIAS}`;
   }
 
@@ -659,6 +672,7 @@ class JsFromMir {
     for (const [kind, name] of this.stFns) L.push(`const ${name} = memStoreFn(${JSON.stringify(kind)});`);
     for (const [kind, name] of this.ldFnsN) L.push(`const ${name} = memLoadFnN(${JSON.stringify(kind)});`);
     for (const [kind, name] of this.stFnsN) L.push(`const ${name} = memStoreFnN(${JSON.stringify(kind)});`);
+    L.push(...this.moduleBase());
     L.push(...bodies);
     // 函数表：CALLI（C 的函数指针）与 libc 回调（qsort 的比较器）都按它查
     const table = mir.funcs.map((f, no) => `$f${no}`).join(', ');
@@ -696,6 +710,42 @@ const $callFromLibc = (fp, args) => {
   }
 
   /**
+   * module 档的**装载期**那几句：占一段线性内存、算出与"烤死那一版"的差 `$D`，
+   * 再把每一条地址常量算成 `基址 + 偏移`。
+   *
+   * 占的是**整张像**（`[64K, mem.min 页)`）而不只是 data 段：影子栈与堆的那几格基址
+   * 也在这张像里（`tccgen` 按 `dataOff` 一路往上排），整块搬才能让它们仍然对得上
+   * —— 与 `tests/mir/reloc.js` 搬的是同一块东西。
+   */
+  moduleBase() {
+    if (!this.modular) return [];
+    const mir = this.mir;
+    if (mir.mem === null) {
+      if (this.addrRefs.size > 0) throw new OmniError('mir.emit_js: 没有内存却有地址常量');
+      return [];
+    }
+    if (mir.mem.max !== 0) throw new OmniError('mir.emit_js: module 档还不支持内存页上限');
+    const span = mir.mem.min * MEM_PAGE - MEM_PAGE;
+    const L = [
+      `const $B = memAlloc(${span}, 16);`,
+      `const $D = $B - ${MEM_PAGE};`,
+      'const $Dn = BigInt($D);',
+    ];
+    for (const r of this.addrRefs) {
+      L.push(`const $k${r} = ${BigInt(mir.consts.items[r].text)}n + $Dn;`);
+    }
+    /* data 段在**装载期**就铺好（不像烤死那一版是在 `$run()` 里）：一份 .c 一份 .js
+       之后，别人的代码可能先跑起来，那时我这一段必须已经在内存里。
+       搬了一段之后段里装地址的那几格要跟着加同一个差 —— 哪几格由
+       `mem.data[].relocs` 记着（这张表漏一条就是指向搬之前那块地方）。 */
+    for (const d of mir.mem.data) {
+      const rs = (d.relocs === undefined ? [] : d.relocs).map((r) => `[${r.at},${r.size}]`);
+      L.push(`memPut(${d.off} + $D, [${d.bytes.join(',')}], [${rs.join(',')}], $D);`);
+    }
+    return L;
+  }
+
+  /**
    * `$run()`：与 `runMirModule` 同一套收摊 —— 内存先就位、`exit` 的退出码原样带出、
    * 从 `main` 返回等价于 `exit`（C11 5.1.2.2.3，所以要 `libcAtExit` + `flushOut`）。
    * 退出码只留低 8 位（wait(2) 只传得下一个字节，`return -1` 于是是 255）。
@@ -705,11 +755,12 @@ const $callFromLibc = (fp, args) => {
     const no = mir.funcIndex.get(mir.entry);
     if (no === undefined) throw new OmniError(`mir.emit_js: no entry function '${mir.entry}'`);
     const L = ['function $run() {'];
-    if (mir.mem !== null) {
+    if (mir.mem !== null && !this.modular) {
       L.push(`  memInit(${mir.mem.min}, ${mir.mem.max});`);
       /* data 段就是一串数字字面量。不走 base64/`Buffer`：**这一份自己也要能被 omni
        * 编译**（自举那条门），而 `Buffer` 不在封闭子集里。代价只是源码大一点，
-       * 而 data 段只在装载时走一次。 */
+       * 而 data 段只在装载时走一次。
+       * module 档不在这儿铺 —— 那一档在**装载期**就铺好了（见 `moduleBase`）。 */
       for (const d of mir.mem.data) {
         L.push(`  memData(${d.off}, [${d.bytes.join(',')}]);`);
       }
@@ -744,10 +795,22 @@ const $callFromLibc = (fp, args) => {
  *   - 在本进程里跑：`new Function('$rt', src + 'return $run;')(RT)()`
  *   - 出一个文件：`opts.rtImport` 给运行时模块的 specifier，那时文本自带
  *     `import` 与末尾的 `process.exit($run())`，`node x.js` 直接能跑。
+ *
+ * `opts.module === true` 是**一个 .c 一个 .js** 那条路的档（ADR-0047）：地址不再烤成
+ * 编译期的数，而是"模块基址 + 偏移" —— 基址由装载期的 `memAlloc` 给，内存是 rt 那
+ * 一块共用的。哪些常量是地址、data 段里哪几格装的是地址，全靠前端记下的那两张表
+ * （`mir.addrConsts` 与 `mem.data[].relocs`）；漏一条就是静默错地址，所以
+ * `tests/mir/jsmod.js` 那道门专门把基址推开再跑。
+ *
+ * 这一档**不自己退出**：它 `export { $run }`，谁是程序入口由上面那一层说
+ * （被 `import` 进来的模块里调 `process.exit()` 还会把 stdout 丢掉 —— 宿主的收摊次序）。
  */
 export function emitMirJs(mir, opts) {
-  const src = new JsFromMir(mir).emit();
+  const modular = opts !== undefined && opts.module === true;
+  const src = new JsFromMir(mir, modular).emit();
   const spec = opts === undefined ? undefined : opts.rtImport;
   if (spec === undefined) return src;
-  return `import { RT as $rt } from ${JSON.stringify(spec)};\n${src}\nprocess.exit($run());\n`;
+  const head = `import { RT as $rt } from ${JSON.stringify(spec)};\n`;
+  if (modular) return `${head}${src}\nexport { $run };\n`;
+  return `${head}${src}\nprocess.exit($run());\n`;
 }

@@ -1527,7 +1527,10 @@ export class CGen {  /**
        * 编译期常量，静态初始化式那一路要它（第四十八片）。函数体里这一折省一条 ADD。 */
       const k = this.kintOf(v.mem.addr);
       if (k !== null) {
-        return this.mod.consts.int(BigInt.asUintN(64, k + BigInt(v.mem.off)));
+        const folded = BigInt.asUintN(64, k + BigInt(v.mem.off));
+        /* 底下那一格是**地址**时折出来的还是地址（`&st.b`）—— 记号跟着走，见 `kaddr`。 */
+        if (!this.native && this.mod.addrConsts.has(v.mem.addr)) return this.kaddr(folded);
+        return this.mod.consts.int(folded);
       }
       return this.f.emit(OP.ADD, T_I64, v.mem.addr,
         this.mod.consts.int(BigInt(v.mem.off)), 0);
@@ -1665,8 +1668,14 @@ export class CGen {  /**
     const kv = this.kintOf(r);
     if (kv !== null) {
       const bits = isPtr(ty.t) ? 64 : intBitsOf(ty);
-      return sVal(ty, this.konst(ty,
-        isUnsigned(ty.t) ? BigInt.asUintN(bits, kv) : BigInt.asIntN(bits, kv)));
+      const folded = isUnsigned(ty.t) ? BigInt.asUintN(bits, kv) : BigInt.asIntN(bits, kv);
+      /* 折完还是**同一个地址**时记号要跟着走（`char[N]` 退化成 `char *` 就走这条路：
+         `printf("…")` 的那个串地址正是这么丢掉记号的）。值变了（真的截断了）就不是
+         地址了 —— 那时按普通整数收，别乱扣记号。 */
+      if (!this.native && folded === kv && this.mod.addrConsts.has(r)) {
+        return sVal(ty, this.kaddr(folded));
+      }
+      return sVal(ty, this.konst(ty, folded));
     }
     const srcMir = mirTypeOf(from);
     const dstMir = mirTypeOf(ty);

@@ -69,9 +69,65 @@ function sjCatch(e, tok) {
   return e instanceof SjJump && e.tok === tok ? e : null;
 }
 
+/* ---- 一个 .c 一个 .js：地址得在**装载期**才定（ADR-0047） --------------------
+ *
+ * 烤死地址的那条路只有一个模块时成立：data 段从 64K 起，取址就是一条 `65552n`。
+ * 一份 .c 一份 .js 之后，谁的 data 段落在哪儿是**装载期**才知道的事 —— 于是
+ * 每个模块在自己的顶层要一句 `memAlloc(span, 16)` 占好自己那一段，代码里的地址
+ * 变成"模块基址 + 偏移"（`emit_js.js` 的 module 档）。
+ *
+ * 这儿只有两条：占一段（`memAlloc`）、把 data 段铺进去顺手打重定位（`memPut`）。
+ * 线性内存本身仍是 `interp/builtin.js` 那一份 —— 全仓只有一块内存，这是"不分叉"。
+ */
+
+const MEM_PAGE = 65536;
+/** 下一块可分配的字节地址。0 = 还没开张（页 0 永远空着，NULL 打不中）。 */
+let memBump = 0;
+
+/**
+ * 占一段线性内存，回**字节地址**（number）。内存还没开张就先开一页；
+ * 不够长就 `memGrow` —— 长不动是硬错（不像 wasm 那样回 -1 让调用方查：
+ * 这是装载期，装不下就是这份程序在这个宿主上跑不起来）。
+ */
+function memAlloc(bytes, align) {
+  if (memBump === 0) {
+    const pages = Number(memSize());
+    if (pages === 0) memInit(1, 0);
+    memBump = Math.max(MEM_PAGE, Number(memSize()) * MEM_PAGE);
+  }
+  const a = align > 1 ? Math.ceil(memBump / align) * align : memBump;
+  const end = a + bytes;
+  const need = Math.ceil(end / MEM_PAGE) - Number(memSize());
+  if (need > 0 && memGrow(BigInt(need)) === -1n) {
+    failRt('memAlloc: 线性内存长不到 ' + end + ' 字节');
+  }
+  memBump = end;
+  return a;
+}
+
+/**
+ * 铺一段 data 段，顺手把里头装地址的那几格加上 `delta`。
+ * `relocs` 是 `[[at, size], …]`（`mem.data[].relocs` 那张表发出来的样子）。
+ */
+function memPut(off, bytes, relocs, delta) {
+  if (delta !== 0) {
+    for (const r of relocs) {
+      const at = r[0];
+      const size = r[1];
+      let v = 0n;
+      for (let i = size - 1; i >= 0; i -= 1) v = (v << 8n) | BigInt(bytes[at + i]);
+      v = BigInt.asUintN(64, v + BigInt(delta));
+      for (let i = 0; i < size; i += 1) bytes[at + i] = Number((v >> BigInt(i * 8)) & 255n);
+    }
+  }
+  memData(off, bytes);
+}
+
 export const RT = {
   memInit,
   memData,
+  memAlloc,
+  memPut,
   memSize,
   memGrow,
   memLoadFn,
