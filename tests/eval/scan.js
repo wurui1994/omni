@@ -93,6 +93,20 @@ const files = [
 ].filter((f) => CFG.only === '' || f.includes(CFG.only));
 
 /**
+ * **这几份要一张正常大小的画布**（320×240）。
+ *
+ * 这一扫默认 96×72 是为了快（像素活按面积涨），可有些脚本的**布局是自己算的**，
+ * 窗口太小时它们自己那圈循环就走不完 —— 那是**尺子造的红**，不是我们的缺口：
+ *
+ * * `games/box.kc` —— 拒绝采样放 ≥32×32 的盒子，72×64 的空地里永远放不下（§36.3）；
+ * * `geeky/calend.kc` —— 一格日历每列 72 像素、七列，96 宽里排不下那一行。
+ *
+ * 两份都在 320×240（evaldraw 的常见窗口）上正常跑完。往这张表里加东西之前**必须先证明
+ * "小画布上是它自己走不完"**（把画布放大跑一趟），别拿它盖真的红。
+ */
+const BIG_CANVAS = new Set(['box.kc', 'calend.kc']);
+
+/**
  * 一条错误消息 -> `{ cls, key }`。
  *
  * `cls` 是**类别**（下一刀按它分组）、`key` 是那一格具体的名字（宿主函数名、语法形状…）。
@@ -200,8 +214,11 @@ for (const f of files) {
     continue;
   }
   const png = join(OUT, `${basename(f)}.png`);
+  /* **这几份要一张正常大小的画布**（见 `BIG_CANVAS` 的头注）：96×72 上是**尺子造的红**。 */
+  const big = BIG_CANVAS.has(basename(f));
   const r = spawnSync('node', [CLI, 'run', ...legFlags, f,
-    '--gfx', CFG.gfx, '--frame', CFG.frame, '--w', CFG.w, '--h', CFG.h, '--perf', '-o', png], {
+    '--gfx', CFG.gfx, '--frame', CFG.frame,
+    '--w', big ? '320' : CFG.w, '--h', big ? '240' : CFG.h, '--perf', '-o', png], {
     cwd: ROOT, encoding: 'utf8', timeout: CFG.timeout,
     /**
      * **预算跟着这一扫的 `--timeout` 走，不能给 0**（2026-09-26 量出来的）。
