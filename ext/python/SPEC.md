@@ -243,9 +243,18 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
    于是那张 Argument Clinic 的关键字元组**编出来了**（`_kwtuple` 那 13 行单独一份 TU
    出 53KB 的 `.o`），整份 `unicodeobject.c` 的边界从 413 行推到 **2476 行**
    （`kind = PyUnicode_KIND(string);` 报 `expression expected`）。
-   **注意那一行单独拿出来是编得过的**（`int k = PyUnicode_KIND(s);` 出 `.o`），
-   所以 2476 不是那个宏本身的事 —— 是它前头某处把分析器带偏了。下一刀从"这一行之前
-   最近的那个不寻常构造"接着二分。
+   **那一行单独拿出来是编得过的** —— 两次都验过：`int k = PyUnicode_KIND(s);` 单独一份
+   TU 出 `.o`；把 `as_ucs4` 的头十行连着 `#include "Python.h"` 单独编也过。
+   所以 2476 不是那个宏的事，是**它前头某处把分析器带偏了**。
+   这一轮把它**收进一份 2479 行的截断文件**（原文 1..2478 行 + 一句 `return target; }`，
+   `-I <cpython>/Objects` 要带上，`stringlib/*.h` 在那儿）—— 原样复现。
+
+   二分卡在一处**方法**上，记下来免得下次再走：**按行号胡乱截断没用**。
+   截在 `#if` 中间报"missing #endif"、截在函数中间报"unexpected end of file"，
+   于是六个探点没有一个是有效信号。下一刀要先写一格**认边界的切法**：
+   只在"顶层那个 `}` 之后、而且 `#if` / `#endif` 配平"的地方切。
+   （预处理出来的那 50734 行 `.i` 也能当二分的料 —— 它是自带 `#line` 的，
+   报的行号照旧指回原文；`omni c cpp` 没有 `-o`，重定向就行。）
 
 ## 二、进度
 
