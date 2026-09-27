@@ -3373,12 +3373,12 @@ gltexcoord(0,0); glvertex(-d,4,d); …
   正本扫到 `:` 就把前面那段整个 `strcpy` 成标号名（`eval.c:4010`）—— 所以**那句
   `setcol` 在正本那儿压根没执行**。要接就得照这个来（把那段当标号丢掉），不是修好它。
 * **往回跳的 goto** 1 份（`morse.kc` 的 `goto in2it`）：已知那一族。
-* **`magsword.kc`**：**这一份是脚本自己写错了**，不是我们的缺口。`grabi` 是
-  `static grabi[MAXDEVS]`，而 217~219 行写的是 `bx[grabi] += (nx-bx[grabi[p]])*f` ——
-  **左边那个 `grabi` 少了下标**（222 行的 `drawcone(bx[grabi],…)` 同样）。正本容得下
-  （数组名在标量位置大概是它的基址，算出来是个没意义的下标，但跑得动），我们当场报。
-  要"跑通"就得把数组名在标量位置定成一个数 —— 那是**让答案静默地错**，不做。
-  记在这儿，别再当待办。
+* **`magsword.kc`**：~~这一份是脚本自己写错了~~ —— **这个结论是错的，见 §36.22**。
+  `grabi` 是 `static grabi[MAXDEVS]`，而 217~219 行写 `bx[grabi] += …`（少了下标）；
+  当时我猜"数组名在标量位置大概是它的基址，算出来是个没意义的下标"，于是判成脚本的毛病。
+  问过 `eval_bench` 才知道：**`a` 与 `a[0]` 就是同一格槽**，这是正本明确的语义，
+  按它落地答案是对的。这一份现在过了。
+  （教训：把一份语料判成"它自己错"之前，先花两分钟问 oracle 一句。）
 
 ### 36.9 设备自己解 PNG（`pic` 那一族不再挂在 ImageIO 上）
 
@@ -3688,5 +3688,43 @@ goto 那一族八份语料脚本逐份跑过（kenken/calend/morse/chess/bowling
 
 判据：`ext/evaldraw/examples/strtab.kc` 末尾三行（格式串走变量 / 走赋值 / 走两支 `if`），
 `tests/lower/run.js --only strtab` 2/2。
+
+### 36.22 **光秃秃的数组名字就是它的第 0 格**（`magsword.kc` 通了 —— 不是脚本的毛病）
+
+`demos/magsword.kc` 同一个函数里先声明
+
+    static dx[MAXDEVS], dy[MAXDEVS], dz[MAXDEVS];
+
+后头（第 247 行）又把 `dx` 当标量使：
+
+    dx = bx[i1] - bx[i0];  …  d = dx*dx + dy*dy + dz*dz;
+
+我们从前报「`+` 两边要同型：左是 real，右是 arr\<real\>」，**并且把这一份记成"脚本自己
+写错了"** —— 那个结论是错的。问 `eval_bench`：
+
+    (x){static a[4]; a[0]=3; a=7; return a[0];}      -> 7
+    (x){static a[4]={9,8,7,6}; return a;}            -> 9
+    (x){static a[2][3]; a[1][2]=4; a=5; return a[0][0];} -> 5
+
+所以这门语言里 **`a` 与 `a[0]` 是同一格槽**（读、写、算术、多维四处都一样）。这不奇怪：
+变量就是一格槽，`a[i]` 是"槽 `a` 往后第 `i` 格"，`i` 不写就是 0。
+
+落法：`exprOf` 与 `targetOf` 的名字那一支，数组名字走 `boxRef`（= `a[a$o + 0]`）。
+"一整块"只在**块的位置**上出现，那几处都不走这两条路：`&a`、收 `ARR` 形参的实参
+（`blockArg`）、**宿主调用的实参**（`callOf` 里两条实参路各加了一格"光秃秃的数组名字发
+整块"）。漏掉后一条的代价是 5 份 `.pss` 报「`gl_settex5` 的第 2 个形参是 arr\<real\>，
+给的是 real」（`ken/gspiral.pss` 的 `glsettex(0,obuf,x,y,标志)` 那一族）——
+**这两条实参路是分开的**：`.kc` 那一族走前一条（按 `#arr0` 挑名字），`.pss` 走后一条。
+
+**这一格必须按函数问**（踩过，就在同一份 magsword 上）：`C.arrs` 是张**跨函数的平表**，
+第 122 行主函数里的标量 `a = i*PI*2/16+tim` 会被别人函数里的 `a[…]` 带着一起变成
+`a[0] = …`，方言当场报「aset 的第一个实参要是数组」。`boxedFor` 本来就按函数算了一张
+"眼下哪些名字本来成块"（文件级 + 这一份自己声明的），现在把它摆成 `C.arrHere`，
+`arrSlot0(n, C)` 问的是这一张。
+
+判据：`ext/evaldraw/examples/arrslot0.kc`（五行全是 `eval_bench` 上量出来的，
+头注里抄了那五句脚本），`tests/lower/run.js --only arrslot0` 2/2。
+
+语料账 **228 / 228**。
 
 语料账 **227 / 228**，剩的一份是 `magsword.kc` —— 脚本自己的毛病（见 §36.8）。

@@ -809,6 +809,17 @@ export const EVSTRTAB = ['n0=[alpha]', 'n1=[beta]', 'n2=[alpha]',
   'one 5 [beta]', 'one 6 [alpha]', 'two alpha-beta'];
 
 /**
+ * **光秃秃的数组名字就是它的第 0 格**（`ext/evaldraw/examples/arrslot0.kc`）。
+ * 五行全是 `eval_bench` 上量出来的（例子头注里抄了那五句脚本）：读、写、算术、多维、
+ * 收整块的形参五处都一样。`demos/magsword.kc` 靠的就是这一条。
+ *
+ * `shadow=103` 是这一格的**反面**：`C.arrs` 跨函数串味，照它判就会把主函数里的标量 `q`
+ * 也当成 `g()` 里那个 `static q[8]` —— 要按这一份函数问（adapter 的 `C.arrHere`）。
+ */
+export const EVARRSLOT0 = ['slot0=7', 'bare=9 calc=19', 'dim2=5 4',
+  'shadow=103', 'blk=7 8'];
+
+/**
  * **`goto` 的两格硬骨头**（`ext/evaldraw/examples/gotoentry.kc`）。两个数都是照 C 的
  * 语义手算的：
  *

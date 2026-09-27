@@ -336,6 +336,20 @@ const boxRef = (n, C) => ({
     : withOff(n, { kind: 'int', value: '0' }, C),
 });
 
+/**
+ * **光秃秃的数组名字是它的第 0 格吗？**
+ *
+ * 这门语言里 `a` 与 `a[0]` 是同一格槽（`eval_bench`：
+ * `(x){static a[4]; a[0]=3; a=7; return a[0];}` 回 7）。所以数组名字摆在值/目标位置上
+ * 要落成 `a[0]`（`boxRef`），而不是"一整块"。
+ *
+ * 要按**这一份函数**问：`C.arrs` 是张跨函数的平表（别人函数里的 `auto a[244]` 也在
+ * 里头），直接问它会把这儿的标量 `a` 也当成数组 —— `demos/magsword.kc` 两头都踩过。
+ * `C.arrHere` 由 `boxedFor` 按函数摆好；收整块的形参（`C.offs`）当然也算。
+ */
+const arrSlot0 = (n, C) => C.arrs.has(n)
+  && (C.offs?.has(n) === true || C.arrHere === undefined || C.arrHere.has(n));
+
 /** 这门语言的名字一律折小写（大小写不敏感）。 */
 const low = (s) => String(s).toLowerCase();
 const idOf = (x) => low(tag(x) === 'name' ? leaf(kids(x)[0]) : leaf(x));
@@ -481,7 +495,15 @@ function exprOf(x, C, want = 'val') {
       const v = gfxCallIR(n);
       return want === 'cond' ? truthy(v) : v;
     }
-    const v = C.boxed.has(n) ? boxRef(n, C) : nameRef(n);
+    /* **光秃秃的数组名字就是它的第 0 格**（不是"一整块"）。
+       口径是 `eval_bench`：`(x){static a[4]; a[0]=3; a=7; return a[0];}` 回 **7**
+       —— 写 `a` 与写 `a[0]` 是同一格槽，读、写、算术、多维（`a[2][3]` 上 `a=5`
+       之后 `a[0][0]` 是 5）四处都一样。语料里靠这一条的是
+       `demos/magsword.kc`：同一个函数里 `static dx[MAXDEVS]` 声明过，
+       后头 `dx = bx[i1]-bx[i0]` 又当标量使（先前我们报"两边要同型"）。
+       "一整块"只在**块的位置**上出现（`&a` / 收 `ARR` 形参的实参 / 宿主那几格
+       收数组的调用），那三处都不走这儿（`blockArg` 与下头 `arrGot` 那一支）。 */
+    const v = C.boxed.has(n) || arrSlot0(n, C) ? boxRef(n, C) : nameRef(n);
     return want === 'cond' ? truthy(v) : v;
   }
   if (t === 'neg') return { kind: 'unop', op: '-', operand: exprOf(kids(x)[0], C) };
@@ -736,7 +758,14 @@ function callOf(x, C) {
           as.push(nameRef(bl.name), bl.off);
           return;
         }
-        if (isList(a) && tag(a) === 'name' && C.arrs.has(idOf(a))) arrGot.push(i);
+        /* **宿主那几格收数组的调用**（EvalDraw 的 `glsettex(号,数组,…)` 那一族）：
+           这儿要的是**一整块**，所以不能过 `exprOf` —— 那一条现在把光秃秃的
+           数组名字当第 0 格（见它的名字那一支）。 */
+        if (isList(a) && tag(a) === 'name' && C.arrs.has(idOf(a))) {
+          arrGot.push(i);
+          as.push(nameRef(idOf(a)));
+          return;
+        }
         as.push(exprOf(a, C));
       });
       /* **形状挑名字**：递了串的那几格拼成 `#str0`、递了整块的拼成 `#arr0`
@@ -825,6 +854,14 @@ function callOf(x, C) {
     if (blkAt.includes(i)) {
       const bl = blockArg(a, C, n);
       args.push(nameRef(bl.name), bl.off);
+      return;
+    }
+    /* **光秃秃的数组名字在实参位置上仍是"一整块"**（`glsettex(0,obuf,x,y,标志)` ——
+       `ken/gspiral.pss` 那一族）：`exprOf` 现在把它当第 0 格（见 `arrSlot0`），
+       而这儿要的是整块。漏了这一格的后果是 5 份 `.pss` 报
+       「`gl_settex5` 的第 2 个形参是 arr\<real\>，给的是 real」。 */
+    if (isList(a) && tag(a) === 'name' && C.arrs.has(idOf(a))) {
+      args.push(nameRef(idOf(a)));
       return;
     }
     args.push(hostish && isList(a) && tag(a) === 'str'
@@ -1009,7 +1046,8 @@ function callOf(x, C) {
 function targetOf(x, C) {
   if (tag(x) === 'name') {
     const n = idOf(x);
-    return C.boxed.has(n) ? boxRef(n, C) : nameRef(n);
+    /* 数组名字光秃秃摆在左边也是第 0 格（`dx = …` 等于 `dx[0] = …`，见读那一侧的头注）。 */
+    return C.boxed.has(n) || arrSlot0(n, C) ? boxRef(n, C) : nameRef(n);
   }
   if (tag(x) === 'index' || tag(x) === 'field') {
     /* 结构体那条路先看（`vt[i].stuck = 1`）—— 与读那一侧同一格 `fieldRef`。 */
@@ -3160,6 +3198,9 @@ function boxedFor(node, C) {
   ]);
   for (const s of autoDecls(node)) if (s.ty !== undefined || s.arr !== undefined) here.add(s.name);
   for (const s of staticDecls(node)) if (s.ty !== undefined || s.arr !== undefined) here.add(s.name);
+  /* 这张表**也是"光秃秃的名字是不是第 0 格"那一问的答案**（见 `arrSlot0`）——
+     `C.arrs` 跨函数串味，直接问它会把别人函数里的 `a[16]` 算到这儿的标量 `a` 头上。 */
+  C.arrHere = here;
   const own = collectBoxed(node, C, new Set(), here);
   const out = new Set();
   /* **这一份函数自己算出来的那几格直接算**：整份程序那张（`C.boxedAll`）是拿整棵树那张
