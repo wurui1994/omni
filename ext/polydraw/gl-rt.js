@@ -407,7 +407,11 @@ function glShaderDecls() {
       num(c === 2 ? 1 : 0), num(c === 3 ? 1 : 0)])));
   }
 
-  /* 满屏四边形那六个顶点（位置就是 NDC、纹理坐标 0..1，颜色是现在这一格）。 */
+  /* 满屏四边形那六个顶点（位置就是 NDC、纹理坐标 0..1，颜色**与法向**都是现在这一格）。
+     **法向从前写死成 (0,0,1)**：`tigrou/disco blur shader +blur.pss` 靠
+     `glnormal(t,0.2,yres/xres)` 把时间与画布宽高比递进片元（`n.x` / `n.z`），
+     写死之后那颗球的大小与亮度全不对。三路探针（片元直接印 `gl_Normal`、
+     `glnormal(.3,.5,.7)`）：参考与原版都给 (77,128,178)，我们给 (0,0,255)。 */
   const quadV = [[-1, -1, 0, 0], [1, -1, 1, 0], [-1, 1, 0, 1],
     [1, -1, 1, 0], [1, 1, 1, 1], [-1, 1, 0, 1]];
   const quad = [];
@@ -415,7 +419,7 @@ function glShaderDecls() {
     const vals = [num(x), num(y), num(0), num(1),
       nm('gl_r'), nm('gl_g'), nm('gl_b'), num(1),
       num(s), num(t), num(0), num(1),
-      num(0), num(0), num(1), num(0)];
+      nm('gl_nx'), nm('gl_ny'), nm('gl_nz'), num(0)];
     vals.forEach((v, k) => {
       quad.push(aset('gl_ob', bin('+', bin('*', nm('gl_no'), num(VS)), num(k)), v));
     });
