@@ -346,7 +346,7 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 
     ```
     $ npm run py:sweep
-    共 173 份：**编出 .o 172**（干净 172 + 带警告 0）、编不出 1（115s）
+    共 201 份：**编出 .o 199**（干净 199 + 带警告 0）、编不出 2（79s）
 
     另有 9 份不进分母：
            Python/bytecodes.c —— 不是翻译单元（代码生成器的输入）
@@ -355,12 +355,19 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
            Python/emscripten_*.c（四份）—— 别的平台那一份
 
     编不出的按族：
-        1 份  头文件不在：frozen_modules/…      <- 构建系统先生成（frozen.c）
-    门：>= 172 份编得出 —— 过
+        1 份  头文件不在：frozen_modules/…          <- Python/frozen.c
+        1 份  头文件不在：Python/frozen_modules/…   <- Modules/getpath.c
+    门：>= 199 份编得出 —— 过
     ```
 
-    **剩下那 1 份不是我们的欠账**（`Python/frozen.c` 要 `make regen-frozen` 先生成头），
-    而且 **172 份里一条警告都没有**。
+    **剩下那 2 份不是我们的欠账**（都要 `make regen-frozen` 先生成头，见第 17 条），
+    而且 **199 份里一条警告都没有**。
+
+    分母是 **201 份**而不是从前那 173 份：`Modules/` 那张名单改成**照
+    `Modules/Setup.bootstrap.in` 读**（CPython 自己写的"哪些模块静态编进解释器"，
+    37 份，含 `_io/*.c` / `_sre/sre.c` / `posixmodule.c` / `signalmodule.c` …），
+    `Parser/` 也**连子目录一起扫**（`lexer/` 与 `tokenizer/` 那十份）。
+    从前那 19 份是我手挑的 —— 选得不算错，但**没有来由**；现在换棵树自己跟着变。
 
     分母的口径是**本机该编的翻译单元**（`scope.js` 的 `NOT_TU` / `OTHER_PLATFORM`）：
     `Python/bytecodes.c` 那两份是 `Tools/cases_generator` 的输入，`Makefile` 从不编它们
@@ -370,7 +377,7 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     **它们压根不该进分母**。
 
     几处口径写在这儿：
-    - **门是 `--min`**（缺省 172，像 `tests/c/native-gen.js` 的 `MIN_OK`）：少于它 exit 1。
+    - **门是 `--min`**（缺省 199，像 `tests/c/native-gen.js` 的 `MIN_OK`）：少于它 exit 1。
     - **我们站在构建系统的位置上**，所以它按文件给的开关我们也要给：`scope.js` 的
       `perFileDefs` 现在有一条 —— `Python/dynload_shlib.c` 要 `-DSOABI`
       （`Makefile.pre.in:1922`）。值照 `configure.ac:6742` 算：`cpython-` + 版本（从参考树的
@@ -604,6 +611,41 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
       （跟着常量折叠回 1），我们还没有 —— 但答 0 在语义上永远安全：用它的代码都是
       `__builtin_constant_p(x) ? 常量快路 : 普通路`，答 0 就是一律走普通那条。
       **于是 `--all-modules` 那一趟是 243 份全干净、一条警告都没有。**
+
+17. **第三把尺子：把那堆 `.o` 真摞起来**（`ext/python/rt/link.js`，`npm run py:link`，**0.3s**）。
+
+    前两把回答"编得出"与"编得对（接口层面）"。这一份回答第三问：**链接器还缺什么**。
+    做法是**让真链接器说话** —— `clang -dynamiclib` 把那 199 份 `.o` 链一次；macOS 的
+    链接器自己从 libSystem 解析 libc 那一族，所以**剩下的未定义符号就是我们还差的东西**。
+    （不拿 `nm` 做集合减法：那种减法会把"libc 会给的"也算成缺口。）
+
+    ```
+    $ npm run py:link
+    py-rt/link: 范围 201 份，手上有 199 份 .o
+    ar: libomnipython.a —— 22.4M
+    ld: 还缺 7 个符号（0.3s）
+    有账的（等构建系统先跑一步）：
+      Modules/config.c（1 个）：_PyImport_Inittab
+      Modules/getpath.c（1 个）：_PyConfig_InitPathConfig
+      Python/frozen.c（5 个）：_PyImport_Frozen{Modules,Aliases,Bootstrap,Stdlib,Test}
+    门：没账的未定义符号 0 个 —— 过
+    ```
+
+    也就是说：**借来的那份运行时，除了三份构建系统产物给的 7 个符号，我们编得出、链得上。**
+    那三份不是我们编不出来，是**它们的输入还没生成**：
+    - `Python/frozen.c` / `Modules/getpath.c` 要 `Python/frozen_modules/*.h`
+      （`make regen-frozen` —— 那一步要一个**能跑的 `_freeze_module`**，是个自举环）；
+    - `Modules/config.c` **树里压根没有这份文件**（`makesetup` 按 `Setup` 生成内建模块表）。
+
+    这把尺子当场逼出一个**分母漏洞**：`Parser/` 只扫了顶层，而 `PARSER_OBJS`
+    （`Makefile.pre.in:428`）还有 `lexer/` 与 `tokenizer/` 那十份 —— 少了它们，
+    `pegen.c` 一族引用的 21 个 `_PyTokenizer_*` / `_PyToken_*` 没有定义。
+    "编得出"那把尺子看不见这种漏洞（每一份都编得出，只是**少量了十份**）。
+
+    三把尺子现在的读数（都在 2 分钟以内，可以改完就跑）：
+    - `py:sweep` 201 份里 **199** 编得出、**0 警告**
+    - `py:symbols` **194** 份的外部符号与 clang 一模一样、5 笔按文件记账、没账的 0
+    - `py:link` **199 份摞成 22.4M**，只缺那 7 个构建系统产物的符号
 
 ## 二、进度
 

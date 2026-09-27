@@ -10,19 +10,51 @@ import { readdirSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
- * `Modules/` 那张名单：**核心扩展模块**（不依赖任何第三方库）。
+ * `Modules/` 那张名单：**真进 libpython 的那几份**，从借来的那棵树里**读出来**，不写死。
  *
- * 理由是量出来的：整棵 101 份会给 `gen-pyconf.js` 带进 13 个还没决定的宏，而那 13 个
- * 几乎全是"要不要借那个第三方库 / 可选模块"（sqlite / ssl / editline / decimal / ipv6…）
- * 的决定，不是编译器的活。这张名单里的量过 —— 它们一个新宏都不带。
+ * 来路是 `Makefile.pre.in:595-607` 的 `LIBRARY_OBJS`：
+ *   `getbuildinfo.o` + `PARSER_OBJS` + `OBJECT_OBJS` + `PYTHON_OBJS` +
+ *   `MODULE_OBJS`（`config.o` / `main.o` / `gcmodule.o`，`:355`）+
+ *   `MODOBJS`（= `Modules/Setup.bootstrap.in` 里那一串 `*static*` 模块）+
+ *   `getpath.o` + `frozen.o`。
  *
- * 整棵都想量：`--all-modules`（那时得先给那 13 个宏一格一格写决定）。
+ * 从前这儿是**我手挑的 19 份**"核心扩展模块"。那张表的毛病不是选错了，是**没有来由** ——
+ * 而 `Setup.bootstrap.in` 是 CPython 自己写的"哪些模块静态编进解释器"。照它读，
+ * 换棵树就跟着变，也不必再解释"为什么是这 19 份"。
+ *
+ * `@MODULE_PWD_TRUE@pwd pwdmodule.c` 这种前缀是 configure 替换的开关，本机上都是"要"，
+ * 所以**剥掉前缀照收**（记一笔：哪天在别的平台上量，这一格要照 configure 的答案筛）。
  */
-export const CORE_MODULES = new Set([
-  '_abc.c', '_bisectmodule.c', '_codecsmodule.c', '_collectionsmodule.c', '_datetimemodule.c',
-  '_functoolsmodule.c', '_heapqmodule.c', '_operator.c', '_randommodule.c', '_stat.c',
-  '_typingmodule.c', '_weakref.c', 'atexitmodule.c', 'cmathmodule.c', 'errnomodule.c',
-  'itertoolsmodule.c', 'mathmodule.c', 'symtablemodule.c', 'timemodule.c',
+export function coreModuleFiles(src) {
+  const p = join(src, 'Modules', 'Setup.bootstrap.in');
+  const out = new Set();
+  for (const raw of readFileSync(p, 'utf8').split('\n')) {
+    const line = raw.replace(/@[A-Z0-9_]+@/g, '').trim();
+    if (line === '' || line.startsWith('#') || line.startsWith('*')) continue;
+    /* 一行是 `模块名 源文件…`，源文件可能在子目录里（`_io/fileio.c`、`_sre/sre.c`） */
+    for (const tok of line.split(/\s+/).slice(1)) {
+      if (tok.endsWith('.c')) out.add(tok);
+    }
+  }
+  if (out.size < 20) {
+    throw new Error(`scope.js: Setup.bootstrap.in 里只读出 ${out.size} 份源码 —— 那份名单的形状变了`);
+  }
+  /* `MODULE_OBJS` 与 `LIBRARY_OBJS` 里另外点名的四份（`Makefile.pre.in:355` / `:596` / `:606`）。
+   * `config.c` 不在这儿 —— 它是**生成的**（见 `GENERATED`）。 */
+  for (const f of ['main.c', 'gcmodule.c', 'getbuildinfo.c', 'getpath.c']) out.add(f);
+  return out;
+}
+
+/**
+ * **要构建系统先跑一步**的那几份（在不在树里都不算我们的欠账）：
+ *   * `Modules/config.c` —— `makesetup` 生成的内建模块表（树里压根没有这份文件）；
+ *   * `Python/frozen.c` 与 `Modules/getpath.c` —— 要 `Python/frozen_modules/*.h`
+ *     （`make regen-frozen`，那一步得先有一个能跑的 `_freeze_module`）。
+ */
+export const GENERATED = new Set([
+  'Modules/config.c',
+  'Python/frozen.c',
+  'Modules/getpath.c',
 ]);
 
 /**
@@ -127,17 +159,54 @@ export function perFileFlags(name, src) {
 export const incDirFor = (work, allModules = false) => join(work, allModules ? 'inc-all' : 'inc');
 
 /**
+ * 要**连子目录一起扫**的那几棵。现在只有 `Parser/`：它的 `PARSER_OBJS`
+ * （`Makefile.pre.in:428`）= `POBJS` + `PEGEN_OBJS` + `TOKENIZER_OBJS` + `myreadline.o`，
+ * 而后两族住在 `Parser/lexer/` 与 `Parser/tokenizer/` 里（十份）。
+ *
+ * 这个漏洞是**链接那把尺子逼出来的**：只扫顶层时，`Parser/pegen.c` 一族引用的
+ * 二十一个 `_PyTokenizer_*` / `_PyToken_*` 找不到定义。
+ *
+ * `Objects/stringlib/` 与 `Python/clinic/` 不在这张表里 —— 那两处是**被 include 的 `.h`**，
+ * 不是翻译单元（`Objects/stringlib/*.h` 靠宏参数化、在别的 `.c` 里展开好几遍）。
+ */
+const WALK_SUBDIRS = new Set(['Parser']);
+
+/** 一棵目录下该量的那些相对路径（顶层的 `.c`，必要时加上子目录里的）。 */
+function sourcesUnder(dir) {
+  const out = readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isFile() && e.name.endsWith('.c')).map((e) => e.name);
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (!e.isDirectory()) continue;
+    for (const f of readdirSync(join(dir, e.name))) {
+      if (f.endsWith('.c')) out.push(`${e.name}/${f}`);
+    }
+  }
+  return out.sort();
+}
+
+/**
  * 要量的那一串 `[目录, 文件名]`。`filters` 非空时只留名字里带那几个词的。
  * 不在本机范围里的（`outOfScope`）**不进这张表** —— 分母就是"本机该编的份数"。
  */
 export function filesIn(src, dirs, { allModules = false, filters = [] } = {}) {
   const out = [];
   const skipped = [];
+  const core = dirs.includes('Modules') && !allModules ? coreModuleFiles(src) : null;
   for (const d of dirs) {
     const dir = join(src, d);
     if (!existsSync(dir)) continue;
-    for (const f of readdirSync(dir).filter((x) => x.endsWith('.c')).sort()) {
-      if (d === 'Modules' && !allModules && !CORE_MODULES.has(f)) continue;
+    /* `Modules/` 缺省只量"真进 libpython 的那几份"，而那张名单里有**子目录**
+     * （`_io/fileio.c` / `_sre/sre.c`），所以那一路照名单走、不扫目录。 */
+    let names;
+    if (d === 'Modules' && core !== null) names = [...core].sort();
+    else if (WALK_SUBDIRS.has(d)) names = sourcesUnder(dir);
+    else names = readdirSync(dir).filter((x) => x.endsWith('.c')).sort();
+    for (const f of names) {
+      if (!existsSync(join(dir, f))) {
+        /* 名单上有、树里没有 —— `Modules/config.c` 就是这样（`makesetup` 生成的） */
+        skipped.push([`${d}/${f}`, '树里没有这份（构建系统生成）']);
+        continue;
+      }
       if (filters.length > 0 && !filters.some((x) => f.includes(x))) continue;
       const why = outOfScope(`${d}/${f}`);
       if (why !== null) skipped.push([`${d}/${f}`, why]);
@@ -154,10 +223,13 @@ export function filesIn(src, dirs, { allModules = false, filters = [] } = {}) {
  * 是 `Include/internal/pycore_pythread.h` 读的 —— 漏了它，探出来的 pyconfig 少 17 条，
  * 于是**每一份都**报 `#error "Require native threads"`（量到过，一份都编不出）。
  *
- * `Modules/` 不整棵给：那会带进 13 个"要不要借第三方库"的宏（见 `CORE_MODULES`），
+ * `Modules/` 不整棵给：那会带进 13 个"要不要借第三方库"的宏（见 `coreModuleFiles`），
  * 所以按文件名一份一份给。
  */
-export function pyconfExtra(dirs, allModules = false) {
-  return ['Include', ...dirs.flatMap((d) => (d === 'Modules' && !allModules
-    ? [...CORE_MODULES].map((f) => `Modules/${f}`) : [d]))].join(',');
+export function pyconfExtra(dirs, allModules = false, src = null) {
+  return ['Include', ...dirs.flatMap((d) => {
+    if (d !== 'Modules' || allModules) return [d];
+    if (src === null) return [d];
+    return [...coreModuleFiles(src)].map((f) => `Modules/${f}`);
+  })].join(',');
 }

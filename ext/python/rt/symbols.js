@@ -139,7 +139,7 @@ if (!existsSync(PYCONF)) {
   process.stdout.write(`py-rt/symbols: 探一份 pyconfig.h -> ${PYCONF}\n`);
   const g = spawnSync(process.execPath,
     [join(here, 'gen-pyconf.js'), '--src', SRC, '--out', PYCONF,
-      '--extra', pyconfExtra(DIRS, ALL_MODULES)], { encoding: 'utf8' });
+      '--extra', pyconfExtra(DIRS, ALL_MODULES, SRC)], { encoding: 'utf8' });
   if (g.status !== 0) {
     process.stdout.write(`py-rt/symbols: gen-pyconf 没过：\n${g.stderr}${g.stdout}`);
     process.exit(1);

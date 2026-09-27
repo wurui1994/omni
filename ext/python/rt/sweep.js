@@ -3,7 +3,7 @@
 //
 //   node ext/python/rt/sweep.js                      # 默认 Objects + Python + Parser + 核心 Modules
 //   node ext/python/rt/sweep.js --dirs Objects        # 只量一棵
-//   node ext/python/rt/sweep.js --dirs Modules       # 核心扩展模块那张名单（见 CORE_MODULES）
+//   node ext/python/rt/sweep.js --dirs Modules       # 真进 libpython 的那几份（照 Setup.bootstrap.in 读）
 //   node ext/python/rt/sweep.js unicode               # 只量名字里带 unicode 的
 //   node ext/python/rt/sweep.js --min 0               # 不设门（探路用）
 //
@@ -30,7 +30,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CORE_MODULES, filesIn, flagsFor, incDirFor, perFileFlags, pyconfExtra } from './scope.js';
+import { filesIn, flagsFor, incDirFor, perFileFlags, pyconfExtra } from './scope.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..', '..');
@@ -51,13 +51,13 @@ const DIRS = argOf('--dirs', 'Objects,Python,Parser,Modules').split(',');
 
 /**
  * `Modules/` 那一棵**按名单量**（`--dirs …,Modules`），不整棵走 ——
- * 名单与理由在 `scope.js` 的 `CORE_MODULES`。整棵都想量：`--all-modules`。
+ * 名单从 `Setup.bootstrap.in` 读出来（`scope.js` 的 `coreModuleFiles`）。整棵都想量：`--all-modules`。
  */
 const ALL_MODULES = argv.includes('--all-modules');
 /* 探出来的 `pyconfig.h` 落哪儿 —— **按范围分开放**（见 scope.js 的 `incDirFor`）。 */
 const INC = argOf('--inc', null) ?? incDirFor(WORK, ALL_MODULES);
 /** 编得出 `.o` 的最少份数（ok + warn）。往上走是好事，往下走是回归。 */
-const MIN_OK = Number(argOf('--min', '172'));
+const MIN_OK = Number(argOf('--min', '199'));
 const JOBS = Number(argOf('--jobs', '4'));
 
 if (!existsSync(join(SRC, 'Include', 'Python.h'))) {
@@ -75,7 +75,7 @@ if (!existsSync(PYCONF)) {
   const g = spawnSync(process.execPath,
     /* `--extra` 怎么算（为什么必须带 `Include` 整棵）：见 scope.js 的 `pyconfExtra` */
     [join(here, 'gen-pyconf.js'), '--src', SRC, '--out', PYCONF,
-      '--extra', pyconfExtra(DIRS, ALL_MODULES)],
+      '--extra', pyconfExtra(DIRS, ALL_MODULES, SRC)],
     { encoding: 'utf8' });
   if (g.status !== 0) {
     process.stdout.write(`py-rt/sweep: gen-pyconf 没过：\n${g.stderr}${g.stdout}`);
