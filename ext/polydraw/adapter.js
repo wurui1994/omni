@@ -1195,6 +1195,42 @@ function loopEntryAt(list) {
 }
 
 /**
+ * **往前跳进一格循环里、而标号还在更深一层**（`geeky/morse.kc:173`）：
+ *
+ *     for(i=0;i<NCODES;i++) if (key2morse[i][2] == rndchar) goto in2it;   ← goto 在前头
+ *     …
+ *     for(i=0;i<NCODES;i++) { ch = …; if (…) { … in2it:; … } }           ← 标号在这里头
+ *
+ * 与 `loopEntryAt` 的差别只有一格：标号**不在循环体那一层**，而是埋在体里的 `if` 里。
+ * 落法是现成的 `entryLower`（"去标号那条路上每格判断都改成'进入旗起着就一定走'"）——
+ * 那台机器本来是给往后跳那一档（`pathEntryAt`）写的，这儿原样用。
+ *
+ * **那一跳还得把外头那圈带出来**：`goto` 在另一格 `for` 里，置旗之后那一圈的条件上也
+ * 挂着 `旗子 == 0`（`gotoActive` 那一手），于是它当场退出、`i` 停在配上的那个值上 ——
+ * 正本那一跳靠的就是这个 `i`。
+ */
+function deepEntryAt(list, C) {
+  for (let j = 0; j < list.length; j += 1) {
+    if (!isList(list[j])) continue;
+    const b = loopBodyOf(list[j]);
+    if (b === undefined) continue;
+    for (const name of gotoNames(list.slice(0, j))) {
+      if (C.pathEntry.has(name)) continue;
+      if (!hasLabel(list[j], name)) continue;
+      /* **要跳的那个标号**就摆在体那一层 ⇒ 交给 `loopEntryAt`（它在这之前）；
+         体那一层有别的标号（`geeky/morse.kc` 的 `gotit:`）不算 —— 从前这儿只问
+         "有没有标号"，于是 morse 那一格被自己的另一个标号挡在门外。 */
+      if (isList(b) && tag(b) === 'block') {
+        const la = labelAt(kids(b));
+        if (la >= 0 && idOf(kids(kids(b)[la])[0]) === name) continue;
+      }
+      return { j, name };
+    }
+  }
+  return null;
+}
+
+/**
  * 一句语句（含嵌套的 `block` / `if`）里找 `name:` 这个标号 —— 找到就回**那几段"往后的
  * 尾巴"**：标号自己那格语句表的尾，再一路上外层每格表的尾（内层在前，正是"落下来"
  * 的次序）。路上碰到循环就回 null（那要另一种落法，见 `loopEntryAt`）。
@@ -1415,6 +1451,25 @@ function stmtsOf(list, C) {
       ...stmtsOf(list.slice(j + 1), C),
     ];
   }
+  /* **往前跳进一格循环里、标号还在更深一层**（见 `deepEntryAt` 的头注）：
+     置旗 + 用 `entryLower` 把"去标号那条路"上每格判断改成"旗起着就一定走"。 */
+  const dent = deepEntryAt(list, C);
+  if (dent !== null) {
+    const { j, name } = dent;
+    const flag = gotoFlag(name);
+    C.gotoActive.push(flag);
+    const pre = stmtsOf(list.slice(0, j), C);
+    C.gotoActive.pop();
+    C.pathEntry.set(name, flag);
+    const loop = entryLower(list[j], C, flag, name);
+    C.pathEntry.delete(name);
+    return [
+      { kind: 'let', name: flag, type: REAL, init: num(0) },
+      ...pre,
+      ...loop,
+      ...stmtsOf(list.slice(j + 1), C),
+    ];
+  }
   /* **往前跳进一格块里**（`goto dowin;` … `if (n == 0) { dowin: … }`）——
      旗子那一格管"往前跳"：置旗之后这格表上到那句为止（含嵌套）每句都被护卫挡着，
      于是控制流一路退到那句**后头**；而标号那儿本该跑的那一段（含一路上外层的尾巴）
@@ -1517,33 +1572,70 @@ function pathEntryAt(list, C) {
  * `if` 的条件 OR 上它（标号在 else 支就反过来 AND 上"旗子没起"）、循环的条件 OR 上它、
  * 一格语句表里标号前头那一段整段包进 `if (旗子 == 0)`，标号那儿把旗子清掉。
  */
+/**
+ * **一格块尾巴上那几个标号**：跳它们的 `goto` 就在这块里头（不论嵌套多深），
+ * 而标号后头**什么都没有** —— 那一跳的意思就是"跳到这块的末尾"。
+ *
+ * 回 `{ list, flags }`：`list` 是摘掉那几格标号之后的表、`flags` 是它们的旗子。
+ * 调用方把那几格旗子**罩在整块上**（`gotoActive`），于是"跳到末尾"落成"后头每句都被护卫挡着"。
+ *
+ * 谁要它：`entryLower` 把块按标号切成两段之后，`goto` 与它的标号会被分到两段里，
+ * 谁也看不见谁（`geeky/morse.kc` 的 `goto gotit` 报"找不到往前跳的那个标号"）。
+ * 先在这儿把尾巴上那几格摘出来，两段就都在同一格护卫底下了。
+ */
+function tailGotoFlags(list0) {
+  let list = list0;
+  const flags = [];
+  /* **空语句不算东西**：`in2it:;` 那种写法与"换行当分号"的恢复都会在尾巴上留下
+     `empty` —— 它挡在标号后头的话这一格就白摘了。 */
+  const isNop = (x) => isList(x) && tag(x) === 'empty';
+  for (;;) {
+    let k = list.length - 1;
+    while (k >= 0 && isNop(list[k])) k -= 1;
+    if (k < 0) break;
+    const last = list[k];
+    if (!isList(last) || tag(last) !== 'label') break;
+    const nm = idOf(kids(last)[0]);
+    if (!gotoNames(list.slice(0, k)).has(nm)) break;
+    flags.push(gotoFlag(nm));
+    list = [...list.slice(0, k), ...list.slice(k + 1)];
+  }
+  return { list, flags };
+}
+
 function entryLower(s, C, f, name) {
   const t = tag(s);
   const on = bin('!=', nameRef(f), num(0));
   const off = bin('==', nameRef(f), num(0));
   const skipPre = (pre) => guardStmts(off, pre);
   if (t === 'block') {
-    const list = kids(s);
+    const list0 = kids(s);
+    /* **这格块的尾巴上挂着的标号**（跳它的 `goto` 在这块里头）：它的旗子要罩住整块
+       —— 见 `tailGotoFlags` 的头注。两条路（标号就在这一层 / 还在更深一层）都要先摘。 */
+    const tf = tailGotoFlags(list0);
+    const list = tf.list;
+    for (const g of tf.flags) C.gotoActive.push(g);
+    const lets = tf.flags.map((g) => ({ kind: 'let', name: g, type: REAL, init: num(0) }));
+    const done = (stmts) => {
+      for (let i = 0; i < tf.flags.length; i += 1) C.gotoActive.pop();
+      return [{ kind: 'block', stmts: [...lets, ...stmts] }];
+    };
     const at = labelAt(list);
     if (at >= 0 && idOf(kids(list[at])[0]) === name) {
-      return [{
-        kind: 'block',
-        stmts: [
-          ...skipPre(stmtsOf(list.slice(0, at), C)),
-          { kind: 'assign', target: nameRef(f), value: num(0) },
-          ...stmtsOf(list.slice(at + 1), C),
-        ],
-      }];
+      const pre = list.slice(0, at);
+      const post = list.slice(at + 1);
+      return done([
+        ...skipPre(stmtsOf(pre, C)),
+        { kind: 'assign', target: nameRef(f), value: num(0) },
+        ...stmtsOf(post, C),
+      ]);
     }
     const i = list.findIndex((k) => hasLabel(k, name));
-    return [{
-      kind: 'block',
-      stmts: [
-        ...skipPre(stmtsOf(list.slice(0, i), C)),
-        ...entryLower(list[i], C, f, name),
-        ...stmtsOf(list.slice(i + 1), C),
-      ],
-    }];
+    return done([
+      ...skipPre(stmtsOf(list.slice(0, i), C)),
+      ...entryLower(list[i], C, f, name),
+      ...stmtsOf(list.slice(i + 1), C),
+    ]);
   }
   if (t === 'if') {
     const k = kids(s);
@@ -1585,17 +1677,26 @@ function entryLower(s, C, f, name) {
   if (t === 'for') {
     const [init, cond, post, body] = kids(s);
     const some = (n) => isList(n) && tag(n) !== undefined && tag(n) !== null;
-    if (some(init)) {
-      throw new Error(`eval->IR: \`goto ${name}\` 那条路上有格 for 头上带初值 ——`
-        + ' 原文那一跳压根没跑过它，这一版不接');
-    }
-    return [{
-      kind: 'for',
-      init: null,
-      cond: some(cond) ? bin('||', on, exprOf(cond, C, 'cond')) : null,
-      post: some(post) ? (exprStmtOf(post, C)[0] ?? null) : null,
-      body: entryLower(body, C, f, name),
-    }];
+    /* **头上那格初值：跳进来的那一趟不跑它**（原文那一跳压根没经过），所以提到循环前头、
+       加一格 `旗子 == 0` 的护卫。顺着走下来的那一趟照旧跑 —— 两条路都与正本同义。
+       `geeky/morse.kc` 靠的正是这一格：`i` 是上一圈 `for` 配上的那个值。 */
+    const headOf = (n) => {
+      if (!some(n)) return null;
+      if (tag(n) !== 'comma') return exprStmtOf(n, C)[0] ?? null;
+      const ss = kids(n).flatMap((e) => exprStmtOf(e, C));
+      return ss.length === 1 ? ss[0] : { kind: 'block', stmts: ss };
+    };
+    const ini = headOf(init);
+    return [
+      ...(ini === null ? [] : guardStmts(off, [ini])),
+      {
+        kind: 'for',
+        init: null,
+        cond: some(cond) ? bin('||', on, exprOf(cond, C, 'cond')) : null,
+        post: headOf(post),
+        body: entryLower(body, C, f, name),
+      },
+    ];
   }
   throw new Error(`eval->IR: \`goto ${name}\` 那条路上有一格 ${t} —— 这一版只接 block/if/循环`);
 }
@@ -1687,9 +1788,20 @@ function applyGuards(res, C) {
     .map((f) => bin('==', nameRef(f), num(0)))
     .reduce((a, b) => bin('&&', a, b));
   return res.flatMap((st) => {
-    /* 循环：条件上加一格 —— 光在外头套 `if` 退不出来（旗子是循环体里置的）。 */
+    /* 循环：条件上加一格 —— 光在外头套 `if` 退不出来（旗子是循环体里置的）。
+       **头上那格步进也要加护卫**：C 里 `goto` 从循环里跳出去是**不跑步进的**，
+       所以旗子一起来那一趟的 `i++` 不该发生 —— 少这一格，`geeky/morse.kc` 那种
+       "跳出去时 `i` 停在配上的那个值上、跳进去之后接着用"的写法会差一格
+       （最小例子：`for(i=0;i<5;i++) if (i==2) goto L;` 之后 `i` 该是 2，不是 3）。 */
     if (st.kind === 'while') return [{ ...st, cond: bin('&&', st.cond, g) }];
-    if (st.kind === 'for') return [{ ...st, cond: st.cond === null ? g : bin('&&', st.cond, g) }];
+    if (st.kind === 'for') {
+      return [{
+        ...st,
+        cond: st.cond === null ? g : bin('&&', st.cond, g),
+        post: st.post === null || st.post === undefined
+          ? st.post : { kind: 'if', cond: g, then: [st.post], else_: [] },
+      }];
+    }
     /* **声明不许关进那层 `if` 里** —— 关进去就成了那格块的局部量，后头引它的看不见
        （`do{…}while` 落出来的 `let pd_doN` 与它那格 while 就是这么被切开的：
        `games/kenken.kc` 上报"未声明的变量 pd_do3"）。这门语言里 `let` 的初值是常量或

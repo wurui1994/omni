@@ -3525,7 +3525,14 @@ pgs = gs; for(i=gs.sprn-1;i>=0;i--) pspr[i] = spr[i];
 变量最常用的名字。（`enum` 与 `ABSENT_VARS` 那两族早就有 `C.shadow` 那道护栏，
 `pi`/`e` 这两行是写死的，没走那道门。）
 
-### 36.16 这一轮之后的账：**224 / 228**（4 份红）
+### 36.16 这一轮之后的账：**226 / 228**（2 份红）
+
+> 这一节最早写的是 218、然后 222、223、224 —— 现在是 **226 / 228**。
+> 剩下的两份：`magsword.kc`（脚本自己写错了，§36.8）与 `rscr_strings.kc`
+> （格式串本身是变量，要一台运行期的格式化机器）。
+> 下面那份"四份红"的清单留着当过程记录，`calend` / `morse` 两格已经在 §36.18~36.20 里补上了。
+
+### 36.16.1（过程记录）当时那 4 份红
 
 `tests/eval/scan.js --max-bad 20 --budget 95`（腿=js、设备=null、96×72），五片跑完
 一整趟。剩下的四份**没有一族**：
@@ -3620,3 +3627,34 @@ redo: …
 
 
 
+
+### 36.20 `goto` 的第三格：跳进另一格循环体里嵌套的 `if`（`morse.kc` 通了）
+
+`geeky/morse.kc:173`：
+
+    for(i=0;i<NCODES;i++) if (key2morse[i][2] == rndchar) goto in2it;
+    …
+    for(i=0;i<NCODES;i++) { ch = …; if (…) { … in2it:; … gotit: } }
+
+这一跳要同时办成**四件事**，少一件答案就不对：
+
+1. **离开前一格循环**——旗子一起来，那一圈的条件上挂着 `旗子 == 0`（`gotoActive` 那一手）；
+2. **不跑那一圈的步进** —— C 里 `goto` 跳出循环是不跑 `i++` 的。先前 `applyGuards` 只给
+   `for` 的**条件**加护卫、没管**步进**，于是 `i` 多走一格（最小例子：
+   `for(i=0;i<5;i++) if (i==2) goto L;` 之后 `i` 该是 2，我们给的是 3）；
+3. **跳过后一格循环的初值** —— `entryLower` 的 `for` 那一支把初值提到循环前头、
+   加一格"旗子没起"的护卫（从前这儿直接报"头上带初值的不接"）；
+4. **强行走进那一层 `if`** —— 这一格 `entryLower` 本来就有（`pathEntryAt` 用的同一台机器），
+   新加的是 `deepEntryAt`：标号不在循环体那一层、而埋在体里的时候也走它。
+
+另外两处踩过的坑：
+* `deepEntryAt` 先前问的是"体那一层**有没有**标号"，于是 morse 被自己的另一个标号
+  （`gotit:`）挡在门外 —— 要问的是"**要跳的那个**标号在不在体那一层"；
+* `gotit:` 挂在块的**尾巴**上，而跳它的 `goto` 埋在块里头。`entryLower` 把块按标号切成
+  两段之后，`goto` 与它的标号被分到两段里谁也看不见谁。`tailGotoFlags` 先把尾巴上那几格
+  标号摘下来、旗子罩住整块（"跳到块末尾" = "后头每句都被护卫挡着"）——
+  **`in2it:;` 那种写法在尾巴上留着一格 `empty`**，摘的时候要跨过它，不然这一格白做。
+
+判据：`ext/evaldraw/examples/gotoentry.kc`（两行数都是照 C 手算的：`deep n=21 i=5`、
+`back s=15 c=6`），`tests/lower/run.js --only gotoentry` 2/2；
+goto 那一族八份语料脚本逐份跑过（kenken/calend/morse/chess/bowling/backgammon/hull3d/stratego）。

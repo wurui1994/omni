@@ -805,6 +805,19 @@ export const EVSTRTAB = ['n0=[alpha]', 'n1=[beta]', 'n2=[alpha]',
   'mix=[lit][beta]', 'same=1', 'none=[]'];
 
 /**
+ * **`goto` 的两格硬骨头**（`ext/evaldraw/examples/gotoentry.kc`）。两个数都是照 C 的
+ * 语义手算的：
+ *
+ * * `deep n=21 i=5` —— 往前跳进**另一格循环体里嵌套的 `if`**（`geeky/morse.kc:173`）：
+ *   那一跳要离开前一格循环（**而且不跑它的步进** —— `i` 停在 2）、跳过后一格循环的初值、
+ *   再强行走进那一层 `if`。少了"步进不跑"那一格，`i` 会多走一格、答案是 10。
+ * * `back s=15 c=6` —— 往后跳那一段里的 `break` 绑的是**外层**那个 `while(1)`
+ *   （`geeky/calend.kc:154`）。先前它只跳出合成出来的那一圈，于是外层永远转下去
+ *   （calend 的月历一路数到 193，**不报错，只是画错**）。
+ */
+export const EVGOTOENTRY = ['deep n=21 i=5', 'back s=15 c=6'];
+
+/**
  * **入口收一整块**（`ext/evaldraw/examples/inst.kc`：`(a[16])` 那一档）。
  *
  * 口径 `evaldraw.txt:1258-1296`（自己写乐器那个模式）：宿主每采样调一次，那 16 格是它传进来的

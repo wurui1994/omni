@@ -1,0 +1,48 @@
+// ext/evaldraw/examples/gotoentry.kc —— **`goto` 的两格硬骨头**（两份语料脚本的形状）
+//
+// ## 一、往前跳进另一格循环体里嵌套的 `if`（`geeky/morse.kc:173`）
+//
+//     for(i=0;i<NCODES;i++) if (key2morse[i][2] == rndchar) goto in2it;
+//     …
+//     for(i=0;i<NCODES;i++) { ch = …; if (…) { … in2it:; … } }
+//
+// 三件事一起才对：那一跳**离开前一格循环**（而且 `i` 停在配上的那个值上 ——
+// C 里 `goto` 跳出循环**不跑步进**）、跳过后一格循环的**初值**、
+// 并且强行走进那一层 `if`。落法见 adapter 的 `deepEntryAt` / `entryLower` / `applyGuards`。
+//
+// ## 二、往后跳那一段里的 `break` 绑的是**外层**那个循环（`geeky/calend.kc:154`）
+//
+// 往后跳落成"标号到末尾包进一格合成的 `while`"，里头的 `break` 要用逃逸号送出去，
+// 不然它只跳出合成那一圈 —— calend 的月历因此一路数到 193（不报错，只是画错）。
+//
+// 两格的数都是**照 C 的语义手算出来的**，错一格就对不上。
+
+()
+{
+   static n = 0;
+      //一：i=2 时跳进下一格 for 的 if 里；C 里那一跳之后 i 仍是 2
+   for(i=0;i<5;i++) if (i == 2) goto in2it;
+   for(i=0;i<5;i++)
+   {
+      if (i > 0)
+      {
+         if (i == 4) goto gotit;
+         n = n + 1;
+in2it:;  n = n + 10;
+gotit:
+      }
+   }
+   printf("deep n=%g i=%g\n", n, i);
+
+      //二：往后跳 + 里头的 break 绑外层那个 while(1)
+   c = 1; s = 0;
+   while (1)
+   {
+      d = 1;
+redo: s = s + c;
+      c++;
+      if (c > 5) break;
+      if (d < 3) { d = d + 1; goto redo; }
+   }
+   printf("back s=%g c=%g\n", s, c);
+}
