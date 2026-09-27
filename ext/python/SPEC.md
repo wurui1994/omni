@@ -346,30 +346,40 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 
     ```
     $ npm run py:sweep
-    共 50 份：**编出 .o 44**（干净 44 + 带警告 0）、编不出 6（22s）
+    共 163 份：**编出 .o 142**（干净 141 + 带警告 1）、编不出 21（85s）
     编不出的按族：
-        6 份  非空的 __asm__ 模板（等自带汇编器）
-    门：>= 44 份编得出 —— 过
+       11 份  非空的 __asm__ 模板（等自带汇编器）      <- 我们唯一的真欠账
+        7 份  头文件不在（emscripten ×2 / windows / dl / optimizer.h /
+              pycore_uops.h / frozen_modules/…）      <- 平台或生成的头
+        1 份  '}' expected (got 'SOABI')              <- 构建系统给的宏
+        1 份  ';' expected (got '__VERSION__')        <- gcc/clang 才有（tcc 也没有）
+        1 份  名字看不见：_PYTHONFRAMEWORK            <- 构建系统给的宏
+    带警告的按族：
+        1 份  隐式声明：__builtin_wasm_test_function_pointer_signature（emscripten 的）
+    门：>= 142 份编得出 —— 过
     ```
 
     几处口径写在这儿：
-    - **门是 `--min`**（缺省 44，像 `tests/c/native-gen.js` 的 `MIN_OK`）：少于它 exit 1。
-    - **按族印**，因为「编不出 6 份」没有意义，「6 份卡在同一句 `__asm__`」才有。
+    - **门是 `--min`**（缺省 142，像 `tests/c/native-gen.js` 的 `MIN_OK`）：少于它 exit 1。
+    - **按族印**，因为「编不出 21 份」没有意义，「11 份卡在同一句 `__asm__`」才有。
     - 三档分开数：`ok`（一条诊断都没有）/ `warn`（出了 `.o` 但有警告 —— 那多半是
-      "链接那天才炸"的隐式声明）/ `fail`。位计数那一刀之后 `Objects/` 的 warn 是 **0**。
+      "链接那天才炸"的隐式声明）/ `fail`。位计数那一刀之后**只剩 1 条警告**，
+      而它是 emscripten 专有的内建（我们不出 wasm，不用管）。
     - `pyconfig.h` 缺了就现调 `gen-pyconf.js` 探一份，落 `.omni-cache/py-rt/inc` ——
       **参考树一个字节不写**。`--extra` 必须带上 `Include` 整棵：漏了它，线程那几格
       （`HAVE_PTHREAD_H` …）不进名单，探出来的配置少 17 条，于是**每一份**都报
-      `#error "Require native threads"`（量到过，50 份全红）。
-    - 缺省只量 `Objects`。**不是懒**：`gen-pyconf.js` 的纪律是"读得到的宏一个都不许悄悄
-      留空"，而 `Python/` 整棵又带进七个还没决定的格子 ——
-      `USE_COMPUTED_GOTOS`、`PTHREAD_KEY_T_IS_COMPATIBLE_WITH_INT`、
-      `PTHREAD_SYSTEM_SCHED_SUPPORTED`、`PY_COERCE_C_LOCALE`、`SOABI_PLATFORM`、
-      `ALT_SOABI`、`ANDROID_API_LEVEL`。**照 `configure.ac` 一格一格决定就是下一刀**
-      （其中 `USE_COMPUTED_GOTOS` 会顺带问出一个真语言问题：`goto *p` 我们收不收）。
-      补齐之前把 `Python,Parser` 写进缺省只会让这把尺子自己红，那是假的红。
-    - 上面第 10 条那张「163 份 / 133 份」是**另一套口径**（三个目录 + 上一轮手工探的那份
-      pyconfig），留着当那一刻的快照；能自动回归的是这一条。
+      `#error "Require native threads"`（量到过，50 份全红，而看着像"前端坏了"）。
+    - `Python/` 整棵带进来的七个宏这一刀照 `configure.ac` 一格一格决定了：
+      `PY_COERCE_C_LOCALE` = 1（缺省 yes，是语义：PEP 538）、
+      `PTHREAD_KEY_T_IS_COMPATIBLE_WITH_INT` 与 `PTHREAD_SYSTEM_SCHED_SUPPORTED`
+      **真探**（前者两问：宽度一样 + `k * 1` 编得过；后者真编真跑一个 system 域的线程）、
+      `USE_COMPUTED_GOTOS` 不定义（缺省两条 `AC_DEFINE` 都不走，让 CPython 自己按编译器挑
+      —— 记一笔：它挑"开"要 `&&label` 与 `goto *p`，那是编 `ceval.c` 那天的问题）、
+      `SOABI_PLATFORM` / `ALT_SOABI` / `ANDROID_API_LEVEL` 不定义（构建系统或安卓专有）。
+    - 这一格顺手把上面第 10 条那张手工表**更正**了：**142 而不是 133** ——
+      差的那九份是手工探的那份 pyconfig 少了格子（`fileutils.c` 与 `sysmodule.c` 从前报
+      `F_GETFD` / `O_WRONLY` 看不见，那不是我们缺语法，是配置少探了 `HAVE_FCNTL_H` 一族）。
+      **能自动回归的口径只有这一条**；第 10 条留着当那一刻的快照。
 
 ## 二、进度
 

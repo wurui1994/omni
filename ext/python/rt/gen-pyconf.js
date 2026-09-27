@@ -341,6 +341,37 @@ function rshiftZeroFills() {
 const setpgrpHasArg = () => hasFunc('setpgrp')
   && compiles('#include <unistd.h>\nint main(void){ setpgrp(0,0); return 0; }\n');
 
+/**
+ * `pthread_key_t` 与 int 兼容吗（`configure.ac:3436-3452`）。
+ * 两问都要过：宽度一样（`AC_CHECK_SIZEOF`），而且**它能当算术类型用**
+ * （`pthread_key_t k; k * 1;` 编得过 —— 那一句就是 configure 写的）。
+ */
+function pthreadKeyIsInt() {
+  const sz = runs('#include <pthread.h>\n#include <stdio.h>\n'
+    + 'int main(void){ printf("%d %d\\n", (int)sizeof(pthread_key_t), (int)sizeof(int)); return 0; }\n');
+  if (sz === null) return false;
+  const [a, b] = sz.out.trim().split(/\s+/).map(Number);
+  if (a !== b) return false;
+  return compiles('#include <pthread.h>\nint main(void){ pthread_key_t k = 0; return (int)(k * 1); }\n');
+}
+
+/**
+ * `PTHREAD_SCOPE_SYSTEM` 真能用吗（`configure.ac:4960-4990`）——
+ * configure 那段是**真编真跑**：起一个 system 域的线程再 join 一遍，
+ * 退出码 0 才算支持（编不过 / 跑不过都算不支持，与它的 cross 回退一致）。
+ */
+function pthreadSystemSched() {
+  const r = runs('#include <pthread.h>\n#include <stdio.h>\n'
+    + 'void *foo(void *p){ (void)p; return NULL; }\n'
+    + 'int main(void){ pthread_attr_t attr; pthread_t id;\n'
+    + '  if (pthread_attr_init(&attr)) return -1;\n'
+    + '  if (pthread_attr_setscope(&attr, PTHREAD_SCOPE_SYSTEM)) return -1;\n'
+    + '  if (pthread_create(&id, &attr, foo, NULL)) return -1;\n'
+    + '  if (pthread_join(id, NULL)) return -1;\n'
+    + '  return 0; }\n');
+  return r !== null && r.status === 0;
+}
+
 /* ---- 那几格**不是探针、是决定** -------------------------------------------
  *
  * 借整份运行时那件事（SPEC §一之二）量出来：对象层那一批读到 71 个宏，上面四族答了 59 个，
@@ -379,11 +410,35 @@ const DECIDED = [
     '照 configure 的缺省：不定义（`configure.ac:5357` 的 `with_valgrind=no`，'
     + '要 `--with-valgrind` 才开）。开着的话 `Objects/obmalloc.c` 那三处 `#ifdef` 会'
     + '在 valgrind 下绕开 pymalloc —— 我们不接 valgrind，所以让它走原路'],
+
+  /* ---- `Python/` 整棵带进来的那七格（这一刀补的）。 */
+  ['PY_COERCE_C_LOCALE', 1,
+    '照 configure 的缺省 **yes**（`configure.ac:5335-5349`：`--with-c-locale-coercion`'
+    + ' 不给值就是 yes）。这一格**是语义**：C locale 下把它强制成 UTF-8（PEP 538）'],
+  ['PTHREAD_KEY_T_IS_COMPATIBLE_WITH_INT', 'probe:pkey',
+    'configure.ac:3436 —— 两问都要过：宽度与 int 一样，而且 `pthread_key_t k; k * 1;`'
+    + ' 编得过（那一句就是 configure 写的）'],
+  ['PTHREAD_SYSTEM_SCHED_SUPPORTED', 'probe:psched',
+    'configure.ac:4960 —— 真编真跑：起一个 `PTHREAD_SCOPE_SYSTEM` 的线程再 join'],
+  ['USE_COMPUTED_GOTOS', null,
+    '照 configure 的缺省：**两条 `AC_DEFINE` 都不走**（`configure.ac:7597`：'
+    + '`--with-computed-gotos` 不给值就"no value specified"，宏压根不定义）。'
+    + '不定义时 CPython 自己按编译器挑（`ceval_macros.h` 看 `__GNUC__`）—— 让它挑。'
+    + '记一笔：它挑"开"的那一支要 `&&label` 与 `goto *p`，那是编 `Python/ceval.c` 那天的问题'],
+  ['SOABI_PLATFORM', null,
+    '**构建系统给的字符串**（`configure.ac:1219-1226`：从 `PLATFORM_TRIPLET` 切出来的），'
+    + '不是探出来的。我们不造扩展模块的 `.so`，所以不定义 —— `Python/dynload_shlib.c` 那份'
+    + '因此编不出（它要 `SOABI`），那是**它的**前提不在，不是我们缺一格'],
+  ['ALT_SOABI', null, '同上（`configure.ac:6749`：`cpython-<版本><ABI 标志>` 那个串）'],
+  ['ANDROID_API_LEVEL', null,
+    'Android 才有（`configure.ac:1309`：从编译器的 `__ANDROID_API__` 里 sed 出来的）'],
 ];
 for (const [name, value, why] of DECIDED) {
   WHY.set(name, why);
   if (value === 'probe:rshift') { HOW.set(name, () => (rshiftZeroFills() ? 1 : null)); continue; }
   if (value === 'probe:setpgrp') { HOW.set(name, () => (setpgrpHasArg() ? 1 : null)); continue; }
+  if (value === 'probe:pkey') { HOW.set(name, () => (pthreadKeyIsInt() ? 1 : null)); continue; }
+  if (value === 'probe:psched') { HOW.set(name, () => (pthreadSystemSched() ? 1 : null)); continue; }
   HOW.set(name, () => value);
 }
 

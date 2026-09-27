@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // ext/python/rt/sweep.js —— **量尺：借来的那棵 CPython，我们这台 C 前端能编出多少份**
 //
-//   node ext/python/rt/sweep.js                      # 默认只量 Objects/（见下）
-//   node ext/python/rt/sweep.js --dirs Objects,Python # 多量一格（要先给 gen-pyconf 补探针）
+//   node ext/python/rt/sweep.js                      # 默认 Objects + Python + Parser
+//   node ext/python/rt/sweep.js --dirs Objects        # 只量一棵
 //   node ext/python/rt/sweep.js unicode               # 只量名字里带 unicode 的
 //   node ext/python/rt/sweep.js --min 0               # 不设门（探路用）
 //
@@ -45,15 +45,10 @@ const SRC = argOf('--src', process.env.OMNI_CPYTHON
   ?? join(homedir(), 'Documents', 'Lang', 'reference', 'cpython'));
 const WORK = join(root, '.omni-cache', 'py-rt');
 const INC = argOf('--inc', join(WORK, 'inc'));
-/* 默认只有 `Objects`。**不是懒** —— `gen-pyconf.js` 的纪律是「读得到的宏一个都不许悄悄
- * 留空」，而 `Python/` 整棵又带进七个还没决定的格子（`USE_COMPUTED_GOTOS`、
- * `PTHREAD_KEY_T_IS_COMPATIBLE_WITH_INT`、`PY_COERCE_C_LOCALE`、`SOABI_PLATFORM`、
- * `ALT_SOABI`、`ANDROID_API_LEVEL`、`PTHREAD_SYSTEM_SCHED_SUPPORTED`）。
- * 那七格照 `configure.ac` 一格一格决定**就是下一刀**；补齐之前把 `Python,Parser`
- * 写进默认只会让这把尺子自己红，那是假的红。 */
-const DIRS = argOf('--dirs', 'Objects').split(',');
+/* 三棵都量（`gen-pyconf.js` 那七格 `Python/` 带进来的宏已经照 `configure.ac` 决定过）。 */
+const DIRS = argOf('--dirs', 'Objects,Python,Parser').split(',');
 /** 编得出 `.o` 的最少份数（ok + warn）。往上走是好事，往下走是回归。 */
-const MIN_OK = Number(argOf('--min', '44'));
+const MIN_OK = Number(argOf('--min', '142'));
 const JOBS = Number(argOf('--jobs', '4'));
 
 if (!existsSync(join(SRC, 'Include', 'Python.h'))) {
