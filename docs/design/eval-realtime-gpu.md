@@ -1086,6 +1086,35 @@ CGL 上下文 + 着色器编译 + 写 PNG —— 双方都付这一份，所以�
   机制在 ADR-0038（node 这侧的 FFI 已经有），缺的是 js 那条腿上的 GL 转发 ——
   `host/gfx-cpu.js` 现在只有 CPU 备选。这一栏也要有判据与优化。
 
+### 15.4.1 **"启动 ≤ 1000ms"那一条现在红着 —— 钱花在哪儿量清楚了**（2026-09-28）
+
+`tests/eval/perf.js` 这一趟 14 红，里头**四条是"启动"**
+（`balls2k`/`snake tube`/`disco ball` 的 jit 档、`drawsph` 的 js 档）。
+拿 `disco ball.pss`（320×240）分三档量墙上时间（`/usr/bin/time -p`）：
+
+    node 空跑                                 0.17s
+    --gfx null --frames 0（前端 + js 码生成）  0.62s
+    --gfx gl  --frame  0（+ 真 GL + 一帧）     0.87s
+    --backend jit --gfx gl --frame 0          1.16s
+
+⇒ node 自己 0.17、**我们的前端约 0.45**、GL 开门约 0.25、LLVM 约 0.29。
+再用 `--stat`（js 档、`--gfx null`）把那 0.45 拆开（合计 428ms）：
+
+    156ms  36.4%  core sexpr front end   .sx -> OIR，92 funcs
+      4ms   0.9%  prune  92 -> 29（摇掉 63）
+     41ms   9.6%  backend js  267654 bytes
+    227ms  53.0%  exec in-process（new Function：V8 编那 267KB）
+
+**这两格大头是同一件事**：一份百来行的脚本带出 **92 个函数 / 267KB** 的产物 ——
+里头绝大部分是运行时（`gl-rt` / `gfx3-rt` / 文字 / 噪声那几摊），而且**每趟都重新
+`.sx -> OIR` 再让 V8 编一遍**（摇树之后只剩 29 个函数还在用，可那 63 个已经付过钱了）。
+⇒ **任务 #38（EVAL 两门走按单元产物机制：`ev_rt` 只编一次、只发一次）就是这一条的解药**，
+量出来的上限是 428ms 里的约 250~350ms。`.pss -> .sx` 那一步已经有缓存（`--stat` 的第一行
+起点就是 `.omni-cache/src-sx/…​.sx`），所以**要做的是"运行时那一半也成为一格缓存过的单元"**。
+
+每帧那一栏剩下的红是另一件事（`disco ball` jit 24.2ms / js 104ms、`snake tube` js 13.7 过线、
+`drawsph` interp）—— 那是任务 #32。
+
 
 ### 15.5 **最吃力的那几份**才是判据（2026-09-24 用户纠正）
 
