@@ -3581,6 +3581,40 @@ pgs = gs; for(i=gs.sprn-1;i>=0;i--) pspr[i] = spr[i];
 
 判据：`ext/evaldraw/examples/strtab.kc`（`--only evaldraw` 80/80）。
 
+### 36.19 往后跳那一档合成出来的 `while` **把 `break` 抢走了**（`calend.kc` 的月历数到 193）
+
+这是 §36 这一轮里**最能骗人的一格**：它不报错，只是**画错**，而且错得像"卡住"。
+
+往后跳（`goto` 在标号后头）的落法是"标号到这段末尾包进 `while (旗子) { 旗子=0; …护卫… }`
+—— 置旗就是再走一趟"。可那一段里的 `break`/`continue` 本来绑的是**外头那个循环**，
+包进来之后绑到了合成的这一圈上。`geeky/calend.kc` 的月历就踩在这儿：
+
+```
+   while (1)                       //一格月历
+   {
+      …
+redo: …
+      c++; d++;
+      if (c > 31) break;           //← 本该跳出上面那个 while(1)
+      if (d < 8) goto redo;        //← 往后跳，于是 redo 到末尾被包进一格合成的 while
+      d = 1; printf("\n");
+   }
+```
+
+`if (c > 31) break;` 只跳出合成那一圈，外头那个 `while (1)` 照旧转 —— 日号一路数到
+`193` 还在涨（`--frame 0` 那一趟的 stdout 里看得见），整份脚本自然也停不下来。
+
+**落法（经典的"逃逸号"）**：`escapeLoopCtl` 把那一段里**属于外层**的 `break`/`continue`
+换成 `esc = 1|2; break;`（这个 `break` 跳出的是合成那圈），合成那圈后头再
+`if (esc==1) break; if (esc==2) continue;`。不往已经有自己循环的那几层里走 ——
+那里头的 `break` 本来就绑它自己。没有这类语句时一格逃逸号都不开（与从前逐字节相同）。
+
+**同一个毛病还咬着 `games/kenken.kc`**：它 `back2it:` 那一段里有三处 `continue`
+（`if (ii<=n) continue;` 那一族），先前也被合成的那一圈吃掉了 —— 那份脚本一直在
+"能跑、不报错、答案不对"的状态里。这就是为什么这一类 bug 要专门记一笔：
+**合成循环这件事，每加一处都要问"里头的 break 绑谁"**。
+
+
 
 
 

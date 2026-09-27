@@ -1267,6 +1267,42 @@ function blockEntryAt(list, C) {
   return null;
 }
 
+/**
+ * **把一段降好的语句里"属于外层循环的 `break`/`continue`"换成逃逸号**（就地改）。
+ *
+ * 谁要它：往后跳那一档会把"标号到这段末尾"包进一格合成的 `while`（见 `stmtsOf` 里
+ * `back` 那一支）。那一段里的 `break` 本来绑外头那个循环，包进来之后就绑到合成的这一圈上了
+ * —— `geeky/calend.kc:154` 的 `if (c > 31) break;` 因此只跳出合成那圈，月历一路数到 193。
+ *
+ * 换法：`break` -> `esc = 1; break;`、`continue` -> `esc = 2; break;`（那个 `break` 跳出的是
+ * 合成那一圈），合成那圈后头再 `if (esc==1) break; if (esc==2) continue;`。
+ * **不往里走已经有自己循环的那几层**（`while`）—— 那里头的 `break` 本来就绑它自己。
+ * 回改了几处（0 = 这一段里没有，那就不必开逃逸号那格量）。
+ */
+function escapeLoopCtl(list, esc) {
+  let n = 0;
+  for (let i = 0; i < list.length; i += 1) {
+    const s = list[i];
+    if (s === null || typeof s !== 'object') continue;
+    if (s.kind === 'break' || s.kind === 'continue') {
+      list[i] = {
+        kind: 'block',
+        stmts: [
+          { kind: 'assign', target: nameRef(esc), value: num(s.kind === 'break' ? 1 : 2) },
+          { kind: 'break' },
+        ],
+      };
+      n += 1;
+      continue;
+    }
+    if (s.kind === 'while' || s.kind === 'for' || s.kind === 'dowhile') continue;
+    for (const key of ['then', 'else_', 'stmts']) {
+      if (Array.isArray(s[key])) n += escapeLoopCtl(s[key], esc);
+    }
+  }
+  return n;
+}
+
 function stmtsOf(list, C) {
   /* 标号那一刀。两个方向各一种落法，旗子那一格是同一个：
      * **往前跳**（`goto` 在标号前头）：`旗子=0;` + 前面那段整段加护卫，后面那段照常降；
@@ -1300,7 +1336,30 @@ function stmtsOf(list, C) {
       C.gotoActive.push(flag);
       const guarded = stmtsOf(region, C);
       C.gotoActive.pop();
+      /* **`break`/`continue` 不许被这格合成出来的 `while` 抢走**（2026-09-27）。
+         往后跳那一档把"标号到这段末尾"包进 `while (旗子) {…}` —— 可那一段里的
+         `break` 本来绑的是**外头那个循环**，包进来之后绑的成了这一格。
+         `geeky/calend.kc:154` 的月历就是这一格：`if (c > 31) break;` 只跳出合成的
+         那一圈，`c` 一路数到 193 都停不下来（而且**不报错，只是画错**）。
+         落法是经典的"逃逸号"：那一段里属于外层的 `break`/`continue` 换成
+         "记一笔 + 跳出合成那圈"，合成那圈**后头**再按记的那一笔真跳一次。 */
+      const esc = C.fresh('pd_esc');
+      const n = escapeLoopCtl(guarded, esc);
+      if (n === 0) {
+        return [
+          { kind: 'let', name: flag, type: REAL, init: num(1) },
+          {
+            kind: 'while',
+            cond: bin('!=', nameRef(flag), num(0)),
+            body: [
+              { kind: 'assign', target: nameRef(flag), value: num(0) },
+              ...guarded,
+            ],
+          },
+        ];
+      }
       return [
+        { kind: 'let', name: esc, type: REAL, init: num(0) },
         { kind: 'let', name: flag, type: REAL, init: num(1) },
         {
           kind: 'while',
@@ -1309,6 +1368,13 @@ function stmtsOf(list, C) {
             { kind: 'assign', target: nameRef(flag), value: num(0) },
             ...guarded,
           ],
+        },
+        { kind: 'if', cond: bin('==', nameRef(esc), num(1)), then: [{ kind: 'break' }], else_: [] },
+        {
+          kind: 'if',
+          cond: bin('==', nameRef(esc), num(2)),
+          then: [{ kind: 'continue' }],
+          else_: [],
         },
       ];
     }
