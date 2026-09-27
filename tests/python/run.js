@@ -18,7 +18,8 @@
 //
 // 挑着跑：`node tests/python/run.js kwargs listops`（名字里带这几个字的例子）。
 
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { cpus } from 'node:os';
 import { readdirSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -29,10 +30,28 @@ const examples = join(root, 'ext', 'python', 'examples');
 const out = join(root, '.omni-cache', 'py-e2e');
 mkdirSync(out, { recursive: true });
 
-/** 一趟命令，两条流一起收（报错也是输出的一部分）。 */
+/** 一趟命令，两条流一起收（报错也是输出的一部分）。同步那一版只给"问一句版本"用。 */
 function run(cmd, args, timeout = 120000) {
   return execFileSync(cmd, args, {
     cwd: root, encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+/**
+ * **异步那一版** —— 并行靠它。`execFileSync` 是把整条事件循环按住的，
+ * 拿它去"并行"只会排着跑（量出来的：改成池子之后一分五十六，与排着跑一个数）。
+ * 出错时把 stdout / stderr 一起交给上头（判"还没接"要看那两条流）。
+ */
+function runP(cmd, args, timeout = 120000) {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, {
+      cwd: root, encoding: 'utf8', timeout, maxBuffer: 64 * 1024 * 1024,
+    }, (err, stdout, stderr) => {
+      if (err === null) { resolve(stdout); return; }
+      err.stdout = stdout;
+      err.stderr = stderr;
+      reject(err);
+    });
   });
 }
 
@@ -65,16 +84,24 @@ const LEGS = legsArg ?? ['js', 'c'];
 
 const files = readdirSync(examples).filter((f) => f.endsWith('.py')).sort()
   .filter((f) => filters.length === 0 || filters.some((x) => f.includes(x)));
-for (const f of files) {
+
+/**
+ * 一份例子量一遍（两条腿），**把话攒起来最后一起印** —— 因为下面要几份一起跑。
+ * 计数也攒在回值里，不动外头那三个（并行改共享的计数是自找的麻烦）。
+ */
+async function oneFile(f) {
+  const log = [];
+  let p = 0;
+  let bad = 0;
+  let sk = 0;
   const src = join(examples, f);
   let want = null;
   try {
-    want = run('python3', [src]);
+    want = await runP('python3', [src]);
   } catch (e) {
     const why = String(e.stderr || e.message).trim().split('\n').pop();
-    console.log(`  skip ${f}（本机 python3 自己跑不了它：${why?.slice(0, 80)}）`);
-    skip++;
-    continue;
+    log.push(`  skip ${f}（本机 python3 自己跑不了它：${why?.slice(0, 80)}）`);
+    return { log, p, bad, sk: sk + 1 };
   }
   /* 三条腿：默认（解释器）、`--mode js`（发 JS 再跑）、`build`（发 C 再编再跑）。 */
   for (const leg of LEGS) {
@@ -82,33 +109,62 @@ for (const f of files) {
     try {
       if (leg === 'c') {
         const exe = join(out, f.slice(0, -3));
-        run('node', [join(root, 'src', 'cli.js'), 'build', src, '-o', exe], 300000);
-        got = run(exe, []);
+        await runP('node', [join(root, 'src', 'cli.js'), 'build', src, '-o', exe], 300000);
+        got = await runP(exe, []);
       } else {
-        got = run('node', [join(root, 'src', 'cli.js'), 'run', src,
+        got = await runP('node', [join(root, 'src', 'cli.js'), 'run', src,
           ...(leg === 'js' ? ['--mode', 'js'] : [])]);
       }
     } catch (e) {
       const all = String(e.stdout || '') + String(e.stderr || e.message);
       if (/还没接/.test(all)) {
         const why = all.split('\n').filter((x) => x.trim()).pop();
-        console.log(`  skip ${f} [${leg}]（缺口：${why?.slice(0, 96)}）`);
-        skip++;
+        log.push(`  skip ${f} [${leg}]（缺口：${why?.slice(0, 96)}）`);
+        sk += 1;
         continue;
       }
-      console.log(`  FAIL ${f} [${leg}] 跑不起来：${all.split('\n').filter((x) => x.trim()).pop()?.slice(0, 120)}`);
-      fail++;
+      log.push(`  FAIL ${f} [${leg}] 跑不起来：${all.split('\n').filter((x) => x.trim()).pop()?.slice(0, 120)}`);
+      bad += 1;
       continue;
     }
     if (got === want) {
-      pass++;
-      console.log(`  ok   ${f} [${leg}]（与 python3 逐字节相同，${want.split('\n').length - 1} 行）`);
+      p += 1;
+      log.push(`  ok   ${f} [${leg}]（与 python3 逐字节相同，${want.split('\n').length - 1} 行）`);
     } else {
-      fail++;
+      bad += 1;
       const [g, w] = firstDiff(got, want);
-      console.log(`  FAIL ${f} [${leg}] 输出不同\n       我们：${JSON.stringify(g)}\n       py  ：${JSON.stringify(w)}`);
+      log.push(`  FAIL ${f} [${leg}] 输出不同\n       我们：${JSON.stringify(g)}\n       py  ：${JSON.stringify(w)}`);
     }
   }
+  return { log, p, bad, sk };
+}
+
+/**
+ * **几份例子一起跑**。一份例子两条腿大约 5 秒（那一秒多是 `omni build` 里我们自己编 C），
+ * 26 份排着跑就是两分多钟 —— 那种长度的套件没人会在改完之后立刻跑它。
+ *
+ * 一处要当心：`.omni-cache` 里那几格运行时的目标文件是**按内容寻址**共享的，
+ * 几个 `build` 同时**第一次**去生成它就会撞（量到过 `ENOENT … rt-stage-self/omni_js.o`）。
+ * 所以**头一份先单独跑**把那几格暖上，剩下的才并行。
+ */
+async function main() {
+  const tally = (r) => { pass += r.p; fail += r.bad; skip += r.sk; r.log.forEach((l) => console.log(l)); };
+  if (files.length === 0) { console.log('  （没有对得上的例子）'); return; }
+  tally(await oneFile(files[0]));
+  const rest = files.slice(1);
+  /* 池子宽度：核数 - 2，封在 8（`OMNI_JOBS=N` 可以按住）。留两核给 node 自己与 cc。 */
+  const width = Math.max(1, Number(process.env.OMNI_JOBS)
+    || Math.min(8, (cpus().length || 4) - 2));
+  let next = 0;
+  const workers = new Array(Math.min(width, rest.length)).fill(0).map(async () => {
+    for (;;) {
+      const i = next;
+      next += 1;
+      if (i >= rest.length) return;
+      tally(await oneFile(rest[i]));
+    }
+  });
+  await Promise.all(workers);
 }
 
 /** 第一处不同的那一行（全印出来没人读）。 */
@@ -120,6 +176,8 @@ function firstDiff(a, b) {
   }
   return [a.slice(0, 80), b.slice(0, 80)];
 }
+
+await main();
 
 const py = (() => {
   try { return run('python3', ['--version']).trim(); } catch { return '（没有 python3）'; }
