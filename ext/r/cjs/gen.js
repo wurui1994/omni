@@ -66,6 +66,15 @@ export const DEV_PNG = join(OUT, 'nmath-dev.png');
  * 这一份由测试现做（要 CLI 跑一趟 `c cpp`），不在 `generate()` 里。
  */
 export const PLOT_FLAT = join(OUT, 'nmath-plot-flat.c');
+/**
+ * **一个 .c 一个 .js** 那条路的产物落这儿（ADR-0047 第十/十一格）：
+ * `mod/<名字>.mjs` 一份一份，`mod/probe-drv.c` 是那个只按原型调的驱动，
+ * `mod/main.mjs` 是入口（先叫每份库的 `$init()`，再跑 `$run()`）。
+ */
+export const MOD_DIR = join(OUT, 'mod');
+export const MOD_DRV = join(MOD_DIR, 'probe-drv.c');
+export const MOD_ENTRY = join(MOD_DIR, 'main.mjs');
+
 /** 三份生成出来的头在这儿（`ext/r/build.js` 造的）—— 编这份 `.c` 要 `-I` 它。 */
 export const GEN_INC = join(ROOT, '.omni-cache', 'r-rt', 'include');
 export const INCS = [GEN_INC, join(RSRC, 'src/nmath'), join(RSRC, 'src/include')];
@@ -253,9 +262,18 @@ const driverHead = (what) => [`/* \`ext/r/cjs/gen.js\` 生成，别手改 ——
   '#include <stdio.h>', `#include "${LIB_C}"`,
   `#include "${join(HERE, '..', 'rt', 'omni_rng.h')}"`].join('\n');
 
+/**
+ * **一个 .c 一个 .js** 那条路的驱动头（ADR-0047 第十/十一格）：**不**包那份摊平的 `.c`，
+ * 只按原型调 —— 那 122 份各自编成一份 `.js` 模块，符号靠 `import`/`export` 接上。
+ */
+const modDriverHead = (what) => [`/* \`ext/r/cjs/gen.js\` 生成，别手改 —— ${what} */`,
+  '#include <stdio.h>', '#include <Rmath.h>',
+  `#include "${join(HERE, '..', 'rt', 'omni_rng.h')}"`].join('\n');
+
 /** 驱动一（探子）：一行一格 `名字<制表符>%.17g`。 */
-function probeMain() {
-  const L = [driverHead('66 格数的探子')];
+function probeMain(head) {
+  const L = [head === undefined ? driverHead('66 格数的探子') : head];
+
   L.push('int main(void) {');
   for (const [name, cExpr] of PROBES) {
     L.push(`  printf("${name}\\t%.17g\\n", (double)(${cExpr}));`);
@@ -540,6 +558,22 @@ int main(void) {
   return L.join('\n');
 }
 
+/**
+ * **一个 .c 一个 .js** 那条路要编的那一串（`{path, out}`）：nmath 那 122 份 + 我们自己
+ * 那两份 + 那个只按原型调的驱动。名单的唯一出处仍是 R 自己的 Makefile。
+ */
+export function modUnits() {
+  const us = nmathSources().map((n) => ({
+    path: join(RSRC, 'src/nmath', n),
+    out: join(MOD_DIR, `${n.replace(/\.c$/, '')}.mjs`),
+  }));
+  for (const o of OURS) {
+    us.push({ path: o.path, out: join(MOD_DIR, `${o.name.replace(/\.c$/, '')}.mjs`) });
+  }
+  us.push({ path: MOD_DRV, out: join(MOD_DIR, 'probe-drv.mjs') });
+  return us;
+}
+
 /** 写盘。回写了几份、摊了几个文件、改了哪几个名字。 */
 export function generate() {
 
@@ -551,9 +585,13 @@ export function generate() {
       + `（${GEN_INC}）—— 先跑一遍 \`node ext/r/build.js\``);
   }
   mkdirSync(OUT, { recursive: true });
+  mkdirSync(MOD_DIR, { recursive: true });
   const { text, renamed, count } = amalgamate();
   writeFileSync(LIB_C, text);
   writeFileSync(AMALGAM, `${probeMain()}\n`);
+  /* 同一个 `main`，只换了头：那一份包摊平的 `.c`，这一份只按原型调（一个 .c 一个 .js）。
+     两份的 stdout 必须逐字节相同 —— 那就是 `tests/r/cjs.js` 最后那一节的判据。 */
+  writeFileSync(MOD_DRV, `${probeMain(modDriverHead('66 格数的探子（一个 .c 一个 .js）'))}\n`);
   writeFileSync(PROBE_R, probeR());
   writeFileSync(PLOT_C, `${plotMain()}\n`);
   writeFileSync(PLOT_R, plotR());

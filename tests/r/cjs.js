@@ -35,9 +35,10 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
   generate, AMALGAM, PROBE_R, PLOT_C, PLOT_R, PLOT, PLOT_FLAT,
-  FRAME_C, FRAME_PNG, DEV_C, DEV_PNG,
+  FRAME_C, FRAME_PNG, DEV_C, DEV_PNG, MOD_ENTRY, modUnits,
   INCS, PROBES, RNG_N_UNIF, RNG_N_NORM,
 } from '../../ext/r/cjs/gen.js';
+import { cJsModules, cJsEntry } from '../../src/core/lang/c.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
 const CLI = join(ROOT, 'src/cli.js');
@@ -416,6 +417,41 @@ function firstDiff(a, b) {
     if (x[i] !== y[i]) return `第 ${i + 1} 行：\n       尺子 ${x[i]}\n       我们 ${y[i]}`;
   }
   return '（长度不同但每一行都一样？）';
+}
+
+/* ---- 一个 .c 一个 .js：122 份不再摊成一份（ADR-0047 第十/十一格） ----------- */
+//
+// 判据是**与摊成一份那条腿逐字节相同**：同一个 `main`（只换了头 —— 那份包摊平的 `.c`，
+// 这份只按原型调），66 格数 + 60 格 RNG 一行不差。地址在装载期才定、符号靠
+// `import`/`export` 接上，所以这一节同时判了那两张记录表（`addrConsts` 与 `dataRefs`）
+// 在**真产物**上够不够用 —— 小判据（`tests/mir/jsmod.js`）判的是形状，这儿判的是量。
+{
+  let linked = null;
+  const t0 = Date.now();
+  try {
+    linked = cJsModules(modUnits(), {
+      incs: INCS,
+      defs: [['MATHLIB_STANDALONE', '1'], ['HAVE_CONFIG_H', '1']],
+      rtImport: join(ROOT, 'src/core/mir/js_rt.js'),
+    });
+  } catch (e) {
+    no('一个 .c 一个 .js：编 + 连', String(e instanceof Error ? e.message : e).slice(0, 400));
+  }
+  if (linked !== null) {
+    let bytes = 0;
+    for (const u of linked.units) { writeFileSync(u.out, u.text); bytes += u.text.length; }
+    writeFileSync(MOD_ENTRY, cJsEntry(linked));
+    ok('一个 .c 一个 .js', `${linked.units.length} 份 .c -> ${linked.units.length} 份 .js`
+      + `（${bytes} 字节），对外符号 ${linked.syms.size} 个，${((Date.now() - t0) / 1000).toFixed(1)}s`);
+    const r = sh('node', [MOD_ENTRY]);
+    const mText = probeLines(r);
+    if (mText === jText && mText !== '') {
+      ok('一份一份 == 摊成一份', `${N_LINES} 行逐字节相同`);
+    } else {
+      no('一份一份 == 摊成一份', `code=${r.code}\n       ${firstDiff(jText, mText)}\n       `
+        + r.err.split('\n').slice(0, 4).join('\n       '));
+    }
+  }
 }
 
 process.stdout.write(`\n  ${pass} passed, ${fail} failed\n`);

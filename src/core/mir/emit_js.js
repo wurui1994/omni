@@ -774,6 +774,9 @@ const $callFromLibc = (fp, args) => {
       const f = mir.funcs[no];
       if (f.local === true) continue;
       if (f.thunk !== null && f.thunk !== undefined) continue;
+      /* 只声明过、一条指令都没有的不导出（系统头带进来的那上百个名字）——
+         导出了就等于"我提供这个符号"，那会把真正的定义顶掉。 */
+      if (f.count() === 0) continue;
       items.push(`$f${no} as $fn_${f.name}`);
     }
     if (items.length > 0) L.push(`export { ${items.join(', ')} };`);

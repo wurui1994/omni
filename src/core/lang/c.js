@@ -14,6 +14,7 @@ import { C_INCLUDE_DIR } from '../runtime/c_runtime.js';
 import { lowerC, lowerCNative, declsOfC } from '../frontend-c/tccgen.js';
 import { Cpp } from '../frontend-c/tccpp.js';
 import { verifyMir } from '../mir/verify.js';
+import { emitMirJs } from '../mir/emit_js.js';
 import { mirOptLevel, optimizeMir } from '../mir/opt/index.js';
 
 /* SDK 根找一次就记住（一趟里 spawn xcrun 那一下是几十毫秒，而系统头每个文件都要问一遍）。
@@ -200,7 +201,8 @@ function readOrNull(p) {
  * 这条腿的 **ABI** 仍旧是那个虚拟目标（`long double` = double、`wchar_t` = int、
  * `char` 有符号），由 `lowerC` 自己钉住 —— 见那儿的注。
  */
-export function cMir(path, incs, defs, args, sysIncs, tgt) {
+export function cMir(path, incs, defs, args, sysIncs, tgt, opts) {
+  const tu = opts !== undefined && opts.tu === true;
   const { mod, warnings } = lowerC(path, readText(path), {
     readFile: readOrNull,
     includeDirs: incs,
@@ -209,16 +211,19 @@ export function cMir(path, incs, defs, args, sysIncs, tgt) {
     join,
     arch: tgt?.arch,
     os: tgt?.os,
-  }, defs.map(([name, body]) => ({ name, body })), args);
+  }, defs.map(([name, body]) => ({ name, body })), args, tu ? { tu: true } : undefined);
   for (const w of warnings) stderr(`${w}\n`);
   /**
    * **一份就是一个程序**（这条路是 `omni run x.c` / `emit …`）：所以"声明了没定义的
    * 全局量"在这儿必须报。`lowerC` 那一侧 2026-09-27 起只**记一条**（`mod.dataRefs`），
-   * 因为它也是 MIR 层链接器的输入 —— 那时缺的那一格由别的翻译单元提供。
+   * 因为它也是"一个 .c 一个 .js"那条路的输入 —— 那时缺的那一格由别的翻译单元提供。
    * 两处分工：**记录在编译，报错在成品**。少了这一句，`extern int x;` 没人定义也能跑，
    * 拿到的是一个指着自己那块空白的指针（静默答错）。
+   *
+   * `tu` 档（一份 .c 一份产物）里这一问要等**全部单元都编完**才有答案，
+   * 所以那时不在这儿报 —— `cJsModules` 那一层按符号表报。
    */
-  if (mod.dataRefs !== undefined && mod.dataRefs.length > 0) {
+  if (!tu && mod.dataRefs !== undefined && mod.dataRefs.length > 0) {
     /* 同一个符号可能记了好几条（基址那一条 + `&arr[2]` 折出来的那几条），报错只说名字。 */
     const names = [...new Set(mod.dataRefs.map((r) => `'${r.name}'`))].join('、');
     throw new OmniError(`${path}: error: undefined symbol ${names}`);
@@ -227,6 +232,94 @@ export function cMir(path, incs, defs, args, sysIncs, tgt) {
   if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
   optMir(mod, path);
   return mod;
+}
+
+/**
+ * **N 份 `.c` -> N 份 `.js`**（ADR-0047 的 JS 路径）。一份 `.c` 一份模块，符号靠
+ * `import`/`export` 接上，于是**依赖关系就是 ESM 的依赖图** —— node 与浏览器自己排
+ * 装载次序，我们这边没有链接器。
+ *
+ * 三步，与真链接器的三步一一对应：
+ *   1. 每份单独编成 MIR（`tu` 档：`main` 不是必须的、堆不烤进像里）；
+ *   2. **符号表**：谁定义了哪个名字（函数看"不是桩、不是 static"，数据看 `dataSyms`）。
+ *      同一个名字两份都定义 = `duplicate symbol`；谁也没定义而又被数据引用 =
+ *      `undefined symbol`（函数那一侧没定义的照旧当 libc，宿主提供）；
+ *   3. 发代码：每份模块把**别人**提供的那些当 `opts.symbols` 交给 `emitMirJs`。
+ *
+ * @param {{path: string, out: string}[]} units 每份 `.c` 与它要落的 `.js` 路径
+ * @param {{incs?: string[], defs?: [string, string][], sysIncs?: string[], tgt?: object,
+ *          rtImport: string}} opts
+ * @returns {{units: {path:string, out:string, text:string, lib:boolean}[],
+ *            entry: (string|null), syms: Map<string,string>}}
+ */
+export function cJsModules(units, opts) {
+  const mods = units.map((u) => ({
+    path: u.path,
+    out: u.out,
+    mir: cMir(u.path, opts.incs ?? [], opts.defs ?? [], [], opts.sysIncs, opts.tgt, { tu: true }),
+  }));
+  /* 符号表 = 这一步就是"链接"。 */
+  const provide = new Map();
+  const claim = (name, m) => {
+    const had = provide.get(name);
+    if (had !== undefined && had !== m.out) {
+      throw new OmniError(`omni c jsmod: duplicate symbol '${name}'（${had} 与 ${m.out} 都定义了它）`);
+    }
+    provide.set(name, m.out);
+  };
+  for (const m of mods) {
+    for (const f of m.mir.funcs) {
+      if (f.local === true) continue;
+      if (f.thunk !== null && f.thunk !== undefined) continue;
+      /* **只声明过、一条指令都没有**的不算定义：系统头一份 `<math.h>` 就带进上百个
+         这样的名字（`__math_errhandling` / `acosf` / …），认它们是定义的话两份模块
+         一碰就是假的 `duplicate symbol`。 */
+      if (f.count() === 0) continue;
+      /* 每份模块都有一个自己的 `omni_main`（那是"序"）—— 它不是对外的符号。 */
+      if (f.name === m.mir.entry) continue;
+      claim(f.name, m);
+    }
+    for (const [sym] of m.mir.dataSyms) claim(sym, m);
+  }
+  /* 数据那一侧没人提供就是 `undefined symbol`：函数还能落到 libc 上，数据不能 ——
+     悄悄放过去会得到一个指着自己那块空白的指针（静默答错）。 */
+  const missing = new Set();
+  for (const m of mods) {
+    for (const r of m.mir.dataRefs) if (!provide.has(r.name)) missing.add(r.name);
+  }
+  if (missing.size > 0) {
+    throw new OmniError(`omni c jsmod: undefined symbol ${[...missing].map((n) => `'${n}'`).join('、')}`);
+  }
+  let entry = null;
+  const out = [];
+  for (const m of mods) {
+    const syms = new Map();
+    for (const [sym, file] of provide) if (file !== m.out) syms.set(sym, file);
+    const text = emitMirJs(m.mir, { rtImport: opts.rtImport, module: true, symbols: syms });
+    const lib = !m.mir.funcIndex.has('main');
+    if (!lib) entry = m.out;
+    out.push({ path: m.path, out: m.out, text, lib });
+  }
+  return { units: out, entry, syms: provide };
+}
+
+/**
+ * 那个**入口文件**的文本：先把每份库的 `$init()` 叫一遍（它们的"序"：`$sp` 的初值、
+ * errno/strerror/流那几格），再跑有 `main` 那一份的 `$run()`。
+ *
+ * data 段不在这儿铺 —— 那是**装载期**的事（`import` 一到就铺好了），所以这儿只管"序"。
+ */
+export function cJsEntry(linked) {
+  if (linked.entry === null) throw new OmniError('omni c jsmod: 这几份里没有 main');
+  const L = [];
+  let n = 0;
+  for (const u of linked.units) {
+    if (u.lib) L.push(`import { $init as $i${n++} } from ${JSON.stringify(u.out)};`);
+  }
+  L.push(`import { $run } from ${JSON.stringify(linked.entry)};`);
+  for (let k = 0; k < n; k++) L.push(`$i${k}();`);
+  L.push('process.exit($run());');
+  return L.join('\n') + '\n';
 }
 
 /**

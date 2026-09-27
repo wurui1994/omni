@@ -8311,7 +8311,11 @@ export class CGen {  /**
 
     /* 本模块**定义**的、外部看得见的那些：链接时它们是提供方。 */
     for (const [name, e] of this.gvars) {
-      if (!e.defined || e.local === true || e.addr < 0) continue;
+      /* 本模块**定义**的、外部看得见的那些：链接时它们是提供方。
+         `isStatic` 也要挡（块里的 `static`：`fprec.max10e.0` 那种名字不是外部符号，
+         导出去的话一个 .c 一个 .js 那条路会把它当提供方，而它连合法标识符都不是）。 */
+      if (!e.defined || e.local === true || e.isStatic === true || e.addr < 0) continue;
+
       this.mod.dataSyms.set(name, e.addr);
     }
   }
