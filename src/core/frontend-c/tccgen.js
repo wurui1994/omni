@@ -7517,6 +7517,12 @@ export class CGen {  /**
    * `_Bool` 是例外：它只有「零与非零」（6.3.1.2）。
    */
   ceCastTo(ty, v) {
+    /* `(void)x`：把算出来的值丢掉。这个形状只在「逗号左边」有意义 ——
+     * CPython 的 `Py_BUILD_ASSERT_EXPR`（`pymacro.h:167`）正是
+     * `((void)sizeof(struct { int dummy; _Static_assert(cond, #cond); }), 0)`：
+     * 左边那一半是为了让 `_Static_assert` 在类型里被检出来，值本身没人要。
+     * 操作数已经求过（该报的错都在 `v` 算出来的时候报过了），这儿只回一个占位的 0。 */
+    if (btype(ty.t) === VT_VOID) return 0n;
     if (isFloat(ty.t)) {
       const x = Number(v);
       return btype(ty.t) === VT_FLOAT ? Math.fround(x) : x;
@@ -7696,7 +7702,15 @@ export class CGen {  /**
       }
       /* 分组：回的是原样值 —— 不在这儿提前截断，否则 `(1.5 + 1) * 2` 会算成 4。
        * 走 `ceCond` 而不是 `ceInfix`：括号里可以有 `?:`。 */
-      const v = this.ceCond();
+      let v = this.ceCond();
+      /* 括号里还可以有**逗号**（`((void)x, 0)`，CPython 的 `Py_BUILD_ASSERT_EXPR`）：
+       * 前面那些项求过就丢掉，值是最后那一项。只在括号里收 —— 逗号在别处是分隔符
+       * （枚举项、初始化式、实参表），那几路都指着 `constExpr` 停在逗号上。
+       * tcc 那边括号里走的是 `gexpr`（收逗号），所以这与它一致。 */
+      while (this.tok === COMMA) {
+        this.next();
+        v = this.ceCond();
+      }
       this.skip(RPAR);
       return v;
     }
@@ -7719,6 +7733,24 @@ export class CGen {  /**
       this.symAlign = 0;
       const ty = this.sizeofType();
       return BigInt(this.symAlign !== 0 ? this.symAlign : typeSize(ty).align);
+    }
+    /* `__builtin_types_compatible_p(T1, T2)` 是一句**编译期**的问话，所以它在「必须是
+     * 常量」的位置上也该是一格常量。表达式那一路早就有（`unary` 里同名的一格），缺的
+     * 只是这台只认记号的求值器 —— 于是 `static char b[__builtin_types_compatible_p(
+     * int, int) ? 1 : 2];` 从前报「要一个常量表达式」。
+     *
+     * 逼出这一格的是 CPython 的 `Py_ARRAY_LENGTH`（`Include/pymacro.h:205`）：我们的
+     * `__GNUC__` 是 4，于是走 GCC 扩展那一支，数组维度里明着写着这一问 ——
+     * `Objects/typeobject.c:11720` 的 `slotdefs_dups[Py_ARRAY_LENGTH(slotdefs)][…]`
+     * 就是它。问的是同一句 `compareTypes(a, b, 1)`，所以「什么算相容」两路不会分岔。 */
+    if (t === TOK_BUILTIN_TYPES_COMPATIBLE_P) {
+      this.next();
+      this.skip(LPAR);
+      const a = this.typeName();
+      this.skip(COMMA);
+      const b = this.typeName();
+      this.skip(RPAR);
+      return compareTypes(a, b, 1) ? 1n : 0n;
     }
     if (t === AMP) {
       /* `offsetof(T, f)` 展开出来就是这个形状（tccdefs.h 的 `__builtin_offsetof`：
