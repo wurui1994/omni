@@ -1760,6 +1760,10 @@ function stmtOf1(s, C) {
     });
   }
   if (t === 'static' || t === 'enum' || t === 'sty' || t === 'struct') return [];
+  /* **标号的名字不是个名字**那一档（`labelex`，见 `.grammar` 里那两条）：冒号前头那一段
+     在正本里是**标号名的文本**、一句都不编（`eval.c:2370`）—— 所以这儿什么都不发。
+     `geeky/linefit2.kc:56` 的 `setcol(0xc0c0c0):` 就是它：那一句 `setcol` 正本也没调。 */
+  if (t === 'labelex') return [];
   if (t === 'label') {
     /* 标号那一格由 `stmtsOf` 拆掉（它要看见"前后两段"）。走到这儿说明它不在一格语句表的
        位置上（比如 `if (c) lab:`）—— 那种写法这一版不接。 */

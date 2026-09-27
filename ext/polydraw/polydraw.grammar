@@ -248,6 +248,14 @@
     (-> ("continue" ";") (continue))
     (-> ("goto" NAME ";") (goto $2))
     (-> (NAME ":") (label $1))
+    ;; **标号的名字可以不是个名字**：`eval.c:2370` 那一支把**冒号前头那一整段文本**
+    ;; 原样当标号名收下（`strcpy(&newlabnam[…], &st[z])`），**冒号前那个表达式一句都不编**。
+    ;; 语料里就一处：`geeky/linefit2.kc:56` 的 `setcol(0xc0c0c0): drawsph(…);`
+    ;; —— 正本在那儿**根本没调 setcol**，冒号后头那句照常跑。
+    ;; 只接"一格调用 + 冒号"这一形（再宽会与三元的 `? :` 打起来），落成一格**什么都不发**
+    ;; 的语句（`labelex`）：那个名字含括号，`goto` 压根写不出来，所以不必登记。
+    (-> (postfix "(" ")" ":") (labelex))
+    (-> (postfix "(" arglist ")" ":") (labelex))
     (-> ("static" staticlist ";") (static $*2))
     ;; **`auto`**（RScript 的"栈上的量"）：`auto mx0[244], my0[244];`（`games/stratego.kc:643`）、
     ;; `auto perim, grab=-1;`（`games/box.kc:15`）。说明书那一行："Defines a variable with
