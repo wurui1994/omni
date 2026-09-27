@@ -376,6 +376,14 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
       `USE_COMPUTED_GOTOS` 不定义（缺省两条 `AC_DEFINE` 都不走，让 CPython 自己按编译器挑
       —— 记一笔：它挑"开"要 `&&label` 与 `goto *p`，那是编 `ceval.c` 那天的问题）、
       `SOABI_PLATFORM` / `ALT_SOABI` / `ANDROID_API_LEVEL` 不定义（构建系统或安卓专有）。
+    - **`Modules/` 扩面的第一道门量出来了**：那一棵（本机这份 CPython 下 **101 份 `.c`**）
+      带进 **13 个**还没决定的宏，而它们的性质一眼就看得出来 ——
+      `PY_SQLITE_*`（两个）、`PY_SSL_DEFAULT_CIPHER*`（两个）、`WITH_EDITLINE`、
+      `WITH_DECIMAL_CONTEXTVAR`、`ENABLE_IPV6`、`POSIX_SEMAPHORES_NOT_ENABLED`、
+      `MAJOR_IN_MKDEV` / `MAJOR_IN_SYSMACROS`、`GETPGRP_HAVE_ARG`、`HAVE__GETPTY`、
+      `WITH_NEXT_FRAMEWORK`。**几乎全是"要不要借那个第三方库 / 可选模块"的决定**，
+      不是编译器的活。所以下一刀不是"整棵 `Modules/`"，而是**按名单借那几份核心的**
+      （`_collectionsmodule.c` / `itertoolsmodule.c` 这一类，先量它们各自要几个宏）。
     - 这一格顺手把上面第 10 条那张手工表**更正**了：**142 而不是 133** ——
       差的那九份是手工探的那份 pyconfig 少了格子（`fileutils.c` 与 `sysmodule.c` 从前报
       `F_GETFD` / `O_WRONLY` 看不见，那不是我们缺语法，是配置少探了 `HAVE_FCNTL_H` 一族）。
