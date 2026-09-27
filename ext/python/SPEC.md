@@ -346,23 +346,41 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 
     ```
     $ npm run py:sweep
-    共 182 份：**编出 .o 172**（干净 171 + 带警告 1）、编不出 10（85s）
+    共 173 份：**编出 .o 172**（干净 172 + 带警告 0）、编不出 1（115s）
+
+    另有 9 份不进分母：
+           Python/bytecodes.c —— 不是翻译单元（代码生成器的输入）
+           Python/optimizer_bytecodes.c —— 同上
+           Python/dynload_hpux.c / dynload_stub.c / dynload_win.c —— 别的平台那一份
+           Python/emscripten_*.c（四份）—— 别的平台那一份
+
     编不出的按族：
-        7 份  头文件不在（emscripten ×2 / windows / dl / optimizer.h /
-              pycore_uops.h / frozen_modules/…）      <- 平台或生成的头
-        1 份  '}' expected (got 'SOABI')              <- 构建系统给的宏
-        1 份  ';' expected (got '__VERSION__')        <- gcc/clang 才有（tcc 也没有）
-        1 份  名字看不见：_PYTHONFRAMEWORK            <- 构建系统给的宏
-    带警告的按族：
-        1 份  隐式声明：__builtin_wasm_test_function_pointer_signature（emscripten 的）
+        1 份  头文件不在：frozen_modules/…      <- 构建系统先生成（frozen.c）
     门：>= 172 份编得出 —— 过
     ```
 
-    **剩下的 10 份里我们自己的欠账是 0** —— 全是构建系统与平台的事（第 12 条那一刀
-    把那 11 份 `__asm__` 清了）。
+    **剩下那 1 份不是我们的欠账**（`Python/frozen.c` 要 `make regen-frozen` 先生成头），
+    而且 **172 份里一条警告都没有**。
+
+    分母的口径是**本机该编的翻译单元**（`scope.js` 的 `NOT_TU` / `OTHER_PLATFORM`）：
+    `Python/bytecodes.c` 那两份是 `Tools/cases_generator` 的输入，`Makefile` 从不编它们
+    （`Makefile.pre.in:2101` 起那一串 `regen-cases`）；`dynload_*.c` 是 `DYNLOADFILE`
+    挑一份（`configure.ac:5454`，darwin 挑 `dynload_shlib.c`）、`emscripten_*.c` 只在
+    emscripten 上进 `PLATFORM_OBJS`（`configure.ac:5433`）。把它们算进"编不出"是口径错 ——
+    **它们压根不该进分母**。
 
     几处口径写在这儿：
     - **门是 `--min`**（缺省 172，像 `tests/c/native-gen.js` 的 `MIN_OK`）：少于它 exit 1。
+    - **我们站在构建系统的位置上**，所以它按文件给的开关我们也要给：`scope.js` 的
+      `perFileDefs` 现在有一条 —— `Python/dynload_shlib.c` 要 `-DSOABI`
+      （`Makefile.pre.in:1922`）。值照 `configure.ac:6742` 算：`cpython-` + 版本（从参考树的
+      `Include/patchlevel.h` **读**）+ `ABIFLAGS`（空）+ 平台（我们不定义 `SOABI_PLATFORM`，
+      所以没有后缀）。
+    - **`HAVE_DYNAMIC_LOADING` 从前是错的**：它落进了 `gen-pyconf.js` 的"有没有这个函数"
+      那一族、被静悄悄答成"没有"。它不是函数，是决定（`configure.ac:5473`：`DYNLOADFILE`
+      不是 stub 就定义它，而有 `dlopen` 的机器上挑的是 `dynload_shlib.o`）。答错的代价是
+      **我们少编了一整块代码**：`Python/import.c` 里动态装载那条路整段跳掉、
+      `dynload_shlib.c` 连 `dl_funcptr` 都看不见。这一格是第 13 条那把尺子逼出来的。
     - 量的是 `Objects` + `Python` + `Parser` 三棵 **加上 `Modules/` 那张名单**（19 份
       "核心扩展模块"：`_abc` / `_bisect` / `_codecs` / `_collections` / `_datetime` /
       `_functools` / `_heapq` / `_operator` / `_random` / `_stat` / `_typing` / `_weakref` /
@@ -427,6 +445,41 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 
     表里另外记着 `__x86_64__` 那一支（CPython 写的是 `"{movq %%rsp, %0"`，那个 `{` 是
     它源码里就有的），照原样收着但没判据 —— 考它 clang 编不过，这一组的尺子就没了。
+
+13. **第二把尺子：编出来的 `.o` 与 clang 的比外部符号**（`ext/python/rt/symbols.js`，
+    `npm run py:symbols`）。
+
+    `sweep.js` 只回答**编得出**。少发一个函数、把 `static` 发成外部、把一个 `extern` 的
+    名字拼错 —— `.o` 照样出得来，而那些要到**链接那天**才炸。这一份把那一天提前：
+    同一份 `.c`、同一套开关，我们与 clang 各出一份 `.o`，两份的外部符号集必须一样
+    （`nm -g -U` 定义出来的、`nm -g -u` 要别人给的，逐个对）。
+
+    ```
+    $ npm run py:symbols
+    共 173 份：**符号对上 167**、已知差异 5、对不上 0、跳过 1（103s）
+    ```
+
+    - clang 那侧的开关要与我们**语义对齐**才叫量同一件事：`-D_FORTIFY_SOURCE=0`
+      （我们那份 `tccdefs.js` 就是 0，不然 clang 发的是 `__memcpy_chk` 一族）、
+      `-fno-stack-protector`（我们不发栈保护）。
+    - 跳过的那 1 份就是 `sweep` 里编不出的 `frozen.c`。
+    - `SOFT`：两边都可以有也可以没有的几族 —— 定长小块 `memcpy/memset/bzero`（摊开或发
+      调用都合规）、`copysign`/`fma` 这类 clang 当内建摊成一条指令的 libm 函数、
+      `__chkstk_darwin`（clang 给大帧发的栈探针）、`__isnan` 一族
+      （`<math.h>:159` 看 `__FINITE_MATH_ONLY__`，我们是 1 所以走发调用那支）。
+    - `KNOWN_BAD`：**按文件记的五笔已知差异**，每笔写清"差的是哪一段代码、为什么"。
+      修好了还留着，脚本会喊（棘轮不许空转）。五笔里三个根因：
+      1. **`_Thread_local` 当普通全局**（`import.c` / `pystate.c` 的 `__tlv_bootstrap`）——
+         与 `__atomic_*` 落成普通读写同一笔账：这条链一个线程都不起。
+      2. **macOS 可用性那一族的编译期问答**我们没有 —— `__has_builtin(__builtin_available)`
+         （`pytime.c`：clang 编"带运行期回退"的两支，我们只编 `clock_gettime` 那支）与
+         `__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__`（`pylifecycle.c`：
+         `HAS_APPLE_SYSTEM_LOG` 因此是 0，`os_log` 那一块我们没编。clang 给 270000）。
+      3. **`realpath` 的 `$DARWIN_EXTSN` 改名**我们故意不改（量过：本机两个符号给同一个答案）。
+    - **这把尺子第一次跑就抓出一格配置错**：`import.c` 从前多要一个
+      `PyModule_FromSlotsAndSpec` —— 顺着查下去是 `HAVE_DYNAMIC_LOADING` 被当成函数探针、
+      答成了"没有"，于是**我们少编了一整块代码**（见第 11 条那一段）。
+      "编得出"那把尺子对此一无所知：少编一块，`.o` 照样干干净净地出来。
 
 ## 二、进度
 

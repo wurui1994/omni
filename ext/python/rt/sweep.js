@@ -25,11 +25,12 @@
 //     "其中 11 份卡在同一句 `__asm__`"才有。
 //   * 参考树不在就印一行跳过、exit 0（与 `tests/c` 缺 tcc 那一组同一口径）。
 
-import { existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CORE_MODULES, filesIn, flagsFor, perFileDefs, pyconfExtra } from './scope.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..', '..');
@@ -50,21 +51,9 @@ const INC = argOf('--inc', join(WORK, 'inc'));
 const DIRS = argOf('--dirs', 'Objects,Python,Parser,Modules').split(',');
 
 /**
- * `Modules/` 那一棵**按名单量**（`--dirs …,Modules`），不整棵走。
- *
- * 理由是量出来的：整棵 101 份会给 `gen-pyconf.js` 带进 13 个还没决定的宏，而那 13 个
- * 几乎全是"要不要借那个第三方库 / 可选模块"（sqlite / ssl / editline / decimal / ipv6…）
- * 的决定，不是编译器的活。这张名单里的是**核心扩展模块**：不依赖任何第三方库，
- * 而且量过 —— 它们一个新宏都不带（同一套 `--extra` 算出来的名单不变）。
- *
- * 整棵都想量：`--all-modules`（那时得先给那 13 个宏一格一格写决定）。
+ * `Modules/` 那一棵**按名单量**（`--dirs …,Modules`），不整棵走 ——
+ * 名单与理由在 `scope.js` 的 `CORE_MODULES`。整棵都想量：`--all-modules`。
  */
-const CORE_MODULES = new Set([
-  '_abc.c', '_bisectmodule.c', '_codecsmodule.c', '_collectionsmodule.c', '_datetimemodule.c',
-  '_functoolsmodule.c', '_heapqmodule.c', '_operator.c', '_randommodule.c', '_stat.c',
-  '_typingmodule.c', '_weakref.c', 'atexitmodule.c', 'cmathmodule.c', 'errnomodule.c',
-  'itertoolsmodule.c', 'mathmodule.c', 'symtablemodule.c', 'timemodule.c',
-]);
 const ALL_MODULES = argv.includes('--all-modules');
 /** 编得出 `.o` 的最少份数（ok + warn）。往上走是好事，往下走是回归。 */
 const MIN_OK = Number(argOf('--min', '172'));
@@ -83,13 +72,9 @@ if (!existsSync(PYCONF)) {
   mkdirSync(INC, { recursive: true });
   process.stdout.write(`py-rt/sweep: 探一份 pyconfig.h -> ${PYCONF}\n`);
   const g = spawnSync(process.execPath,
-    /* `--extra` 要带上 **`Include` 整棵**，不能只给要量的那几个目录：
-     * 名单是"能定义的宏 ∩ 源码真读到的"，而线程那几格（`HAVE_PTHREAD_H` …）是
-     * `Include/internal/pycore_pythread.h` 读的 —— 漏了它，探出来的 pyconfig 少 17 条，
-     * 于是**每一份都**报 `#error "Require native threads"`（量到过，一份都编不出）。 */
+    /* `--extra` 怎么算（为什么必须带 `Include` 整棵）：见 scope.js 的 `pyconfExtra` */
     [join(here, 'gen-pyconf.js'), '--src', SRC, '--out', PYCONF,
-      '--extra', ['Include', ...DIRS.flatMap((d) => (d === 'Modules' && !ALL_MODULES
-        ? [...CORE_MODULES].map((f) => `Modules/${f}`) : [d]))].join(',')],
+      '--extra', pyconfExtra(DIRS, ALL_MODULES)],
     { encoding: 'utf8' });
   if (g.status !== 0) {
     process.stdout.write(`py-rt/sweep: gen-pyconf 没过：\n${g.stderr}${g.stdout}`);
@@ -97,12 +82,8 @@ if (!existsSync(PYCONF)) {
   }
 }
 
-/** 一份 `.c` 的编译开关。与 SPEC §一里那几条量数用的**完全一样**（少一格数就变了）。 */
-const flagsFor = (out) => ['c', 'obj', '-std=c11',
-  '-DPy_BUILD_CORE', '-D_Py_USE_GCC_BUILTIN_ATOMICS=1',
-  '-I', INC, '-I', join(SRC, 'Include'), '-I', join(SRC, 'Include', 'internal'),
-  '-I', join(SRC, 'Objects'), '-I', join(SRC, 'Python'), '-I', join(SRC, 'Modules'),
-  '-o', out];
+/** 一份 `.c` 的编译开关在 `scope.js`（两把尺子共用 —— 少一格数就变了）。 */
+const flags = (out, name) => flagsFor(out, INC, SRC, perFileDefs(name, SRC));
 
 /**
  * 一条诊断归到哪一族。**「22 份编不出」这个数没有意义**，
@@ -119,15 +100,8 @@ function familyOf(msg) {
   return msg.replace(/^.*(error|warning): /, '').slice(0, 60);
 }
 
-const files = [];
-for (const d of DIRS) {
-  const dir = join(SRC, d);
-  if (!existsSync(dir)) continue;
-  for (const f of readdirSync(dir).filter((x) => x.endsWith('.c')).sort()) {
-    if (d === 'Modules' && !ALL_MODULES && !CORE_MODULES.has(f)) continue;
-    if (filters.length === 0 || filters.some((x) => f.includes(x))) files.push([d, f]);
-  }
-}
+/* 分母是**本机该编的份数**：代码生成器的输入与别的平台那几份不算（见 scope.js）。 */
+const { files, skipped } = filesIn(SRC, DIRS, { allModules: ALL_MODULES, filters });
 mkdirSync(join(WORK, 'obj'), { recursive: true });
 
 /** 一份的结果：`{ name, kind: 'ok' | 'warn' | 'fail', first }`。 */
@@ -135,7 +109,7 @@ function compileOne(d, f) {
   return new Promise((done) => {
     const name = `${d}/${f}`;
     const out = join(WORK, 'obj', `${d}-${f}`.replace(/[/.]/g, '-') + '.o');
-    const p = spawn(process.execPath, [CLI, ...flagsFor(out), join(SRC, d, f)],
+    const p = spawn(process.execPath, [CLI, ...flags(out, name), join(SRC, d, f)],
       { stdio: ['ignore', 'pipe', 'pipe'] });
     let so = '';
     let se = '';
@@ -185,6 +159,11 @@ function byFamily(list) {
 
 process.stdout.write(`\n共 ${files.length} 份：**编出 .o ${ok.length + warn.length}**`
   + `（干净 ${ok.length} + 带警告 ${warn.length}）、编不出 ${fail.length}（${secs}s）\n`);
+if (skipped.length > 0) {
+  /* 分母之外的那几份 —— 印出来，免得"182 里 174"这种数看着像少了八格 */
+  process.stdout.write(`\n另有 ${skipped.length} 份不进分母：\n`);
+  for (const [n, why] of skipped) process.stdout.write(`       ${n} —— ${why}\n`);
+}
 if (fail.length > 0) {
   process.stdout.write('\n编不出的按族：\n');
   for (const [k, n] of byFamily(fail)) process.stdout.write(`  ${String(n).padStart(3)} 份  ${k}\n`);

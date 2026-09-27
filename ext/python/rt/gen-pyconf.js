@@ -172,10 +172,25 @@ const gccAsmMc68881 = () => links('int main(void){\n'
   + '  __asm__ __volatile__ ("fmove.l %0,%%fpcr" : : "dm" (fpcr));\n'
   + '  return 0; }\n');
 
+/** `unistd.h` 自己定不定 `_POSIX_THREADS`（`configure.ac:4885` 的 `AX_CHECK_DEFINE`）。 */
+const unistdDefinesPosixThreads = () => compiles('#include <unistd.h>\n'
+  + '#ifndef _POSIX_THREADS\n#error no\n#endif\nint main(void){ return 0; }\n');
+
 /* ---- 算名单：`pyconfig.h.in 能定义的` ∩ `这几份源码真测到的` ---------------- */
 
 const conf = readFileSync(join(SRC, 'pyconfig.h.in'), 'utf8');
 const canDefine = new Set([...conf.matchAll(/^#\s*undef\s+([A-Za-z0-9_]+)\s*$/gm)].map((m) => m[1]));
+/**
+ * 那几格在模板里**自己带 `#ifndef` 罩子**的（`AC_USE_SYSTEM_EXTENSIONS` 出的那一族：
+ * `pyconfig.h.in:2020` 起的 `_ALL_SOURCE` / `_GNU_SOURCE` / `_XOPEN_SOURCE` …）。
+ *
+ * 罩子不是装饰：`Python/remote_debugging.c:1` 自己先 `#define _GNU_SOURCE`（空体），
+ * 我们要是无罩子地再 `#define _GNU_SOURCE 1`，那一份就多一条 `redefined` 警告
+ * （量到过）。照模板的形状出，警告就没了。
+ */
+const guarded = new Set([...conf.matchAll(/^#\s*ifndef\s+(\w+)\s*\n#\s*undef\s+\1\s*\n#\s*endif/gm)]
+  .map((m) => m[1]));
+
 if (canDefine.size < 400) {
   throw new Error(`gen-pyconf.js: pyconfig.h.in 里只读出 ${canDefine.size} 个 \`#undef\` —— 那份模板的形状变了`);
 }
@@ -200,7 +215,10 @@ for (const rel of [...SOURCES, ...EXTRA]) {
   if (!existsSync(p)) throw new Error(`gen-pyconf.js: 借来的那份不在：${p}`);
   for (const f of filesOf(p)) {
     const text = readFileSync(f, 'utf8');
-    for (const m of text.matchAll(/\b([A-Z][A-Z0-9_]{2,})\b/g)) {
+    /* `_` 打头的也要收：`_PYTHONFRAMEWORK` / `_POSIX_THREADS` / `_XOPEN_SOURCE` 这一族
+     * 都在 `pyconfig.h.in` 里，从前那道 `[A-Z]` 打头的筛子把它们整族漏了 ——
+     * 量到的后果是 `Python/sysmodule.c:4025` 报「名字看不见：_PYTHONFRAMEWORK」。 */
+    for (const m of text.matchAll(/\b(_?[A-Z][A-Z0-9_]{2,})\b/g)) {
       if (canDefine.has(m[1])) needed.add(m[1]);
     }
   }
@@ -432,6 +450,36 @@ const DECIDED = [
   ['ALT_SOABI', null, '同上（`configure.ac:6749`：`cpython-<版本><ABI 标志>` 那个串）'],
   ['ANDROID_API_LEVEL', null,
     'Android 才有（`configure.ac:1309`：从编译器的 `__ANDROID_API__` 里 sed 出来的）'],
+  ['HAVE_DYNAMIC_LOADING', 1,
+    '**这一格是决定，不是函数探针**（从前它落进"有没有这个函数"那一族、被静悄悄答成"没有"）。'
+    + '`configure.ac:5473-5477`：`DYNLOADFILE != dynload_stub.o` 就定义它；而 `:5462-5468` 在'
+    + '有 `dlopen` 的机器上挑 `dynload_shlib.o` —— 我们这台有（`HAVE_DLOPEN` / `HAVE_DLFCN_H` '
+    + '都探到了）。量到的代价：答"没有"时 `Python/import.c` 少编一整块（动态装载那条路，'
+    + '于是 `import_run_modexport` 成了没人引用的 static）、`Python/dynload_shlib.c` 连 '
+    + '`dl_funcptr` 那个 typedef 都看不见（`pycore_importdl.h` 拿这一格罩着）'],
+  ['_PYTHONFRAMEWORK', '""',
+    '**非 framework 构建就是空串**：`configure.ac:722` 那条 `AC_DEFINE_UNQUOTED` 是'
+    + '无条件的，而 `--enable-framework` 不给时 `PYTHONFRAMEWORK=`（`configure.ac:687`）。'
+    + '也就是说这一格不是"不定义"，是"定义成空串" —— `Python/sysmodule.c:4025` 把它塞进'
+    + '`sys._framework`，少了它那一份编不出来。与我们 `WITH_NEXT_FRAMEWORK` 不定义那一格一致'],
+
+  /* ---- `_` 打头那一族（收全筛子之后冒出来的六格）。 */
+  ['_ALL_SOURCE', 1,
+    'autoconf 的 `AC_USE_SYSTEM_EXTENSIONS`（`configure.ac:1129`）**无条件**定的那几条'
+    + '之一（生成的 configure:6579）。AIX 才认，别处无害'],
+  ['_GNU_SOURCE', 1, '同上（configure:6583）—— glibc 才认，macOS 的头不看它'],
+  ['_XOPEN_SOURCE', null,
+    '**darwin 上明确不定**：`configure.ac:886-889` 那两支 `Darwin/…) define_xopen_source=no`'
+    + '（理由写在它自己的注里：10.4 起定了它会"disables platform specific features beyond'
+    + ' repair"）。定了反而编不出来 —— 这一格是"照它说的不定"'],
+  ['_XOPEN_SOURCE_EXTENDED', null, '同上（`configure.ac:919` 只在 xopen 那一支里定）'],
+  ['_POSIX_C_SOURCE', null, '同上（`configure.ac:925` 同一支：`202405L`）'],
+  ['_POSIX_THREADS', 'probe:unistd-pthreads',
+    '**反着来**：`unistd.h` 自己定了就不定这一格（`configure.ac:4885`+`:4942` —— '
+    + '「POSIX 说 pthreads 实现必须在 unistd.h 里定它，有些实现没定」）。真探一次'],
+  ['_PYTHREAD_NAME_MAXLEN', process.platform === 'darwin' ? 63 : (process.platform === 'linux' ? 15 : null),
+    '**按平台一张表**，照 `configure.ac:8284-8292`（Darwin 63、Linux/Android 15、'
+    + 'SunOS 31、FreeBSD 19…，表外的不定义）。线程名超了要截断，`Python/thread_pthread.h` 用它'],
 ];
 for (const [name, value, why] of DECIDED) {
   WHY.set(name, why);
@@ -439,6 +487,11 @@ for (const [name, value, why] of DECIDED) {
   if (value === 'probe:setpgrp') { HOW.set(name, () => (setpgrpHasArg() ? 1 : null)); continue; }
   if (value === 'probe:pkey') { HOW.set(name, () => (pthreadKeyIsInt() ? 1 : null)); continue; }
   if (value === 'probe:psched') { HOW.set(name, () => (pthreadSystemSched() ? 1 : null)); continue; }
+  if (value === 'probe:unistd-pthreads') {
+    /* 反着来：unistd.h 自己定了，这一格就**不**定义 */
+    HOW.set(name, () => (unistdDefinesPosixThreads() ? null : 1));
+    continue;
+  }
   HOW.set(name, () => value);
 }
 
@@ -481,7 +534,10 @@ for (const name of [...needed].sort()) {
      （下一个人看到 `/* #undef WITH_MIMALLOC *​/` 时不必去翻提交记录）。 */
   const why = WHY.get(name);
   if (why !== undefined) lines.push(`/* ${why} */`);
-  lines.push(v === null ? `/* #undef ${name} */` : `#define ${name} ${v}`);
+  if (v === null) { lines.push(`/* #undef ${name} */`); continue; }
+  /* 模板里带罩子的，照它的形状出（见 `guarded` 头上那段） */
+  if (guarded.has(name)) lines.push(`#ifndef ${name}`, `# define ${name} ${v}`, '#endif');
+  else lines.push(`#define ${name} ${v}`);
 }
 lines.push('', '#endif /* OMNI_PYCONF_H */', '');
 

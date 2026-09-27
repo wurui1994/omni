@@ -269,6 +269,16 @@ export const COMPILE_DEFS = [
   ['__int128_t', 'struct __uint128__'],
   ['__uint128_t', 'struct __uint128__'],
 
+  /* `__VERSION__` —— **声称 `__GNUC__` 就得带上它**。gcc 与 clang 都定这一条，
+   * 而且真有代码去拼它：CPython 的 `Python/getcompiler.c:17` 写的是
+   * `#define COMPILER "[GCC " __VERSION__ "]"`（进 `sys.version`），少了这一条
+   * 那一份就报 `';' expected (got '__VERSION__')` —— 量到过。
+   *
+   * 只装在编译那一路：`cpp/` 那组的尺子是 `tcc -dM` 的宏表逐行相同，而 tcc 没有
+   * 这一条。值照 clang 的体例（它在 macOS 上报 `4.2.1 Compatible Apple LLVM …`）——
+   * 我们在 osx 上装成 APPLE-GCC 4（见 `OS_EXTRA`），所以也从 `4.2.1 Compatible` 起。 */
+  ['__VERSION__', '"4.2.1 Compatible Omni C"'],
+
   /* ---- `__atomic_*` 那一族（GCC / clang 的内建原子操作）--------------------
    *
    * 为什么要有：**借来的 C 里到处是它**。最先撞上的是 CPython 的
