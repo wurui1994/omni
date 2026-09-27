@@ -1823,7 +1823,11 @@ function printfOf(e, C) {
   }
   const fmt = cUnescape(unquote(leaf(kids(fmtTok)[0])));
   const vals = args.slice(1).map((a) => exprOf(a, C));
-  const stmts = fmtToStmts(fmt, vals, C.tyCtx(), 'eval->IR', C.fresh);
+  /* 末尾那个 `true` = **多给的实参丢掉不报**：这门语言的正本就是 C 的 `printf`
+     （`polydraw_src` 里 `printf` 直接转给 libc），多给的那几格由 C 丢掉。语料里
+     `geeky/remez8.kc:112` 写的是 `fprintf("%+.12f",coef[b][i],i)` —— 多给一格。
+     公共层的默认仍然是"多给少给都报"（那条纪律见 `fmt.js` 的 `fmtToIR` 头注）。 */
+  const stmts = fmtToStmts(fmt, vals, C.tyCtx(), 'eval->IR', C.fresh, true);
   if (C.host.who !== 'evaldraw') return stmts;
   return textAndStdout(stmts, C);
 }
@@ -1868,7 +1872,7 @@ function printgOf(e, C) {
   C.needGfx = true;
   return [
     { kind: 'expr-stmt', expr: { kind: 'call', fn: nameRef('gt_at'), args: at } },
-    ...textAndStdout(fmtToStmts(fmt, vals, C.tyCtx(), 'eval->IR', C.fresh), C, false),
+    ...textAndStdout(fmtToStmts(fmt, vals, C.tyCtx(), 'eval->IR', C.fresh, true), C, false),
     { kind: 'expr-stmt', expr: { kind: 'call', fn: nameRef('gt_atend'), args: [] } },
   ];
 }

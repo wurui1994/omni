@@ -585,8 +585,12 @@ function dressIR(spec, body, fresh, who, wE = null, pE = null) {
  * 走一遍格式串，答**若干段**：`[{ parts, nl }]`。`split` 为真时按 `\n` 切段
  * （带换行的段 `nl` 为真）—— `printf` 那一侧要这个；`Sprintf` 那一侧 `split` 为假，
  * 换行就是串里的一个字符，整条只有一段。
+ *
+ * `extraOk`：**多给的实参不报，丢掉**。默认仍是报（见 `fmtToIR` 的头注那条纪律），
+ * 这一格只给"正本就是 C 的 printf"的那几门用 —— EVAL 的 `fprintf("%+.12f",coef,i)`
+ * （`geeky/remez8.kc:112`）在正本那儿多给的那一格就是被 C 丢掉的，我们跟着丢。
  */
-function fmtWalk(fmt, args, tyCtx, who, fresh, split) {
+function fmtWalk(fmt, args, tyCtx, who, fresh, split, extraOk = false) {
   const segs = [];
   let parts = [];
   let lit = '';
@@ -641,7 +645,7 @@ function fmtWalk(fmt, args, tyCtx, who, fresh, split) {
     i = spec.end;
   }
   endSeg(false);
-  if (ai < args.length) {
+  if (ai < args.length && !extraOk) {
     throw new Error(`${who}: 格式串只用了 ${ai} 格实参，给了 ${args.length} 格`
       + `（${JSON.stringify(fmt)}）`);
   }
@@ -669,8 +673,8 @@ export function fmtToIR(fmt, args, tyCtx, who, fresh = null) {
  *
  * 这与 sx 那一半的 `fmtRun(mode='stmt')` 是同一条口径（那一份发的是 sx 文字）。
  */
-export function fmtToStmts(fmt, args, tyCtx, who, fresh = null) {
-  const segs = fmtWalk(fmt, args, tyCtx, who, fresh, true);
+export function fmtToStmts(fmt, args, tyCtx, who, fresh = null, extraOk = false) {
+  const segs = fmtWalk(fmt, args, tyCtx, who, fresh, true, extraOk);
   const out = [];
   segs.forEach((seg, i) => {
     const last = i === segs.length - 1;
