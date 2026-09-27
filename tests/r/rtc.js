@@ -457,6 +457,30 @@ const JSRUN = [
   ['nmath__beta', 'Rf_beta', '2.5, 3.5', 'beta(2.5,3.5)', 0.036815538909255386],
   ['nmath__choose', 'Rf_choose', '10, 3', 'choose(10,3)', 120],
 ];
+/** R 自己的初始化次序（`main.c` 的 `setup_Rmainloop`，984-999 行）。
+ *
+ * 次序不是可选的：`InitStringHash` 必须在 `InitNames` 之前、`InitNames` 必须在
+ * `InitBaseEnv` 之后（要 `R_EmptyEnv`）、`InitTypeTables` 必须在 `InitS3DefaultTypes`
+ * 之前。乱了就**卡死**不是报错 —— 量出来的：少了 `InitStringHash`，`InitNames` 一去不回
+ * （`type2char` 拿到空的 `Type2Table` 去 `warning`，`warning` 又去 `install`，
+ * 而符号表那一圈这时还没铺好，`install` 就在 `strcmp` 上转圈）。
+ *
+ * `InitTempDir` 要 `stat`、`InitEd` 要 `getpid` —— 我们的 libc 还没有这两个，
+ * 所以那两步明着炸（`ALLOW_FAIL`），不静默跳过。
+ */
+const INIT_SEQ = ['Rf_InitArithmetic', 'Rf_InitTempDir', 'Rf_InitMemory', 'Rf_InitStringHash',
+  'Rf_InitBaseEnv', 'Rf_InitNames', 'Rf_InitGlobalEnv', 'Rf_InitOptions', 'Rf_InitGraphics',
+  'Rf_InitTypeTables', 'Rf_InitS3DefaultTypes', 'R_InitConditions'];
+/** 这两步现在过不去（缺 `stat` / `getpid`），是记着的账不是惊喜。 */
+const INIT_ALLOW_FAIL = new Set(['Rf_InitTempDir', 'Rf_InitEd']);
+/** SEXP 那一层：全用 R 自己的 API 兜回来，不读内存（读内存那一路是另一格）。 */
+const SEXP_CHECKS = [
+  ['str2type(type2char(REALSXP))', 14],
+  ['str2type(type2char(VECSXP))', 19],
+  ['asReal(ScalarReal(3.5))', 3.5],
+  ['asInteger(ScalarInteger(7))', 7],
+  ['xlength(allocVector(REALSXP,5))', 5],
+];
 if (want('jsrun')) {
   const dir = join(ROOT, '.omni-cache', 'r-rt', 'jsall');
   mkdirSync(dir, { recursive: true });
@@ -488,7 +512,10 @@ if (want('jsrun')) {
     const L = [];
     let k = 0;
     for (const u of linked.units) L.push(`import { $init as $i${k++} } from ${JSON.stringify(u.out)};`);
-    L.push(`import { $fn_Rf_InitArithmetic as $ia } from ${JSON.stringify(join(dir, 'main__arithmetic.mjs'))};`);
+    const MAIN = JSON.stringify(join(dir, 'main__arithmetic.mjs'));
+    void MAIN;
+    /* 初始化那一串 + SEXP 那几格都从符号表里现找（名字在别的模块里） */
+    L.push(`const $M = [${linked.units.map((u) => JSON.stringify(u.out)).join(', ')}];`);
     k = 0;
     for (const [mod, sym] of JSRUN) {
       L.push(`import { $fn_${sym} as $c${k++} } from ${JSON.stringify(join(dir, `${mod}.mjs`))};`);
@@ -497,7 +524,27 @@ if (want('jsrun')) {
     L.push('let n = 0;');
     L.push('for (const f of INITS) { f(); n += 1; }');
     L.push("process.stdout.write('$init\\t' + n + '\\n');");
-    L.push('$ia();');
+    /* 初始化那一串：照 R 自己的次序，一步一格印 */
+    L.push('const $ns = {};');
+    L.push('for (const p of $M) { const m = await import(p); for (const kk of Object.keys(m)) if (kk.startsWith("$fn_") && $ns[kk] === undefined) $ns[kk] = m[kk]; }');
+    L.push(`const $F = (s) => $ns['$fn_' + s] ?? null;`);
+    L.push(`for (const s of ${JSON.stringify(INIT_SEQ)}) {
+  const f = $F(s);
+  if (f === null) { process.stdout.write('init\\t' + s + '\\t没这个符号\\n'); continue; }
+  try { f(); process.stdout.write('init\\t' + s + '\\tok\\n'); }
+  catch (e) { process.stdout.write('init\\t' + s + '\\t炸了：' + String(e && e.message).slice(0, 100) + '\\n'); }
+}`);
+    L.push(`{
+  const t2c = $F('Rf_type2char'); const s2t = $F('Rf_str2type');
+  const P = (nm, v) => process.stdout.write('sexp\\t' + nm + '\\t' + v + '\\n');
+  P('str2type(type2char(REALSXP))', s2t(t2c(14)));
+  P('str2type(type2char(VECSXP))', s2t(t2c(19)));
+  P('asReal(ScalarReal(3.5))', $F('Rf_asReal')($F('Rf_ScalarReal')(3.5)));
+  P('asInteger(ScalarInteger(7))', $F('Rf_asInteger')($F('Rf_ScalarInteger')(7)));
+  P('xlength(allocVector(REALSXP,5))', $F('Rf_xlength')($F('Rf_allocVector')(14, 5n)));
+  $F('R_gc')();
+  process.stdout.write('sexp\\tR_gc\\t1\\n');
+}`);
     k = 0;
     for (const [, sym, args] of JSRUN) {
       L.push(`process.stdout.write(${JSON.stringify(sym)} + '\\t' + $c${k}(${args}).toPrecision(17) + '\\n');`);
@@ -506,7 +553,10 @@ if (want('jsrun')) {
     const entry = join(dir, '$judge.mjs');
     writeFileSync(entry, `${L.join('\n')}\n`);
     const r = spawnSync(process.execPath, [entry], { encoding: 'utf8', maxBuffer: 1 << 26 });
-    const got = new Map((r.stdout ?? '').trim().split('\n').map((s) => s.split('\t')));
+    const lines = (r.stdout ?? '').trim().split('\n').map((s) => s.split('\t'));
+    const got = new Map(lines.filter((a) => a[0] !== 'init' && a[0] !== 'sexp').map((a) => [a[0], a[1]]));
+    const initOut = new Map(lines.filter((a) => a[0] === 'init').map((a) => [a[1], a[2]]));
+    const sexpOut = new Map(lines.filter((a) => a[0] === 'sexp').map((a) => [a[1], a[2]]));
     /* 尺子：Rscript。没有就退回记死的常数。 */
     const rs = spawnSync('Rscript', ['-e',
       JSRUN.map(([, , , expr]) => `cat(sprintf("%.17g", ${expr}), "\\n")`).join(';')],
@@ -518,6 +568,20 @@ if (want('jsrun')) {
     if (got.get('$init') !== String(linked.units.length)) {
       bad.push(`只有 ${got.get('$init')} 份的 $init 跑过（要 ${linked.units.length}）`);
     }
+    /* 初始化那一串：该过的必须过，记着的那两笔账（缺 stat / getpid）允许炸 */
+    for (const s of INIT_SEQ) {
+      const v = initOut.get(s);
+      if (v === undefined) { bad.push(`init ${s}: 一行都没印（那一步之前就断了）`); break; }
+      if (v === 'ok') continue;
+      if (INIT_ALLOW_FAIL.has(s)) continue;
+      bad.push(`init ${s}: ${v}`);
+    }
+    /* SEXP 那一层：R 自己的 API 兜回来的值 */
+    for (const [nm, wantV] of SEXP_CHECKS) {
+      const v = Number(sexpOut.get(nm));
+      if (v !== wantV) bad.push(`${nm}: 我们 ${sexpOut.get(nm)}、要 ${wantV}`);
+    }
+    if (sexpOut.get('R_gc') !== '1') bad.push('R_gc 没跑过');
     JSRUN.forEach(([, sym], i) => {
       const v = Number(got.get(sym));
       const w = refs[i];
@@ -528,7 +592,10 @@ if (want('jsrun')) {
     if (bad.length > 0) {
       no('装起来真调 R 的运行时', bad.slice(0, 8).join('\n       '));
     } else {
+      const skipped = INIT_SEQ.filter((s) => initOut.get(s) !== 'ok');
       ok('装起来真调 R 的运行时', `${linked.units.length} 份的 $init 全跑过，`
+        + `R 自己那 ${INIT_SEQ.length} 步初始化过了 ${INIT_SEQ.length - skipped.length} 步`
+        + `（欠的：${skipped.join('、') || '无'}），SEXP 那 ${SEXP_CHECKS.length} 格 + R_gc 都对，`
         + `${JSRUN.length} 个函数与 ${rs.status === 0 ? 'Rscript' : '记死的常数'} 的相对差都 <= 1e-12`);
     }
   }

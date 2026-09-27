@@ -896,8 +896,36 @@ R 自己的 `Rf_initialize_R` 也是这个次序。
 * 还没跑的：R 的**解释器**那一层（`Rf_initialize_R` / `SETUP_MAIN` 要文件系统、
   locale、setjmp 那一整套），与浏览器里那一趟（55 MB 要先打包）。
 * 软缺 205 个仍挂着 —— 纯计算那一路上没碰到它们（10 个函数一个都没落到宿主的缺口上）。
-* **下一刀的形状（这一趟量出来的）**：`InitArithmetic` 3ms、`InitMemory` 638ms 都过，
-  `Rf_InitNames()` **卡住** —— 45 秒的 `timeout` 砍掉时还没回。那一步建符号表
-  （几千次 `install()` + `R_Newhashpjw`），怀疑是哈希那条链上的一个真错，单独一刀。
+* 那个"`InitNames` 卡住"**不是我们的错，是次序错**（当天追出来的，记下来省得再踩）：
+  R 的 `setup_Rmainloop`（main.c 984-999）里 `InitStringHash` **必须**在 `InitNames`
+  之前、`InitNames` 必须在 `InitBaseEnv` 之后。少了 `InitStringHash` 那一步，
+  `type2char` 拿到还空着的 `Type2Table` 就去 `warning`，`warning` 又去 `install`，
+  而符号表那一圈这时还没铺好 —— `install` 就在 `strcmp` 上转圈。**卡死不是报错**，
+  这是这一族缝的共同形状。照 R 自己的次序叫，`InitNames` 956ms 就过了。
 * 顺带量到的一项性能账：250 份 `.mjs` 的 `import` 要 **29 秒**（55 MB 的解析）。
   浏览器那一趟之前这一项得压下去 —— 打成一份包，或按需装载。
+
+## 第二十格：照 R 自己的次序把 libR 初始化起来（已落，2026-09-28）
+
+`tests/r/rtc.js jsrun` 长出第二半：250 份装载之后，照 `setup_Rmainloop` 的次序
+叫 R 的 12 步初始化，再用 **R 自己的 API** 兜几个 SEXP 回来。量出来：
+
+* 过了 **11/12** 步：`InitArithmetic` / `InitMemory`(292ms) / `InitStringHash`(161ms) /
+  `InitBaseEnv` / `InitNames`(956ms) / `InitGlobalEnv` / `InitOptions` / `InitGraphics` /
+  `InitTypeTables` / `InitS3DefaultTypes` / `R_InitConditions`。
+* 欠的一步：`InitTempDir` —— 要 `stat`，我们的 libc 还没有（`InitEd` 要 `getpid`，
+  同一类）。这两笔在天花板里记着，不静默跳过。
+* SEXP 那一层（全走 R 自己的 API，不读内存）：`str2type(type2char(REALSXP))==14`、
+  `…(VECSXP)==19`、`asReal(ScalarReal(3.5))==3.5`、`asInteger(ScalarInteger(7))==7`、
+  `xlength(allocVector(REALSXP,5))==5`，外加 **`R_gc()` 跑得过**。
+
+也就是说：**R 的类型表、符号表、字符串缓存、全局环境、垃圾回收，在 JS 上都起来了**。
+再往前是 `R_ParseVector` + `Rf_eval`（两个符号都在），那要连上 connections 与
+`setjmp` 那一套 —— 下一刀。
+
+### 次序错的形状值得单记
+
+它不报错，它**卡死**。`type2char` 看空表 -> `warning` -> `install` -> 符号表还空着 ->
+`strcmp` 上转圈。查法也记下来：`node --prof` 跑一趟被 `timeout` 砍掉的进程，
+`--prof-process` 的 bottom-up 里 `strcmp` 占 43%，往上三层就是
+`type2char -> warning -> warningcall -> install`。
