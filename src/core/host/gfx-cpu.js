@@ -21,6 +21,7 @@
 
 import { writeBinary, readBinary, exists, mkdirAll, stdout, stderr, env, nowMs, localStamp } from './native.js';
 import { decodeKv6 } from './kv6.js';
+import { decodePng } from './png-read.js';
 import { pngFromRgba, surfaceKind } from './png.js';
 import { dlopenAddon } from './ffi_host.js';
 
@@ -893,10 +894,7 @@ export function gfxCall(name, args) {
      */
     case 'picsiz/1': {
       need(320, 240);
-      if (!G.on || typeof G.m.picload !== 'function') return -1;
-      const p = texPath(Math.trunc(a(0)));
-      if (p === null) return -1;
-      return G.m.picload(p);
+      return picNeed(texPath(Math.trunc(a(0))));
     }
     /**
      * **KV6 那一族的头一句**（`drawkv6("cow.kv6",…)`，`evaldraw.txt:921`）：
@@ -1374,11 +1372,14 @@ function gfxArr(name, args, blk) {
      回抄了多少格 —— 语言那一侧按 `picsiz` 给的宽高自己算下标。 */
   if (nm === 'picread') {
     need(320, 240);
-    if (!G.on || typeof G.m.picread !== 'function' || n === 0) return 0;
-    const ab = new Float64Array(n);
-    const got = G.m.picread(ab.buffer);
-    for (let i = 0; i < got; i++) blk[i] = ab[i];
-    return got;
+    const m = PIC.cur;
+    if (m === null || n === 0) return 0;
+    const cnt = Math.min(m.w * m.h, n);
+    for (let i = 0; i < cnt; i++) {
+      const o = i * 4;
+      blk[i] = (m.px[o] * 65536) + (m.px[o + 1] * 256) + m.px[o + 2];
+    }
+    return cnt;
   }
   /* **KV6 那一族的第二句**（`kv6read`）：把缓存那份模型抄进来 —— 一格体素四个数
      `[x, y, z, 0xRRGGBB]`，坐标已经减掉支点（见 `host/kv6.js` 的头注）。
@@ -1455,6 +1456,37 @@ function gfxDef(kind, name, text) {
  * 读不到/解不开也记住（记成 `null`），不然每帧都去敲一次不存在的文件。
  */
 const KV6 = { path: '', cur: null, seen: new Map() };
+
+/* ── `pic` 那一族的缓存（与 KV6 那一格同一手：按路径记住上一张解开的图）─────────────
+ *
+ * **解码器是我们自己那一份**（`host/png-read.js`），不再借 GL 插件的 ImageIO。
+ * 三条理由：
+ *   1. 插件只有 `--gfx gl` 才挂得上 —— 默认那一档（CPU 帧缓冲）从前 `pic` 一律回 0，
+ *      而 `demos/lab3d.kc` 是拿 `while (pic("doubcube.png",…) != 16777215)` 走光线的
+ *      ⇒ **死循环**，扫描记成"超时"；
+ *   2. ImageIO 只有 macOS 有；
+ *   3. 三条腿要逐字节相同 ⇒ 解码这件事必须是**定死的算术**，不能是"谁在场用谁"。
+ */
+const PIC = { path: '', cur: null, seen: new Map() };
+
+/** `picsiz`：解开并缓存，回 `宽*65536+高`（读不到/解不开回 -1）。 */
+function picNeed(p) {
+  if (p === null) return -1;
+  const hit = (m) => (m === null ? -1 : (m.w * 65536) + m.h);
+  if (PIC.path === p) return hit(PIC.cur);
+  PIC.path = p;
+  if (PIC.seen.has(p)) { PIC.cur = PIC.seen.get(p); return hit(PIC.cur); }
+  let m = null;
+  try {
+    /* `readBinary` 回的是 latin1 串（一个字符一个字节）—— 与 KV6 那一格同一条注。 */
+    const s = readBinary(p);
+    m = typeof s !== 'string' ? null
+      : decodePng(Uint8Array.from(s, (ch) => ch.charCodeAt(0) & 255));
+  } catch { m = null; }
+  PIC.seen.set(p, m);
+  PIC.cur = m;
+  return hit(m);
+}
 
 function kv6Need(p) {
   if (p === null) return -1;

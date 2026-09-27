@@ -743,6 +743,293 @@ static double kv6_size(const char *p) {
   return g_kv6.ok ? (double)g_kv6.n : -1.0;
 }
 
+/* ── **PNG 解码**（与 `src/core/host/png-read.js` 同算法、逐句对应）─────────────────
+ *
+ * 为什么 C 这一侧也要一份：三条腿（js / interp / c）要**逐字节相同**，而 `pic` 那一族
+ * 是 `demos/lab3d.kc` 走光线的判据（`while (pic(…) != 16777215)`）—— 一条腿解得开
+ * 另一条腿回 0，那一条就是死循环。借 GL 插件的 ImageIO 不行：它只有 `--gfx gl`
+ * 挂得上、而且只有 macOS 有。
+ *
+ * 支持到哪儿：位深 1/2/4/8，颜色类型 0/2/3/4/6，过滤器 0..4，非隔行。
+ * 16 位与 Adam7 回 0（解不开）—— 与 JS 那侧同一条线。
+ */
+typedef struct { char path[1024]; unsigned char *px; long w, h; int ok; } png_cache_t;
+static png_cache_t g_png = { { 0 }, NULL, 0, 0, 0 };
+
+/* 一张规范霍夫曼码表：按长度数个数 + 按长度/符号排好的表（RFC 1951 §3.2.2）。 */
+typedef struct { int cnt[16]; int sym[288]; } inf_huf;
+
+static void inf_build(inf_huf *h, const int *lens, int n) {
+  int off[16];
+  for (int i = 0; i < 16; i++) h->cnt[i] = 0;
+  for (int i = 0; i < n; i++) h->cnt[lens[i]] += 1;
+  h->cnt[0] = 0;
+  off[0] = 0;
+  for (int l = 1; l < 16; l++) off[l] = off[l - 1] + h->cnt[l - 1];
+  for (int i = 0; i < n; i++) if (lens[i] != 0) { h->sym[off[lens[i]]] = i; off[lens[i]] += 1; }
+}
+
+typedef struct { const unsigned char *src; long bp; } inf_bs;
+
+static int inf_bit(inf_bs *s) {
+  int b = (s->src[s->bp >> 3] >> (s->bp & 7)) & 1;
+  s->bp += 1;
+  return b;
+}
+
+static int inf_bits(inf_bs *s, int n) {
+  int v = 0;
+  for (int i = 0; i < n; i++) v |= inf_bit(s) << i;
+  return v;
+}
+
+static int inf_decode(inf_bs *s, const inf_huf *h) {
+  int code = 0, first = 0, index = 0;
+  for (int l = 1; l < 16; l++) {
+    code |= inf_bit(s);
+    int count = h->cnt[l];
+    if (code - first < count) return h->sym[index + (code - first)];
+    index += count;
+    first = (first + count) << 1;
+    code <<= 1;
+  }
+  return -1;
+}
+
+/* DEFLATE：解到 `out`（上限 cap），回解出多少字节（坏了回 -1）。 */
+static long inf_run(const unsigned char *src, long from, unsigned char *out, long cap) {
+  static const int LB[29] = { 3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,
+    67,83,99,115,131,163,195,227,258 };
+  static const int LE[29] = { 0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0 };
+  static const int DB[30] = { 1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,
+    769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577 };
+  static const int DE[30] = { 0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13 };
+  static const int ORD[19] = { 16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15 };
+  inf_bs s;
+  s.src = src;
+  s.bp = from * 8;
+  long no = 0;
+  inf_huf fixl, fixd, hl, hd, hc;
+  int gotfix = 0;
+  for (;;) {
+    int last = inf_bit(&s);
+    int type = inf_bits(&s, 2);
+    if (type == 0) {
+      s.bp = (s.bp + 7) & ~7L;
+      long p = s.bp >> 3;
+      int len = src[p] | (src[p + 1] << 8);
+      if (no + len > cap) return -1;
+      for (int i = 0; i < len; i++) out[no + i] = src[p + 4 + i];
+      no += len;
+      s.bp = (p + 4 + len) * 8;
+    } else if (type == 1 || type == 2) {
+      if (type == 1) {
+        if (!gotfix) {
+          int ll[288], dl[30];
+          for (int i = 0; i < 288; i++) ll[i] = i < 144 ? 8 : (i < 256 ? 9 : (i < 280 ? 7 : 8));
+          for (int i = 0; i < 30; i++) dl[i] = 5;
+          inf_build(&fixl, ll, 288);
+          inf_build(&fixd, dl, 30);
+          gotfix = 1;
+        }
+        hl = fixl;
+        hd = fixd;
+      } else {
+        int nlen = inf_bits(&s, 5) + 257;
+        int ndist = inf_bits(&s, 5) + 1;
+        int ncode = inf_bits(&s, 4) + 4;
+        int cl[19];
+        for (int i = 0; i < 19; i++) cl[i] = 0;
+        for (int i = 0; i < ncode; i++) cl[ORD[i]] = inf_bits(&s, 3);
+        inf_build(&hc, cl, 19);
+        int lens[320];
+        for (int i = 0; i < 320; i++) lens[i] = 0;
+        int i = 0;
+        while (i < nlen + ndist) {
+          int sy = inf_decode(&s, &hc);
+          if (sy < 0) return -1;
+          if (sy < 16) { lens[i] = sy; i += 1; continue; }
+          int rep = 0, v = 0;
+          if (sy == 16) { if (i == 0) return -1; v = lens[i - 1]; rep = 3 + inf_bits(&s, 2); }
+          else if (sy == 17) rep = 3 + inf_bits(&s, 3);
+          else rep = 11 + inf_bits(&s, 7);
+          for (int k = 0; k < rep && i < nlen + ndist; k++) { lens[i] = v; i += 1; }
+        }
+        inf_build(&hl, lens, nlen);
+        inf_build(&hd, lens + nlen, ndist);
+      }
+      for (;;) {
+        int sy = inf_decode(&s, &hl);
+        if (sy < 0) return -1;
+        if (sy < 256) { if (no >= cap) return -1; out[no] = (unsigned char)sy; no += 1; continue; }
+        if (sy == 256) break;
+        int li = sy - 257;
+        if (li >= 29) return -1;
+        int len = LB[li] + inf_bits(&s, LE[li]);
+        int di = inf_decode(&s, &hd);
+        if (di < 0 || di >= 30) return -1;
+        long dist = DB[di] + inf_bits(&s, DE[di]);
+        if (dist > no || no + len > cap) return -1;
+        for (int k = 0; k < len; k++) { out[no] = out[no - dist]; no += 1; }
+      }
+    } else return -1;
+    if (last != 0) break;
+  }
+  return no;
+}
+
+static int png_paeth(int a, int b, int c) {
+  int p = a + b - c;
+  int pa = p > a ? p - a : a - p;
+  int pb = p > b ? p - b : b - p;
+  int pc = p > c ? p - c : c - p;
+  if (pa <= pb && pa <= pc) return a;
+  return pb <= pc ? b : c;
+}
+
+/* 一份 PNG -> `g_png`（RGBA）。成了回 1。 */
+static int png_decode(const unsigned char *b, long len) {
+  if (len < 8 || b[0] != 0x89 || b[1] != 'P' || b[2] != 'N' || b[3] != 'G') return 0;
+  long w = 0, h = 0;
+  int depth = 8, color = 6;
+  const unsigned char *pal = NULL, *trns = NULL;
+  long ntrns = 0;
+  unsigned char *z = NULL;
+  long zn = 0;
+  long i = 8;
+  while (i + 8 <= len) {
+    long n = ((long)b[i] << 24) | ((long)b[i + 1] << 16) | ((long)b[i + 2] << 8) | (long)b[i + 3];
+    const unsigned char *ty = b + i + 4;
+    const unsigned char *at = b + i + 8;
+    if (n < 0 || i + 8 + n > len) break;
+    if (!memcmp(ty, "IHDR", 4)) {
+      w = ((long)at[0] << 24) | ((long)at[1] << 16) | ((long)at[2] << 8) | (long)at[3];
+      h = ((long)at[4] << 24) | ((long)at[5] << 16) | ((long)at[6] << 8) | (long)at[7];
+      depth = at[8];
+      color = at[9];
+      if (at[12] != 0) { free(z); return 0; }                 /* 隔行不认 */
+      if (depth != 1 && depth != 2 && depth != 4 && depth != 8) { free(z); return 0; }
+    } else if (!memcmp(ty, "PLTE", 4)) {
+      pal = at;
+    } else if (!memcmp(ty, "tRNS", 4)) {
+      trns = at;
+      ntrns = n;
+    } else if (!memcmp(ty, "IDAT", 4)) {
+      unsigned char *nz = (unsigned char *)realloc(z, (size_t)(zn + n));
+      if (nz == NULL) { free(z); return 0; }
+      z = nz;
+      memcpy(z + zn, at, (size_t)n);
+      zn += n;
+    } else if (!memcmp(ty, "IEND", 4)) break;
+    i += n + 12;
+  }
+  if (w <= 0 || h <= 0 || z == NULL) { free(z); return 0; }
+  int ch = color == 0 ? 1 : (color == 2 ? 3 : (color == 3 ? 1 : (color == 4 ? 2 : (color == 6 ? 4 : 0))));
+  if (ch == 0) { free(z); return 0; }
+  long bpl = (w * ch * depth + 7) / 8;
+  long bpp = (ch * depth) / 8;
+  if (bpp < 1) bpp = 1;
+  long rawcap = h * (bpl + 1) + 64;
+  unsigned char *raw = (unsigned char *)malloc((size_t)rawcap);
+  unsigned char *lines = (unsigned char *)malloc((size_t)(h * bpl));
+  unsigned char *px = (unsigned char *)malloc((size_t)(w * h * 4));
+  if (raw == NULL || lines == NULL || px == NULL) { free(z); free(raw); free(lines); free(px); return 0; }
+  long got = inf_run(z, 2, raw, rawcap);
+  free(z);
+  if (got < h * (bpl + 1)) { free(raw); free(lines); free(px); return 0; }
+  for (long y = 0; y < h; y++) {
+    int ft = raw[y * (bpl + 1)];
+    long src = y * (bpl + 1) + 1, dst = y * bpl, up = dst - bpl;
+    for (long x = 0; x < bpl; x++) {
+      int v = raw[src + x];
+      int a = x >= bpp ? lines[dst + x - bpp] : 0;
+      int bb = y > 0 ? lines[up + x] : 0;
+      int c = (y > 0 && x >= bpp) ? lines[up + x - bpp] : 0;
+      int o = v;
+      if (ft == 1) o = v + a;
+      else if (ft == 2) o = v + bb;
+      else if (ft == 3) o = v + ((a + bb) >> 1);
+      else if (ft == 4) o = v + png_paeth(a, bb, c);
+      else if (ft != 0) { free(raw); free(lines); free(px); return 0; }
+      lines[dst + x] = (unsigned char)(o & 255);
+    }
+  }
+  free(raw);
+  int gmax = (1 << depth) - 1;
+  for (long y = 0; y < h; y++) {
+    long row = y * bpl;
+    for (long x = 0; x < w; x++) {
+      long o = (y * w + x) * 4;
+      int r = 0, g = 0, bl = 0, al = 255;
+      int per = 8 / depth;
+      /* 第 k 个样本（位深 < 8 时从高位往低位数，RFC 2083 §7.2）。 */
+      #define PNG_SAMP(k) (depth == 8 ? lines[row + (k)] \
+        : ((lines[row + (k) / per] >> (8 - depth * (((k) % per) + 1))) & gmax))
+      if (color == 0 || color == 4) {
+        int v = PNG_SAMP(x * ch);
+        r = depth == 8 ? v : (int)((v * 255 + gmax / 2) / gmax);
+        g = r;
+        bl = r;
+        if (color == 4) al = PNG_SAMP(x * ch + 1);
+      } else if (color == 2 || color == 6) {
+        r = PNG_SAMP(x * ch);
+        g = PNG_SAMP(x * ch + 1);
+        bl = PNG_SAMP(x * ch + 2);
+        if (color == 6) al = PNG_SAMP(x * ch + 3);
+      } else {
+        int idx = PNG_SAMP(x);
+        if (pal == NULL) { free(lines); free(px); return 0; }
+        r = pal[idx * 3];
+        g = pal[idx * 3 + 1];
+        bl = pal[idx * 3 + 2];
+        if (trns != NULL && idx < ntrns) al = trns[idx];
+      }
+      #undef PNG_SAMP
+      px[o] = (unsigned char)r;
+      px[o + 1] = (unsigned char)g;
+      px[o + 2] = (unsigned char)bl;
+      px[o + 3] = (unsigned char)al;
+    }
+  }
+  free(lines);
+  free(g_png.px);
+  g_png.px = px;
+  g_png.w = w;
+  g_png.h = h;
+  return 1;
+}
+
+/* `picsiz(名字下标)`：宽*65536+高（读不到/解不开回 -1）。缓存与 KV6 那一格同一手，
+   **落点也试三处**（脚本旁边 / `../data/` / `data/`）—— EvalDraw 自己把图放在跟着程序
+   走的 `data/` 里（`demos/lab3d.kc` 写的是 `pic("doubcube.png",…)`，文件在
+   `evaldraw/data/doubcube.png`）。这与 JS 那侧的 `assetFind` 是同一条口径。 */
+static double png_size(const char *p) {
+  if (p == NULL) return -1.0;
+  if (strcmp(g_png.path, p) == 0) {
+    return g_png.ok ? (double)(g_png.w * 65536 + g_png.h) : -1.0;
+  }
+  snprintf(g_png.path, sizeof(g_png.path), "%s", p);
+  g_png.ok = 0;
+  char cand[3][1024];
+  int nc = 0;
+  snprintf(cand[nc++], sizeof(cand[0]), "%s", p);
+  const char *slash = strrchr(p, '/');
+  if (slash != NULL) {
+    int dlen = (int)(slash - p);
+    snprintf(cand[nc++], sizeof(cand[0]), "%.*s/../data/%s", dlen, p, slash + 1);
+    snprintf(cand[nc++], sizeof(cand[0]), "%.*s/data/%s", dlen, p, slash + 1);
+  }
+  for (int i = 0; i < nc; i++) {
+    unsigned char *b = NULL;
+    long len = kv6_slurp(cand[i], &b);
+    if (len < 0) continue;
+    int okp = png_decode(b, len);
+    free(b);
+    if (okp) { g_png.ok = 1; break; }
+  }
+  return g_png.ok ? (double)(g_png.w * 65536 + g_png.h) : -1.0;
+}
+
 
 /* 想不想要 GL 那一档（`OMNI_GFX=gl`）。 */
 static int gfx_gl_want(void) {
@@ -1162,8 +1449,14 @@ double omni_gfx_arr(omni_str name, double a0, double a1, double a2, double a3,
      回抄了多少格 —— 语言那一侧按 `picsiz` 给的宽高自己算下标。
      **与 `host/gfx-cpu.js` 的那一格逐句相同**（三条腿逐字节相同是判据）。 */
   if (!strcmp(nm, "picread")) {
-    if (g_gl.picread == NULL || items == NULL || n <= 0) return 0.0;
-    return (double)g_gl.picread(items, n);
+    if (!g_png.ok || g_png.px == NULL || items == NULL || n <= 0) return 0.0;
+    long cnt = g_png.w * g_png.h;
+    if (cnt > n) cnt = n;
+    for (long i = 0; i < cnt; i++) {
+      const unsigned char *q = g_png.px + i * 4;
+      items[i] = (double)((long)q[0] * 65536 + (long)q[1] * 256 + (long)q[2]);
+    }
+    return (double)cnt;
   }
   /* **KV6 那一族的第二句**（`kv6read`）：把缓存那份模型抄进来 —— 一格体素四个数
      `[x, y, z, 0xRRGGBB]`（坐标已减过支点）。回抄了多少**格体素**。
@@ -1504,12 +1797,6 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
        （目录只有宿主知道），解码与上传在设备 —— 与 `host/gfx-cpu.js` 那一格同一手。 */
     /* **`pic` 那一族**（`evaldraw.txt:1341`）：`picsiz 名字下标` -> 宽*65536+高（-1 = 没有）。
        路径在这一层拼（目录只有宿主知道），解码与缓存在设备（与文件纹理同一份）。 */
-    if (!strcmp(nm, "picsiz") && argc == 1 && g_gl.picload != NULL) {
-      const char *p = gfx_tex_path((int)a0);
-      int pw = 0, ph = 0;
-      if (p == NULL || g_gl.picload(p, &pw, &ph) != 0) return -1.0;
-      return (double)(pw * 65536 + ph);
-    }
     if (!strcmp(nm, "glsettexfile") && argc == 3 && g_gl.texfile != NULL) {
       const char *p = gfx_tex_path((int)a1);
       if (p == NULL) return 1.0;
@@ -1561,6 +1848,13 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
      路径在这一层拼（目录只有宿主知道），与 `picsiz` 同一手。 */
   if (!strcmp(nm, "kv6siz") && argc == 1) {
     return kv6_size(gfx_tex_path((int)a0));
+  }
+  /* **`pic` 那一族的头一句**（`picsiz 名字下标`，`evaldraw.txt:1341`）：宽*65536+高。
+     **不经 GL 插件** —— 解码器就在这份文件里（`png_decode`，与 `host/png-read.js`
+     同算法），三条腿要逐字节相同。先前这一格挂在插件上，于是 `--gfx host`/`null`
+     那两档一律回 -1：`demos/lab3d.kc` 拿 `while (pic(…) != 16777215)` 走光线 ⇒ 死循环。 */
+  if (!strcmp(nm, "picsiz") && argc == 1) {
+    return png_size(gfx_tex_path((int)a0));
   }
   if (!strcmp(nm, "glulookat") && argc == 9) { return 0.0; }
   if (!strcmp(nm, "drawspr") && argc == 4) { return 0.0; }

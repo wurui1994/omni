@@ -1,0 +1,29 @@
+// ext/evaldraw/examples/pic.kc —— **`pic` 那一族：设备自己解 PNG**
+//
+// 口径（`evaldraw.txt:1341`）：
+//
+//     pic("a.png",x,y)            回那一格像素的 0xRRGGBB
+//     pic("a.png",x,y,&r,&g,&b)   拆成三格 0..255
+//
+// 落法是两句宿主调用（见 `ext/polydraw/gfx3-rt.js` 的 `g3_pic3`）：`picsiz` 解一次并
+// 缓存、`picread` 把整张图抄给语言那一侧 —— 之后每像素采样都在语言层，不再过边界。
+//
+// **解码器是我们自己那一份**（`src/core/host/png-read.js` 与 `src/runtime/omni_fmt.c`
+// 的 `png_decode`，同算法两份）。先前这一格挂在 GL 插件的 ImageIO 上：只有 `--gfx gl`
+// 挂得上、而且只有 macOS 有 —— 于是默认那一档（CPU 帧缓冲）`pic` 一律回 0，
+// 而 `demos/lab3d.kc` 是拿 `while (pic("doubcube.png",…) != 16777215)` 走光线的
+// ⇒ **死循环**，扫描把它记成"超时"。
+//
+// 这一份用的图是 `ramp8.png`（8×8、RGB8、真 zlib 压的 —— 所以动态霍夫曼那条路也走到）：
+// 第 (x,y) 格是 `(x*32, y*32, (x+y)*16)`。挑四格出来印，偏一格就看得出来。
+
+()
+cls(0);
+printf("p00=%g p10=%g p07=%g p77=%g\n",
+       pic("ramp8.png",0,0), pic("ramp8.png",1,0),
+       pic("ramp8.png",0,7), pic("ramp8.png",7,7));
+r = 0; g = 0; b = 0;
+pic("ramp8.png",3,5,&r,&g,&b);
+printf("rgb=%g,%g,%g\n", r, g, b);
+   //把那张 8×8 放大 8 倍画出来 —— 判据那一侧要"这一帧不是全黑"，而且这样贴错一格看得见
+for(y=0;y<64;y++) for(x=0;x<64;x++) { setcol(pic("ramp8.png",x/8,y/8)); setpix(x+10,y+10); }
