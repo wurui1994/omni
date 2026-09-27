@@ -8373,7 +8373,8 @@ export function lowerC(path, text, host, defs, args) {
     }
     argvAddr = alignUp(gen.dataOff, 8);
     gen.dataOff = argvAddr + (ptrs.length + 1) * 8;
-    for (let i = 0; i < ptrs.length; i++) gen.emitBytes(argvAddr + i * 8, 8, BigInt(ptrs[i]));
+    /* argv 那张指针表也是**地址**（搬这块线性内存时要跟着改）—— 走 `emitPtrBytes`。 */
+    for (let i = 0; i < ptrs.length; i++) gen.emitPtrBytes(argvAddr + i * 8, BigInt(ptrs[i]));
   }
   /* `errno` 那一格（第八刀第八片）：data 段末尾 4 个字节，**只在用到时才留**。
    * 不写一个字节 data —— 线性内存出生全是 0，而 C 正好要求「程序启动时 errno 是 0」
@@ -8417,23 +8418,23 @@ export function lowerC(path, text, host, defs, args) {
    * 而 wasm 那边的 `(global $sp (mut i64) (i64.const …))` 是同一件事的静态写法。
    * 没有任何函数要帧时 spNo 还是 -1，这条也就不发。 */
   if (gen.spNo >= 0) {
-    entry.emit(OP.GSTORE, T_VOID, mod.consts.int(BigInt(stackTop)), REF_NONE, gen.spNo);
+    entry.emit(OP.GSTORE, T_VOID, gen.kaddr(stackTop), REF_NONE, gen.spNo);
   }
   /* 堆的起点交给宿主那份分配器（`interp/libc.js`）。**只有用到堆才发** —— 没用到的
    * 模块不该多一个外部符号（将来自带后端那条路上它是一次真的链接）。 */
   if (gen.heapUsed) {
     entry.emit(OP.CCALL, T_VOID, mod.cabiNo('__omni_heap_init'),
-      entry.pushArgs([mod.consts.int(BigInt(heapBase))]), 0);
+      entry.pushArgs([gen.kaddr(heapBase)]), 0);
   }
   /* `errno` 那一格的地址，同理 —— 用到 `<errno.h>` 才发。 */
   if (gen.errnoUsed) {
     entry.emit(OP.CCALL, T_VOID, mod.cabiNo('__omni_errno_init'),
-      entry.pushArgs([mod.consts.int(BigInt(errnoAddr))]), 0);
+      entry.pushArgs([gen.kaddr(errnoAddr)]), 0);
   }
   /* `strerror` 那块缓冲的地址**与大小**，同理 —— 用到 `strerror` 才发。 */
   if (gen.strerrorUsed) {
     entry.emit(OP.CCALL, T_VOID, mod.cabiNo('__omni_strerror_init'),
-      entry.pushArgs([mod.consts.int(BigInt(strerrAddr)),
+      entry.pushArgs([gen.kaddr(strerrAddr),
         mod.consts.int(BigInt(STRERROR_BYTES))]), 0);
   }
   /* 宿主提供的全局量（第十七片）：三条标准流那几格。地址与序号交过去，宿主把自己的
@@ -8449,7 +8450,7 @@ export function lowerC(path, text, host, defs, args) {
     mirTypeOf(mainParams[0].ty) === T_I32
       ? mod.consts.i32(argvStrs.length)
       : mod.consts.int(BigInt(argvStrs.length)),
-    mod.consts.int(BigInt(argvAddr)),
+    gen.kaddr(argvAddr),
   ];
   if (rt === T_VOID) {
     entry.emit(OP.CALL, T_VOID, info.no, entry.pushArgs(mainArgs), 0);
