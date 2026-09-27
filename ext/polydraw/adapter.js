@@ -286,8 +286,9 @@ const BLOCK_ARGS = new Map([
   ['getpicsiz/2', [0, 1]], ['getpicsiz/3', [1, 2]],
   /* 读像素那两格（`evaldraw.txt:1478`/`:1490`）：`&r,&g,&b` 三格都是块。 */
   ['getrgb/4', [1, 2, 3]], ['getpix/5', [2, 3, 4]],
-  /* `pic(名字,x,y,&r,&g,&b)`：后三格是块（第 0 格那个串在 `SHADER_FNS` 那张表里）。 */
-  ['pic/6', [3, 4, 5]],
+  /* `pic(名字,x,y,&r,&g,&b)`：后三格是块（第 0 格那个串在 `SHADER_FNS` 那张表里）。
+     不带文件名那一档（Ctrl+P 选的图）是 `pic(x,y,&r,&g,&b)` —— 后三格同理。 */
+  ['pic/6', [3, 4, 5]], ['pic/5', [2, 3, 4]],
   /* 联网那一族（`net-rt.js`）：`net_recv(&from,&val)` 两格都是块、
      `net_recv(&from,buf,leng)` 前两格是块、`net_send(to,buf,leng)` 中间那格是块。 */
   ['net_recv/2', [0, 1]], ['net_recv/3', [0, 1]], ['net_send/3', [1]],
@@ -325,9 +326,14 @@ const nameRef = (n) => ({ kind: 'name', name: n });
  * `for(i=gs.sprn-1;i>=0;i--) pspr[i] = spr[i];` 就成了一条跑不完的循环
  * （看着像"卡住"，其实是在抄 25 亿轮）。
  * 本地那种真箱子没有 `$o` 形参 ⇒ `withOff` 原样回 `[0]`，与从前一模一样。
+ * **不给 `C`** 那一档也是 `[0]`：入口里就地开的那种箱子（`名字[0] = 名字$v`，见
+ * `valBox` 那一段）起点必然是 0，而且那时候 `C.offs` 还没摆好。
  */
 const boxRef = (n, C) => ({
-  kind: 'index', obj: nameRef(n), index: withOff(n, { kind: 'int', value: '0' }, C),
+  kind: 'index',
+  obj: nameRef(n),
+  index: C === undefined ? { kind: 'int', value: '0' }
+    : withOff(n, { kind: 'int', value: '0' }, C),
 });
 
 /** 这门语言的名字一律折小写（大小写不敏感）。 */
@@ -406,10 +412,14 @@ function exprOf(x, C, want = 'val') {
   }
   if (t === 'name') {
     const n = idOf(x);
-    /* 内建常量。`PI` 在 `eval.txt` 里是内建；`RND`/`NRND` 是**无参函数**，
-       写成光秃秃的名字也算调用（说明书 §"1-Param Operators" 那一行里就有它们）。 */
+    /* 内建常量。`PI` 在 `eval.txt` 里是内建（正本里连赋值都不许：`eval_bench` 上
+       `pi=5` 报「'=' bad dest」）；`RND`/`NRND` 是**无参函数**，写成光秃秃的名字也算调用
+       （说明书 §"1-Param Operators" 那一行里就有它们）。
+       **`E` 不是内建**（从前这儿有一格 `e` = 2.71828…，是我们自己加的）：
+       `eval_bench` 上 `(x) e` 报「E undefined」、`e=5; e+1` 回 6 —— 它就是个普通名字。
+       代价不是"少一个常量"而是**死循环**：`games/kjoust3d/kjoust3d.kc:486` 的
+       `for(e=eggn-1;e>=0;e--)` 里 `e` 被折成 2.71828，条件永远真，一帧再也出不来。 */
     if (n === 'pi') return num('3.14159265358979323846');
-    if (n === 'e') return num('2.71828182845904523536');
     /* `RND` / `NRND` 光秃秃写着也算调用（`eval.txt` 的 "1-Param Operators" 那一行）。 */
     if (n === 'rnd' || n === 'nrnd') {
       C.needRnd = true;
@@ -1212,6 +1222,28 @@ function labelTails(s, name) {
 }
 
 /**
+ * **这个标号那一格自己就能落**：它摆在某格 `block` 的**这一层**，而跳它的 `goto`
+ * 也在那一格表里（不论嵌套多深）。那一格 `block` 降的时候走的正是"往前跳"那一档
+ * （标号前头整段加护卫、里头每格循环的条件上也加一格旗子），控制流自己会一路退到
+ * 标号那句 —— 所以**不该再按 `blockEntryAt` 拆一份抄到 `goto` 那儿**。
+ *
+ * 为什么必须拦：抄过去的那一段里可能有 `break`（`geeky/hull3d.kc` 的 `endit:` 后头就是
+ * "收尾那一圈 + break"）。`break` 在标号那儿绑的是**外层那个 for**，抄到 `goto` 那儿
+ * 绑的却是**它身边那个 do-while** —— 两件事。于是 `zz` 那一圈再也走不动，
+ * 一份 8 个点的凸包能转到超时。
+ */
+function labelHandledInside(s, name) {
+  if (!isList(s)) return false;
+  if (tag(s) === 'block') {
+    const list = kids(s);
+    const at = list.findIndex((x) => isList(x) && tag(x) === 'label' && idOf(kids(x)[0]) === name);
+    if (at >= 0) return gotoNames(list.slice(0, at)).has(name);
+  }
+  for (const k of kids(s)) if (labelHandledInside(k, name)) return true;
+  return false;
+}
+
+/**
  * **往前跳进一格块里**那一档：`goto` 在这格语句表上（含嵌套）、标号在后头某一句
  * **里头**（`games/chess/chess.kc:162` 跳进 `if (n==0) {…}`、
  * `games/bowling/bowling.kc:119` 从 `if` 的这一支跳进 `else` 那一支）。
@@ -1222,6 +1254,8 @@ function blockEntryAt(list, C) {
     if (!isList(list[j])) continue;
     for (const name of gotoNames(list.slice(0, j + 1))) {
       if (C.gotoCopy.has(name)) continue;    /* 这一格正在降（下面那一层的递归）—— 别再拆一遍 */
+      /* 标号与跳它的 `goto` 在同一格表里 ⇒ 那一格自己落（见 `labelHandledInside`）。 */
+      if (labelHandledInside(list[j], name)) continue;
       const tails = labelTails(list[j], name);
       if (tails === null) continue;
       const region = tails.flat();

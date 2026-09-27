@@ -96,6 +96,11 @@ export const EVALDRAW_3D = new Map([
      串那一格由 `SHADER_FNS` 换成名字下标，所以 `callOf` 查的是 `#str0` 那个键。 */
   ['pic/3#str0', 'g3_pic3'],
   ['pic/4#str0', 'g3_pic4'],
+  /* **不带文件名那两档**（`:1341`/`:1342`）：读的是**编辑器里 Ctrl+P 选的那张图**。
+     这条腿上没有"选过的图"（`getpicsiz(&x,&y)` 那一档同理，回 0×0）⇒ 采样一律回 0、
+     三格颜色写 0。`voxes/genglobe.kc:22` 就是 `pic(u*xmul,v*ymul+yadd,&r0,&g0,&b0)`。 */
+  ['pic/2', 'g3_pic2'],
+  ['pic/5', 'g3_pic5'],
   /* `pic(名字,x,y,&r,&g,&b)`：**串 + 三格块同时配对**（见 `g3_pic6` 的头注）。 */
   ['pic/6#str0', 'g3_pic6'],
   ['getrgb/4', 'g3_getrgb4'],
@@ -469,6 +474,16 @@ export function gfx3FnDecls(host = false, withGL = false) {
     ]),
     fnT('g3_getpicsiz3', [['nam'], ['px', ARR], ['po'], ['py', ARR], ['qo']], [
       ex(call('g3_getpicsiz2', [nm('px'), nm('po'), nm('py'), nm('qo')])),
+      ret(num(0)),
+    ]),
+    /* **不带文件名的 `pic`**（编辑器里 Ctrl+P 选的那张图）：这条腿上没有"选过的图"
+       ⇒ 与 `g3_getpicsiz2` 回 0×0 是同一个口径，采样回 0、三格颜色写 0。 */
+    fn('g3_pic2', ['x', 'y'], [ret(num(0))]),
+    fnT('g3_pic5', [['x'], ['y'],
+      ['rb', ARR], ['ro'], ['gb', ARR], ['go'], ['bb', ARR], ['bo']], [
+      aset('rb', nm('ro'), num(0)),
+      aset('gb', nm('go'), num(0)),
+      aset('bb', nm('bo'), num(0)),
       ret(num(0)),
     ]),
     /**
