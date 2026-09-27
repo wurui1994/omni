@@ -648,3 +648,35 @@ typedef union { struct { double r; double i; }; double _Complex private_data_c; 
   `array.c` 一处把复数当整数用、`eval.c` 的计算跳转、`memory.c` 要 `stdalign.h`。
 * `tests/mir/jsmod.js` 新增一格 `struct-byval-across`：两份模块之间**按值传/按值回**
   一个 `{double r; double i;}`，`(1.5+2i)(0.5-1i) = 2.75-0.5i`，退出码与输出都对上。
+
+## 第十五格：三个单点 —— R 运行时 103/111 变 108/111（已落，2026-09-27）
+
+剩下那几类都是单点，一刀一个：
+
+1. **宽字符常量进不了常量表达式**（2 份）：`case L'%':` 报 `constant expression expected`。
+   `ceUnary` 只认 `TOK_CCHAR`，漏了 `TOK_LCHAR` —— 而 C11 6.4.4.4 第 11 段说宽字符常量
+   也是整型常量（类型 `wchar_t`）。R 的 `Rstrptime.h` 与 `printutils.c` 里满地都是。
+2. **`<stdalign.h>` 不在搜索路径上**（1 份）：系统那份在 clang 的资源目录里
+   （`/…/lib/clang/17/include`），不是 SDK 的 `usr/include`。自带一份（四个宏，
+   真东西是早就认的 `_Alignas` / `_Alignof` 两个关键字）比去猜 clang 的版本目录稳。
+3. **`extern T x[];` 那一对**（2 份 + 顺带 35 份）：从前不带长度的 `extern` 数组按
+   **0 个元素**登记，于是"头里声明、`.c` 里定义"那一对（R 的 `g_extern.h` +
+   `g_fontdb.c`）成了"长度 0 与长度 N 冲突"。现在：
+   * `mergeTentative` 认"长度不知道"（`unsized`）：另一条写了长度就算另一条的；
+   * 长度补上时**重划地方** —— 占位块是 0 字节，不重划就与后面那个全局量叠在同一个
+     地址上（静默答错）。已经有人取过它的地址就来不及了，那时报出来；
+   * 反过来那 35 份（`extern T x[];` 用了、但**这个单元里没有定义**）从前一律报
+     `unknown type size`。那种用法只要"基址 + 下标 × 元素大小"，长度一个字节都用不到
+     （`sys_errlist[i]` 就是），所以给它划一格 8 字节的**占位**，真地址由链接那一步
+     按符号名回填（`mod.dataRefs`）。
+
+### 账
+
+* `tests/r/rtc.js`：**108/111**（地板抬到 108）。剩下 3 份要的是复数**算术**
+  （`complex.c` 的 `1.0iF`、`array.c` 的 `cimag(x*y)`）与**计算跳转**（`eval.c` 的
+  bytecode 解释器，`&&label`）—— 那是两把更大的刀。
+* `tests/c/gen/88-extern-array-bound.c`（新格）：声明在前、定义在后的四对
+  （`int[]` / `const char[]` / `double[]` / `struct[]`），中间夹两个哨兵全局量
+  判"没被叠在一起"，退出码与 cc 逐字节相同（102）。
+* 一个已知的洞写在明处：占位块上**折出来的内部地址**（`&x[2]`，x 是长度不知道的
+  extern 数组）认不回符号 —— R 里没有这种写法，真撞上要在常量折叠那一处按名字记。

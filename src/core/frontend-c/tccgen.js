@@ -692,10 +692,16 @@ function cefApply(t, x, y, err) {
  */
 function mergeTentative(a, b) {
   if (isArray(a.t) && isArray(b.t) && sameType(a, b)) {
+    /* `extern T x[];` 的长度是**不知道**（登记成 0，见 declarator 里那一段）——
+       另一条写了长度就算另一条的。少这两句，同一个单元里"头里 extern、这儿定义"
+       的那一对会被判成"长度 0 与长度 N 冲突"。 */
+    if (a.unsized === true && b.unsized !== true) return b;
+    if (b.unsized === true && a.unsized !== true) return a;
     if (a.count === b.count || b.count < 0) return a;
     if (a.count < 0) return b;
     return null; /* 两条都写了长度，而且不一样 */
   }
+
   if (sameType(a, b)) return a;
   return null;
 }
@@ -2318,9 +2324,18 @@ export class CGen {  /**
        * 合并的规则只有一条：数组的长度谁写了算谁的。 */
       const m = mergeTentative(hit.ty, ty);
       if (m === null) this.err(`incompatible types for redefinition of '${name}'`);
+      const wasUnsized = hit.ty.unsized === true && m.unsized !== true;
       hit.ty = m;
       if (!isExtern) hit.defined = true;
       if (extra > 0) hit.extra = extra;
+      /* **长度从"不知道"变成真长度了**（头里 `extern T x[];`、这儿是定义）：
+         那条 `extern` 当时按 0 字节划过地方，现在得重划 —— 不重划的话这一块与后面
+         那个全局量**叠在同一个地址上**（静默答错）。已经有人取过它的地址就来不及了
+         （那条地址常量已经发出去），那时报出来。 */
+      if (wasUnsized && !(isArray(m.t) && m.count <= 0)) {
+        if (hit.used) this.err(`'${name}' 的长度在用过之后才补上（先声明再定义那一对要在用它之前）`);
+        hit.addr = -1;
+      }
       // 长度补上了才划地方（试探性那一条当时没划）
       if (hit.addr < 0 && !(isArray(m.t) && m.count < 0)) this.allocGlobal(hit);
       return hit;
@@ -2357,8 +2372,26 @@ export class CGen {  /**
   /** 一个全局量 -> 左值。地址是常量，静态偏移 0（`p->f` 那种偏移进描述符是后面的事）。 */
   gvarLval(e) {
     /* 试探性定义的长度一直没补上：tcc 也是在**用**它的地方报，而且是这句话
-     * （`static int t[]; sizeof(t)` -> `unknown type size`）。 */
-    if (e.addr < 0) this.err('unknown type size');
+     * （`static int t[]; sizeof(t)` -> `unknown type size`）。
+     *
+     * 一个例外（第一百五十二片）：**`extern T x[];` 长度在别的翻译单元里**。
+     * 那种用起来只要"基址 + 下标 × 元素大小"，长度一个字节都用不到（`sys_errlist[i]`
+     * 就是这么用的）。所以给它划一格**占位**（8 字节，只为了有一个与别人不同的地址），
+     * 真地址由链接那一步按符号名回填（`mod.dataRefs`）。
+     * 从前这儿一律报错，而那把 R 的 35 份 `.c` 判死了。
+     *
+     * 一个已知的洞写在明处：占位块上**折出来的内部地址**（`&x[2]` 那种常量折叠）
+     * 认不回符号 —— 那时它落在占位块之外，`dataRefs` 记不到。R 里没有这种写法；
+     * 真撞上要在折叠那一处按名字记，见 ADR-0047 第十五格的账。 */
+    if (e.addr < 0) {
+      if (e.defined || this.native) this.err('unknown type size');
+      else {
+        this.dataOff = alignUp(this.dataOff, 8);
+        e.addr = this.dataOff;
+        this.dataOff += 8;
+        e.dseq = this.dataSeq++;
+      }
+    }
     e.used = true;
     this.symAlign = e.align || 0;
     /* native（第二十一片）：全局量的地址是一个**符号的地址**，编译期算不出来 ——
@@ -7235,7 +7268,10 @@ export class CGen {  /**
   ceUnary() {
     const t = this.tok;
     if (t === TOK_CINT || t === TOK_CUINT || t === TOK_CLLONG || t === TOK_CULLONG
-      || t === TOK_CLONG || t === TOK_CULONG || t === TOK_CCHAR) {
+      || t === TOK_CLONG || t === TOK_CULONG || t === TOK_CCHAR || t === TOK_LCHAR) {
+      /* 宽字符常量（`L'%'`）也是整型常量（C11 6.4.4.4 第 11 段：类型 `wchar_t`）——
+         少了它 `case L'%':` 就报 `constant expression expected`。R 的 `Rstrptime.h` 与
+         `printutils.c` 里满地都是（ADR-0047 量出来的两份）。 */
       const v = BigInt(/** @type {bigint} */ (this.tokc));
       this.next();
       return v;
@@ -7566,14 +7602,18 @@ export class CGen {  /**
               /* `extern const char *const sys_errlist[];`（第八刀第十六片）——
                * `extern` 的数组可以是**不完整类型**（C11 6.7.6.2 第 4 段）：大小在别的
                * 翻译单元里。这儿按 0 个元素登记：不占 data 段，`sizeof` 会得到 0
-               * （真的编译器那儿是一条错误 —— 那一格还没到）。
+               * （真的编译器那儿是一条错误 —— 那一格还没到），但**记一条"长度是不知道，
+               * 不是 0"**（`unsized`）：长度可能由**同一个单元里后面那条定义**补上 ——
+               * R 的 `g_extern.h` 声明 `extern const struct … _hershey_font_info[];`，
+               * 而定义就在 `g_fontdb.c` 里。少这个记号那一对就成了"长度 0 与长度 N 冲突"，
+               * 报 `incompatible types for redefinition`（第一百五十二片量出来 2 份）。
                *
                * 文件作用域上不带 `extern` 的那一种是**试探性定义**（C11 6.9.2，
                * 第三十九片）：`static int t[];` 合法，长度由后面同名的那一条补上。
                * 所以那时**留着** count < 0 交给 `declareGlobal` —— 它登记一条
                * 「还没划地方」的登记。局部量没有这一说，照旧报错。 */
               if (!global && !isExtern) this.err(`array size missing in '${name}'`);
-              if (!global || isExtern) vty = mkArray(vty.ref, 0);
+              if (!global) vty = mkArray(vty.ref, 0);
             } else if (this.tok === TOK_STR) {
               /* 相邻的字面量要拼起来（`char s[] = "a" "b"`），所以只能真的读一遍；
                * 读完记号已经吃掉，字节留在手上。 */
