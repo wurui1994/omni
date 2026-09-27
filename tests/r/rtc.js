@@ -248,8 +248,8 @@ if (kinds.size > 0) {
  *
  * 天花板只许降、地板只许涨。这两条合起来就是"这一套离链得起还差多少"的唯一口径。
  */
-const CEIL = { dup: 0, data: 3, thunk: 0, libc: 205 };
-const SYMS_FLOOR = 2552;
+const CEIL = { dup: 0, data: 0, thunk: 0, libc: 205 };
+const SYMS_FLOOR = 2555;
 if (want('rt')) {
   const provide = new Map();
   const dups = [];
