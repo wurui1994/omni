@@ -3424,5 +3424,69 @@ js 腿 + GL 设备（ImageIO）**三份 PNG 逐字节相同**。`doubcube.png` �
 ⇒ 这个数影响不到任何判得出来的东西；真接音频那天要先把它量出来。落在 `noise-rt.js`
 那一摊（"纯算术的宿主函数"），一个像素都不画。
 
+### 36.12 联网那一族：单机**就是**联网的一个真实情形（`net_send`/`net_recv` 落地）
+
+`evaldraw.txt:1725` 给 `NET_ALL` 的定义是「Send to everyone, **including self**」，`:1770`
+又专门写着「You can send packets to yourself. Sometimes, this enables simpler code.」——
+所以 `net_players`=1 那一档不是"功能缺失"，是**收件人只有自己**。
+
+从前这两格在 `ABSENT_FNS` 里（回 0、实参一格不算），于是这种写法死循环：
+
+```
+if (!net_me) { rseed = int((klock(1)*10)%32768); net_send(NET_ALL,rseed); }
+while (1) { if (net_recv(&from,&rseed)) { if (!from) { srand(rseed); break; } } }
+```
+
+`games/stratego.kc:26` 就是这两行 —— 它拿"发给自己的那一包"当随机种子的同步点。语料里
+靠这一族的十二份（`netsync` / `asteroids` / `stratego` / `kjoust3d` / `snood` / `traffic` /
+`chess` / `rummiken` / `tictactoe` / `set` / `backgammon` / `dragcards`）全是这个形状。
+
+落法：一格**收包队列**，在语言这一侧（`ext/polydraw/net-rt.js`）—— 纯数据，与画布/GPU 无关，
+四条腿同一份代码。队列里一格包是 `[个数, 值…]`，两参/三参各一对发收。
+四处**明写的偏差**（只有一台机器、三个常量的值不可知、包边界在 3 发 2 收时只取第一个、
+队列满回 0）写在那份文件的头注里。`NET_NOSYNC` 取 **0** 不是"编了个数"：它的意思是
+"绕开经主机排序、直接放进自己的收包队列"，而我们只有一台机器、本来就是直接放。
+
+判据：`ext/evaldraw/examples/netbox.kc`（`tests/lower/run.js --only evaldraw`，三条腿同一份
+输出）。
+
+### 36.13 `&一整块里的某一格` —— 函数体里的下标写死 `[0]` 会把别人的字段改掉
+
+这是 §36 这一轮里**最深的一格**，`games/asteroids/asteroids.kc` 卡在它上头：
+
+```
+krnd (&kholdrand) { kholdrand = ((kholdrand*214013)+2531011*2)%(2^32); return(...); }
+...
+lspr[i].x = gxres*krnd(&lgs.krnd);      //lgs 是 21 槽的结构体，krnd 是第 4 个字段
+```
+
+`&x` 形参在我们这条腿上落成**两格**（那一块 + 那格偏移 `名字$o`，见 adapter 的 `offName`），
+可 `boxRef()` 生成的读写却写死 `[0]` —— 于是 `krnd` 改的是那一块的**第 0 格**，也就是
+`gs.sprn`（精灵数）。它被写成 25 亿，紧接着那句
+
+```
+pgs = gs; for(i=gs.sprn-1;i>=0;i--) pspr[i] = spr[i];
+```
+
+就成了一条抄 25 亿轮的循环。**看着是"卡住"，其实是在跑一条正确的循环，只是界错了。**
+
+修法一行：`boxRef(n, C)` 把下标过一趟 `withOff` —— 本地那种真箱子没有 `$o` 形参，
+`withOff` 原样回 `[0]`，与从前逐字节相同；只有"形参"那一档会加上偏移。
+
+**查这一类的路子**（这次绕了不少弯，记下来）：
+* `printf` 探针在死循环里**印不出来** —— stdout 走管道是块缓冲，程序没退出就什么都看不到。
+  用它做二分是白费功夫；
+* `--frames 1` 的 `refresh()` 是"交这一帧"，**不是"到这儿就停"** —— 插一句 `refresh()`
+  当断点会让后面的代码照旧往下跑，二分的结论是反的；
+* 真正好用的两把：`OMNI_PROF=sample:997` 直接跑二进制（它说"99.97% 在 `s_eval$frame`
+  自己身上、一个被调函数都没有" ⇒ 那个循环里**没有调用**），
+  再用 `lldb -b -o "br set -n s_某函数" -o run -o bt`**按函数问"到过没有"**
+  （到过 `s_spawnmeteor`、没到过 `s_drawit`）；
+* 把范围夹到几行之后，`lldb` 里直接调运行时读那一块：
+  `p (double)omni_arr_f64_get((void*)$x1, 0)` —— 第二趟 `spawnmeteor` 时 `gs.sprn` 印出来
+  是 `2512633608`，一眼就是个 LCG 状态值，根因立刻落到 `krnd` 身上。
+
+判据：`ext/evaldraw/examples/netbox.kc` 的前三行（`field=` / `slot=` / `plain=`）。
+
 
 

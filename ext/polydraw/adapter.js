@@ -35,6 +35,7 @@ import { gfx3FnDecls, gfx3GlobalDecls } from './gfx3-rt.js';
 import { textFnDecls, textStubDecls, textGlobalDecls } from './text-rt.js';
 import { glslAlign } from './glsl.js';
 import { NOISE_FNS, noiseGlobalDecls, noiseFnDecls } from './noise-rt.js';
+import { NET_FNS, netGlobalDecls, netFnDecls } from './net-rt.js';
 import {
   graphGlobalDecls, graphFnDecls, graphInitStmts, graphFrameStmts, graph3dFrameStmts,
   graph1dFrameStmts,
@@ -95,21 +96,21 @@ const ABSENT_VARS = new Map([
   ['using6dof', 0], ['usingstereo', 0], ['net_players', 1], ['net_me', 0],
 ]);
 /**
- * 同一格口径的**函数**：设备/对方不在，所以"什么都没读到" ⇒ **回 0，出参一格不动**。
+ * 同一格口径的**函数**：设备不在场，所以"什么都没读到" ⇒ **回 0，出参一格不动**。
  *
- * * `readmag6d(设备号, &x,&y,&z, …)` —— 回的是读到几组；没有追踪器就是 0；
- * * `net_recv(&from,&val)` / `net_recv(&from,buf,leng)` —— `evaldraw.txt:1732`：
- *   「Returns the # of values read, or 0 if nothing」；
- * * `net_send(to,val)` / `net_send(to,buf,leng)` —— `:1728`：「Returns the number of
- *   values actually transmitted; 0 if failed」。
+ * * `readmag6d(设备号, &x,&y,&z, …)` —— 回的是读到几组；没有追踪器就是 0。
  *
  * **实参一格都不算**（它们全是 `&x` / `&a[i]` 这种出参，单独过 `exprOf` 会当场报）——
  * 而这正好也是对的：没读到东西就不该动它们（静态量本来是 0）。代价是实参里的副作用
  * 不发生 —— 这一族的实参全是纯粹的地址，语料里没有例外。
  * 语料里靠这一族的五份：`magpong` / `magpong2` / `magsword` / `bowling` / `kpool`
- * （全都按回来的个数判"有没有设备"），加上联网那四份。
+ * （全都按回来的个数判"有没有设备"）。
+ *
+ * **联网那两格从前也在这儿**（`net_send` / `net_recv`）—— 已经搬走了：单机是联网的一个
+ * 真实情形（`net_players`=1、发给 `NET_ALL` 原路落回自己），回 0 会把
+ * `games/stratego.kc:26` 那种"自己发自己收"的同步点变成死循环。见 `net-rt.js` 的头注。
  */
-const ABSENT_FNS = new Set(['readmag6d', 'net_recv', 'net_send']);
+const ABSENT_FNS = new Set(['readmag6d']);
 /**
  * **脚本写得动的那几格**。那张表里它们全是"名字 -> 一格 double 的地址"
  * （`polydraw.c:2217-2222`），所以**每一格都写得动** —— 从前这儿只放了两格，
@@ -287,6 +288,9 @@ const BLOCK_ARGS = new Map([
   ['getrgb/4', [1, 2, 3]], ['getpix/5', [2, 3, 4]],
   /* `pic(名字,x,y,&r,&g,&b)`：后三格是块（第 0 格那个串在 `SHADER_FNS` 那张表里）。 */
   ['pic/6', [3, 4, 5]],
+  /* 联网那一族（`net-rt.js`）：`net_recv(&from,&val)` 两格都是块、
+     `net_recv(&from,buf,leng)` 前两格是块、`net_send(to,buf,leng)` 中间那格是块。 */
+  ['net_recv/2', [0, 1]], ['net_recv/3', [0, 1]], ['net_send/3', [1]],
 ]);
 
 /** 宿主那边**无参的函数**（`KLOCK()`）。 */
@@ -307,13 +311,24 @@ const num = (v) => ({ kind: 'real', value: String(v) });
 const nameRef = (n) => ({ kind: 'name', name: n });
 
 /**
- * **装在一格数组里的量**（`&a` 那一族）：读写都走 `x[0]`。
+ * **装在一格数组里的量**（`&a` 那一族）：读写都走 `x[那格偏移]`。
  *
  * 这门语言的 `&a` 形参是"改得到调用方"（`eval.txt` 那张形参表的第二态）。标准 IR 里
  * 没有指针，所以凡是**被取过地址**的量都落成一格长度 1 的数组：实参传那一格数组本身，
  * 被调用的函数改的就是同一块。名单在 `C.boxed`（见 `collectBoxed`）。
+ *
+ * **下标不是常量 0，要加上那格偏移**（`名字$o`，见 `offName` 的头注）：调用方传过来的
+ * 未必是"自己开的一格长度 1 的箱子"，也可以是**一整块里的某一格**——
+ * `games/asteroids/asteroids.kc:457` 的 `krnd(&lgs.krnd)` 就是这一格（`lgs` 是个
+ * 21 槽的结构体、`krnd` 是第 4 个字段）。从前这儿写死 `[0]`，于是 `krnd` 改的是
+ * `lgs.sprn`（第 0 个字段）：精灵数被写成 25 亿，紧接着那句
+ * `for(i=gs.sprn-1;i>=0;i--) pspr[i] = spr[i];` 就成了一条跑不完的循环
+ * （看着像"卡住"，其实是在抄 25 亿轮）。
+ * 本地那种真箱子没有 `$o` 形参 ⇒ `withOff` 原样回 `[0]`，与从前一模一样。
  */
-const boxRef = (n) => ({ kind: 'index', obj: nameRef(n), index: { kind: 'int', value: '0' } });
+const boxRef = (n, C) => ({
+  kind: 'index', obj: nameRef(n), index: withOff(n, { kind: 'int', value: '0' }, C),
+});
 
 /** 这门语言的名字一律折小写（大小写不敏感）。 */
 const low = (s) => String(s).toLowerCase();
@@ -442,7 +457,7 @@ function exprOf(x, C, want = 'val') {
       const v = gfxCallIR(n);
       return want === 'cond' ? truthy(v) : v;
     }
-    const v = C.boxed.has(n) ? boxRef(n) : nameRef(n);
+    const v = C.boxed.has(n) ? boxRef(n, C) : nameRef(n);
     return want === 'cond' ? truthy(v) : v;
   }
   if (t === 'neg') return { kind: 'unop', op: '-', operand: exprOf(kids(x)[0], C) };
@@ -916,6 +931,16 @@ function callOf(x, C) {
     return { kind: 'call', fn: nameRef(noiseFn), args };
   }
 
+  /* **联网那一族**（`net_send` / `net_recv`）：一格队列，落成生成出来的 IR
+     （`net-rt.js`）—— 单机是联网的一个真实情形（发给 `NET_ALL` 原路落回自己）。
+     键用 `rawArgs.length`（`args` 里块那几格已经配成两个了）。 */
+  const netFn = NET_FNS.get(`${n}/${rawArgs.length}`);
+  if (netFn !== undefined) {
+    C.needNet = true;
+    C.fns.set(netFn, { params: args.map(() => REAL), ret: REAL });
+    return { kind: 'call', fn: nameRef(netFn), args };
+  }
+
   /* 画图那一族：**按这一门的宿主表判**（`C.host`）。两门语言共用这一份 adapter，
      差别只在这张表 —— PolyDraw 是 GL 立即模式（`polydraw.c:2070` 的 myext[]）、
      EvalDraw 是 `cls/setcol/setpix/moveto/lineto/drawsph/drawcone/…`（`evaldraw_ref.md`）。 */
@@ -960,7 +985,7 @@ function callOf(x, C) {
 function targetOf(x, C) {
   if (tag(x) === 'name') {
     const n = idOf(x);
-    return C.boxed.has(n) ? boxRef(n) : nameRef(n);
+    return C.boxed.has(n) ? boxRef(n, C) : nameRef(n);
   }
   if (tag(x) === 'index' || tag(x) === 'field') {
     /* 结构体那条路先看（`vt[i].stuck = 1`）—— 与读那一侧同一格 `fieldRef`。 */
@@ -2384,6 +2409,13 @@ function blockOperand(x, C) {
      那它就是个标量，不是那个同名的整块。 */
   if (isList(x) && tag(x) === 'name' && C.localReal !== undefined
     && C.localReal.has(idOf(x))) return null;
+  /* **装箱的那几格同理**：它在本函数里是"一格长度 1 的箱子"（`&x` 要的那种），
+     不是别的函数里那个同名的大数组。`games/stratego.kc` 的 `mx0` 就是这一格 ——
+     `getcompmove` 里是 `auto mx0[244]`、主函数里是个取过地址的标量。
+     （能进 `C.boxed` 就说明"这一份函数眼里它不是块"——那张表是按函数算的，
+     见 `boxedFor` 的头注。） */
+  if (isList(x) && tag(x) === 'name' && C.boxed !== undefined
+    && C.boxed.has(idOf(x))) return null;
   const r = blockWalk(x, C);
   if (r !== null) {
     if (r.dims.length === 0 && r.ty === null) return null;   /* 落到一个数 -> 照旧走标量那条路 */
@@ -2686,7 +2718,9 @@ function collectBoxed(x, C, out = new Set(), blocks = new Set()) {
     const a = kids(x)[0];
     if (isList(a) && tag(a) === 'name') {
       const n = idOf(a);
-      if (!C.arrs.has(n) && !C.svars.has(n) && !blocks.has(n)) out.add(n);
+      /* **"本来就成块"只问那张传进来的表**：`C.arrs`/`C.svars` 不分函数，而且会在
+         函数逐个降的过程中被别人的 `auto a[N]` 塞进去（见 `boxedFor` 的头注）。 */
+      if (!blocks.has(n)) out.add(n);
     }
     return out;
   }
@@ -2751,8 +2785,29 @@ function collectBoxed(x, C, out = new Set(), blocks = new Set()) {
  * 一帧 175 个球 ⇒ 350 次 `omni_arr_f64_new`（占语言那一半 24.1% 的栈顶样本）。
  */
 function boxedFor(node, C) {
-  const own = collectBoxed(node, C, new Set(), C.blockNames);
+  /**
+   * 这一份函数眼里"本来就成块"的名字 = **文件级那几格** + 它自己声明的那几格。
+   *
+   * 不能拿整棵树那张（`C.blockNames`）也不能拿 `C.arrs`/`C.svars` 直接问：那两张都
+   * **跨函数串味** —— `C.arrs` 还会在函数逐个降的过程中被别人的 `auto a[244]` 塞进去
+   * （`bodyOf` 的 `autoShape`）。`games/stratego.kc` 就栽在这儿：`getcompmove` 有
+   * `auto mx0[244]`，而主函数里 `mx0` 是个普通标量、还拿 `&mx0` 递下去 ——
+   * 主函数那一格于是"看着像已经成块"不装箱，落成 `real`，而被调方的形参要一整块。
+   */
+  const fileLevel = (m) => [...m.keys()].filter((n) => C.staticOwner.get(n) === '文件级');
+  const here = new Set([
+    ...(C.fileBlockNames ?? C.blockNames),
+    ...fileLevel(C.arrs),
+    ...fileLevel(C.svars),
+  ]);
+  for (const s of autoDecls(node)) if (s.ty !== undefined || s.arr !== undefined) here.add(s.name);
+  for (const s of staticDecls(node)) if (s.ty !== undefined || s.arr !== undefined) here.add(s.name);
+  const own = collectBoxed(node, C, new Set(), here);
   const out = new Set();
+  /* **这一份函数自己算出来的那几格直接算**：整份程序那张（`C.boxedAll`）是拿整棵树那张
+     块名表算的，跨函数串味的那几格（见 `C.fileBlockNames` 的头注）根本进不了它 ——
+     所以不能只在它里头筛。 */
+  for (const nm of own) if (!C.valParams.has(nm)) out.add(nm);
   for (const nm of C.boxedAll) {
     if (C.valParams.has(nm)) continue;
     if (own.has(nm) || C.globals.get(nm) === ARR) out.add(nm);
@@ -3249,6 +3304,7 @@ export function evalToIR(cst, host, src = '') {
     need3D: false,                      /* 用过 3D 那一族没有（`gfx3-rt.js`：投影在语言这一侧） */
     needText: false,                    /* 用过画布文字没有（`text-rt.js`：`gt_*`） */
     needNoise: false,                   /* 用过 `NOISE`/`NOISE3D` 没有（`noise-rt.js`） */
+    needNet: false,                     /* 用过 `net_send`/`net_recv` 没有（`net-rt.js`） */
     usedGL: false,                      /* 这份脚本用过 GL 那一族没有（每帧初态要不要发） */
     /* 用到了宿主那"每帧盖一次"的哪几格（`xres`/`yres`/`mousx`/`mousy`）——
        用到的那几格各有一格模块级量，每帧开头问设备一次盖上去。 */
@@ -3382,7 +3438,25 @@ export function evalToIR(cst, host, src = '') {
   C.blockNames = new Set(
     autoDecls(cst).filter((s) => s.ty !== undefined || s.arr !== undefined).map((s) => s.name),
   );
-  C.boxedAll = collectBoxed(cst, C, new Set(), C.blockNames);
+  /**
+   * **文件级那几格"本来就成块"的名字**（`auto`/`static` 的数组与结构体写在函数外头的）。
+   *
+   * 为什么要与上头那张分开：`C.blockNames` 是**整棵树**扫出来的，函数体里的 `auto a[244]`
+   * 也在里头。那张表当"这个名字本来就成块、不用装箱"的判据时**跨函数串味**：
+   * `games/stratego.kc` 里 `getcompmove` 有 `auto mx0[244]`，而**主函数**里 `mx0` 是个
+   * 普通标量、还拿 `&mx0` 递下去 —— 于是主函数里那一格不装箱，落成 `real`，
+   * 而被调方的形参要的是一整块 ⇒ "第 2 个形参是 arr<real>，给的是 real"。
+   * 按函数算的那一张在 `boxedFor` 里拼（文件级这几格 + 这一份函数自己的）。
+   */
+  C.fileBlockNames = new Set(
+    top.filter((x) => tag(x) !== 'fn')
+      .flatMap((x) => autoDecls(x))
+      .filter((s) => s.ty !== undefined || s.arr !== undefined)
+      .map((s) => s.name),
+  );
+  C.boxedAll = collectBoxed(cst, C, new Set(), new Set([
+    ...C.blockNames, ...C.arrs.keys(), ...C.svars.keys(),
+  ]));
   C.boxed = C.boxedAll;
   for (const d of preDecls) {
     /* **已经成块的不许再装箱**：`C.arrs` 里那些是真有长度的数组（`static v[3]`），
@@ -3563,6 +3637,12 @@ export function evalToIR(cst, host, src = '') {
     decls.unshift(...rt(C, noiseGlobalDecls()));
     decls.push(...rt(C, noiseFnDecls()));
   }
+  /* **联网那一族**（`net_send`/`net_recv`）：一格收包队列，也在语言这一侧
+     （见 `net-rt.js` 的头注 —— 单机是"自己发自己收"，不是"对方不在场"）。 */
+  if (C.needNet) {
+    decls.unshift(...rt(C, netGlobalDecls()));
+    decls.push(...rt(C, netFnDecls()));
+  }
   /* `static x = 3;` 的初值：**在入口里做一次**（方言的 `(global 名 类型)` 不许带初值 ——
      `lower/lower.js` 那一段写着"要非零初值就让 adapter 在入口里摆一句 set"）。
      摆在帧循环**之前**，所以它一辈子只跑一趟 —— 那正是 static 的意思。 */
@@ -3597,7 +3677,7 @@ export function evalToIR(cst, host, src = '') {
     }] : []),
     ...C.staticInits.map((s) => ({
       kind: 'assign',
-      target: C.boxed.has(s.name) ? boxRef(s.name) : nameRef(s.name),
+      target: C.boxed.has(s.name) ? boxRef(s.name, C) : nameRef(s.name),
       value: exprOf(s.init, C),
     })),
     /* 2D graphing 那一档：网格摆成默认（`setgrid(-4,3,4,-3)`）+ 颜色那三格箱子开出来。 */

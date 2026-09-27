@@ -776,6 +776,24 @@ export const EVBLOCKCOPY = ['one=3,30,300', 'all=1,300', 'plain=1,4', 'arg=3,22,
   'bufset=1,7,7,4', 'bufcpy=3,4,7,4'];
 
 /**
+ * **`&一整块里的某一格`当"改得动的标量"** 与 **联网那一族**
+ * （`ext/evaldraw/examples/netbox.kc`）。
+ *
+ * 前三行钉住那格**偏移**：`&s.b` / `&buf[2]` 递给一个形参是 `&x` 的函数，改的必须是那一格
+ * （`field=1,102,3` 与 `slot=10,20,130,40`）；`plain=107` 钉住本地那种真箱子照旧是 `[0]`。
+ * 先前函数体里写死 `[0]`，于是改的是那一块的**第 0 格** ——
+ * `games/asteroids/asteroids.kc:457` 的 `krnd(&lgs.krnd)` 把 `gs.sprn` 写成 25 亿，
+ * 紧接着那句 `for(i=gs.sprn-1;i>=0;i--)` 成了跑不完的循环（看着像"卡住"）。
+ *
+ * 后头几行是联网那一族在单机上的口径（`NET_ALL` 落回自己、发件人是 `net_me`=0、
+ * 队列空了回 0 且出参不动、`NET_ALLELSE` 没有收件人、三参那一档收进 `&buf[1]`）。
+ * `games/stratego.kc:26` 拿这一格当随机种子的同步点，回 0 会让它死循环。
+ */
+export const EVNETBOX = ['field=1,102,3', 'slot=10,20,130,40', 'plain=107',
+  'players=1 me=0', 'sent=1', 'recv=1 from=0 val=123', 'empty=0 from=-1 val=-1',
+  'else=0', 'then=0', 'sent3=3', 'recv3=3', 'got=10,5,6,7 from=0'];
+
+/**
  * **入口收一整块**（`ext/evaldraw/examples/inst.kc`：`(a[16])` 那一档）。
  *
  * 口径 `evaldraw.txt:1258-1296`（自己写乐器那个模式）：宿主每采样调一次，那 16 格是它传进来的

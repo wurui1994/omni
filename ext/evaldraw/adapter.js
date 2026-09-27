@@ -31,6 +31,7 @@ import { EVALDRAW_2D } from '../polydraw/gfx-rt.js';
 import { EVALDRAW_3D } from '../polydraw/gfx3-rt.js';
 import { EVALDRAW_TEXT } from '../polydraw/text-rt.js';
 import { GL_CONSTS, POLYDRAW_GL, EVALDRAW_TEX } from '../polydraw/gl-rt.js';
+import { NET_CONSTS } from '../polydraw/net-rt.js';
 
 /**
  * **GL 那个子集两门共用同一份**（`gl-rt.js`）—— 只有一个模型：命令变顶点、合批、拆 mode
@@ -85,8 +86,8 @@ export const EVALDRAW_HOST = {
   glrt: true,
   /** GL 那几格常量（`GL_QUADS` / `GL_TEXTURE0` …）—— EvalDraw 的脚本里也有 GL 子集，
       所以这张表两门语言共用（语料里 `demos/sprite2d.kc` 就写 `glbegin(GL_QUADS)`）；
-      再加上 `drawcone` 那几格旗子（上头那张表）。 */
-  consts: new Map([...GL_CONSTS, ...DRAWCONE_CONSTS, ...SETHLIN_CONSTS]),
+      再加上 `drawcone` 那几格旗子（上头那张表）与联网那三格（`net-rt.js`）。 */
+  consts: new Map([...GL_CONSTS, ...DRAWCONE_CONSTS, ...SETHLIN_CONSTS, ...NET_CONSTS]),
   gfx: [
     /* 2D */
     'cls', 'setcol', 'setpix', 'moveto', 'lineto', 'drawsph', 'drawcone', 'drawspr',
