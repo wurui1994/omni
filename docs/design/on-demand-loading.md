@@ -234,6 +234,16 @@ const rt = borrowRt(lang);                             // 到这一刻才装这�
 批 B 之后        90 份模块、1586 KB 源码      -48% 份数 / -59% 字节
 ```
 
+**机器终于安静下来那一刻量到的 wall clock**（load 4.6，同一份 `print(1)`）：
+
+```
+omni: 启动         宿主 + 装编译器  [62ms]        （文章开头那一趟是 681ms，最差见过 1824ms）
+omni: 合计         进程内 124ms = 启动 62ms + 步骤 61ms（3 格） + 其余 1ms；其中子进程 1 次 5ms
+```
+
+也就是 **848ms -> 124ms**。这个数只在机器闲着时可比，所以它是"结果"而不是"判据"——
+判据仍然是上面那张图的大小。
+
 踩到一处**接缝有第二个入口**：`tests/mir/run.js` 自己也有一份 readModule 回调（它把 cli.js
 降到 MIR），只过了 `builtinAlt`。`lazy-pick.js` 的文件头预言了这件事，而它当场就发生了 ——
 那条轴报 `'node:module' is not importable`。改成 `builtinAlt(p, true) ?? lazyAlt(p) ?? p`。
