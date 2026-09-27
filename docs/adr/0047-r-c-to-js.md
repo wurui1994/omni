@@ -863,3 +863,36 @@ this.gotoSlot = labeled ? -1 : outerSlot;
 
 `tests/r/rtc.js` 现在收一个节名：`rt` / `cx` / `cx2`。改一行复数公式要重编 248 份
 （55 秒）这件事本身就是个性能问题 —— `node tests/r/rtc.js cx2` 是 1.2 秒。
+
+## 第十九格：全部运行时发成 JS 并**真跑**（已落，2026-09-28）
+
+`tests/r/rtc.js jsrun`（62 秒）：250 份 `.c` -> **250 份 `.mjs`、55 165 054 字节、
+对外符号 2555 个**，一遍 `$init()` 全跑过，再按原型调 10 个纯函数 ——
+答案与 `Rscript` 的相对差都 <= 1e-12。这是"R 的运行时（除解释器那一份 R 代码）
+在 JS 上跑起来"的第一个完整判据。
+
+### 量出来的一个真错：R 的全局要先初始化，不然**静默答错**
+
+`pgamma(2,3,1)` 头一趟答 **1**（R 是 0.3233）。不是我们编错 —— libR 档下
+`nmath.h` 里 `ML_POSINF` 展开成 `R_PosInf`，那是 `arithmetic.c` 里一个**运行时
+初始化**的全局（`InitArithmetic()` 里才写值）。没叫那一句它是 0，于是
+`R_P_bounds_01(x, 0., ML_POSINF)` 看到 `x >= 0` 就回 `R_DT_1` = 1。
+
+这条缝的形状值得记：**standalone 档（`MATHLIB_STANDALONE`）里 `ML_POSINF` 是
+`1.0/0.0` 那个字面量，libR 档里是个变量** —— `tests/r/cjs.js` 那 66 格一直是绿的，
+因为它走的是 standalone 档。所以判据里现在明着叫一句 `Rf_InitArithmetic()`：
+R 自己的 `Rf_initialize_R` 也是这个次序。
+
+### 另一格：漏叫 `$init()` 的报错很难看
+
+只 `import` 一份模块的函数、没叫它的 `$init()` 就调，得到的是
+`TypeError: Cannot mix BigInt and other types`（`$sp` 还是 0 不是 0n）。
+这不是错答案，但错得不像话 —— 记在这儿：**装载这一套的规矩是"每份都要 $init()"**。
+（起一个 `$loadAll()` 的活留给 CLI 那一刀。）
+
+### 账
+
+* 手上这一套：`.omni-cache/r-rt/jsall/` 250 份 `.mjs` + `$judge.mjs`（判据自己写的入口）。
+* 还没跑的：R 的**解释器**那一层（`Rf_initialize_R` / `SETUP_MAIN` 要文件系统、
+  locale、setjmp 那一整套），与浏览器里那一趟（55 MB 要先打包）。
+* 软缺 205 个仍挂着 —— 纯计算那一路上没碰到它们（10 个函数一个都没落到宿主的缺口上）。

@@ -434,5 +434,105 @@ if (want('cx2')) {
   }
 }
 
+/* ---- 全部运行时发成 JS 模块，装起来真调（第十九格）----------------------------
+ *
+ * 前三节判的是"编得过 / 链得起 / 那几个我们自己写的对不对"。这一节判的是**跑得动**：
+ * 250 份 `.c` 发成 250 份 `.mjs`（一份一份，符号靠 `import`/`export`），一遍
+ * `$init()` 铺好各自的 data 段，再叫 R 自己的 `Rf_InitArithmetic()` ——
+ * `R_PosInf` / `R_NaN` 那几个全局是**运行时**初始化的，libR 档下 `ML_POSINF` 就是它们，
+ * 不叫这一句 `pgamma(2,3,1)` 会**静默答 1**（`R_P_bounds_01` 拿 0 当正无穷）。
+ *
+ * 然后按原型调 10 个纯函数，答案与 `Rscript` 比（相对差 <= 1e-12）。
+ * 没有 `Rscript` 就与记死的那一列常数比 —— 常数是上一次与 Rscript 对齐时记下来的。
+ */
+const JSRUN = [
+  ['nmath__dnorm', 'Rf_dnorm4', '0, 0, 1, 0', 'dnorm(0,0,1)', 0.3989422804014327],
+  ['nmath__pnorm', 'Rf_pnorm5', '1.96, 0, 1, 1, 0', 'pnorm(1.96)', 0.9750021048517795],
+  ['nmath__qnorm', 'Rf_qnorm5', '0.975, 0, 1, 1, 0', 'qnorm(0.975)', 1.959963984540054],
+  ['nmath__lgamma', 'Rf_lgammafn', '10', 'lgamma(10)', 12.801827480081469],
+  ['nmath__gamma', 'Rf_gammafn', '5.5', 'gamma(5.5)', 52.34277778455352],
+  ['nmath__pgamma', 'Rf_pgamma', '2, 3, 1, 1, 0', 'pgamma(2,3,1)', 0.32332358381693654],
+  ['nmath__dbinom', 'Rf_dbinom', '3, 10, 0.3, 0', 'dbinom(3,10,0.3)', 0.26682793200000005],
+  ['nmath__bessel_j', 'Rf_bessel_j', '1.5, 2', 'besselJ(1.5,2)', 0.2320876721442147],
+  ['nmath__beta', 'Rf_beta', '2.5, 3.5', 'beta(2.5,3.5)', 0.036815538909255386],
+  ['nmath__choose', 'Rf_choose', '10, 3', 'choose(10,3)', 120],
+];
+if (want('jsrun')) {
+  const dir = join(ROOT, '.omni-cache', 'r-rt', 'jsall');
+  mkdirSync(dir, { recursive: true });
+  const units = [];
+  for (const [label, d, names] of [...groups, ...OURS]) {
+    for (const n of names) {
+      const path = d.startsWith('/') ? join(d, n) : join(RSRC, d, n);
+      units.push({ path, out: join(dir, `${label}__${n.replace(/\.c$/, '')}.mjs`) });
+    }
+  }
+  let linked = null;
+  try {
+    linked = cJsModules(units, {
+      incs: INCS, defs: DEFS, rtImport: join(ROOT, 'src/core/mir/js_rt.js'),
+    });
+    for (const u of linked.units) writeFileSync(u.out, u.text);
+  } catch (e) {
+    no('全部运行时发成 JS 模块', String(e instanceof Error ? e.message : e).slice(0, 400));
+  }
+  if (linked !== null) {
+    const bytes = linked.units.reduce((a, u) => a + u.text.length, 0);
+    if (linked.units.length !== units.length) {
+      no('全部运行时发成 JS 模块', `只发了 ${linked.units.length}/${units.length} 份`);
+    } else {
+      ok('全部运行时发成 JS 模块', `${linked.units.length} 份 .mjs、${bytes} 字节、`
+        + `对外符号 ${linked.syms.size} 个`);
+    }
+    /* 装载 + 真调。入口自己写（`cJsEntry` 要一份有 `main` 的，libR 没有）。 */
+    const L = [];
+    let k = 0;
+    for (const u of linked.units) L.push(`import { $init as $i${k++} } from ${JSON.stringify(u.out)};`);
+    L.push(`import { $fn_Rf_InitArithmetic as $ia } from ${JSON.stringify(join(dir, 'main__arithmetic.mjs'))};`);
+    k = 0;
+    for (const [mod, sym] of JSRUN) {
+      L.push(`import { $fn_${sym} as $c${k++} } from ${JSON.stringify(join(dir, `${mod}.mjs`))};`);
+    }
+    L.push(`const INITS = [${linked.units.map((_, i) => `$i${i}`).join(', ')}];`);
+    L.push('let n = 0;');
+    L.push('for (const f of INITS) { f(); n += 1; }');
+    L.push("process.stdout.write('$init\\t' + n + '\\n');");
+    L.push('$ia();');
+    k = 0;
+    for (const [, sym, args] of JSRUN) {
+      L.push(`process.stdout.write(${JSON.stringify(sym)} + '\\t' + $c${k}(${args}).toPrecision(17) + '\\n');`);
+      k += 1;
+    }
+    const entry = join(dir, '$judge.mjs');
+    writeFileSync(entry, `${L.join('\n')}\n`);
+    const r = spawnSync(process.execPath, [entry], { encoding: 'utf8', maxBuffer: 1 << 26 });
+    const got = new Map((r.stdout ?? '').trim().split('\n').map((s) => s.split('\t')));
+    /* 尺子：Rscript。没有就退回记死的常数。 */
+    const rs = spawnSync('Rscript', ['-e',
+      JSRUN.map(([, , , expr]) => `cat(sprintf("%.17g", ${expr}), "\\n")`).join(';')],
+    { encoding: 'utf8' });
+    const refs = rs.status === 0
+      ? (rs.stdout ?? '').trim().split('\n').map((s) => Number(s))
+      : JSRUN.map(([, , , , c]) => c);
+    const bad = [];
+    if (got.get('$init') !== String(linked.units.length)) {
+      bad.push(`只有 ${got.get('$init')} 份的 $init 跑过（要 ${linked.units.length}）`);
+    }
+    JSRUN.forEach(([, sym], i) => {
+      const v = Number(got.get(sym));
+      const w = refs[i];
+      if (!Number.isFinite(v)) { bad.push(`${sym}: 没答案（${(r.stderr ?? '').split('\n')[0].slice(0, 120)}）`); return; }
+      const rel = Math.abs(v - w) / Math.max(Math.abs(w), 1e-300);
+      if (rel > 1e-12) bad.push(`${sym}: 我们 ${v}、R ${w}（相对差 ${rel.toExponential(2)}）`);
+    });
+    if (bad.length > 0) {
+      no('装起来真调 R 的运行时', bad.slice(0, 8).join('\n       '));
+    } else {
+      ok('装起来真调 R 的运行时', `${linked.units.length} 份的 $init 全跑过，`
+        + `${JSRUN.length} 个函数与 ${rs.status === 0 ? 'Rscript' : '记死的常数'} 的相对差都 <= 1e-12`);
+    }
+  }
+}
+
 process.stdout.write(`\n  ${pass} passed, ${fail} failed\n`);
 process.exit(fail > 0 ? 1 : 0);
