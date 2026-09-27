@@ -346,9 +346,8 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 
     ```
     $ npm run py:sweep
-    共 182 份：**编出 .o 161**（干净 160 + 带警告 1）、编不出 21（73s）
+    共 182 份：**编出 .o 172**（干净 171 + 带警告 1）、编不出 10（85s）
     编不出的按族：
-       11 份  非空的 __asm__ 模板（等自带汇编器）      <- 我们唯一的真欠账
         7 份  头文件不在（emscripten ×2 / windows / dl / optimizer.h /
               pycore_uops.h / frozen_modules/…）      <- 平台或生成的头
         1 份  '}' expected (got 'SOABI')              <- 构建系统给的宏
@@ -356,11 +355,14 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
         1 份  名字看不见：_PYTHONFRAMEWORK            <- 构建系统给的宏
     带警告的按族：
         1 份  隐式声明：__builtin_wasm_test_function_pointer_signature（emscripten 的）
-    门：>= 142 份编得出 —— 过
+    门：>= 172 份编得出 —— 过
     ```
 
+    **剩下的 10 份里我们自己的欠账是 0** —— 全是构建系统与平台的事（第 12 条那一刀
+    把那 11 份 `__asm__` 清了）。
+
     几处口径写在这儿：
-    - **门是 `--min`**（缺省 161，像 `tests/c/native-gen.js` 的 `MIN_OK`）：少于它 exit 1。
+    - **门是 `--min`**（缺省 172，像 `tests/c/native-gen.js` 的 `MIN_OK`）：少于它 exit 1。
     - 量的是 `Objects` + `Python` + `Parser` 三棵 **加上 `Modules/` 那张名单**（19 份
       "核心扩展模块"：`_abc` / `_bisect` / `_codecs` / `_collections` / `_datetime` /
       `_functools` / `_heapq` / `_operator` / `_random` / `_stat` / `_typing` / `_weakref` /
@@ -394,6 +396,37 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
       差的那九份是手工探的那份 pyconfig 少了格子（`fileutils.c` 与 `sysmodule.c` 从前报
       `F_GETFD` / `O_WRONLY` 看不见，那不是我们缺语法，是配置少探了 `HAVE_FCNTL_H` 一族）。
       **能自动回归的口径只有这一条**；第 10 条留着当那一刻的快照。
+
+12. **内联汇编那一格：一张显式的白名单，不是通用内联汇编**（`tccgen.js` 的 `ASM_KNOWN`）。
+
+    唯一剩下的真欠账是 CPython 的 `_Py_get_machine_stack_pointer`
+    （`Include/internal/pycore_pystate.h:317`）里那一句 `__asm__ ("mov %0, sp" : "=r" (result))`
+    —— 它卡住 11 份 `.c`（`Objects/` 六份、`Python/` 四份、`Parser/parser.c`），
+    而链 libpython 一份都少不了。
+
+    排掉的两条歧路：**不做**通用内联汇编（那要自带汇编器，ADR-0017 第九到十一步）、
+    **不做**隐式的模板匹配 hack。做的是一张**显式的小表**，每一条写清：模板原文、
+    GNU 语义下它做什么、我们拿什么等价物顶上、凭什么说等价。表以外一律照旧报
+    `第八刀：非空的 __asm__ 模板还没到`（边界不动，`gen-bad/asm-tmpl`）。
+    这与把 `__atomic_*` 落成普通读写是同一种"带账的等价实现"。
+
+    第一条（也是目前唯一一条）是"读机器栈指针"，落成**取一格匿名局部量的地址**：
+    - 凭什么等价：CPython 自己的 `#else` 分支写的就是 `char here; result = (uintptr_t)&here;`
+      （同一个函数，`:328-331`）—— **它自己认这是同一件事的可移植写法**；而这个值的唯一
+      用途是与另一次同样的取值相减、量栈用了多深（`_Py_RecursionLimit_GetMargin`），
+      那个差值我们给得同样对。
+    - 为什么不落成一条 MIR 新算子：**"读 SP"这个语义在 JS 腿上根本不存在**。
+    - 收的形状只有「一个输出、没有输入、约束 `=r`」；别的形状是边界
+      （`gen-bad/asm-sp-shape`）。顺带把 `asmOperands` 从"只报错"改成认得
+      `"约束" (左值)`（只在模板命中白名单时才去读）。
+    - 判据 `tests/c/gnu/03-asm-read-sp.c`，尺子是 clang（tcc 也收不了这一句）：
+      **问关系不问数值** —— clang 那份真读 SP、我们那份给局部量地址，两个数本来就不同，
+      能比的是"非零"与"递归深一层拿到的地址更低"。
+    - 量出来的：`npm run py:sweep` 的门 **161 -> 172**，那 11 份一份不剩，
+      而剩下的 10 份里**我们自己的欠账是 0**。
+
+    表里另外记着 `__x86_64__` 那一支（CPython 写的是 `"{movq %%rsp, %0"`，那个 `{` 是
+    它源码里就有的），照原样收着但没判据 —— 考它 clang 编不过，这一组的尺子就没了。
 
 ## 二、进度
 

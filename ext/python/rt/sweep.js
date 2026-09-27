@@ -67,7 +67,7 @@ const CORE_MODULES = new Set([
 ]);
 const ALL_MODULES = argv.includes('--all-modules');
 /** 编得出 `.o` 的最少份数（ok + warn）。往上走是好事，往下走是回归。 */
-const MIN_OK = Number(argOf('--min', '161'));
+const MIN_OK = Number(argOf('--min', '172'));
 const JOBS = Number(argOf('--jobs', '4'));
 
 if (!existsSync(join(SRC, 'Include', 'Python.h'))) {

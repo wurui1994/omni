@@ -620,6 +620,22 @@ const CMP_FOLD = new Map([
   [OP.ULE, (a, b) => U64(a) <= U64(b)], [OP.UGT, (a, b) => U64(a) > U64(b)],
 ]);
 
+/**
+ * **已知内联汇编惯用写法**那张表（`asmInstr` 用，键是压过空白的模板原文）。
+ *
+ * 自带汇编器没到之前，通用内联汇编这条路不通；但有几条惯用写法的**语义**我们能用
+ * 等价物顶上，而且顶得住账：每一条都要说清「GNU 语义下它做什么、我们拿什么顶、凭什么
+ * 说等价」。表以外一律报边界 —— 这张表是白名单，不是按模板猜。
+ *
+ * - `sp`：读机器栈指针（arm64 与 x86_64 两种写法，都出自 CPython 的
+ *   `_Py_get_machine_stack_pointer`，`Include/internal/pycore_pystate.h:317`）。
+ *   等价物与那笔账见 `asmReadSp`。
+ */
+const ASM_KNOWN = new Map([
+  ['mov %0, sp', 'sp'],          // __aarch64__ 那一支
+  ['{movq %%rsp, %0', 'sp'],     // __x86_64__ 那一支（那个 `{` 是 CPython 源码里就有的）
+]);
+
 function precedence(t) {
   if (t === TOK_LOR) return 1;
   if (t === TOK_LAND) return 2;
@@ -6955,14 +6971,19 @@ export class CGen {  /**
   /**
    * `asm_instr`（`tccasm.c:1327`）：`__asm__` 当**一条语句**。
    *
-   * 自带汇编器还没到（ADR-0017 第九到十一步），所以这一格只认一种形状：**模板是空串、
-   * 没有操作数**的那种 —— `__asm__ __volatile__("" ::: "memory")`，一条编译屏障。
-   * 它说的是「别把内存访问搬过这一行」，而我们既不重排也不把内存缓进寄存器（每次访问
-   * 都是一条 LOAD/STORE），所以**什么都不发**就是它的正确实现。
+   * 自带汇编器还没到（ADR-0017 第九到十一步），所以真的发指令这条路不通。能走的只有两格：
+   *
+   * 一、**模板是空串、没有操作数** —— `__asm__ __volatile__("" ::: "memory")`，一条
+   * 编译屏障。它说的是「别把内存访问搬过这一行」，而我们既不重排也不把内存缓进寄存器
+   * （每次访问都是一条 LOAD/STORE），所以**什么都不发**就是它的正确实现。
    * macOS SDK 的 `dispatch_compiler_barrier()`（`dispatch/base.h:195`）就是这一条，
    * `dispatch/once.h` 的两个 inline 函数里各有一次 —— 编 tinycc 的源码时撞上的正是它。
    *
-   * 模板非空、或者带了操作数的，报错并钉住边界（`gen-bad/asm-stmt`）：那些要真的发指令。
+   * 二、`ASM_KNOWN` 那张**显式的小表**里的惯用写法：每一条都写清「GNU 语义下它做什么、
+   * 我们拿什么等价物顶上、凭什么说等价」。这与把 `__atomic_*` 落成普通读写是同一种
+   * 「带账的等价实现」—— 不是通用内联汇编，也不是按模板猜。表以外一律照旧报错。
+   *
+   * 模板不在表里、或者形状超出那一条认的范围，报错并钉住边界（`gen-bad/asm-tmpl`）。
    *
    * 与 tcc 一样**不吃掉那个 `;`**（`tccasm.c:1420` 的注释），只检查它在 —— 留给外面
    * 当一条空语句读掉。
@@ -6977,18 +6998,26 @@ export class CGen {  /**
     if (this.tok !== TOK_STR) this.expect('string constant');
     // `parse_asm_str`：相邻的字符串字面量接成一个模板（`readStrTok` 顺手往前走）
     const tmpl = this.readStrTok(this.tokc);
-    if (tmpl !== '') this.err('第八刀：非空的 __asm__ 模板还没到（等自带汇编器）');
+    /* 查表用**压过空白**的模板（`mov %0, sp` 与 `mov   %0,sp` 是同一条指令）。 */
+    const kind = tmpl === '' ? null
+      : (ASM_KNOWN.get(tmpl.replace(/\s+/g, ' ').trim()) ?? null);
+    if (tmpl !== '' && kind === null) {
+      this.err('第八刀：非空的 __asm__ 模板还没到（等自带汇编器）');
+    }
+    let outs = [];
+    let ins = [];
     /* `: 输出 : 输入 : 破坏列表` —— 形状照抄 tcc（`tccasm.c:1352-1380`）：
-     * 「下一个不是 `:`」才算这一段有东西。真的有操作数就是边界；不是操作数的东西
-     * （比如 `("" :)` 里的 `)`）与 tcc 一样报 `string constant expected`。
+     * 「下一个不是 `:`」才算这一段有东西。模板在表里才去**读**操作数，否则真的有操作数
+     * 就是边界；不是操作数的东西（比如 `("" :)` 里的 `)`）与 tcc 一样报
+     * `string constant expected`。
      * 第三段是一串逗号分隔的字符串（寄存器/内存的破坏列表），对我们没有意义，读掉。 */
     if (this.tok === COLON) {
       this.next();
-      this.asmOperands('输出');
+      outs = this.asmOperands('输出', kind !== null);
       if (this.tok === COLON) {
         this.next();
         if (this.tok !== RPAR) {
-          this.asmOperands('输入');
+          ins = this.asmOperands('输入', kind !== null);
           if (this.tok === COLON) {
             this.next();
             for (;;) {
@@ -7007,22 +7036,68 @@ export class CGen {  /**
       this.next();
     }
     this.skip(RPAR);
+    if (kind === 'sp') this.asmReadSp(outs, ins);
     if (this.tok !== SEMI) this.expect("';'");
   }
 
   /**
-   * `parse_asm_operands`（`tccasm.c:1268`）的边界版：一段操作数表。
+   * `ASM_KNOWN` 的 `sp` 那一条：**读机器栈指针**，落成「取一格匿名局部量的地址」。
+   *
+   * 凭什么说等价：CPython 自己的 `#else` 分支写的就是 `char here; result = (uintptr_t)&here;`
+   * （`Include/internal/pycore_pystate.h:328-331`）—— 它自己认这是同一件事的可移植写法，
+   * 而这个值的唯一用途是「与另一次同样的取值相减，量栈用了多深」（`_Py_RecursionLimit_GetMargin`），
+   * 那个差值我们给得同样对。反过来说，「读 SP」这个语义在 JS 腿上根本不存在，所以它
+   * **不能**落成一条 MIR 新算子 —— 只能落成等价物。
+   *
+   * 认的形状只有一个输出、没有输入、约束是 `=r`（`=&r` 这类也收，早退位无所谓）；
+   * 别的形状是边界。
+   */
+  asmReadSp(outs, ins) {
+    if (outs.length !== 1 || ins.length !== 0) {
+      this.err('第八刀：读栈指针那条 __asm__ 只认「一个输出、没有输入」的写法');
+    }
+    const { cons, val } = outs[0];
+    if (!cons.startsWith('=') || !cons.includes('r')) {
+      this.err(`第八刀：读栈指针那条 __asm__ 的输出约束只认 "=r"，收到 "${cons}"`);
+    }
+    const off = this.frameAlloc(TY_CHAR);
+    this.vstore(val, sVal(mkPointer(TY_CHAR),
+      this.addrOf(sMem(TY_CHAR, this.fpRef, off))));
+  }
+
+  /**
+   * `parse_asm_operands`（`tccasm.c:1268`）：一段操作数表。
    *
    * tcc 那边「下一个不是 `:`」就当这一段有操作数、去读 `[名字] "约束" (表达式)`。
-   * 我们读不了 —— 那要把值搬进指定的寄存器。所以：看着**像**操作数（`[` 或字符串）的
-   * 报边界；别的与 tcc 一样报 `string constant expected`。
+   * `parse` 为假（模板不在 `ASM_KNOWN` 里）时我们读不了 —— 那要把值搬进指定的寄存器，
+   * 所以看着**像**操作数（`[` 或字符串）的报边界；别的与 tcc 一样报
+   * `string constant expected`。
+   *
+   * `parse` 为真时读成 `{ cons, val }` 一串交给表里那一条自己检查。`[名字]` 这种
+   * 具名操作数仍是边界（表里的条目都不用它）。
    */
-  asmOperands(which) {
-    if (this.tok === COLON) return;
-    if (this.tok === LBRACK || this.tok === TOK_STR) {
-      this.err(`第八刀：__asm__ 的${which}操作数还没到（等自带汇编器）`);
+  asmOperands(which, parse = false) {
+    /** @type {{cons: string, val: object}[]} */
+    const out = [];
+    if (this.tok === COLON) return out;
+    if (!parse) {
+      if (this.tok === LBRACK || this.tok === TOK_STR) {
+        this.err(`第八刀：__asm__ 的${which}操作数还没到（等自带汇编器）`);
+      }
+      this.expect('string constant');
+      return out;
     }
-    this.expect('string constant');
+    for (;;) {
+      if (this.tok !== TOK_STR) this.expect('string constant');
+      const cons = this.readStrTok(this.tokc);
+      this.skip(LPAR);
+      const val = this.exprEq();
+      this.skip(RPAR);
+      out.push({ cons, val });
+      if (this.tok !== COMMA) break;
+      this.next();
+    }
+    return out;
   }
 
   parseBtype(ad = null) {
