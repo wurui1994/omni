@@ -32,10 +32,17 @@ node tests/r/oracle.js        # 正确性：逐字节对 Rscript + gram.y 的漂
    这件事的办法就是"那段数是 R 的 C 算的"。
 
 3. **主路线是编到 C；JS 那条腿走 C → JS，不另写一份实现。**
-   R → 标准 IR → `.sx` → **C**（`--backend c`，我们自己那台 C 前端 + 链接器），
-   JS 腿由同一批 C 经 `frontend-c` → MIR → `emit_js.js` 出来（ADR-0047 已经把
-   nmath 整条跑通：66 格数、一张 SVG、两张 PNG，真浏览器里也跑过）。
-   所以**不存在"JS 专用的那一份实现"** —— 两条腿共一份 C。
+   * **C 路径**：R 的运行库按 **R 自己那套**编出来（configure/Makefile）；R 程序编到 C；
+     这些 C 与那个库由**我们自己的 C 前端 + 链接器**编链（`omni c tcc` / `obj` / `link`），
+     也可以 `OMNI_CC=cc` 指外部 cc。**多翻译单元的链接是 C 链接器的事** ——
+     量过：两份 `.c`（跨单元函数 + 跨单元 `extern` 变量 + 同名 file-scope `static`）
+     我们自己链出来的退出码与 `cc` 一样（判据 `tests/c/run.js` 的 `link2/`）。
+   * **JS 路径**：**一个 `.c` → 一个 `.js`**，模块之间 `import` / `export` 自动成依赖图；
+     那块线性内存由一个 rt 模块提供，每份的 data 段落点在**加载期**分配（所以地址不能是
+     编译期烤死的常量 —— 那正是 MIR 里 `relocs` / `addrConsts` / `dataSyms` / `dataRefs`
+     四张记录表的用处）。
+   两条路都**不需要"MIR 层的链接器"**：2026-09-27 照那条错路做过一版，当天撤掉，
+   账在 ADR-0047 的"更正"那一节。所以**不存在"JS 专用的那一份实现"** —— 两条腿共一份 C。
 
 4. **不按"有多少库函数就写多少"。** `ext/r/adapter.js` 里那几千行 `r_*`
    （`vecFnDecl` / `strFnDecl` / `printFnDecl` … 生成出来的辅助函数）是编译器档起步时的

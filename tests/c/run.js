@@ -857,6 +857,64 @@ for (const f of pick('diag')) {
   }
 }
 
+/* ------------------------------- 两份 `.c`：我们自己那台驱动与 tcc/cc 同解（C 路径）
+ *
+ * **C 路径的"链接"是 C 链接器的事**，不是 MIR 的事：R 的运行库按 R 自己那套编出来，
+ * R 程序编到 C，这些 C 默认由我们自己的前端 + 链接器编（`omni c tcc`，也能 `OMNI_CC`
+ * 指外部 cc）。所以这一条钉的正是"多翻译单元能链"——跨单元的函数、跨单元的 extern
+ * 变量、两份各有一个同名的 file-scope `static`（`src/main` 那 99 份里这三样遍地）。
+ *
+ * 判据是**退出码与 cc 相同**（cc 在就比，不在就跳过）。
+ */
+{
+  const ldir = workDir('c-link2');
+  const cases = [
+    {
+      name: 'call-across',
+      a: 'int bee(int x);\nstatic const char *tag = "A";\n'
+        + 'int main(void){ return bee(3) + (int)tag[0]; }\n',
+      b: 'static const char *tag = "B";\nint bee(int x){ return x + (int)tag[0]; }\n',
+    },
+    {
+      name: 'extern-var',
+      a: 'int bee(int x);\nextern int shared;\nstatic const char *tag = "A";\n'
+        + 'int main(void){ shared = 4; return bee(3) + (int)tag[0] + shared; }\n',
+      b: 'int shared;\nstatic const char *tag = "B";\n'
+        + 'int bee(int x){ shared = shared + 1; return x + (int)tag[0]; }\n',
+    },
+  ];
+  for (const c of cases) {
+    const name = `link2/${c.name}`;
+    const pa = join(ldir, `${c.name}-a.c`);
+    const pb = join(ldir, `${c.name}-b.c`);
+    writeFileSync(pa, c.a);
+    writeFileSync(pb, c.b);
+    const out = join(ldir, c.name);
+    const g = cliRun(['c', 'tcc', '-o', out, pa, pb]);
+    if (g.code !== 0) {
+      bad(name, `    我们自己那台驱动没链成：${(g.err ?? '').split('\n').slice(-2).join(' ')}`);
+      continue;
+    }
+    const ours = spawnSync(out, [], { encoding: 'utf8' });
+    if (CC === null) {
+      ok(`${name} [我们链出来退出码 ${ours.status}；没有 cc，不比]`);
+      continue;
+    }
+    const refOut = join(ldir, `${c.name}-ref`);
+    const r = spawnSync(CC, [pa, pb, '-o', refOut], { encoding: 'utf8' });
+    if (r.status !== 0) {
+      bad(name, `    cc 自己没编过：${(r.stderr ?? '').split('\n')[0]}`);
+      continue;
+    }
+    const want = spawnSync(refOut, [], { encoding: 'utf8' });
+    if (ours.status !== want.status) {
+      bad(name, `    我们 ${ours.status}、cc ${want.status}`);
+    } else {
+      ok(`${name} [我们与 cc 都是 ${want.status}]`);
+    }
+  }
+}
+
 const rep = cache.report();
 process.stdout.write(`\n${pass} passed, ${fail} failed${skip ? `, ${skip} skipped` : ''}${rep === '' ? '' : `  （${rep}）`}\n`);if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n`);
