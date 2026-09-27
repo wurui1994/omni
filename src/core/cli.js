@@ -45,11 +45,12 @@ import {
 } from './cli/flame.js';
 import { statModel, statTable, statDot, statJson } from './cli/statgraph.js';
 import { layerModel, layerTable, countNodes, stepTable, kindStat, kindTable } from './cli/layers.js';
-import { linkJs } from './frontend-js/link.js';
-import { lowerJs } from './frontend-js/lower.js';
-import { lowerWat } from './frontend-wat/lower.js';
-import { genArm64Module as genArm64 } from './arm64/from_mir.js';
-import { genModule as genX64 } from './x64/from_mir.js';
+/* **这儿从前还有三条死 import**：`linkJs`（frontend-js/link.js）、`lowerJs`
+ * （frontend-js/lower.js）、`lowerWat`（frontend-wat/lower.js）—— 三个名字在这份文件里
+ * 一次都没被用到（只出现在 import 行上）。真正用它们的是 `lang/js.js` 与 `lang/wat.js`，
+ * 而那两门本来就在迟装表里（`lang/builtin.js`）。于是这三条只是让**每一条命令**都白装
+ * 一整套 JS 前端与 wat 前端：逐条量出来 **≈36ms**（`frontend-wat/lower.js` 一份就 26ms）。
+ * 记在这儿是因为"删掉一条没人用的 import"这件事看不出痕迹 —— 而它是这一刀里最便宜的一格。 */
 import { writeObject } from './link/macho.js';
 import { writeElfObject } from './link/elf.js';
 import { mergeObjects as mergeElfObjects } from './link/elf_merge.js';
@@ -62,7 +63,6 @@ import { machoExe, isMachoBinary } from './link/macho_exe.js';
 import { lowerToMir } from './mir/from_oir.js';
 import { printMir } from './mir/print.js';
 import { verifyMir } from './mir/verify.js';
-import { dumpBytes } from './mir/bytes.js';
 import { IncrCache, compileIncremental, incrReport } from './incr/cache.js';
 import { Diagnostics, OmniError, SourceFile } from './source/diag.js';
 /* **借来的那十一门语言**（ADR-0044）：一门一份 adapter，CST → 标准 IR → 公共降级器 → `.sx`。
@@ -72,7 +72,6 @@ import { Diagnostics, OmniError, SourceFile } from './source/diag.js';
 import { coreSxText, borrowedExts, unitsBuilderOf, runFallbackOf } from './lower/drive.js';
 /* 构建引擎（`omni ninja`）：依赖图 + 脏判定 + 调度，不认识语言 —— 设计见
  * `docs/design/build-system.md`，模型照 ninja 复刻。 */
-import { ninjaCmd } from './build/cli.js';
 /* 模块产物缓存那套通用机器（一份索引 + 内容身份 + 一格键）：有 import 关系的语言共用它，
  * 不再每门语言手写一份脏判定 —— 见 `docs/design/build-system.md` §10。 */
 import {
@@ -95,18 +94,16 @@ import {
  * —— 两条路在注册表那一层看不出区别。 */
 import { registerBuiltins } from './lang/builtin.js';
 import { builtinAlt } from './lang/builtin-pick.js';
-/* 借来的那十三格 adapter 的同一条接缝（源码腿按需装 / 产物腿静态全装）——
-   见 `lower/borrow-pick.js` 与 `docs/design/on-demand-loading.md`。 */
-import { borrowAlt } from './lower/borrow-pick.js';
+/* **两格迟装的接缝**（源码腿按需装 / 产物腿静态全装）：借来的十三格语言 adapter
+   （`lower/borrow.js`）与核心自己那几摊按动词的部件（`lazy.js`）。规则在 `lazy-pick.js`，
+   账在 `docs/design/on-demand-loading.md`。 */
+import { lazyAlt } from './lazy-pick.js';
+/* 核心里"按动词才要"的那些部件（链接器 / 汇编器 / REPL / 构建引擎 / MIR 解释器 /
+   `eval` 的钩子）—— `coreMod('repl.js').startRepl(…)` 这种写法，用到那一刻才装。 */
+import { coreMod } from './lazy.js';
 import { PLUGIN_SET, pluginRegName, CORE_DATA } from './plugin-set.js';
 import { RUNTIME_DIR, JIT_DIR, GL_DIR, SCHED_DIR, runtimeSources } from './runtime/c_runtime.js';
 import { loadProgram, MODE_BY_EXT } from './module/load.js';
-import { startRepl } from './repl.js';
-import { interpret } from './interp/eval.js';
-import { interpretMir, runMirModule } from './mir/interp.js';
-import { emitMirJs } from './mir/emit_js.js';
-import { runMirJs } from './mir/js_rt.js';
-import { bootstrapSelf } from './bootstrap.js';
 
 /**
  * `-I <目录>` 收成一张有序的表（可重复，第六十二刀）。jancy 的 `jnc` 就是这个开关，
@@ -426,8 +423,8 @@ function cObj(path, out, arch, incs, defs, fmt, os, sysIncs, instr) {
   /* win32 的 x86_64 上代码节里还多一份共用的展开信息（第一百一十七片）——
    * 摆在第一个函数之后，所以这一格得在生成代码的时候就给。 */
   const blob = arch === 'x86_64'
-    ? genX64(mod, { unwind: fmt === 'elf' && os === 'win32', win64: os === 'win32' })
-    : genArm64(mod, { win32: os === 'win32' });
+    ? coreMod('x64/from_mir.js').genModule(mod, { unwind: fmt === 'elf' && os === 'win32', win64: os === 'win32' })
+    : coreMod('arm64/from_mir.js').genArm64Module(mod, { win32: os === 'win32' });
   vNext('codegen');
   const syms = [];
   for (let k = 0; k < mod.funcs.length; k++) {
@@ -1406,13 +1403,13 @@ function readModule(p) {
     vStep(`builtins ${LANGS_FAT ? 'fat ' : 'core'}  ${alt}`);
     return readText(alt);
   }
-  /* **借来的那十三格 adapter 同一条接缝**（`lower/borrow-pick.js`）：源码腿那一份用
-     `createRequire` 按需装（一门只装一门），而我们自己的前端不认 `node:module` ——
-     编的时候换成 `borrow-fat.js`（十三条静态 import，产物里一格不少）。 */
-  const bAlt = borrowAlt(p);
-  if (bAlt !== null) {
-    vStep(`borrowed fat  ${bAlt}`);
-    return readText(bAlt);
+  /* **那两格迟装同一条接缝**（`lazy-pick.js`）：源码腿用 `createRequire` 按需装
+     （借来的语言一门只装一门、核心那几摊按动词才装），而我们自己的前端不认 `node:module`
+     —— 编的时候换成各自的 fat 那一份（静态 import，产物里一格不少）。 */
+  const lAlt = lazyAlt(p);
+  if (lAlt !== null) {
+    vStep(`lazy fat  ${lAlt}`);
+    return readText(lAlt);
   }
   return exists(p) ? readText(p) : null;
 }
@@ -4671,7 +4668,7 @@ function buildPluginSet(core, dir, want, argv) {
      而同一份在 js/c 两条腿上好好地退 0。 */
   let code = 0;
   try {
-    code = interpret(mod);
+    code = coreMod('interp/eval.js').interpret(mod);
   } catch (e) {
     if (e === null || typeof e !== 'object' || !('$exit' in e)) throw e;
     vStep(`exec interp  OIR ${mod.funcs.length} funcs  exit=${e.$exit}（脚本自己那个 while 靠 $exit 收摊）`);
@@ -4686,7 +4683,7 @@ function runInterpMir(mod) {
   /* `$exit` 那一格与上头 `runInterp` 同一句话（图形那一格靠它收摊）。 */
   let code = 0;
   try {
-    code = interpretMir(mod);
+    code = coreMod('mir/interp.js').interpretMir(mod);
   } catch (e) {
     if (e === null || typeof e !== 'object' || !('$exit' in e)) throw e;
     vStep(`exec interp --mir  ${mod.funcs.length} funcs  exit=${e.$exit}（$exit 收摊）`);
@@ -6435,7 +6432,7 @@ function main(argv) {
         const out = oi >= 0 ? rest[oi + 1] : `${basename(path, '.c')}.js`;
         const { flags, prog } = cSplitArgs(rest);
         const mir = cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags), cTgt(flags));
-        const text = emitMirJs(mir, { rtImport: join(installDir(), '..', 'mir', 'js_rt.js') });
+        const text = coreMod('mir/emit_js.js').emitMirJs(mir, { rtImport: join(installDir(), '..', 'mir', 'js_rt.js') });
         writeText(out, text);
         stderr(`omni: built ${out} (${text.length} 字节，MIR -> JS；`
           + '运行时来自这棵树里的 mir/js_rt.js)\n');
@@ -6675,7 +6672,7 @@ function main(argv) {
   if (cmd === 'repl') {
     const li = rest.indexOf('--lang');
     const ei = rest.indexOf('--engine');
-    return startRepl(modeFor('', rest, 'dynamic'), li >= 0 ? rest[li + 1] : 'omni',
+    return coreMod('repl.js').startRepl(modeFor('', rest, 'dynamic'), li >= 0 ? rest[li + 1] : 'omni',
       { asy: cap('asy.frontEnd'), asyPrelude: () => (env('OMNI_ASY_BUILTINS') === '0' ? '' : 'asy_builtins') },
       ei >= 0 ? rest[ei + 1] : 'interp');
   }
@@ -6770,7 +6767,7 @@ function main(argv) {
   if (cmd === 'cache') return cacheCmd(args, rest);
   /* `omni ninja`：按一张依赖图把该做的做完（`build/cli.js`）。摆在这儿的理由与
    * bootstrap 一样 —— 它**没有源文件参数**，目标是图里的名字，别掉进下面按扩展名分派那套。 */
-  if (cmd === 'ninja') return ninjaCmd(rest);
+  if (cmd === 'ninja') return coreMod('build/cli.js').ninjaCmd(rest);
   // 自举也没有源文件参数（默认就是编译器自己）。整条链与四条门槛见 bootstrap.js
   if (cmd === 'bootstrap') {
     const oi = rest.indexOf('-o');
@@ -6779,7 +6776,7 @@ function main(argv) {
     if (!exists(source)) {
       throw new OmniError(`bootstrap: no compiler source at ${source}; pass the path explicitly`);
     }
-    const r = bootstrapSelf({
+    const r = coreMod('bootstrap.js').bootstrapSelf({
       source,
       outDir,
       quick: rest.includes('-q') || rest.includes('--quick'),
@@ -7058,7 +7055,7 @@ function main(argv) {
         }
         // eval / Function(src) 要编译器在运行期在场（ADR-0020 P6）：跑在本进程里的这一条
         // 装得上那格钩子，编成独立产物的场合装不上 —— 那时那两个 op 当场报错
-        installSrcEvalHook((m, o) => target('js').emit(m, o));
+        coreMod('host/src_eval.js').installSrcEvalHook((m, o) => target('js').emit(m, o));
         /* **带 `$exit` 的错是"正常收摊"**（`host/native.js:457` 立的那个规矩：这条腿上
            "退出进程"就是抛它）。图形那一格用它停下**脚本自己写的那个 `while(1)`**
            （`host/gfx-cpu.js` 的 `refresh`，帧数够了就抛）—— 不接住就成了一片栈。 */
@@ -7432,7 +7429,7 @@ function main(argv) {
     }
     case 'c-emit-js': {
       const { flags, prog } = cSplitArgs(rest);
-      stdout(emitMirJs(cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags), cTgt(flags))));
+      stdout(coreMod('mir/emit_js.js').emitMirJs(cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags), cTgt(flags))));
       return 0;
     }
     /**
@@ -7459,7 +7456,7 @@ function main(argv) {
     case 'c-run': {
       const { flags, prog } = cSplitArgs(rest);
       const mod = cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags), cTgt(flags));
-      return runMirModule({ structs: [], enums: [], classes: [], js: false }, mod);
+      return coreMod('mir/interp.js').runMirModule({ structs: [], enums: [], classes: [], js: false }, mod);
     }
     /**
      * `c-run-js`：C -> MIR -> **JS 源码** -> 本进程里 `new Function`（ADR-0013）。
@@ -7474,9 +7471,9 @@ function main(argv) {
     case 'c-run-js': {
       const { flags, prog } = cSplitArgs(rest);
       const mir = cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags), cTgt(flags));
-      const js = emitMirJs(mir);
+      const js = coreMod('mir/emit_js.js').emitMirJs(mir);
       vStep(`backend js (from mir)  ${js.length} bytes`);
-      return runMirJs(js);
+      return coreMod('mir/js_rt.js').runMirJs(js);
     }
     /* `c-obj`：C -> 真机器码 -> 一个 `.o`（第九刀第二十六片）。
      * 链接留给外面（`clang a.o -o a`）—— 可执行文件的写出还没到。 */
@@ -7913,7 +7910,7 @@ function main(argv) {
       if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
       vStep('mir verify  ok');
       // --bytes：印字节形式的摘要与每个函数的内容哈希（增量编译的缓存键，决策 5）
-      stdout(rest.includes('--bytes') ? dumpBytes(mir) : printMir(mir));
+      stdout(rest.includes('--bytes') ? coreMod('mir/bytes.js').dumpBytes(mir) : printMir(mir));
       return 0;
     }
     // 增量编译（ADR-0014 决策 5）：函数级单元 + 内容哈希 + 内容寻址的产物缓存。

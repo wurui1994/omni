@@ -22,22 +22,47 @@
 // 一格不少）—— 规则在 `borrow-pick.js`，接缝与 `lang/builtin-pick.js` 同构。
 
 import { createRequire } from 'node:module';
-import { join } from '../host/path.js';
-import { treeRoot } from './langs.js';
-import { mkBorrowRt } from './borrow-core.js';
+import { pickRt } from './borrow-core.js';
 import { OmniError } from '../source/diag.js';
 
 const require_ = createRequire(import.meta.url);
 
-/** 登记处那一行 -> 这门语言的运行时那半（`{ toIR, hooks?, imports?, pre? }`）。 */
-export const borrowRt = mkBorrowRt((p) => require_(join(treeRoot(), p)));
+/** 装过的那几门（一门只装一次）。键是语言名。 */
+const MEM = new Map();
+
+/**
+ * 登记处那一行 -> 这门语言的运行时那半（`{ toIR, hooks?, imports?, pre? }`）。
+ *
+ * 一趟 `omni` 里同一门会被问好几次（`emit sx` + `run` 那种嵌套、`--pkgs` 多份源文件），
+ * 所以记住。**普通函数 + 模块级 Map**，不是"造一格带缓存的闭包" —— 返回闭包那一格不在
+ * 这门语言的子集里（踩过：产物腿 `undefined is not a function`，见 `borrow-core.js` 文件头）。
+ */
+export function borrowRt(lang) {
+  const hit = MEM.get(lang.name);
+  if (hit !== undefined) return hit;
+  /* 路径**相对这一份文件**算（`../../../` 就是树根，与 `langs.js` 里从前那些
+     `'../../../ext/…'` 逐字一致）—— 不走 `treeRoot()`：那一格认的是布局，而 js-roundtrip
+     会把整棵树重新生成到 `.omni-build/` 下（那儿没有 package.json / .git）。 */
+  const rt = pickRt(lang, require_(`../../../${lang.adapter}`));
+  MEM.set(lang.name, rt);
+  return rt;
+}
+
+/** `{ adapter, name }` 那两格（`units` / `runFallback`）装过的模块（键是 adapter 路径）。 */
+const SPEC_MEM = new Map();
 
 /**
  * 登记处那一行的 `{ adapter, name }` 一格 -> 那一个导出（`units` / `runFallback`）。
- * 与 `borrowRt` 同一条路子：用到才装（装过的记住），名字对不上当场抛。
+ * 与 `borrowRt` 同一条路子：用到才装（装过的记住），名字对不上当场抛；
+ * 路径同样**相对这一份文件**算，理由见上头 `borrowRt` 那段。
  */
 export function borrowOne(spec) {
-  const v = require_(join(treeRoot(), spec.adapter))[spec.name];
+  let mod = SPEC_MEM.get(spec.adapter);
+  if (mod === undefined) {
+    mod = require_(`../../../${spec.adapter}`);
+    SPEC_MEM.set(spec.adapter, mod);
+  }
+  const v = mod[spec.name];
   if (v === undefined) {
     throw new OmniError(`${spec.adapter} 里没有 '${spec.name}' 这个导出 —— 登记处与代码走散了`);
   }

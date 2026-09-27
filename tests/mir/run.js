@@ -28,6 +28,8 @@ import { loadProgram, MODE_BY_EXT } from '../../src/core/module/load.js';
 import { check } from '../../src/core/hir/check.js';
 import { linkJs } from '../../src/core/frontend-js/link.js';
 import { builtinAlt } from '../../src/core/lang/builtin-pick.js';
+/* 迟装那两格同一条接缝（`lower/borrow.js` 与 `lazy.js`）—— 见 src/core/lazy-pick.js。 */
+import { lazyAlt } from '../../src/core/lazy-pick.js';
 import { lowerJs } from '../../src/core/frontend-js/lower.js';
 import { lowerWat } from '../../src/core/frontend-wat/lower.js';
 import { lowerToMir } from '../../src/core/mir/from_oir.js';
@@ -60,8 +62,9 @@ function toOir(path) {
        MIR，而 `lang/builtin.js` 那一份是**迟装**的（`createRequire`），我们自己的前端不认它 ——
        编我们自己的源码时它该换成全静态那一份（fat）。 */
     const ast = linkJs(path, (p) => {
-      const alt = builtinAlt(p, true);
-      const q = alt === null ? p : alt;
+      /* 两条换法都要过：`builtinAlt`（那八门语言四个目标）与 `lazyAlt`（借来的语言 adapter +
+         核心那几摊按动词的部件）—— 两边的迟装那一份都 import `node:module`。 */
+      const q = builtinAlt(p, true) ?? lazyAlt(p) ?? p;
       return existsSync(q) ? readFileSync(q, 'utf8') : null;
     }, diags);
     diags.throwIfErrors();

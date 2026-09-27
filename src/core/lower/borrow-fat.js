@@ -15,7 +15,7 @@
 //
 // 浏览器那条腿吃的是同一份（打包器只认静态 import），见 `tools/bundle-studio.mjs` 的 SWAP。
 
-import { mkBorrowRt } from './borrow-core.js';
+import { pickRt } from './borrow-core.js';
 import { OmniError } from '../source/diag.js';
 import { chezToIR } from '../../../ext/chez/adapter/index.js';
 import { sbclToIR } from '../../../ext/sbcl/adapter/index.js';
@@ -40,7 +40,7 @@ import * as librRun from '../../../ext/r/libr-run.js';
  *
  * 键写全路径而不是语言名：`borrow-core.js` 那格机制只认"装这个模块"，它不认识语言名字
  * （polydraw 与 evaldraw 共用一份语法，却是两份 adapter —— 按路径分才分得开）。
- * 对不上的那一格会被 `mkBorrowRt` 抓住（「装不进 …」/「没有 '…' 这个导出」）。
+ * 对不上的那一格会被 `pickRt` 抓住（「装不进 …」/「没有 '…' 这个导出」）。
  */
 const MODS = new Map([
   ['ext/chez/adapter/index.js', { chezToIR }],
@@ -59,6 +59,9 @@ const MODS = new Map([
   ['ext/evaldraw/adapter.js', { evaldrawToIR, preprocess }],
   ['ext/r/adapter.js', { rToIR }],
 ]);
+
+/** 装过的那几门（这一份的模块本来就都在内存里，这格 Map 只是省掉重复组对象）。 */
+const MEM = new Map();
 
 /* `{ adapter, name }` 那两格（`units` / `runFallback`）的模块表 —— 键与登记处逐字相同。 */
 const SPEC_MODS = new Map([
@@ -80,4 +83,10 @@ export function borrowOne(spec) {
 }
 
 /** 登记处那一行 -> 这门语言的运行时那半（`{ toIR, hooks?, imports?, pre? }`）。 */
-export const borrowRt = mkBorrowRt((p) => MODS.get(p));
+export function borrowRt(lang) {
+  const hit = MEM.get(lang.name);
+  if (hit !== undefined) return hit;
+  const rt = pickRt(lang, MODS.get(lang.adapter));
+  MEM.set(lang.name, rt);
+  return rt;
+}

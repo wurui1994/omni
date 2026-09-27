@@ -210,8 +210,60 @@ const rt = borrowRt(lang);                             // 到这一刻才装这�
 `runtime/c_runtime.js`（41 处 / 4.2ms）、`build/modules.js` + `modcache.js`（26 处 / 14ms）、
 `cli/flame.js`（12 处 / 2ms）、`frontend-c/split.js`（8 处 / 4.7ms）。
 
-预估省 **≥250ms**，而要改的调用点只有二十来处。按上面的顺序**一组一刀**地做，每组的判据是
-「那一组的命令照旧过它自己那条测试轴」+「`tiny.py` 的启动再掉一格」。
+预估省 **≥250ms**，而要改的调用点只有二十来处。按上面的顺序**一组一刀**地做。
+
+**判据用"静态 import 图有多大"，不用 wall clock。** 这台机器上 `启动` 那一栏在 257ms 与
+900ms 之间跳（IDE 自己就占着十几个核），拿它当判据只会把噪音读成结论。图的大小与负载无关 ——
+从入口顺着 `import … from '…'` 递归数份数与字节数（十几行脚本，`link.js` 的 `scan` 干的就是这件事）：
+
+```
+第 0/1 刀之前   173 份模块、3859 KB 源码
+批 A 之后       106 份模块、1948 KB 源码      -39% 份数 / -49% 字节
+```
+
+**批 A 已落**（三条死 import + `src_eval` + 两个汇编器 + `build/cli` + `repl` + `bootstrap`
++ `interp/eval` + `mir/interp|emit_js|js_rt|bytes`）：`cli.js` 的静态 import 60 条 -> 48 条。
+机制是 `lazy-core.js`（`mkCoreMod(load)`）+ `lazy.js`（node `createRequire`）+
+`lazy-fat.js`（静态表）+ `lazy-pick.js`（接缝，**同时管** `lower/borrow.js` 那一格；
+原来的 `borrow-pick.js` 并进它）。调用点写成 `coreMod('repl.js').startRepl(…)`。
+
+踩到一处**接缝有第二个入口**：`tests/mir/run.js` 自己也有一份 readModule 回调（它把 cli.js
+降到 MIR），只过了 `builtinAlt`。`lazy-pick.js` 的文件头预言了这件事，而它当场就发生了 ——
+那条轴报 `'node:module' is not importable`。改成 `builtinAlt(p, true) ?? lazyAlt(p) ?? p`。
+
+批 A 的判据（**已达成**）：`tests/mir` 51 passed / 0 failed、`tests/run.js` 105 passed /
+0 failed（含 repl 那两条，正好压住 `startRepl` 的迟装）、`tests/js-roundtrip` 675 passed /
+0 failed（含"整棵树重新生成再跑全套"那一轴）、`check:self` 两条腿绿。
+
+**批 A 里踩到的两处，都值得单独记**（都是"node 上一切正常、换条腿才炸"的那一类）：
+
+1. **第一版把机制写成了返回闭包的工厂**（`mkBorrowRt(load)` / `mkCoreMod(load)`）。node 源码腿
+   全绿、`check:self` 全绿，可 `./dist/omni run x.py` 报 `undefined is not a function`。
+   我第一反应断定"返回闭包不在子集里"—— **那个判断是错的**（写最小复现测过：`() => {…}` 返回
+   闭包、对象字面量简写、动态字符串下标，js 腿与 c 腿都对）。真因见下一条。不过改成
+   "收参数、回值的普通函数 + 模块级 Map"本身是对的（少一层、两条腿形状一致），就留下了。
+2. **`lazy.js` 用 `treeRoot()` 拼路径是错的**：js-roundtrip 那条轴把整棵树重新生成到
+   `.omni-build/js-roundtrip/` 下，那儿没有 `package.json` / `.git`，`treeRoot()` 退回
+   "往上数三格"就指到了别处 —— 症状是 `session-asy.in [host crash]`。改成
+   **相对这一份文件**（`createRequire(import.meta.url)` 的 base 就是它）之后那条轴转绿。
+
+## 七、顺手挖出来的两笔既有欠账
+
+想给这一刀加一条"产物真跑一趟"的判据，结果发现那条路**从来没绿过**。两笔都与按需装载无关，
+一个已修、一个记账：
+
+1. **`import { A as B }` 的改写不认局部遮蔽**（已修，见 `frontend-js/rename.js`）。
+   `renameImports` 把 `B` 的引用改写成 `A`，而 `glr/lex.js` 里恰好有 `import { span as
+   mkSpan }` + 函数体内 `const span = mkSpan(…)` —— 改写之后成了"调那格局部量"。
+   于是**自己编出来的 omni 读任何借来的语言都炸在词法器里**（`.py` / `.go` / `.pss` 全中），
+   而 `emit js` / `emit c` 一声不响地编过去。修完之后自编的 JS 产物**第一次**跑得动 `.py`。
+2. **原生腿的正则引擎缺一格**（未修）：`./dist/omni run x.py` 现在报
+   `regexp: negated class escape (\D \S \W) inside [...] is not supported`。
+   python.grammar 的词法规则里有这种写法，而 `src/runtime/` 那份 C 正则还没收字符类里的
+   否定类转义。这是"原生产物 × 借来的语言"这条组合上的下一格，与这一份文档无关。
+
+**这两笔照出同一件事**：判据里长期缺"**自己编出来的那份真跑一趟借来的语言**"。
+`check:self` 只管编得出，`tests/*` 都跑在 node 源码腿上。这条组合该有一格判据。
 
 ### 第 3 刀（收尾，没有性能收益）：数据那半也挪进自述
 
