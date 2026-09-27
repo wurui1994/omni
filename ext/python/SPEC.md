@@ -230,7 +230,22 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
    已经排除的嫌疑（各写了最小复现，与 clang 逐字节相同）：`(long)(3ULL<<30) | ((long)5<<48)`
    那种折叠、`&extern结构.成员.子成员` 与 `&extern数组[2].成员` 那种地址常量、
    `.ob_base = { { {…}, (&T) }, (2) }` 这种**具名**的嵌套指定初始化。
-   下一刀就从那两格接着走（匿名 union 那一格优先 —— 它是"答错"，不是"还没接"）。
+
+7. **匿名 union 那一格修了，`_kwtuple` 过了，边界推到 2476 行**。
+
+   修法：**初始化式看的成员表与取名字看的那张分开**。`ref.fields` 照旧是**摊平**的
+   （`s.full` / `s.ob_refcnt` 要靠它，与 tcc 一条），新的 `ref.inits` 是**按声明**的 ——
+   匿名 struct/union 在那儿算**一格**（C11 6.7.9：它就是一个没名字的成员）。
+   `initFull` / `initElem` 改用后者（`initMembers()`）。四种形状与 clang 逐字节相同：
+   `{ 7, (void*)8 }` / `{ { 9 }, (void*)10 }` 以及 union 在中间的那两种。
+   `tests/c` 照旧 106 passed / 2 failed。
+
+   于是那张 Argument Clinic 的关键字元组**编出来了**（`_kwtuple` 那 13 行单独一份 TU
+   出 53KB 的 `.o`），整份 `unicodeobject.c` 的边界从 413 行推到 **2476 行**
+   （`kind = PyUnicode_KIND(string);` 报 `expression expected`）。
+   **注意那一行单独拿出来是编得过的**（`int k = PyUnicode_KIND(s);` 出 `.o`），
+   所以 2476 不是那个宏本身的事 —— 是它前头某处把分析器带偏了。下一刀从"这一行之前
+   最近的那个不寻常构造"接着二分。
 
 ## 二、进度
 

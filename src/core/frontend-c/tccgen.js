@@ -690,6 +690,18 @@ function cefApply(t, x, y, err) {
  * 所以先问 `sameType(a, b)` 会让 `int t[]; int t[10];` 直接回第一条的
  * 「没长度」类型，长度就永远补不上了。
  */
+/**
+ * **初始化式看的那一串成员**：匿名 struct/union 在这儿算**一格**（C11 6.7.9 第 9 段 ——
+ * 它是一个没名字的成员，`{ … }` 里占一个位置），而 `ref.fields` 是**摊平**的
+ * （`s.full` 那种取名字要它）。两张表分开之前这儿是一处**静静答错**（见布局那一段的账）。
+ * 老的结构体记录上没有 `inits`（比如 `mkStruct` 直接造出来那几格）—— 退回 `fields`。
+ */
+function initMembers(ty) {
+  const r = ty.ref;
+  if (r === null || r === undefined) return null;
+  return r.inits ?? r.fields;
+}
+
 function mergeTentative(a, b) {
   /* 数组那一档**不能拿 `sameType(a, b)` 当门**：它自己就把"两条长度都写了而且不一样"
      判成不同型（`compareTypes` 里那一句），于是下面按长度合并的几条一格都走不到。
@@ -3092,7 +3104,7 @@ export class CGen {  /**
   /** 这一层填满了吗（不定长数组永远没满，它的长度是数出来的）。 */
   initFull(lv) {
     if (isArray(lv.ty.t)) return lv.ty.count >= 0 && lv.i >= lv.ty.count;
-    return lv.i >= lv.ty.ref.fields.length;
+    return lv.i >= initMembers(lv.ty).length;
   }
 
   /** 这一层的第 `i` 格是什么类型、在哪儿。满了还要就是 excess。 */
@@ -3103,7 +3115,7 @@ export class CGen {  /**
       }
       return { ty: lv.ty.ref, off: lv.off + lv.i * typeSize(lv.ty.ref).size };
     }
-    const fields = lv.ty.ref.fields;
+    const fields = initMembers(lv.ty);
     if (fields === null) this.err(`'${cTypeText(lv.ty)}' is an incomplete type`);
     if (lv.i >= fields.length) {
       this.err(`excess elements in ${isUnion(lv.ty.t) ? 'union' : 'struct'} initializer`);
@@ -6336,6 +6348,8 @@ export class CGen {  /**
     let bitPos = 0;
     let maxalign = 1;
     const pragmaPack = this.cpp.packStack[this.cpp.packStack.length - 1];
+    /** 按**声明**的那一串成员（匿名 struct/union 算一格）—— 初始化式走它，见下面那段账。 */
+    const inits = [];
     for (const m of mems) {
       let fty = m.ty;
       const bits = m.bits;
@@ -6373,6 +6387,12 @@ export class CGen {  /**
         }
         if (align > maxalign) maxalign = align;
         for (const f of fty.ref.fields) fields.push({ name: f.name, ty: f.ty, off: at + f.off });
+        /* **初始化式看的是另一张表**：匿名成员在那儿算**一格**（C11 6.7.9 —— 它就是一个
+           没名字的成员），而 `fields` 是摊平的（`s.full` 要能取到）。
+           拿摊平那张表去走初始化式会静静答错：`struct S { union { long full; struct {
+           unsigned r; …; }; }; void *t; }` 上 `{ 7, (void*)8 }` 会把 8 填进 `r`
+           （与 full 同一个地址）、`t` 一格都没填 —— clang 是 `7 7 0x8`，我们答 `8 8 0x0`。 */
+        inits.push({ name: null, ty: fty, off: at });
         continue;
       }
 
@@ -6428,7 +6448,11 @@ export class CGen {  /**
         bitPos += bits;
       }
       if (align > maxalign) maxalign = align;
-      if (m.name !== null) fields.push({ name: m.name, ty: fty, off });
+      if (m.name !== null) {
+        fields.push({ name: m.name, ty: fty, off });
+        inits.push({ name: m.name, ty: fty, off });
+      }
+      /* 匿名**位域**（`int :0;` / `int :3;`）两张表都不进：它取不了名字，也不许初始化。 */
     }
 
     // 末尾那一串没排完的位也要占字节（`tccgen.c:4344`）
@@ -6439,6 +6463,7 @@ export class CGen {  /**
     let a = ad.aligned !== 0 ? ad.aligned : 1;
     if (a < maxalign) a = maxalign;
     info.fields = fields;
+    info.inits = inits;
     info.align = a;
     info.size = alignUp(c, a);
     this.fixBitfields(fields, info.size);
