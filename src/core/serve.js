@@ -513,7 +513,12 @@ export function startServer(opts) {
             'x-kv6-voxels': String(m.n),
             'cache-control': 'no-cache',
           });
-          res.end(Buffer.from(m.vox.buffer, 0, m.n * 32));
+          /* **按字节发出去这一步在这儿打包**（`m.vox` 是一格普通数组）：解码器那一份要过
+             我们自己那台 JS 前端，那儿没有 `Float64Array`（见 `host/kv6.js` 的头注）；
+             而 serve 是**另一个进程**（`cli.js` 只是 spawn 它），node 的东西随便用。
+             线上格式一个字节都没变：`n` 格体素 × 4 个 little-endian double = `n*32` 字节，
+             页面那侧照旧 `new Float64Array(arrayBuffer)`（`studio/gfx-gl.js`）。 */
+          res.end(Buffer.from(new Float64Array(m.vox).buffer, 0, m.n * 32));
           return undefined;
         }
         res.writeHead(200, {

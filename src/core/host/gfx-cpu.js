@@ -1477,6 +1477,22 @@ const KV6 = { path: '', cur: null, seen: new Map() };
  *   2. ImageIO 只有 macOS 有；
  *   3. 三条腿要逐字节相同 ⇒ 解码这件事必须是**定死的算术**，不能是"谁在场用谁"。
  */
+/**
+ * latin1 串（一个字符一个字节 —— `readBinary` 回的就是它）-> 一格**真的** `Uint8Array`。
+ *
+ * 为什么不写 `Uint8Array.from(s, fn)`：那要把 `Uint8Array` **当值用**，而封闭 ABI 里这个
+ * 名字只有 `new Uint8Array(…)` 那一格（症状是 `check:self` 报两条
+ * `unresolved identifier 'Uint8Array'`，而 node 那条腿全绿 —— 这一份要过我们自己那台
+ * JS 前端，它在 `src/cli.js` 那棵树里）。`new Uint8Array(数组)` 是在的（`js_buf_of_list`），
+ * 所以先摊成一格普通数组再交给它。**这儿必须是字节缓冲、不能是普通数组**：
+ * 两份解码器都要 `bytes.buffer`（`new DataView(…)`）。
+ */
+function bytesOfLatin1(s) {
+  const a = [];
+  for (let i = 0; i < s.length; i++) a.push(s.charCodeAt(i) & 255);
+  return new Uint8Array(a);
+}
+
 const PIC = { path: '', cur: null, seen: new Map() };
 
 /** `picsiz`：解开并缓存，回 `宽*65536+高`（读不到/解不开回 -1）。 */
@@ -1491,7 +1507,7 @@ function picNeed(p) {
     /* `readBinary` 回的是 latin1 串（一个字符一个字节）—— 与 KV6 那一格同一条注。 */
     const s = readBinary(p);
     m = typeof s !== 'string' ? null
-      : decodePng(Uint8Array.from(s, (ch) => ch.charCodeAt(0) & 255));
+      : decodePng(bytesOfLatin1(s));
   } catch { m = null; }
   PIC.seen.set(p, m);
   PIC.cur = m;
@@ -1522,7 +1538,7 @@ function kv6Need(p) {
          `new Uint8Array(串)`（那样得到的是空数组，解码器看见的就是"长度不够"）。 */
       const s = readBinary(c);
       m = typeof s !== 'string' ? null
-        : decodeKv6(Uint8Array.from(s, (ch) => ch.charCodeAt(0) & 255));
+        : decodeKv6(bytesOfLatin1(s));
     } catch { m = null; }
     if (m !== null) break;
   }

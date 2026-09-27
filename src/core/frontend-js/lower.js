@@ -4305,27 +4305,32 @@ const STATIC_CALLS = {
   // len 有了才能"当值用"（这几个的 length 照规范）。可变实参那一档由 builtinFnValue
   // 包成 (...xs) => f(...xs)，所以定死的形参个数不会再把多出来的实参吃掉。
   'Math.hypot': { op: 'js_math', argc: 2, lit: { op: 'Y' }, len: 2, assoc: true, id: 0 },
-  'Math.exp': { op: 'js_math', argc: 2, lit: { op: 'E' } },
-  'Math.expm1': { op: 'js_math', argc: 2, lit: { op: 'X' } },
-  'Math.log': { op: 'js_math', argc: 2, lit: { op: 'O' } },
-  'Math.log10': { op: 'js_math', argc: 2, lit: { op: 'Q' } },
+  /* **一元那一族的 `len` 全是 1**（规范 21.3.2：这些函数的 `length` 都是 1）。
+     标了才允许"当值用"（`sin: Math.sin` 这种查表），而**那正是 EVAL 两门 adapter 折常量
+     时的写法**（`ext/polydraw/adapter.js` 的 `constOf`）—— 从前只有 sqrt/abs/floor/ceil
+     标了，于是 `check:self` 在那张表上报八条
+     `'Math.sin' is not in the closed ABI`，而 node 那条腿一点事没有。 */
+  'Math.exp': { op: 'js_math', argc: 2, lit: { op: 'E' }, len: 1 },
+  'Math.expm1': { op: 'js_math', argc: 2, lit: { op: 'X' }, len: 1 },
+  'Math.log': { op: 'js_math', argc: 2, lit: { op: 'O' }, len: 1 },
+  'Math.log10': { op: 'js_math', argc: 2, lit: { op: 'Q' }, len: 1 },
   'Math.log2': { op: 'js_math', argc: 2, lit: { op: 'w' }, len: 1 },
-  'Math.log1p': { op: 'js_math', argc: 2, lit: { op: 'P' } },
+  'Math.log1p': { op: 'js_math', argc: 2, lit: { op: 'P' }, len: 1 },
   'Math.sign': { op: 'js_math', argc: 2, lit: { op: 'g' }, len: 1 },
-  'Math.cbrt': { op: 'js_math', argc: 2, lit: { op: 'B' } },
-  'Math.sin': { op: 'js_math', argc: 2, lit: { op: 'S' } },
-  'Math.cos': { op: 'js_math', argc: 2, lit: { op: 'C' } },
-  'Math.tan': { op: 'js_math', argc: 2, lit: { op: 'T' } },
-  'Math.asin': { op: 'js_math', argc: 2, lit: { op: 'I' } },
-  'Math.acos': { op: 'js_math', argc: 2, lit: { op: 'A' } },
-  'Math.atan': { op: 'js_math', argc: 2, lit: { op: 'N' } },
-  'Math.atan2': { op: 'js_math', argc: 2, lit: { op: '2' } },
-  'Math.sinh': { op: 'js_math', argc: 2, lit: { op: 'H' } },
-  'Math.cosh': { op: 'js_math', argc: 2, lit: { op: 'D' } },
-  'Math.tanh': { op: 'js_math', argc: 2, lit: { op: 'G' } },
-  'Math.asinh': { op: 'js_math', argc: 2, lit: { op: 'J' } },
-  'Math.acosh': { op: 'js_math', argc: 2, lit: { op: 'K' } },
-  'Math.atanh': { op: 'js_math', argc: 2, lit: { op: 'L' } },
+  'Math.cbrt': { op: 'js_math', argc: 2, lit: { op: 'B' }, len: 1 },
+  'Math.sin': { op: 'js_math', argc: 2, lit: { op: 'S' }, len: 1 },
+  'Math.cos': { op: 'js_math', argc: 2, lit: { op: 'C' }, len: 1 },
+  'Math.tan': { op: 'js_math', argc: 2, lit: { op: 'T' }, len: 1 },
+  'Math.asin': { op: 'js_math', argc: 2, lit: { op: 'I' }, len: 1 },
+  'Math.acos': { op: 'js_math', argc: 2, lit: { op: 'A' }, len: 1 },
+  'Math.atan': { op: 'js_math', argc: 2, lit: { op: 'N' }, len: 1 },
+  'Math.atan2': { op: 'js_math', argc: 2, lit: { op: '2' }, len: 2 },
+  'Math.sinh': { op: 'js_math', argc: 2, lit: { op: 'H' }, len: 1 },
+  'Math.cosh': { op: 'js_math', argc: 2, lit: { op: 'D' }, len: 1 },
+  'Math.tanh': { op: 'js_math', argc: 2, lit: { op: 'G' }, len: 1 },
+  'Math.asinh': { op: 'js_math', argc: 2, lit: { op: 'J' }, len: 1 },
+  'Math.acosh': { op: 'js_math', argc: 2, lit: { op: 'K' }, len: 1 },
+  'Math.atanh': { op: 'js_math', argc: 2, lit: { op: 'L' }, len: 1 },
   // pow 与 `**` 是同一件事（规范里两者都是 ToNumber 之后求幂），所以它就是那条算术 op
   'Math.pow': { op: 'js_arith', argc: 2, lit: { op: 'p' }, len: 2 },
   // imul 是**32 位乘法**，不是 `Math.*` 那一族：它属于 i32 那三条 op（ADR-0013 第三刀）。

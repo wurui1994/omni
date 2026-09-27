@@ -24,6 +24,21 @@
 const be32 = (b, i) => (((b[i] << 24) | (b[i + 1] << 16) | (b[i + 2] << 8) | b[i + 3]) >>> 0);
 
 /**
+ * `n` 格 0 的一格**普通数组**（码表那几张小表用它）。
+ *
+ * 为什么不用 `Int32Array`：**这一份要过我们自己那台 JS 前端**（`gfx-cpu.js` 静态 import
+ * 它 ⇒ 它在 `src/cli.js` 那棵树里，`check:self` 与 `build:native` 都编它），而封闭 ABI 里
+ * 只有 `ArrayBuffer` / `Uint8Array` / `DataView` 这一族，没有 `Int32Array`
+ * （症状是 `check:self` 报七条 `unresolved identifier 'Int32Array'`，而 node 那条腿全绿）。
+ * 这几张表最大 288 格、里头是小整数 —— 普通数组算出来的字节与从前**逐格相同**。
+ */
+const zeros = (n) => {
+  const a = [];
+  for (let i = 0; i < n; i++) a.push(0);
+  return a;
+};
+
+/**
  * **DEFLATE（RFC 1951）**：`{ out, n }` —— `out` 是解出来的字节。
  *
  * 三种块都认：stored（BTYPE=0）、固定码表（1）、动态码表（2）。
@@ -47,12 +62,12 @@ function inflate(src, from, cap) {
   };
   /* 一张码表：`{ cnt, sym }` —— cnt[l] 是长度 l 的符号个数、sym 是按长度/符号排好的表。 */
   const build = (lens, n) => {
-    const cnt = new Int32Array(16);
+    const cnt = zeros(16);
     for (let i = 0; i < n; i++) cnt[lens[i]] += 1;
     cnt[0] = 0;
-    const off = new Int32Array(16);
+    const off = zeros(16);
     for (let l = 1; l < 16; l++) off[l] = off[l - 1] + cnt[l - 1];
-    const sym = new Int32Array(n);
+    const sym = zeros(n);
     for (let i = 0; i < n; i++) if (lens[i] !== 0) { sym[off[lens[i]]] = i; off[lens[i]] += 1; }
     return { cnt, sym };
   };
@@ -96,9 +111,10 @@ function inflate(src, from, cap) {
       let hd = null;
       if (type === 1) {
         if (fixL === null) {
-          const ll = new Int32Array(288);
+          const ll = zeros(288);
           for (let i = 0; i < 288; i++) ll[i] = i < 144 ? 8 : (i < 256 ? 9 : (i < 280 ? 7 : 8));
-          const dl = new Int32Array(30).fill(5);
+          const dl = zeros(30);
+          for (let i = 0; i < 30; i++) dl[i] = 5;
           fixL = build(ll, 288);
           fixD = build(dl, 30);
         }
@@ -109,10 +125,10 @@ function inflate(src, from, cap) {
         const ndist = bits(5) + 1;
         const ncode = bits(4) + 4;
         const ORD = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
-        const cl = new Int32Array(19);
+        const cl = zeros(19);
         for (let i = 0; i < ncode; i++) cl[ORD[i]] = bits(3);
         const hc = build(cl, 19);
-        const lens = new Int32Array(nlen + ndist);
+        const lens = zeros(nlen + ndist);
         let i = 0;
         while (i < nlen + ndist) {
           const s = decode(hc);
@@ -122,8 +138,10 @@ function inflate(src, from, cap) {
           if (s === 16) { v = lens[i - 1]; rep = 3 + bits(2); } else if (s === 17) { rep = 3 + bits(3); } else { rep = 11 + bits(7); }
           for (let k = 0; k < rep; k++) { lens[i] = v; i += 1; }
         }
-        hl = build(lens.subarray(0, nlen), nlen);
-        hd = build(lens.subarray(nlen), ndist);
+        /* `slice` 而不是 `subarray`（那是类型化数组的方法）—— `build` 只按下标读，
+           所以"另一格数组"与"同一块内存上的视图"在这儿是同一件事。 */
+        hl = build(lens.slice(0, nlen), nlen);
+        hd = build(lens.slice(nlen), ndist);
       } else throw new Error('png: deflate 块类型 3');
       for (;;) {
         const s = decode(hl);
