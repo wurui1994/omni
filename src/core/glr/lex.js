@@ -300,9 +300,24 @@ export function readLexSpec(node, diags) {
       const open = it.items[1];
       const close = it.items[2];
       if (!isStr(open) || !isStr(close)) { diags.error(it.span, '(block-comment OPEN CLOSE) needs two strings'); continue; }
-      const nest = isAtom(it.items[3]) && it.items[3].value === 'nest';
-      if (it.items.length > 3 && !nest) diags.error(it.span, "the only flag after (block-comment OPEN CLOSE) is 'nest'");
-      blocks.push({ open: open.value, close: close.value, nest, openC0: open.value.charCodeAt(0) });
+      const flags = it.items.slice(3).filter((f) => isAtom(f)).map((f) => f.value);
+      const nest = flags.includes('nest');
+      /**
+       * `eof-ok`：**到文件尾还没关也算关了**（不报 unterminated）。
+       *
+       * 为什么要这一格而不是一律宽容：C 那一族里"没关的块注释"是真错（它会把后面整份文件
+       * 吃掉）。可有的语言的正本压根不检查 —— EVAL（`.pss`/`.kc`）那台剥注释的机器就是
+       * 一遍扫描加一格 `got` 旗子（`polydraw_src/eval.c:6893`），扫到头就结束，
+       * 于是作者在文件末尾用 `/*` 压一段笔记是**合法的写法**（`games/snood.kc:295`）。
+       * 这一格由语法自己声明，别的语言一个字都不受影响。
+       */
+      const eofOk = flags.includes('eof-ok');
+      if (flags.some((f) => f !== 'nest' && f !== 'eof-ok')) {
+        diags.error(it.span, "the only flags after (block-comment OPEN CLOSE) are 'nest' and 'eof-ok'");
+      }
+      blocks.push({
+        open: open.value, close: close.value, nest, eofOk, openC0: open.value.charCodeAt(0),
+      });
       continue;
     }
     if (h === 'indent') {
@@ -653,7 +668,7 @@ export function lexText(spec, file, diags) {
           if (src.startsWith(b.close, i)) { d--; i += b.close.length; continue; }
           i++;
         }
-        if (d > 0) {
+        if (d > 0 && !b.eofOk) {
           diags.error(mkSpan(file, start, src.length), 'unterminated block comment');
           failed = true;
         }

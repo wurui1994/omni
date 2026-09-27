@@ -50,7 +50,10 @@
   (lex
     (skip (+ (set " \t\r\n")))
     (comment "//" (* (not "\n")))
-    (block-comment "/*" "*/")
+    ;; `eof-ok`：**到文件尾还没关也算关了**。正本那台剥注释的机器是一遍扫描 + 一格
+    ;; `got` 旗子（`polydraw_src/eval.c:6893`），扫到头就结束 —— 所以作者在文件末尾用
+    ;; 一个没关的块注释压一段笔记是合法写法（`games/snood.kc:295` 那份末尾压着两行 bind 说明）。
+    (block-comment "/*" "*/" eof-ok)
     (skip "@" (* (or (not "\n") "\n")))
 
     (token NUMBER (+ digit) (? "." (* digit)) (? (or "e" "E") (? (or "+" "-")) (+ digit)))

@@ -598,6 +598,40 @@ console.log('##' + JSON.stringify({ setpix: ops.get('setpix') ?? 0 }));
   }
 }
 
+/* ── **文件末尾那个没关的块注释**：EVAL 认，别的语言照旧当错 ─────────────────────────
+ *
+ * 正本那台剥注释的机器是一遍扫描 + 一格 `got` 旗子（`polydraw_src/eval.c:6893`），
+ * 扫到文件头就结束 —— 所以作者在末尾开一个块注释、不关它、压一段笔记是**合法写法**
+ * （`games/snood.kc:295` 末尾压着两行 bind 说明，整份先前跑不起来）。
+ *
+ * 落法是语法自己声明一格 `eof-ok` 旗子（`polydraw.grammar` 的那句 block-comment，
+ * 实现在 `glr/lex.js`）。**这一格判据的重点是后一半**：别的语言（这儿拿 `.go`）一个字都
+ * 不受影响 —— 在 C 那一族里"没关的块注释"是真错（它会把后面整份文件吃掉），不许一律宽容。
+ */
+if (only.length === 0 || only.some((x) => 'eofcomment'.includes(x))) {
+  const tmp = join(ROOT, '.omni-cache', 'eofcomment');
+  mkdirSync(tmp, { recursive: true });
+  const write = (name, text) => { const p = join(tmp, name); writeFileSync(p, text); return p; };
+  /* EVAL（`.kc`）：末尾压一段没关的注释 —— 照旧要跑出那一行。 */
+  const kc = write('tail.kc', '()\nprintf("ok=%g\\n", 7);\n\n/*\nbind f2 format savetxt\n');
+  const r1 = spawnSync(process.execPath, [CLI, 'run', kc], { encoding: 'utf8', timeout: 60000 });
+  if (r1.status !== 0) {
+    no('末尾没关的块注释：`.kc` 要认', `退出码 ${r1.status}：${(r1.stderr ?? '').split('\n').slice(0, 2).join(' ')}`);
+  } else if (!(r1.stdout ?? '').includes('ok=7')) {
+    no('末尾没关的块注释：`.kc` 要认', `stdout 里没有 ok=7：${JSON.stringify(r1.stdout)}`);
+  } else ok('末尾没关的块注释：`.kc` 认（扫到文件头就算关了）');
+  /* `.go`：同一个形状必须还是错 —— `eof-ok` 是**按语法**给的，不是全局宽容。 */
+  const go = write('tail.go', 'package main\n\nfunc main() {\n}\n\n/* 没关\n');
+  const r2 = spawnSync(process.execPath, [CLI, 'run', go], { encoding: 'utf8', timeout: 60000 });
+  const said = `${r2.stdout ?? ''}${r2.stderr ?? ''}`;
+  if (r2.status === 0) {
+    no('末尾没关的块注释：`.go` 照旧要报', '它跑通了 —— `eof-ok` 漏成全局宽容了');
+  } else if (!said.includes('unterminated block comment')) {
+    no('末尾没关的块注释：`.go` 照旧要报', `报的不是那一句：${said.split('\n').slice(0, 2).join(' ')}`);
+  } else ok('末尾没关的块注释：`.go` 照旧报 unterminated（旗子是按语法给的）');
+  rmSync(tmp, { recursive: true, force: true });
+}
+
 /* ── **自循环的脚本在录制那一档（`--gfx null`）也得走出来** ─────────────────────────
  *
  * 录制那一档是扫描的**尺子**（`tests/eval/scan.js` 的默认设备）：画图那一族记一笔就回 0，
