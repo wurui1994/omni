@@ -15,16 +15,23 @@
 // **现在收着的只有 str 的补宽度那四格，不再长**（见 SPEC §二 那一刀）。
 // 下一刀是把对象层借进来、adapter 改发"往借来的运行时里调一格"。
 
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-import { tag, kids, part } from '../../../src/core/lower/cst.js';
-import { nameOf } from './expr.js';
+// **宿主 IO 走封闭 ABI**（`host/native.js`），路径计算走 `host/path.js` —— 这是 SDK 面的
+// 规矩（docs/EXTENSIONS.md 第三节：「别直接碰 `node:fs`」）。上一刀这儿写的是
+// `node:fs` + `node:url` + `node:path` 三条，于是 `npm run check:self` 整条红：
+//   ext/python/adapter/pylib.js:18: 'node:fs' is not importable（ADR-0011 decision 2）
+// `import.meta.url` 也一样不行 —— 它不在这门语言的子集里。
+//
+// **"树根在哪儿"由核心递进来**（`drive.js` → `toIR(tree, { root })` → `C.root`），扩展这一侧
+// 不自己去找：往上数几层在源码腿与产物腿上不一样，那笔账核心那份 `treeRoot()` 已经算过了。
+// 顺带解掉一个 import 环：从 `lower/langs.js` 取 `treeRoot` 会绕回这一份（langs → adapter → 这儿）。
+import { readText } from '../../../src/core/host/native.js';
+import { join } from '../../../src/core/host/path.js';
+import {
+  tag, kids, part, leaf,
+} from '../../../src/core/lower/cst.js';
 
 /** 顶层那几句（`(line …)` 那一层剥掉）—— 这儿只关心 `def`。 */
 const topOf = (items) => items.flatMap((s) => (tag(s) === 'line' ? topOf(kids(s)) : [s]));
-
-const LIB_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'lib');
 
 /** 库源码，按文件。次序无所谓（这一层只收 `def`，不跑模块级语句）。 */
 const LIB_FILES = ['str.py'];
@@ -84,13 +91,16 @@ export function loadPyLib(C) {
   if (C.parseExpr === null) {
     throw new Error('python->IR: 库那一份没法解析（`drive.js` 的 `parseExpr` 没递进来）');
   }
+  const dir = join(C.root ?? '.', 'ext', 'python', 'lib');
   for (const file of LIB_FILES) {
-    const src = readFileSync(join(LIB_DIR, file), 'utf8');
+    const src = readText(join(dir, file));
     const tree = C.parseExpr(src);
     if (tree === null) throw new Error(`python->IR: 库 \`lib/${file}\` 解析不动`);
     for (const nd of topOf(kids(tree))) {
       if (tag(nd) !== 'def') continue;
-      const nm = String(nameOf(kids(nd).find((y) => tag(y) === 'n')));
+      /* `def` 的名字那一格一定是 `(n 名字)`（上一行的 `find` 就按它挑的），所以直接取叶子 ——
+         不走 `expr.js` 的 `nameOf`：那会与 `expr.js` 结一个 import 环（它 import 这一份）。 */
+      const nm = String(leaf(kids(kids(nd).find((y) => tag(y) === 'n'))[0]));
       if (C.fnNodes.has(nm)) {
         throw new Error(`python->IR: 库 \`lib/${file}\` 里的 \`${nm}\` 与这份源码里的同名`);
       }

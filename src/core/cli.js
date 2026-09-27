@@ -3286,14 +3286,52 @@ function extWinCc() {
  * 为什么要分：`hostOs()` 把"没有 uname"读成 Windows，那条推断在 node 上是对的，
  * 可在页面里是假的 —— 那儿只是没有 `fork`。三个问平台的地方（`hostArch` /
  * `hostIsDarwin` / `hostOs`）共用这一格，别各写一个 try。
+ *
+ * **一趟 `uname -sm` answer 两个问题**（不是一格一次 spawn）：从前 `-s` 与 `-m` 各起一个
+ * 子进程，而 `hostIsDarwin` 与 `hostOs` 问的还是**同一个** `-s` —— 于是随便一条命令
+ * （`run --mode js` 一份 `print(1)` 也算）开头就白花两三次 spawn。量到的：`--cpu-prof`
+ * 那张表里 `spawnSync` 自用 52ms / 一趟 1363ms，栈是 `main > cTgt > hostArch|hostOs >
+ * unameOut`。`uname -sm` 两家都按 `sysname machine` 的固定次序印（BSD 与 coreutils 都是
+ * 按 `-snrvmpio` 排，不按命令行上的次序），所以拆开就是这两格。
+ *
+ * 拆不出两格（某家的 `uname` 不认 `-sm`）就**退回一格一次**，不猜 —— 那条退路上的代价
+ * 与从前一样，答案也与从前一样。
  */
-function unameOut(flag) {
+let UNAME_ASKED = false;
+let UNAME_S = null;
+let UNAME_M = null;
+
+function unameSpawn(flag) {
   try {
     const r = spawn('uname', [flag], 'c');
     return r[0] === 0 ? r[1].trim() : '';
   } catch {
     return null;
   }
+}
+
+function unameOut(flag) {
+  if (flag !== '-s' && flag !== '-m') return unameSpawn(flag);
+  if (!UNAME_ASKED) {
+    UNAME_ASKED = true;
+    const line = unameSpawn('-sm');
+    if (line === null) {
+      /* 这条腿上没有子进程（浏览器）—— 两格都是 `null`，与从前逐格问时一样。 */
+      UNAME_S = null;
+      UNAME_M = null;
+    } else {
+      const parts = line.split(' ').filter(Boolean);
+      if (parts.length >= 2) {
+        UNAME_S = parts[0];
+        UNAME_M = parts[parts.length - 1];
+      } else {
+        /* `-sm` 不认（或只印了一格）：退回一格一次。 */
+        UNAME_S = unameSpawn('-s');
+        UNAME_M = unameSpawn('-m');
+      }
+    }
+  }
+  return flag === '-s' ? UNAME_S : UNAME_M;
 }
 
 /**

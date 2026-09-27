@@ -25,6 +25,32 @@ function node(name) {
   return process.getBuiltinModule(name);
 }
 
+/**
+ * **V8 的编译缓存**（`module.enableCompileCache`）——「启动那一秒」里最大的一格。
+ *
+ * 量到的账（`run --mode js` 一份 `print(1)`，`--cpu-prof` 那张表）：一趟 1363ms 里
+ * `compileSourceTextModule` 自用 **283ms**，整个 ESM 图装进来（`#getOrCreateModuleJob…`）
+ * 含子 751ms、55%。那是 V8**每趟都重新解析编译**这棵树四百来份 `.js` —— 而源码一个
+ * 字节都没变。编译缓存把 V8 吐出的字节码存到盘上，下一趟直接反序列化。
+ *
+ * 为什么摆在**这一份文件**里：
+ *   * 它是 `core/cli.js` 的第一个 import，所以这一句在整棵树被装进来**之前**跑
+ *     —— 晚一格就有几百毫秒白付。
+ *   * 链接器（`frontend-js/link.js`）**不把这份文件拼进程序里**（见文件头）：从这儿
+ *     导入的名字全被映射成 ABI op。所以这一句只在「node 上直接跑编译器」那条腿上
+ *     存在，不会跟着 `emit js` / `emit c` 进到产物里 —— 自编译那一轴看不见它。
+ *
+ * 目录交给 node 自己定（`$TMPDIR/node-compile-cache/<版本>-<arch>-…-<uid>`）：它已经把
+ * 「node 版本 / 架构 / 用户」编进路径，换一版 node 不会读到上一版的字节码。
+ * `NODE_COMPILE_CACHE` 给了就听它的。**失败不要紧**：纯缓存，没有它只是慢回原样。
+ */
+(() => {
+  try {
+    const m = process.getBuiltinModule('node:module');
+    if (typeof m.enableCompileCache === 'function') m.enableCompileCache();
+  } catch { /* 没有这一格（老 node、别的宿主）就照旧每趟重新编 */ }
+})();
+
 /* ---------------------------------------------------------------- 文件系统 */
 
 export function readText(p) {

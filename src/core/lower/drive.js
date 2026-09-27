@@ -183,7 +183,9 @@ export function sxTextOf(path, argv = [], out = null, opts = {}) {
       const t = glrParse(tb, toks, diags);
       return t === null || diags.errorCount() > n0 ? null : t;
     };
-    const ir = lang.toIR(tree, { also, src: mainSrc, parseExpr });
+    const ir = lang.toIR(tree, {
+      also, src: mainSrc, parseExpr, root: treeRoot(),
+    });
     /* **顺手把"哪些名字是那门语言的运行时层"带出去**（`out.rtNames`，EVAL 两门在用）：
        切单元产物时按它分 —— 运行时那一层是所有脚本共用的一格，只编一次只发一次
        （`docs/design/omni-serve-studio.md` §9.3）。别的语言没这一格就是空表。
@@ -203,6 +205,7 @@ export function sxTextOf(path, argv = [], out = null, opts = {}) {
       ? opts.skipBodies(Array.isArray(ir.rtNames) ? ir.rtNames : [])
       : null;
     return lower(ir, lang.hooks ?? {}, skip instanceof Set ? { skipBodies: skip } : {});
+
   } catch (err) {
     throw new OmniError(`${path}：${lang.name} 这一格还没接住 —— ${err.message}`);
   }

@@ -49,6 +49,9 @@ export function pyToIR(tree, ctx = {}) {
 
   const C = makeCtx();
   C.parseExpr = ctx.parseExpr ?? null;
+  /* **这棵树的根**由核心递进来（`drive.js`），扩展这一侧不自己去找 —— `import.meta.url`
+     不在这门语言的子集里，而 `treeRoot()` 在核心那一份里已经有了。`lib/*.py` 按它拼。 */
+  C.root = ctx.root ?? null;
   const top = flatten(kids(tree));
   const fnNodes = top.filter((s) => tag(s) === 'def');
   const classNodes = top.filter((s) => tag(s) === 'class');
@@ -267,6 +270,8 @@ function makeCtx() {
      * 再解析一遍（`src/core/lang/jnc.js` 的 `jncParseExpr` 是同一条先例）。
      */
     parseExpr: null,
+    /** 这棵树的根（`drive.js` 递的）—— `lib/*.py` 按它拼。 */
+    root: null,
     /** f-string 的分段缓存（记号原文 → 那几段，表达式那几段带解析好的树）。 */
     fstrCache: new Map(),
     /** f-string 里那几棵解析出来的表达式树 —— 推断那几趟要连它们一起走。 */
