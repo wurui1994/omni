@@ -576,3 +576,40 @@ stdout 落**文件**而不是管子：被 `import` 进来的模块里调 `proces
   段上互指时会撞 TDZ（响的，不是静默）。真撞上要把那几格挪进一个 `$link()`。
 * 变参的外部函数还不能跨模块 import（桩的签名是"固定形参 + 变参区指针"，
   而那一档的调用点早就直接 `CCALL` 了）—— nmath 里没有这种，R 的 `src/main` 里有。
+
+## 第十三格：`_Complex` 当布局收下 —— R 运行时 0/111 变 90/111（已落，2026-09-27）
+
+不停在 nmath。`src/main`（99 份）+ `src/appl` + `src/unix` 一份一份过我们自己的 C 前端
+（`tu` 档），扫出来的第一张表是**一类错占了 107 份**：
+
+```
+/…/src/include/R_ext/Complex.h:81: error: identifier expected     107 份
+```
+
+那一行是
+
+```c
+typedef union { struct { double r; double i; }; double _Complex private_data_c; } Rcomplex;
+```
+
+—— R 几乎每份 `.c` 都经过它。而那一格**从来没人算它**（R 自己的 C 用 `.r` / `.i`），
+它在那儿只是让想用 C99 复数的外部代码能别名同一块内存。所以这一刀只补"多大"：
+
+* `_Complex` 落成一个**两格同类型浮点的匿名 struct**（`complexType`，一个翻译单元一份
+  —— `sameType` 比的是引用，两处各建一份的话同一种复数会成为两个类型）。于是 `sizeof`、
+  对齐、按值拷贝、放进别的 struct、取地址、数组全都白捡，后端一行不改。
+* **算术不收**：`a * b` 落在这个类型上报的是"struct 当值用还没到" —— 响的，不是静默错。
+  真的复数算术是另一刀（`src/main/complex.c` 要它）。
+
+### 账
+
+* `tests/r/rtc.js`（新轴）：**90/111 份编得过**，共 180 839 个函数。判据是一个**地板**
+  （只许涨）；剩下 21 份按类印出来，就是下一刀的选题单：
+  * 9 份 外部函数**返回** struct 要真 ABI（线性内存腿）
+  * 4 份 外部函数**按值收** struct 同上
+  * 2 份 `constant expression expected`、2 份 `incompatible types for redefinition`
+  * 各 1 份：`cannot convert`、`invalid number`、`计算跳转却没摆状态机`、一个找不到的头
+* `tests/c/gen/87-complex-layout.c`（新格）：大小 / 对齐 / 数组 / 别名 / 按值拷贝 /
+  嵌进 struct 的偏移，**退出码与 cc 逐字节相同**（196）。
+* 顺带掉出一个真 bug：`structLayout` 的成员记录少 `aligned`/`packed` 两格时算出 `NaN`
+  尺寸，`sizeof` 那条路当场抛 `RangeError` —— 自己造成员表时那两格必须给。

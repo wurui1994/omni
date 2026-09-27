@@ -153,7 +153,7 @@ import {
   TOK_EQ, TOK_NE, TOK_LT, TOK_GE, TOK_LE, TOK_GT, TOK_ULE, TOK_UGT,
   TOK_IF, TOK_ELSE, TOK_WHILE, TOK_FOR, TOK_DO, TOK_BREAK, TOK_CONTINUE, TOK_RETURN,
   TOK_SWITCH, TOK_CASE, TOK_DEFAULT, TOK_GOTO, TOK_SIZEOF, TOK_DOTS, TOK_STATIC_ASSERT,
-  TOK_INT, TOK_VOID, TOK_BOOL, TOK_SIGNED, TOK_UNSIGNED, TOK_CHAR, TOK_SHORT, TOK_LONG,
+  TOK_INT, TOK_VOID, TOK_BOOL, TOK_COMPLEX, TOK_SIGNED, TOK_UNSIGNED, TOK_CHAR, TOK_SHORT, TOK_LONG,
   TOK_FLOAT, TOK_DOUBLE, TOK_STRUCT, TOK_UNION, TOK_ENUM, TOK_TYPEDEF,
   TOK_EXTERN, TOK_STATIC, TOK_CONST, TOK_REGISTER, TOK_AUTO, TOK_VOLATILE, TOK_INLINE,
   TOK_CONST1, TOK_CONST2, TOK_VOLATILE1, TOK_VOLATILE2, TOK_SIGNED1, TOK_SIGNED2,
@@ -821,6 +821,9 @@ export class CGen {  /**
      * @type {{off:number}[]}
      */
     this.pendingPtr = [];
+    /** `_Complex` 那几种类型，一个翻译单元一份（见 `complexType`）。 @type {Map<string,object>} */
+    this.cplxTags = new Map();
+
     /** 外部数据符号在本单元里预留的那几块地方（`{name, lo, hi}`）—— 见 `unit()` 末尾。 */
     this.extSpans = [];
 
@@ -5764,7 +5767,8 @@ export class CGen {  /**
     if (t >= TOK_UIDENT) return this.tdefLookup(this.cpp.tokStr(t, null)) !== null;
     return t === TOK_INT || t === TOK_VOID || t === TOK_BOOL || t === TOK_SIGNED
       || t === TOK_UNSIGNED || t === TOK_CHAR || t === TOK_SHORT || t === TOK_LONG
-      || t === TOK_FLOAT || t === TOK_DOUBLE || t === TOK_STRUCT || t === TOK_UNION
+      || t === TOK_FLOAT || t === TOK_DOUBLE || t === TOK_COMPLEX
+      || t === TOK_STRUCT || t === TOK_UNION
       || t === TOK_ENUM || t === TOK_TYPEDEF || t === TOK_EXTERN || t === TOK_STATIC
       || t === TOK_CONST || t === TOK_REGISTER || t === TOK_AUTO || t === TOK_VOLATILE
       || t === TOK_INLINE
@@ -6482,6 +6486,8 @@ export class CGen {  /**
     let storage = 0;
     let quals = 0;
     let any = false;
+    /** `_Complex` 写过吗（第一百五十二片）—— 基本类型定完之后才知道是哪一种复数。 */
+    let cplx = false;
     /** @type {object|null} `typedef` 名带来的整个类型（可能是指针、数组） */
     let tdef = null;
     const setBt = (b) => {
@@ -6540,6 +6546,8 @@ export class CGen {  /**
       if (t === TOK_AUTO || t === TOK_REGISTER) { any = true; this.next(); continue; }
       if (t === TOK_FLOAT) { setBt(VT_FLOAT); any = true; this.next(); continue; }
       if (t === TOK_DOUBLE) { setBt(VT_DOUBLE); any = true; this.next(); continue; }
+      /* `_Complex`（第一百五十二片，ADR-0047）：**只当布局**收下 —— 见 `complexType`。 */
+      if (t === TOK_COMPLEX) { cplx = true; any = true; this.next(); continue; }
       if (t === TOK_STRUCT || t === TOK_UNION || t === TOK_ENUM) {
         /* struct/union/enum 走 `tdef` 那一格：它们和 typedef 名一样是「一整个类型」，
          * 不是一位说明符，所以不能与 `short`/`long`/`signed` 同时出现。 */
@@ -6606,6 +6614,17 @@ export class CGen {  /**
      * `long` 那一票**在这儿就用掉**（`longs = 0`）—— 否则下面「short/long 只能配 int」
      * 与「longs>0 就是 long long」两条会把它按整型处理。 */
     if (longs > 0 && bt === VT_DOUBLE) { bt = VT_LDOUBLE; longs = 0; }
+    /* `_Complex`：到这儿基本类型已经定了，落成那个两格的匿名 struct（见 `complexType`）。
+       `_Complex` 单独出现（gcc 收，当 `double _Complex`）与整型复数（gcc 的扩展，
+       R 里没有）分开对待 —— 后者不收，报得响。 */
+    if (cplx) {
+      if (bt === VT_INT && shorts === 0 && longs === 0 && sign === 0) bt = VT_DOUBLE;
+      if (bt !== VT_FLOAT && bt !== VT_DOUBLE && bt !== VT_LDOUBLE) {
+        this.err(`'_Complex' 只收 float / double / long double（给的是 '${cTypeText(ctype(bt))}'）`);
+      }
+      const cty = this.complexType(bt);
+      return ctype(cty.t | quals | storage, cty.ref);
+    }
 
     if ((bt === VT_FLOAT || bt === VT_DOUBLE) && (sign !== 0 || shorts > 0 || longs > 0)) {
       this.err(`'${cTypeText(ctype(bt))}' cannot be signed or sized`);
@@ -6628,6 +6647,40 @@ export class CGen {  /**
     else if (t === VT_BYTE && charIsUnsigned()) t = t | VT_UNSIGNED;
     if (longs === 1) t = t | VT_LONG;
     return ctype(t | quals | storage);
+  }
+
+  /**
+   * `float _Complex` / `double _Complex` / `long double _Complex`
+   * （第一百五十二片，ADR-0047）。
+   *
+   * **只当布局收下**：一个复数就是"实部在前、虚部在后"两格同类型的浮点，
+   * 这也正是 C11 6.2.5 第 13 段与所有实现的做法。于是它落成一个匿名 struct ——
+   * `sizeof`、对齐、按值拷贝、放进别的 struct 里、取地址全都白捡，一行代码都不用加。
+   *
+   * **算术不收**：`a * b` 落到 struct 上时报的是"struct 当值用还没到"那句 ——
+   * 响的，不是静默答错。为什么这样分：逼出这一格的是 R 的 `R_ext/Complex.h`
+   *
+   *     typedef union { struct { double r; double i; }; double _Complex private_data_c; } Rcomplex;
+   *
+   * 那一格从来没人**算**它（R 自己的 C 用的是 `.r` / `.i`），它在那儿只是为了让
+   * 想用 C99 复数的外部代码能别名同一块内存。107 份 `.c` 被这一行挡在门外，
+   * 而它们要的只有"这个类型有多大"。真的复数算术是另一刀（`complex.c` 那一份要它）。
+   */
+  complexType(bt) {
+    const name = `_Complex ${bt === VT_FLOAT ? 'float' : bt === VT_DOUBLE ? 'double' : 'long double'}`;
+    /* 一个翻译单元里**只有一份**（不进 tag 作用域栈）：`sameType` 比的是引用，
+       两处各建一份的话同一种复数在两个块里会成为两个类型。 */
+    let info = this.cplxTags.get(name);
+    if (info === undefined) {
+      info = { kind: 'struct', name, anon: false, fields: null, size: 0, align: 1 };
+      this.cplxTags.set(name, info);
+      const ety = ctype(bt);
+      this.structLayout(info, false, [
+        { name: '__re', ty: ety, bits: -1, anon: false, aligned: 0, packed: false },
+        { name: '__im', ty: ety, bits: -1, anon: false, aligned: 0, packed: false },
+      ], { aligned: 0, packed: false });
+    }
+    return mkStruct(info, false);
   }
 
   /**
@@ -7892,7 +7945,8 @@ export class CGen {  /**
    */
   genInlineFuncs() {
     for (;;) {
-      let any = false;
+    let any = false;
+
       for (const fn of this.inlineFns) {
         if (fn.done || !fn.info.used) continue;
         fn.done = true;

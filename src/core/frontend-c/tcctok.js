@@ -299,6 +299,10 @@ export const TOK_VOID = fixed('void');
 export const TOK_CHAR = fixed('char');
 export const TOK_INT = fixed('int');
 export const TOK_BOOL = fixed('_Bool');
+/* C99 的 `_Complex`（ADR-0047）：R 的运行时几乎每份 `.c` 都经过 `R_ext/Complex.h`，
+   那儿一条 `double _Complex private_data_c;` 从前把 107 份挡在门外。 */
+export const TOK_COMPLEX = fixed('_Complex');
+
 export const TOK_FLOAT = fixed('float');
 export const TOK_DOUBLE = fixed('double');
 export const TOK_SHORT = fixed('short');
