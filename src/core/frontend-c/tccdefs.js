@@ -397,6 +397,38 @@ export const COMPILE_DEFS = [
   ['__builtin_clrsbll(x)',
     '(__extension__ ({ long long __bsl = (long long)(x);'
     + ' (int)(__builtin_clzll((unsigned long long)(__bsl < 0 ? ~__bsl : __bsl)) - 1); }))'],
+  /* ---- 浮点的**有序比较**那一族（C99 的 `isgreater` 一家，`<math.h>` 拿它们定同名宏）----
+   *
+   * macOS 的 `<math.h>:584` 起把 `isgreater`/`isgreaterequal`/`isless`/`islessequal`/
+   * `islessgreater`/`isunordered` 六个标准宏**直接定义成这几个内建** —— 也就是说不认它们
+   * 就编不了任何一份真用了这几个宏的 `.c`（量到的：`Modules/mathmodule.c:230` 的
+   * `isgreater(r, 1.0)`，那是 CPython 的 `math.fmod`/`remainder` 一路）。tcc 也没有这一族。
+   *
+   * 语义上它们与普通的 `>` `>=` `<` `<=` 差在**不引发"无效"异常**（C99 7.12.14）：
+   * 对 NaN 静默地回假而不置标志位。我们这条链**一个浮点异常标志都不读**（四条腿都没有
+   * `fetestexcept`），所以"静默"与"置标志"在可观察行为上一样 —— 这一格因此就是那几个比较。
+   * 真接了浮点环境的那天，这几条要换成真的静默比较，账记在这儿。
+   *
+   * `isunordered` 用 `x != x` 判 NaN（IEEE-754 里 NaN 是唯一不等于自己的值）。
+   * 六条都用语句表达式把两边各存一次 —— 实参只求值一次（`isgreater(f(), g())`）。 */
+  ['__builtin_isgreater(x,y)',
+    '(__extension__ ({ __typeof__(x) __fa = (x); __typeof__(y) __fb = (y);'
+    + ' (int)(__fa > __fb); }))'],
+  ['__builtin_isgreaterequal(x,y)',
+    '(__extension__ ({ __typeof__(x) __fa = (x); __typeof__(y) __fb = (y);'
+    + ' (int)(__fa >= __fb); }))'],
+  ['__builtin_isless(x,y)',
+    '(__extension__ ({ __typeof__(x) __fa = (x); __typeof__(y) __fb = (y);'
+    + ' (int)(__fa < __fb); }))'],
+  ['__builtin_islessequal(x,y)',
+    '(__extension__ ({ __typeof__(x) __fa = (x); __typeof__(y) __fb = (y);'
+    + ' (int)(__fa <= __fb); }))'],
+  ['__builtin_islessgreater(x,y)',
+    '(__extension__ ({ __typeof__(x) __fa = (x); __typeof__(y) __fb = (y);'
+    + ' (int)(__fa < __fb || __fa > __fb); }))'],
+  ['__builtin_isunordered(x,y)',
+    '(__extension__ ({ __typeof__(x) __fa = (x); __typeof__(y) __fb = (y);'
+    + ' (int)(__fa != __fa || __fb != __fb); }))'],
   ['__builtin_clrsbl(x)',
     '(__extension__ ({ long __bsw = (long)(x);'
     + ' (int)(__builtin_clzl((unsigned long)(__bsw < 0 ? ~__bsw : __bsw)) - 1); }))'],
