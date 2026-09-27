@@ -278,6 +278,27 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 
    下一格是那条 warning：`__builtin_ctzll` 还只是隐式声明（将来会变链接错）。
 
+9. **对象层现在过了七份**（同一套开关，`Objects/` 下逐份 `omni c obj`）：
+
+   ```
+   listobject.c  dictobject.c  longobject.c  tupleobject.c
+   bytesobject.c floatobject.c boolobject.c        全部一个字不改编出 .o
+   unicodeobject.c                                 15436 行，1.5MB 的 .o
+   ```
+
+   还剩三格边界，各有各的性质：
+   - `object.c` / `abstract.c` -> `Include/internal/pycore_pystate.h:325`
+     **非空的 `__asm__` 模板**（"等自带汇编器"那笔既有欠账，不是这条线上的事）。
+     `object.c` 原来卡在第 2400 行的 `_PyObject_HEAD_INIT` 上，那一格已经过了 ——
+     真因是**指定初始化符没穿透匿名 struct/union**（`ref.fields` 摊平表的下标被当成
+     `ref.inits` 按声明表的序号），修在 `tccgen.js` 的 `initPath`，判据
+     `tests/c/gen/88-designator-anon.c`（`tests/c` 108 passed / 2 failed）。
+   - `typeobject.c:11720` -> `constant expression expected`：
+     `static uint8_t slotdefs_dups[Py_ARRAY_LENGTH(slotdefs)][1 + MAX_EQUIV];`
+     要的是 `sizeof` 一个**由初始化式定长**的静态数组（`slotdefs[]`）在静态上下文里求值。
+     朴素复现（`static int a[7]; static char b[sizeof(a)/sizeof(a[0])];`）是**绿**的，
+     所以真因还没定位 —— 下一刀就是它。二分的办法见上面第 8 条（`scanTopLevel` + `ppBalance`）。
+
 ## 二、进度
 
 ### 已落地
