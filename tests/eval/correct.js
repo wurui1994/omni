@@ -66,7 +66,9 @@ const CFG = {
    */
   pxdiff: Number(val('--pxdiff', '0.005')),
   only: val('--only', ''),
-  budget: Number(val('--budget', '100')) * 1000,
+  /* **整趟的秒数**（不是每份）。100 太紧：一趟 62 份就要 100s 出头，到点收摊的那几份
+     会安静地记成"跳过"，看着像退步（踩过一次：29 过 -> 21 过，其实只是没跑完）。 */
+  budget: Number(val('--budget', '300')) * 1000,
 };
 
 /**
@@ -117,6 +119,13 @@ const REF_WRONG = new Map([
     + '抓屏那一族接上之后（§22）齿轮本身的位置、形状、那层蓝色两边是一样的，'
     + '差都在麻点上（RMSE 48、我们非黑 58780 vs 参考 43038）。要对上只能让那格'
     + '未初始化的量在两边取到同一份垃圾 —— 那不是我们做得到的事'],
+  ['gpgpu.pss',
+    '**参考这一份一个像素都不画**（非黑 0），而**原版画 51984 格**'
+    + '（`polydraw_a64 ken/gpgpu.pss --render`，320×240）—— 我们画 50416 格，'
+    + '在原版那一侧。这一份靠的是**四参的 `glcapture(槽,宽,高,格)` + `glgettex`**'
+    + '（`polydraw.c:1217` 的 `kglCapture`，画进真 FBO），参考那条路没走通。'
+    + '我们四参那一档也没接（宿主表里收下不管，抓的是整帧），所以**这一份也不该拿来判我们**'
+    + '—— 等四参那一族真接上再重裁'],
   ['curvybuild.pss',
     '**两条都指到源码上**：(1) 它那两张纹理**全是 `noise()` 生出来的**（第 44-59 行：'
     + '地毯那张整张、木纹那张一半），而参考的 `noise()` 是它自己写着的占位实现'
@@ -300,7 +309,7 @@ const t0 = Date.now();
 P(`出图正确性（与 c_impl 逐像素对照，${CFG.w}×${CFG.h}，第 ${CFG.frame} 帧，`
   + `fovy ${fovyOf(CFG.w, CFG.h).toFixed(2)}°）：\n`);
 P(`  尺子：${REFDIR}${REFDIR === PATCHED
-  ? '（补过 mat4_rotate / setfov / 立方图挑面 三格）'
+  ? '（补过 mat4_rotate / setfov / 立方图挑面 / 抓屏拷完清画布 / glquad 的 alpha 混合 五格）'
   : '（**原样** —— `glrotate` 是转置的、`setfov` 当场就换且不过 ksetfov、立方图挑面是倒序'
     + '不是 cubemapindex，那三族量不准；跑一趟 tests/eval/mkref.js）'}\n`);
 if (!existsSync(REF) || !existsSync(DEC)) {

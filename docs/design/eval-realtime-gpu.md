@@ -3743,4 +3743,49 @@ goto 那一族八份语料脚本逐份跑过（kenken/calend/morse/chess/bowling
 留在账里（带 `stale`），于是"没过的"清单里可能混着已经修好、这趟没轮到的份。
 要判某一份到底好没好就单跑它：`node src/cli.js run 那份 --gfx null --frames 0`。
 
+### 37 拿**原版**当第三方裁判：抓屏与 `glquad` 那两格（判据 43 过 -> 44 过、6 红 -> 4 红）
+
+先前"出图正确"这一轴只有两个人：我们与 `c_impl`。分歧只能靠读 `polydraw_src` 裁。
+现在有第三个：**`polydraw_a64`**（原版移到 arm64 的那一份，§36 之外另记在
+`project_polydraw_a64_port`）—— 它能 `--render` 出 PNG，于是**同一份探针三路各跑一趟**
+就能当场判谁对。两分钟量出两格。
+
+探针一（抓完屏幕上还剩着吗）：
+
+    {
+       glsetshader(0);
+       glcapture(); glquad(1); glcaptureend();
+    }
+    @v: void main() { gl_Position = ftransform(); }
+    @f: void main() { gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0); }
+
+**原版 (0,0,0)**、我们 (0,255,0)、`c_impl` (0,255,0)。依据在
+`polydraw.c:1283`：`qglEndCapture` 拷完那一句是
+`glClear(COLOR|DEPTH|STENCIL)` —— 抓屏那一趟画的东西**不留在屏幕上**。
+
+探针二（`glquad()` 那一格实参是"开不开混合"吗）：把探针一的 `glcaptureend()` 之后
+加一层 `glquad()`，片元写 `vec4(1.0,0.0,0.0,0.5)`。
+**原版 (128,0,0)**（混合开着、底是清过的黑）、我们 (128,128,0)（混合对、底没清）、
+`c_impl` **(255,0,0)**（混合压根没开 —— 它的 `glcmd.h:51` 明写着
+"a = mode (0 alpha,1 opaque)"，可 `GLCMD_QUAD` 那一支只 `draw_quad(rd)`）。
+
+两格的落法：
+
+* 我们这一侧（`omni_ev_gl_capend` + 页面那一档的 `capEnd`）拷完照原版清画布。
+  **只有零参那条路才清** —— 原版那格 `glastcap` 分两条，四参的
+  `glcapture(槽,宽,高,格)`（`polydraw.c:1217` 的 `kglCapture`，画进真 FBO）那一条
+  `qglEndCapture` 是提前回的、不清。我们四参那一档压根没接（宿主表里收下不管），
+  于是 `glcaptureend` 会**没配对地**进来 —— 不判这一格的话 `ken/gpgpu.pss` 整张变黑
+  （踩过：一度"两边都不画"，而原版在那一份上画 51984 格）。
+* 尺子那一侧在 `tests/eval/mkref.js` 里同时补（第四、五格）——
+  **不补就等于拿一处已知的错当判据**（§30.1 那条）。
+
+账：`tests/eval/correct.js` 从 **43 过 / 6 红** 到 **44 过 / 4 红 / 14 不计**；
+`disco blur shader +blur.pss` 的 RMSE **84.33 -> 23.26**（那 41 层终于叠上了）。
+剩下四红：`disco ball` 67.05、`disco blur` 23.26、`drawcone2` 10.13、`tree` 8.27。
+
+**顺带修了判据自己一格**：`--budget` 默认 100s 而一趟 62 份要 220s ——
+到点收摊的那几份安静地记成"跳过"，看着像退步（当时读成"29 过 -> 21 过"，
+其实只是没跑完）。默认改成 300s。
+
 语料账 **227 / 228**，剩的一份是 `magsword.kc` —— 脚本自己的毛病（见 §36.8）。

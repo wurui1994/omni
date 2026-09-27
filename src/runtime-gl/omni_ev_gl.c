@@ -62,6 +62,8 @@ static int g_w, g_h;
 static int g_vpw, g_vph;
 /** 抓屏那一趟的尺寸（照 c_impl 就是整帧）。 */
 static int g_capw, g_caph;
+/** 抓屏配上对没有（原版那格 `glastcap`，见 `omni_ev_gl_capend` 里那段头注）。 */
+static int g_capon;
 #define EV_MAXLOC 32
 /** 按 program 记住的那几个位置 / 复用的 float 缓冲 / 属性指针的脏记号（`ev_loc_at`）。 */
 static int g_nloc;
@@ -1033,21 +1035,23 @@ int omni_ev_gl_gettex(int slot, int w, int h, long cap, double *out) {
 /**
  * **抓屏那一族**（`glcapture()` / `glcaptureend(槽)`，§22）。
  *
- * 两份参考在这一格**不是一回事**，这儿跟的是 `c_impl`（也就是逐像素那把尺子）：
+ * 三份实现在这一格**不是一回事**，跟的是**原版**：
  *
- * * `polydraw.c:1195` 的 `qglCapture` 把视口换成 `captexsiz²`（512 往下取到 2 的幂）、
- *   把 PROJECTION 换成定死的 `gluPerspective(45,1,0.1,1000)`、MODELVIEW 换成
- *   `glScalef(高/宽,1,1)`；
- * * `c_impl/src/render/gl_renderer.c:1652` 起是**整帧**：视口不动、矩阵不动，
- *   只把画布清成黑，`glcaptureend` 那一刻把整帧拷进纹理。
+ * * `polydraw.c:1199` 的 `qglCapture` 把视口换成 `captexsiz²`、把 PROJECTION 换成
+ *   定死的 `gluPerspective(45,1,0.1,1000)`、MODELVIEW 换成 `glScalef(高/宽,1,1)`；
+ * * `polydraw.c:1252` 的 `qglEndCapture` 拷完之后**把画布清掉**
+ *   （`glClear(COLOR|DEPTH|STENCIL)`）—— 抓屏那一趟画的东西**不留在屏幕上**；
+ * * `c_impl/src/render/gl_renderer.c:1691` 拷完**不清**，抓的那一张留在屏幕上。
  *
- * **为什么跟 c_impl**：原版那个 `glcapture()` 是**零参**的（`myext[]` 里写着
- * `"GLCAPTURE()"`），而 `qglCapture(double dcaptexsiz)` 读的是一格根本没传的实参 ——
- * 于是 `captexsiz` 拿到的是栈上的垃圾，视口边长在原版里就是不确定的。这一格
- * "以 polydraw_src 为准"定不下来；而语料自己的注释（`examples/opengl/25_offscreen_capture.pss`：
+ * 三路探针（抓一张绿的、抓完什么都不画，源码抄在设计文档 §37）：
+ * **原版给黑**、我们与 `c_impl` 都给绿 —— 所以"清"这一格照原版补上了（尺子那一侧
+ * 在 `tests/eval/mkref.js` 里同时补，不然等于拿一处已知的错当判据）。
+ *
+ * 视口/矩阵那一半仍不动：原版那个 `glcapture()` 是**零参**的（`myext[]` 里写着
+ * `"GLCAPTURE()"`），而 `qglCapture(double dcaptexsiz)` 读的是一格根本没传的实参 ⇒
+ * `captexsiz` 拿到的是栈上的垃圾，边长在正本里就是不确定的。这一格"以 polydraw_src
+ * 为准"定不下来；而语料自己的注释（`examples/opengl/25_offscreen_capture.pss`：
  * "glcapture() grabs the current framebuffer into a texture id"）说的正是整帧那一种。
- * 量过：按 polydraw_src 那一种做，这一族六份与参考的差**一律变大**
- * （tree 38.6→64.4、gears 40→82、clock 16.7→40.6、texture 54→全黑）。
  */
 int omni_ev_gl_capbegin(int siz) {
   if (!g_on) return 0;
@@ -1055,6 +1059,7 @@ int omni_ev_gl_capbegin(int siz) {
   CGLSetCurrentContext(g_ctx);
   g_capw = g_w;
   g_caph = g_h;
+  g_capon = 1;
   glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
   glViewport(0, 0, g_vpw, g_vph);
   g_st_bound = 0;
@@ -1084,6 +1089,18 @@ int omni_ev_gl_capend(int slot) {
   g_tex[i].w = g_capw;
   g_tex[i].h = g_caph;
   g_tex[i].fmt = 0;
+  /* **拷完把画布清掉**（`polydraw.c:1283` 那句 `glClear`）：抓屏那一趟画的东西
+     不留在屏幕上，随后那趟后处理是画在**干净底**上的。三路探针见上头的头注。
+     **只有零参那条路才清**：原版那格 `glastcap` 分两条路 —— 四参的
+     `glcapture(槽,宽,高,格)`（`polydraw.c:1217` 的 `kglCapture`，画进真 FBO）
+     那一条 `qglEndCapture` 是提前回的，**不清**。我们这儿四参那一档压根没接
+     （宿主表里收下不管），于是 `glcaptureend` 会**没配对地**进来 ——
+     照 `glastcap` 只在配过对的时候清（少了这一格 `ken/gpgpu.pss` 整张变黑）。 */
+  if (g_capon) {
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+  }
+  g_capon = 0;
   return 0;
 }
 

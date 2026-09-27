@@ -88,6 +88,69 @@ const NEWCUBE = `                    /* 补过（Omni 判据）：照 polydraw.c
                     static const int cubemapindex[6] = { 1, 3, 4, 5, 0, 2 };
                     int row = cubemapindex[f] * fh;`;
 
+/**
+ * **第四格：`glcaptureend` 拷完要把画布清掉。** `polydraw.c:1283`（`qglEndCapture`）
+ * 拷完那一句是 `glClear(COLOR|DEPTH|STENCIL)` —— 抓屏那一趟画的东西**不留在屏幕上**，
+ * 随后那趟后处理画在干净底上。参考这一份拷完**不清**。
+ *
+ * 三路探针（源码抄在设计文档 §37；抓一张绿的、抓完什么都不画）：**原版给黑**、
+ * 参考与我们（改之前）都给绿。我们那一侧同一天照原版补上了（`omni_ev_gl_capend`）。
+ *
+ * **只有零参那条路才清**：原版那格 `glastcap` 分两条 —— 四参的
+ * `glcapture(槽,宽,高,格)`（`polydraw.c:1217` 的 `kglCapture`，画进真 FBO）那一条
+ * `qglEndCapture` 是提前回的，**不清**（`ken/gpgpu.pss` 靠它）。参考这一份没有那格
+ * 旗子，所以这儿按"抓的边长等于整帧"认零参那一档 —— 语料里唯一用四参的 gpgpu 是
+ * 512² / 640×240，与判据那张 320×320 分得开。
+ */
+const OLDCAP = `            if (rd->render_to_default) glViewport(0, 0, rd->fb_w, rd->fb_h);
+            else                       glViewport(0, 0, rd->w, rd->h);
+            break;
+        }`;
+const NEWCAP = `            if (rd->render_to_default) glViewport(0, 0, rd->fb_w, rd->fb_h);
+            else                       glViewport(0, 0, rd->w, rd->h);
+            /* 补过（Omni 判据）：照 polydraw.c:1283 —— qglEndCapture 拷完把画布清掉，
+               抓屏那一趟画的东西不留在屏幕上。只有零参那条路才清（原版那格 glastcap，
+               四参的 kglCapture 画进真 FBO、那一条提前回）—— 这儿按"边长等于整帧"认。 */
+            {
+                int fullw = rd->render_to_default ? rd->fb_w : rd->w;
+                int fullh = rd->render_to_default ? rd->fb_h : rd->h;
+                if (rd->cap_w == fullw && rd->cap_h == fullh)
+                    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
+                            | GL_STENCIL_BUFFER_BIT);
+            }
+            break;
+        }`;
+
+/**
+ * **第五格：`glquad(实参)` 那一格实参是"开不开 alpha 混合"。** `polydraw.c:979` 的
+ * `qglQuad(double alpha)`：`0` ⇒ `glEnable(GL_BLEND)` + `SRC_ALPHA/ONE_MINUS_SRC_ALPHA`、
+ * `1` ⇒ `glDisable(GL_BLEND)`，整段包在 `glPushAttrib` 里（画完还回去）。
+ * 参考把那一格实参**接下来了却没用**（`glcmd.h:51` 明写着 "a = mode (0 alpha,1 opaque)"，
+ * 而 `GLCMD_QUAD` 那一支只 `draw_quad(rd)`）。
+ *
+ * 探针（抓一张绿的，再用 alpha=0.5 的红铺一层 `glquad()`）：**原版 (128,0,0)**
+ * （混合开着、底是清过的黑）、我们 (128,128,0)（混合开着、底没清）、
+ * 参考 **(255,0,0)**（混合压根没开）。`tigrou/disco blur shader +blur.pss` 靠这一格
+ * 叠 41 层（每层 alpha 约 0.05），少了它 100% 的格都有差。
+ */
+const OLDQUAD = `        case GLCMD_QUAD:
+            draw_quad(rd);
+            break;`;
+const NEWQUAD = `        case GLCMD_QUAD: {
+            /* 补过（Omni 判据）：照 polydraw.c:979 的 qglQuad —— 实参 0 开 alpha 混合、
+               1 关，画完把 GL_BLEND 还回去（原版是 glPushAttrib/glPopAttrib）。 */
+            GLboolean blendWasOn = GL_FALSE;
+            glGetBooleanv(GL_BLEND, &blendWasOn);
+            if (c->a == 0.0) {
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            }
+            if (c->a == 1.0) glDisable(GL_BLEND);
+            draw_quad(rd);
+            if (blendWasOn) glEnable(GL_BLEND); else glDisable(GL_BLEND);
+            break;
+        }`;
+
 if (!existsSync(SRC)) {
   process.stdout.write(`这台机器上没有 ${SRC} —— 没东西可补\n`);
   process.exit(1);
@@ -103,14 +166,18 @@ rmSync(join(DST, 'build'), { recursive: true, force: true });
 
 const f = join(DST, 'src/render/gl_renderer.c');
 const s = readFileSync(f, 'utf8');
-if (!s.includes(OLD) || !s.includes(OLDFOV) || !s.includes(OLDCUBE)) {
-  process.stdout.write('`mat4_rotate` / `GLCMD_SETFOV` / 立方图挑面那三处与记着的原样'
-    + '对不上 —— 参考那边改过源码了，得重新裁一次（别盲目补）\n');
+const need = [['mat4_rotate', OLD], ['GLCMD_SETFOV', OLDFOV], ['立方图挑面', OLDCUBE],
+  ['GLCMD_CAPTUREEND 尾巴', OLDCAP], ['GLCMD_QUAD', OLDQUAD]];
+const miss = need.filter(([, t]) => !s.includes(t)).map(([n]) => n);
+if (miss.length > 0) {
+  process.stdout.write(`这几处与记着的原样对不上：${miss.join('、')}`
+    + ' —— 参考那边改过源码了，得重新裁一次（别盲目补）\n');
   process.exit(1);
 }
-writeFileSync(f, s.replace(OLD, NEW).replace(OLDFOV, NEWFOV).replace(OLDCUBE, NEWCUBE));
-process.stdout.write(`补好了 ${f}（三处：mat4_rotate / GLCMD_SETFOV / 立方图挑面）\n`
-  + '开始 make（约 40s）…\n');
+writeFileSync(f, s.replace(OLD, NEW).replace(OLDFOV, NEWFOV).replace(OLDCUBE, NEWCUBE)
+  .replace(OLDCAP, NEWCAP).replace(OLDQUAD, NEWQUAD));
+process.stdout.write(`补好了 ${f}（五处：mat4_rotate / GLCMD_SETFOV / 立方图挑面 /`
+  + ' 抓屏拷完清画布 / glquad 的 alpha 混合）\n开始 make（约 40s）…\n');
 
 const mk = spawnSync('make', ['-j8'], { cwd: DST, encoding: 'utf8' });
 const bin = join(DST, 'build/polydraw-render');

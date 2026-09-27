@@ -734,9 +734,9 @@ function texIn(slot, w, h, d, fmt, px) {
  * 拷进一格纹理，随后当贴图再画一趟（后处理：`tigrou/clock.pss` 是 3.0*uv 采样、
  * `funky`/`gears`/`tree` 是模糊、`ken/texture.pss` 是把画面贴到方块上）。
  *
- * 口径**照本机那一档**（`runtime-gl/omni_ev_gl.c:1052` 的头注：两份参考在这一格不是
- * 一回事，跟的是 c_impl —— 整帧，视口与矩阵一格都不动，只把画布清成黑）。这一层与
- * 本机那一档的唯一差别是**没有离屏帧缓冲**：页面这格设备一直画在画布上，所以
+ * 口径**照本机那一档**（`runtime-gl/omni_ev_gl.c` 里 `omni_ev_gl_capbegin` 的头注：
+ * 三份实现在这一格不是一回事 —— 整帧、视口与矩阵一格都不动照 `c_impl`，而
+ * **"拷完把画布清掉"照原版**）。这一层与本机那一档的唯一差别是**没有离屏帧缓冲**：页面这格设备一直画在画布上，所以
  * "抓屏"就是从默认帧缓冲 `copyTexImage2D`。看得见的后果是抓屏那一趟会在画布上闪
  * 一下（同一帧里随后那趟全屏贴图会盖掉它），换 FBO 才能免掉 —— 先不换，两层帧缓冲
  * 是另一件活（本机那一档为此有一整套 `-1` 哨兵）。
@@ -744,7 +744,7 @@ function texIn(slot, w, h, d, fmt, px) {
  * `siz` 收下不用：原版那个 `qglCapture(double dcaptexsiz)` 读的是一格根本没传的实参
  * （`myext[]` 里是零参的 `GLCAPTURE()`），边长在正本里就是栈上的垃圾。
  */
-const CAP = { w: 0, h: 0 };
+const CAP = { w: 0, h: 0, on: false };
 
 function capBegin() {
   const gl = D.gl;
@@ -752,6 +752,7 @@ function capBegin() {
   flush();
   CAP.w = D.w;
   CAP.h = D.h;
+  CAP.on = true;
   /* 从干净的黑底起（照 c_impl）：后处理按 >1 的坐标采样时，采到的只该是这一趟画的。 */
   gl.clearColor(0, 0, 0, 1);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
@@ -783,6 +784,15 @@ function capEnd(slot) {
   t.w = w;
   t.h = h;
   t.fmt = 0;
+  /* **拷完把画布清掉**（`polydraw.c:1283` 那句 `glClear`）—— 与本机那一档同一手：
+     抓屏那一趟画的东西**不留在屏幕上**。**只有配过对的才清**（原版那格 `glastcap`：
+     四参的 `glcapture(槽,宽,高,格)` 走真 FBO，那一条不清）——
+     见 `omni_ev_gl_capend` 的头注。 */
+  if (CAP.on) {
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+  }
+  CAP.on = false;
   return 0;
 }
 
