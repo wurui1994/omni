@@ -31,6 +31,13 @@ static d[4];
    printf("plain=%g,%g\n", d[0], d[3]);
    bump(a[1]);
    printf("arg=%g,%g,%g\n", a[1].x, a[1].y, a[1].z);
+      //`bufset`/`bufcpy` 的第一个实参可以是 `&一整块里的第 i 格`（`evaldraw.txt:1513`）：
+      //从第 1 格起两格填 7 —— 偏移错一格这四个数就变
+   bufset(&d[1],7,2);
+   printf("bufset=%g,%g,%g,%g\n", d[0], d[1], d[2], d[3]);
+      //把 c[2..3] 抄到 d[0..1]（两头都是"第 i 格"那种形状）
+   bufcpy(&d[0],&c[2],2);
+   printf("bufcpy=%g,%g,%g,%g\n", d[0], d[1], d[2], d[3]);
 }
 
 //收一整个结构体（带类型的形参）—— 拿到的是同一块，所以改得动调用方

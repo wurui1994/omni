@@ -57,6 +57,17 @@ export const DRAWCONE_CONSTS = new Map([
   ['drawcone_cull_back', 128], ['drawcone_cull_front', 256], ['drawcone_cull_none', 512],
 ]);
 
+/**
+ * **`sethlin` 那四格旗子**（`evaldraw.txt:1499`：OPAQUE / MASK / BLEND / ADD，"not combinable"）。
+ *
+ * **值不可知**：说明书只给了名字与语义，evaldraw 又没有源码。这儿按说明书里的次序编 0..3。
+ * 这一档 `sethlin` 把旗子**收下不用**（见 `gfx3-rt.js` 的 `g3_sethlin5/6`），所以值不影响
+ * 画面；哪天真要做 mask/blend/add，这四个数**必须先量出来**再动混合那一段。
+ */
+export const SETHLIN_CONSTS = new Map([
+  ['sethlin_opaque', 0], ['sethlin_mask', 1], ['sethlin_blend', 2], ['sethlin_add', 3],
+]);
+
 /** EvalDraw 那张宿主表。名字照 `evaldraw_ref.md` 那几节抄，**不是前缀猜的**。 */
 export const EVALDRAW_HOST = {
   who: 'evaldraw',
@@ -75,7 +86,7 @@ export const EVALDRAW_HOST = {
   /** GL 那几格常量（`GL_QUADS` / `GL_TEXTURE0` …）—— EvalDraw 的脚本里也有 GL 子集，
       所以这张表两门语言共用（语料里 `demos/sprite2d.kc` 就写 `glbegin(GL_QUADS)`）；
       再加上 `drawcone` 那几格旗子（上头那张表）。 */
-  consts: new Map([...GL_CONSTS, ...DRAWCONE_CONSTS]),
+  consts: new Map([...GL_CONSTS, ...DRAWCONE_CONSTS, ...SETHLIN_CONSTS]),
   gfx: [
     /* 2D */
     'cls', 'setcol', 'setpix', 'moveto', 'lineto', 'drawsph', 'drawcone', 'drawspr',

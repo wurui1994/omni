@@ -83,6 +83,7 @@ export const EVALDRAW_3D = new Map([
      （调用点按 `BLOCK_ARGS` 那张白名单配对着发：块 + 偏移）。 */
   ['sethlin/4', 'g3_sethlin4'],
   ['sethlin/5', 'g3_sethlin5'],
+  ['sethlin/6', 'g3_sethlin6'],
   ['gethlin/4', 'g3_gethlin4'],
   /* `getpicsiz(&x,&y)` / `getpicsiz("a.png",&x,&y)`（`evaldraw.txt:1348`）：这条腿上没有
      图片（解码器那一层还没有，见 11.3）⇒ **写回 0×0**，脚本自己判得出来。 */
@@ -442,6 +443,12 @@ export function gfx3FnDecls(host = false, withGL = false) {
     ]),
     /* 带 flags 的那一档（mask/blend/add，`evaldraw.txt:83`）：**旗子收下不用**。 */
     fnT('g3_sethlin5', [['x0'], ['y'], ['buf', ARR], ['bo'], ['dx'], ['fl']], [
+      ex(call('g3_sethlin4', [nm('x0'), nm('y'), nm('buf'), nm('bo'), nm('dx')])),
+      ret(num(0)),
+    ]),
+    /* `sethlin(x0,y,buf,dx,flags,alpha)`（`evaldraw.txt:1498`）：**旗子与 alpha 都收下不用**
+       —— 这一档没有混合（`geeky/buf_speed_tests.kc` 整份就是把这几种变体各跑一趟计时）。 */
+    fnT('g3_sethlin6', [['x0'], ['y'], ['buf', ARR], ['bo'], ['dx'], ['fl'], ['al']], [
       ex(call('g3_sethlin4', [nm('x0'), nm('y'), nm('buf'), nm('bo'), nm('dx')])),
       ret(num(0)),
     ]),

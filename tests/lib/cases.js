@@ -740,7 +740,11 @@ export const EVTAILSEMI = ['semi=15', 'asg=20', 'blk=30', 'ctl=0'];
  * `<缓存根>/gfx/<脚本名>.png`"那条契约（判据在仓库根上跑，所以印的是相对路径）。
  */
 export const EVREADPIX = ['#gfx png .omni-cache/gfx/readpix.png 320 240',
-  'pix=200,100,50 z=0', 'rgb=64,128,192 a=0'];
+  'pix=200,100,50 z=0', 'rgb=64,128,192 a=0',
+  /* 整行那两格（`sethlin`/`gethlin`，实参是 `&一整块里的第 i 格`）：写的是 `row[2..4]`、
+     读回的落在 `back[1..3]` —— **偏移错一格这三个数就变**，而 `out=0,0`
+     （`back[0]` 与 `back[4]`）钉住"没多写一格"。 */
+  'hlin=66051,263430,460809 out=0,0'];
 
 /**
  * **`&a[i]` / `&p.x`：一格伴随的偏移形参**（`ext/evaldraw/examples/arrview.kc`）。
@@ -762,7 +766,10 @@ export const EVARRVIEW = ['all=39 tail=13', 'view=12', 'p=1,102,3'];
  * 先前这四样一律当场报，14 份 `.kc` 卡在这儿（口径与坑在
  * `docs/design/eval-realtime-gpu.md` §8.3.1）。
  */
-export const EVBLOCKCOPY = ['one=3,30,300', 'all=1,300', 'plain=1,4', 'arg=3,22,203'];
+export const EVBLOCKCOPY = ['one=3,30,300', 'all=1,300', 'plain=1,4', 'arg=3,22,203',
+  /* `bufset`/`bufcpy` 的实参是 `&一整块里的第 i 格`：起点偏移错一格这两行就变
+     （`bufset=1,7,7,4` 钉住"从第 1 格起两格"、`bufcpy=3,4,7,4` 钉住"抄的是 c[2..3]"）。 */
+  'bufset=1,7,7,4', 'bufcpy=3,4,7,4'];
 
 /**
  * **入口收一整块**（`ext/evaldraw/examples/inst.kc`：`(a[16])` 那一档）。

@@ -280,7 +280,7 @@ const gfxDefIR = (kind, name, text) => ({
  * `getpicsiz([名字,]&x,&y)`。
  */
 const BLOCK_ARGS = new Map([
-  ['sethlin/4', [2]], ['sethlin/5', [2]], ['gethlin/4', [2]],
+  ['sethlin/4', [2]], ['sethlin/5', [2]], ['sethlin/6', [2]], ['gethlin/4', [2]],
   ['getpicsiz/2', [0, 1]], ['getpicsiz/3', [1, 2]],
   /* 读像素那两格（`evaldraw.txt:1478`/`:1490`）：`&r,&g,&b` 三格都是块。 */
   ['getrgb/4', [1, 2, 3]], ['getpix/5', [2, 3, 4]],
@@ -769,9 +769,28 @@ function callOf(x, C) {
     && (C.host.draw?.has(`${n}/${rawArgs.length}`) === true
       || HOST_FNS0.includes(n)
       || C.host.gfx.some((p) => n === p || n.startsWith(p)));
-  const args = rawArgs.map((a) => (hostish && isList(a) && tag(a) === 'str'
-    ? num(internStr(C, cUnescape(unquote(leaf(kids(a)[0])))))
-    : exprOf(a, C)));
+  /**
+   * **收整块的那几格要在这儿就按对配**（`BLOCK_ARGS` 那张白名单）：那一格发**两个**实参
+   * （块本身 + 偏移）。
+   *
+   * 为什么不能留到下头 `g3_`/设备那几支再配：这一句（`rawArgs.map(exprOf)`）在它们**之前**
+   * —— `&buf2[y][0]` 这种实参单独过 `exprOf` 当场报「`&` 只接名字」，后头那几支压根看不到。
+   * `&r` 那种（取过地址的标量）恰好在 `exprOf` 里也认，所以先前只有**下标形**的
+   * 露出来：`games/stratego.kc:477` 的 `gethlin(0,y,&buf2[y][0],SIZ2)` 与
+   * `geeky/buf_speed_tests.kc` 整份 `sethlin(…,&pic[y][0],…)`。
+   */
+  const blkAt = BLOCK_ARGS.get(`${n}/${rawArgs.length}`) ?? [];
+  const args = [];
+  rawArgs.forEach((a, i) => {
+    if (blkAt.includes(i)) {
+      const bl = blockArg(a, C, n);
+      args.push(nameRef(bl.name), bl.off);
+      return;
+    }
+    args.push(hostish && isList(a) && tag(a) === 'str'
+      ? num(internStr(C, cUnescape(unquote(leaf(kids(a)[0])))))
+      : exprOf(a, C));
+  });
 
   if (RMATH1.has(n) && args.length === 1) return rmath(RMATH1.get(n), args);
   if (RMATH2.has(n) && args.length === 2) return rmath(RMATH2.get(n), args);
@@ -827,8 +846,10 @@ function callOf(x, C) {
   }
 
   /* **画图那一族**：这一门的宿主表里有的，落成生成出来的设备函数（`gfx-rt.js`）。
-     设备就是一块帧缓冲 —— 清单/像素都在进程里，跨出去的只有一帧表面。 */
-  const drawFn = C.host.draw?.get(`${n}/${args.length}`);
+     设备就是一块帧缓冲 —— 清单/像素都在进程里，跨出去的只有一帧表面。
+     **键按原实参个数算**（`rawArgs.length`）：收整块的那几格在上头已经摊成两个实参了
+     （`getrgb(c,&r,&g,&b)` 摊完是 7 个），按摊完的数查表一格都对不上。 */
+  const drawFn = C.host.draw?.get(`${n}/${rawArgs.length}`);
   if (drawFn !== undefined) {
     C.needGfx = true;
     /* GL 那一族（固定管线 + 着色器）用过没有 —— 每帧的 GL 初态只给用过的脚本发。 */
@@ -1715,22 +1736,19 @@ function exprStmtOf(e, C) {
   }
   /* **`bufset(dst,val,n)` / `bufcpy(dst,src,n)`**：口径是 `evaldraw.txt:1513` 那一行 ——
      "Optimized version of: for(i=0;i<n;i++) dst[i] = val"。所以这儿就摊成那个循环
-     （`n` 是**元素个数**，见 `sizeof` 那一段）。它们只在语句位置有意义（回的是 0）。 */
+     （`n` 是**元素个数**，见 `sizeof` 那一段）。它们只在语句位置有意义（回的是 0）。
+     两头都走 `blockArg`：名字、`&a[i]`、`&a[i][j]`、`&p.x` 四种形状一样接
+     （`geeky/buf_speed_tests.kc` 用的是 `bufset(&buf0[0],3,n)`）。 */
   if (t === 'call' && isList(kids(e)[0]) && tag(kids(e)[0]) === 'name'
     && ['bufset', 'bufcpy'].includes(idOf(kids(e)[0])) && kids(e).length === 4) {
     const fn = idOf(kids(e)[0]);
-    const dst = kids(e)[1];
-    if (!isList(dst) || tag(dst) !== 'name' || !C.arrs.has(idOf(dst))) {
-      throw new Error(`eval->IR: \`${fn}\` 的第一个实参要是一格 static 数组的名字`);
-    }
+    const dst = blockArg(kids(e)[1], C, fn);
     const i = C.fresh('bi');
     const cnt = toInt(exprOf(kids(e)[3], C));
     const src = fn === 'bufset' ? exprOf(kids(e)[2], C) : null;
-    const from = fn === 'bufcpy' ? kids(e)[2] : null;
-    if (from !== null && (!isList(from) || tag(from) !== 'name' || !C.arrs.has(idOf(from)))) {
-      throw new Error('eval->IR: `bufcpy` 的第二个实参要是一格 static 数组的名字');
-    }
-    const idx = { kind: 'builtin', name: 'toint', args: [nameRef(i)] };
+    const from = fn === 'bufcpy' ? blockArg(kids(e)[2], C, fn) : null;
+    /* 下标 = 那一格的起点偏移 + i（起点是 `&a[i]` 摊平算出来的那个数）。 */
+    const at = (b) => toInt(bin('+', b.off, nameRef(i)));
     return [
       { kind: 'let', name: i, type: REAL, init: num(0) },
       {
@@ -1739,9 +1757,9 @@ function exprStmtOf(e, C) {
         body: [
           {
             kind: 'assign',
-            target: { kind: 'index', obj: nameRef(idOf(dst)), index: idx },
+            target: { kind: 'index', obj: nameRef(dst.name), index: at(dst) },
             value: fn === 'bufset' ? src
-              : { kind: 'index', obj: nameRef(idOf(from)), index: idx },
+              : { kind: 'index', obj: nameRef(from.name), index: at(from) },
           },
           { kind: 'assign', target: nameRef(i), value: bin('+', nameRef(i), num(1)) },
         ],
