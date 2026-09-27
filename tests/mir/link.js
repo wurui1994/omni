@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { workDir } from '../work.js';
 import { lowerC } from '../../src/core/frontend-c/tccgen.js';
 import { runMirModule } from '../../src/core/mir/interp.js';
-import { linkMir } from '../../src/core/mir/link.js';
+import { linkMir, linkAll } from '../../src/core/mir/link.js';
 import { verifyMir } from '../../src/core/mir/verify.js';
 
 const dir = workDir('mir-link');
@@ -127,6 +127,29 @@ const want = runMirModule(OIR, build('one.c', ONE));
   let got;
   try {
     got = runMirModule(OIR, linkMir(build('ca.c', CA), build('cb.c', CB)));
+  } catch (e) {
+    got = `报错：${e.message.split('\n')[0]}`;
+  }
+  if (String(got) !== String(w)) bad(name, `    链完得 ${got}，拼成一份是 ${w}`);
+  else ok(`${name} [与拼成一份都是 ${w}]`);
+}
+
+/* **三份**：`linkAll` 从左往右折。三份各带一条自己的静态串 —— 一条都不许串。 */
+{
+  const name = 'link/三份一起链';
+  const TA = 'int f2(int); int f3(int);\nstatic const char *t = "A";\n'
+    + 'int main(void){ return f2(1) + f3(2) + (int)t[0]; }\n';
+  const TB = 'static const char *t = "B";\nint f2(int x){ return x + (int)t[0]; }\n'
+    + 'int main(void){ return 0; }\n';
+  const TC = 'static const char *t = "C";\nint f3(int x){ return x + (int)t[0]; }\n'
+    + 'int main(void){ return 0; }\n';
+  const TONE = 'static const char *tb = "B";\nint f2(int x){ return x + (int)tb[0]; }\n'
+    + 'static const char *tc = "C";\nint f3(int x){ return x + (int)tc[0]; }\n'
+    + 'static const char *t = "A";\nint main(void){ return f2(1) + f3(2) + (int)t[0]; }\n';
+  const w = runMirModule(OIR, build('tone.c', TONE));
+  let got;
+  try {
+    got = runMirModule(OIR, linkAll([build('ta.c', TA), build('tb.c', TB), build('tc.c', TC)]));
   } catch (e) {
     got = `报错：${e.message.split('\n')[0]}`;
   }

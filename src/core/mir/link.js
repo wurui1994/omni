@@ -18,6 +18,9 @@
 // 这个布局**费地址空间**（两段栈、两段堆），但它先是对的；把两份的 data 并进一段、
 // 只留一份栈那种省法是下一刀的事，而那一刀的判据与这一刀是同一套。
 //
+// 多于两份就 `linkAll([…])` 从左往右折 —— 每一步都是"把下一份挪到已链好的那块后头"，
+// 所以 99 份也是同一条路（地址空间按份数线性涨，见下面"布局"那一段的账）。
+//
 // ## 还没做的
 //
 // * 同名 `static` 函数（C 里它们是文件局部的，两份各有一个 `helper` 是合法的）——
@@ -60,6 +63,13 @@ function shiftImage(mod, d) {
  *
  * 次序照"先算好新号、再一次改写"—— 边算边改会读到改过一半的表。
  */
+export function linkAll(mods) {
+  if (mods.length === 0) throw new Error('mir-link: 一份模块都没给');
+  let out = mods[0];
+  for (let i = 1; i < mods.length; i += 1) out = linkMir(out, mods[i]);
+  return out;
+}
+
 export function linkMir(a, b) {
   if (a.mem === null || b.mem === null) throw new Error('mir-link: 这一刀只链线性内存那条腿');
   if (a.native || b.native) throw new Error('mir-link: native 那条腿有真链接器，不走这儿');
