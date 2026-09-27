@@ -1189,6 +1189,20 @@ export class MirModule {
      * @type {Set<number>}
      */
     this.addrConsts = new Set();
+    /**
+     * **跨翻译单元的数据符号**（线性内存腿，MIR 层链接器要的最后一半）。
+     *
+     * 函数那一侧"声明了没定义"有桩可换（`cabi` + 一条 CCALL 的身子），**变量那一侧没有**：
+     * 这条腿上取全局量的地址就是烤一个数，而外部变量的地址编译期不知道。所以分两张表：
+     *   * `dataSyms`：本模块**定义**的、外部可见的全局量（名字 → 地址）；
+     *   * `dataRefs`：代码里那些"其实是外部数据符号的地址"的常量（`{name, ref}`，
+     *     值先填自己这边预留的那一格），链接时按提供方的地址回填那一条常量。
+     * 引用去重过（同一个符号只有一条地址常量），所以回填一条就够。
+     * @type {Map<string, number>}
+     */
+    this.dataSyms = new Map();
+    /** @type {{name:string, ref:number}[]} */
+    this.dataRefs = [];
     /* 地址模型（第九刀第十九片）。`false` = 地址是**线性内存里的偏移**（wasm 与解释器
      * 那两条腿）；`true` = 地址是**真地址**（native 那两条腿：`FRAME` 回来的、libc
      * 给的、数据符号的，都在同一个地址空间里）。

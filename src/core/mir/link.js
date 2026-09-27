@@ -53,9 +53,11 @@ function shiftImage(mod, d) {
     }
   }
   for (const ref of mod.addrConsts) {
-    const c = mod.consts.items[ref - REF_BIAS >= 0 ? ref : ref];
+    const c = mod.consts.items[ref];
     c.text = String(BigInt(c.text) + BigInt(d));
   }
+  /* 提供方的地址跟着搬 —— 它是"这个符号住哪儿"，与地址常量同一个坐标系。 */
+  for (const [name, at] of mod.dataSyms) mod.dataSyms.set(name, at + d);
 }
 
 /**
@@ -176,7 +178,24 @@ export function linkMir(a, b) {
     a.funcs.push(bf);
   }
 
-  /* 8. data 段与页数。B 的 `cabi` 里那些名字：A 已经有的不重复添
+  /* 8. 跨单元的**数据符号**：先把两张表并起来，再回填得出答案的那些。
+        函数那一侧靠"桩换定义"，变量这一侧只能靠回填 —— 这条腿上取全局量的地址就是
+        一个数，没有桩可换（`ir.js` 的 `dataSyms` / `dataRefs` 那两段账）。 */
+  for (const [name, at] of b.dataSyms) {
+    if (a.dataSyms.has(name)) throw new Error(`mir-link: 数据符号 ${name} 两份里都定义了`);
+    a.dataSyms.set(name, at);
+  }
+  for (const r of b.dataRefs) a.dataRefs.push({ name: r.name, ref: r.ref + cbase });
+  const left = [];
+  for (const r of a.dataRefs) {
+    const at = a.dataSyms.get(r.name);
+    if (at === undefined) { left.push(r); continue; }
+    a.consts.items[r.ref].text = String(at);
+    a.addrConsts.add(r.ref);
+  }
+  a.dataRefs = left;
+
+  /* 9. data 段与页数。B 的 `cabi` 里那些名字：A 已经有的不重复添
         （CCALL 的号在上一步随函数体一起搬进来了 —— 所以两份的 cabi 表必须同号，
         这一刀的做法是**要求 B 的 cabi 是 A 的前缀**，不是就报：真要不同表得改写
         CCALL 的 `a`，那一格等有真例子再做）。 */

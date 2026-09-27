@@ -2314,7 +2314,8 @@ export class CGen {  /**
      * 「不完整」要按类型问，不能按「尺寸是 0」问：`int gz[0];` 的尺寸也是 0，
      * 而那是合法的（GNU 的零长数组，tcc 收）。 */
     if (!isExtern) this.needComplete(name, ty);
-    const e = { name, ty, addr: -1, defined: !isExtern, used: false, align, extra };
+    /* `local`（文件局部 = `static`）由调用方补 —— 链接器要靠它分"别的单元看得见吗"。 */
+    const e = { name, ty, addr: -1, defined: !isExtern, used: false, align, extra, local: false };
     /* 没写长度的数组是一条**试探性定义**：现在不划地方，等后面那条同名声明补上长度。
      * 一直没补上就是错，而那条错在**用**它的地方报（`gvarLval`），与 tcc 一样。 */
     if (!(isArray(ty.t) && ty.count < 0)) this.allocGlobal(e);
@@ -7544,6 +7545,8 @@ export class CGen {  /**
             this.gvars.set(name, e);
           } else if (global) {
             e = this.declareGlobal(name, vty, isExtern && !hasInit, dad.aligned, extra);
+            /* 文件作用域的 `static`：别的翻译单元看不见它（链接器据此不把它当提供方）。 */
+            if (hasStatic) e.local = true;
             /* `static` 的全局量是内部链接（第九十二片）。记在登记上、封盘那一步才用 ——
              * 与函数那一侧同一个道理：先写 `static int x;` 后写 `int x = 1;` 是合法的。 */
             if (hasStatic) e.isStatic = true;
@@ -8259,7 +8262,23 @@ export class CGen {  /**
         this.streamGvars.push({ addr: e.addr, which });
         continue;
       }
-      this.err(`undefined symbol '${name}'`);
+      /**
+       * **线性内存腿：声明了没定义的全局量不再当场报**（2026-09-27）——
+       * 记一条"待回填的数据符号引用"，交给 MIR 层的链接器（`src/core/mir/link.js`）。
+       * 地址那一格照旧预留着（一遍过里引用发生在定义之前，代码得先有个地址可发），
+       * 链接时把**那条地址常量**改成提供方的地址就行 —— 引用去重过，所以一条就够。
+       *
+       * 拿不到那条常量（不该发生：`used` 就意味着 `gvarLval` 走过 `kaddr`）时照旧报 ——
+       * 悄悄放过去会得到一个指着自己那块空白的指针，那是静默答错。
+       */
+      const kref = this.addrRefs.get(String(e.addr));
+      if (kref === undefined) { this.err(`undefined symbol '${name}'`); continue; }
+      this.mod.dataRefs.push({ name, ref: kref });
+    }
+    /* 本模块**定义**的、外部看得见的那些：链接时它们是提供方。 */
+    for (const [name, e] of this.gvars) {
+      if (!e.defined || e.local === true || e.addr < 0) continue;
+      this.mod.dataSyms.set(name, e.addr);
     }
   }
 }

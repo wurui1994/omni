@@ -157,6 +157,27 @@ const want = runMirModule(OIR, build('one.c', ONE));
   else ok(`${name} [与拼成一份都是 ${w}]`);
 }
 
+/* **跨单元的 extern 变量**：函数那一侧有桩可换，变量那一侧只能回填那条地址常量。
+   两份都读写它（B 里加一次），所以"两份各有一块"那种错法会被算出来的数抓住。 */
+{
+  const name = 'link/跨单元的 extern 变量';
+  const EA = 'extern int shared;\nint bump(void);\n'
+    + 'int main(void){ shared = 10; bump(); return shared; }\n';
+  const EB = 'int shared;\nint bump(void){ shared = shared + 5; return shared; }\n'
+    + 'int main(void){ return 0; }\n';
+  const EONE = 'int shared;\nint bump(void){ shared = shared + 5; return shared; }\n'
+    + 'int main(void){ shared = 10; bump(); return shared; }\n';
+  const w = runMirModule(OIR, build('eone.c', EONE));
+  let got;
+  try {
+    got = runMirModule(OIR, linkMir(build('ea.c', EA), build('eb.c', EB)));
+  } catch (e) {
+    got = `报错：${e.message.split('\n')[0]}`;
+  }
+  if (String(got) !== String(w)) bad(name, `    链完得 ${got}，拼成一份是 ${w}`);
+  else ok(`${name} [与拼成一份都是 ${w}]`);
+}
+
 /* 重复定义要报（两份都有 `bee` 的真定义）。 */
 {
   const name = 'link/重复定义当场报';

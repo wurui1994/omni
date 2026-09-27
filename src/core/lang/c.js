@@ -211,6 +211,17 @@ export function cMir(path, incs, defs, args, sysIncs, tgt) {
     os: tgt?.os,
   }, defs.map(([name, body]) => ({ name, body })), args);
   for (const w of warnings) stderr(`${w}\n`);
+  /**
+   * **一份就是一个程序**（这条路是 `omni run x.c` / `emit …`）：所以"声明了没定义的
+   * 全局量"在这儿必须报。`lowerC` 那一侧 2026-09-27 起只**记一条**（`mod.dataRefs`），
+   * 因为它也是 MIR 层链接器的输入 —— 那时缺的那一格由别的翻译单元提供。
+   * 两处分工：**记录在编译，报错在成品**。少了这一句，`extern int x;` 没人定义也能跑，
+   * 拿到的是一个指着自己那块空白的指针（静默答错）。
+   */
+  if (mod.dataRefs !== undefined && mod.dataRefs.length > 0) {
+    const names = mod.dataRefs.map((r) => `'${r.name}'`).join('、');
+    throw new OmniError(`${path}: error: undefined symbol ${names}`);
+  }
   const errs = verifyMir(mod);
   if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
   optMir(mod, path);
