@@ -767,3 +767,45 @@ clang 那边要 `-ffp-contract=off`：它默认把 `a*c + b*d` 收成一条 FMA�
 * 顺带修了 `tests/c/run.js` 的 `link2` 一格**缓存不自洽**：它要的是 `c tcc` 的副作用
   （落在 `workDir` 里的可执行文件），而缓存只记 stdout 与退出码、`workDir` 每趟先清空
   —— 于是第二趟"退出码 0、文件不在"，`spawnSync` 回 null。那一步改成不过缓存。
+
+## 第十七格：语句表达式里的计算跳转（已落，2026-09-28）—— 111/111，全份编得过
+
+最后那一份 `src/main/eval.c` 报的是 `error: internal: 计算跳转却没摆状态机`。
+一开始怀疑 pass1 没数到宏展开出来的标签 —— 不是，标签一个不少。真正的形状是 R 跳
+一步那个宏：
+
+```c
+#define NEXT() (__extension__ ({currentpc = pc; goto *(*pc++).v;}))
+#define BEGIN_MACHINE  NEXT(); init: { int which = 0; loop: switch(which++)
+```
+
+`goto *` 写在一个**语句表达式**里，标签（`op_##name`）却在**函数**那一层上。
+而 `stmtExpr` 从前一律 `this.gotoSlot = -1`：进语句表达式就把状态槽清空，于是里头
+那条 `goto *` 找不到状态机可写。
+
+改法一行：**自己没有标签的语句表达式接着用外面那台**。
+
+```js
+this.gotoSlot = labeled ? -1 : outerSlot;
+```
+
+* 自己有标签（`({ ... here: ... })`）→ 照旧摆自己的（`-1` 再 `temp(T_I32,'state')`），
+  里头的 `goto` 说的是自己那几个标签。
+* 自己没有标签 → 里头的 `goto` / `goto *p` 说的只可能是**外面**的标签，
+  于是写外面那个槽、`BR` 回外面那圈 `gotoloop`（`levelOf('gotoloop')` 自己这层没开，
+  自然找到外面那圈）。
+
+### 账
+
+* `tests/r/rtc.js`：**111/111**（地板抬到 111，227093 个函数）。R 的运行时 —— 除解释器
+  那一份 R 代码以外的全部 C —— 走我们自己的 C 前端全份编得过。
+* `tests/c/gen/90-se-computed-goto.c`（新格）：`NEXT()` 同一形状的跳转表（语句表达式里
+  `goto *`、标签在函数那层）、语句表达式**自己有**标签那一路、外圈 `goto` 套里圈语句
+  表达式各摆一台 —— 退出码与 cc 逐字节相同（36）。
+* 跑过的门：`tests/mir/run.js` 51/51、`tests/mir/jsmod.js` 15/15、`tests/selfc/run.js` 6/6、
+  `tests/r/cjs.js` 22/22（含真浏览器那两格）、`npm run check:self`、`tests/c/run.js gen`。
+
+### 下一刀
+
+编得过之后是**链得起、跑得动**：把这 111 份连成一套（libR 的整张符号表），
+非纯计算那一块（图形 / 设备 / 文件系统）按路线做功能映射，再把整套搬进浏览器。

@@ -5856,7 +5856,18 @@ export class CGen {  /**
       this.labelIds = m;
     }
     this.labelCount = 0;
-    this.gotoSlot = -1;
+    /**
+     * 自己**没有标签**的语句表达式不摆自己的状态机 —— 那时里头的 `goto` / `goto *p`
+     * 说的是**外面那台**（第一百五十二片）。R 的 `NEXT()` 正是这个形状：
+     *
+     *     #define NEXT() (__extension__ ({currentpc = pc; goto *(*pc++).v;}))
+     *
+     * 标签（`op_##name`）全在函数那一层上，跳过去要写**函数那个**状态槽、`BR` 回函数
+     * 那圈 `gotoloop` —— `levelOf('gotoloop')` 自然找到外面那圈（自己这层没开）。
+     * 从前这儿一律清成 -1，于是 `goto *` 在那儿报"计算跳转却没摆状态机"，
+     * 把 `src/main/eval.c`（R 的字节码解释器，唯一还没过的那一份）整份挡在门外。
+     */
+    this.gotoSlot = labeled ? -1 : outerSlot;
     this.seOuterIds = outerIds;
     if (labeled) {
       this.gotoSlot = this.temp(T_I32, 'state');
