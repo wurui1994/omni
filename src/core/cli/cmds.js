@@ -242,6 +242,23 @@ const F_LEG_INTERP = { name: '--interp', arity: 0, brief: '走解释器（= --ba
 const F_LEG_MIR = { name: '--mir', arity: 0, brief: '走 MIR 解释器，不是 OIR 那一条' };
 
 /* ---- C 那一组。 */
+/**
+ * `c` 那一组里某一条的开关表，**按名字取**。
+ *
+ * 老名字（`omni cpp` = `omni c cpp`，见 `LEGACY`）要与正主认同一套开关，从前这儿写的是
+ * `C_GROUP.children[0].flags` —— 那时 `cpp` 恰好排第一。ADR-0046 在它前面插了一条
+ * `split`，于是 `omni cpp` 悄悄换成了 split 的那四个开关（`--scan --map --check -o`），
+ * 而 `-P`/`-M` 这些当场变成「不认识的开关」。症状离病灶很远：`tests/c` 的
+ * `skipinc/`、`sysinc/` 二十来格一起红，报的是「我们拒了，tcc 没拒」。
+ *
+ * 按名字取就不会再有这种事 —— 名字写错是当场抛，而不是静悄悄拿到别人的表。
+ */
+function cGroupFlags(name) {
+  const hit = (C_GROUP.children ?? []).find((k) => k.name === name);
+  if (hit === undefined) throw new Error(`cmds.js: 'c' 组里没有 '${name}' 这一条`);
+  return hit.flags;
+}
+
 const C_GROUP = {  name: 'c',
   brief: 'C 前端（ADR-0017）：预处理、到 MIR、到目标文件、链接、tcc 兼容驱动',
   help: `-D / -U / -isystem / -include 这些**只在这一组里**——它们是 C 的事实，
@@ -671,7 +688,7 @@ asy（5 分多钟），而 tests/asy/eps.js 默认不生成 —— 清掉之后�
     { name: 'interp', key: 'interp', hidden: true, flags: [F_MODE, F_INC, F_LEG_MIR, F_LEG_INTERP] },
     { name: 'asy-units', key: 'asy-units', hidden: true, flags: [] },
     { name: 'glr-table', key: 'glr-table', hidden: true, flags: [{ name: '--brief', arity: 0 }] },
-    { name: 'cpp', key: 'cpp', hidden: true, flags: C_GROUP.children[0].flags },
+    { name: 'cpp', key: 'cpp', hidden: true, flags: cGroupFlags('cpp') },
     { name: 'c-mir', key: 'c-mir', hidden: true, flags: [...C_CPP_FLAGS] },
     { name: 'c-run', key: 'c-run', hidden: true, flags: [...C_CPP_FLAGS] },
     { name: 'jit-selftest', key: 'jit-selftest', hidden: true, flags: [] },
