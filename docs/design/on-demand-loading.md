@@ -274,10 +274,30 @@ omni: 合计         进程内 124ms = 启动 62ms + 步骤 61ms（3 格） + �
    mkSpan }` + 函数体内 `const span = mkSpan(…)` —— 改写之后成了"调那格局部量"。
    于是**自己编出来的 omni 读任何借来的语言都炸在词法器里**（`.py` / `.go` / `.pss` 全中），
    而 `emit js` / `emit c` 一声不响地编过去。修完之后自编的 JS 产物**第一次**跑得动 `.py`。
-2. **原生腿的正则引擎缺一格**（未修）：`./dist/omni run x.py` 现在报
-   `regexp: negated class escape (\D \S \W) inside [...] is not supported`。
-   python.grammar 的词法规则里有这种写法，而 `src/runtime/` 那份 C 正则还没收字符类里的
-   否定类转义。这是"原生产物 × 借来的语言"这条组合上的下一格，与这一份文档无关。
+2. **原生腿的正则引擎缺一格**（已修，`src/runtime/omni_js_re.c` 的 `re_neg_ranges`）。
+   `./dist/omni run x.py` 从前报 `regexp: negated class escape (\D \S \W) inside [...]
+   is not supported`。来源不是 python 的语法，是 `frontend-glsl/pp.js` 那条
+   `/^#\s*define\s+([A-Za-z_]\w*)([\s\S]*)$/` —— `[\s\S]`（"任何字符"的惯用写法）
+   在这棵树里到处都是，而模块级的正则在产物启动时就编译。
+   修法：C 侧把那几格范围**在码元空间（0..0xFFFF）上取补**。码元是 `uint16_t`、空间有限，
+   所以补集本身就是一串范围 —— 精确、不必新加表示。（从前拒的理由"一个取反位表达不出
+   并集里的取反"是对的，但结论下早了：不必表达，算出来就行。）
+   判据进了轴：`tests/js-exec/cases/60-regexp-negated-class.js`，跑
+   **node == omni-js == omni-c** 三条腿（100 格 exec + `i` / `g` / `split`）。
+3. **原生腿的正则还缺反向引用**（已修，同一份文件的 `RE_BREF`）。修掉第 2 条之后下一格就是
+   它：`ext/python/adapter/expr.js:141` 那条
+   `/^([A-Za-z]{0,2})('''|"""|'|")([\s\S]*)\2$/` —— python 的字符串字面量就是这么拆的，
+   「收尾的引号必须与开头那一格一样」只有反向引用说得出来。回溯匹配器加它很自然：
+   取那一组捕获到的文本再匹配一遍；没捕获到的组按 JS 匹配空串，比较过 `i` 的折叠。
+   判据：`tests/js-exec/cases/61-regexp-backref.js`（同样三条腿）。
+4. **顺手把正则的报错改成带上 pattern 本身**（`re_err`）。前两格我各猜了一轮"到底是哪条正则"
+   —— 这类正则多半写在模块级（`const DEFINE = /…/`），在产物启动时编译，栈上一个源码位置
+   都没有，而报错只说 `at index 40`。改完之后第三格是一眼看出来的：
+   `regexp: backreference is not supported (at index 40 of /^([A-Za-z]{0,2})…\2$/)`。
+
+**这三格修完，`./dist/omni run --mode js x.py` 第一次跑出了答案**（`print(1)` -> `1`、
+strmethods 与 go/basics 与源码腿逐行相同）。原生腿这条路很慢（冷缓存那一趟 151s ——
+它要用我们自己那台 C 前端把 21 份运行时 `.c` 编一遍再链接），那是另一笔账。
 
 **这两笔照出同一件事**：判据里长期缺"**自己编出来的那份真跑一趟借来的语言**"。
 `check:self` 只管编得出，`tests/*` 都跑在 node 源码腿上。这条组合该有一格判据。

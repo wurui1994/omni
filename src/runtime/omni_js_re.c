@@ -41,7 +41,8 @@ enum {
   RE_WB,     /* \b / \B（negate 区分）—— 零宽断言，两侧"是不是单词码元"不同即成立 */
   RE_GROUP,  /* (...) 与 (?:...) */
   RE_ALT,    /* a|b|c */
-  RE_REP     /* 量词 */
+  RE_REP,    /* 量词 */
+  RE_BREF    /* \1 .. \9 —— 反向引用（`ch` 存组号） */
 };
 
 typedef struct { uint16_t lo, hi; } re_range;
@@ -102,8 +103,21 @@ typedef struct {
   omni_s16 *gnames;   /* 按组号索引，长度 OMNI_RE_MAX_CAPS；没名字的 p == NULL */
 } re_parse;
 
+/* 报错要带上**正则本身**。从前只有一个下标，而"到底是哪一条正则"得靠猜 —— 真踩过两轮
+   （`negated class escape` 与 `backreference` 各一次）：这类正则多半写在模块级
+   （`const DEFINE = /…/`），在产物启动时就编译，栈上一个源码位置都没有，只有一个
+   "index 40"。ASCII 之外的码元印成 `?`（这一层没有编码器），太长的截断。 */
+#define RE_ERR_SHOW 120
 OMNI_NORETURN static void re_err(re_parse *ps, const char *msg) {
-  omni_errorf("regexp: %s (at index %lld of the pattern)", msg, (long long)ps->i);
+  char buf[RE_ERR_SHOW + 1];
+  int k = 0;
+  for (int64_t j = 0; j < ps->n && k < RE_ERR_SHOW; j++) {
+    uint16_t c = ps->p[j];
+    buf[k++] = (c >= 0x20 && c < 0x7f) ? (char)c : '?';
+  }
+  buf[k] = '\0';
+  omni_errorf("regexp: %s (at index %lld of /%s%s/)", msg, (long long)ps->i,
+              buf, ps->n > (int64_t)k ? "..." : "");
 }
 
 static int re_new(re_parse *ps, int kind) {
@@ -226,6 +240,48 @@ static uint16_t re_esc_char(re_parse *ps, uint16_t c) {
   }
 }
 
+/* 把 ranges[rlo .. nr) 那几格在**码元空间**（0..0xFFFF）上取补，就地换成补集。
+ *
+ * `[\D]` / `[\S]` / `[\W]` 要的就是这个：类的表示是"一串范围 + 一个取反位"，
+ * 而"并集里某一格成员是另一个集合的补"用一个取反位表达不出来。从前这儿是拒绝
+ * （"实测集里没有"），可 `ext/python/python.grammar` 的词法规则里真有 —— 症状是
+ * `./dist/omni run x.py` 报 `negated class escape … is not supported`，而 node 腿一直
+ * 好好的（那条腿用宿主的 RegExp，没有这一格限制）。
+ *
+ * 为什么这不算"硬凑"：码元是 `uint16_t`，空间有限，所以**补集本身就是一串范围** ——
+ * 算出来是精确的，不需要新的表示，也不必近似。
+ *
+ * 与 `i` flag 的关系：折叠只在 ASCII 字母之间移动（A-Z <-> a-z），而这三格的成员要么
+ * 一个字母都不含（`\d` / `\s`），要么整段字母都在里头（`\w`）—— 两种情况下
+ * "先折叠再查补集"与"先查再折叠"答案一样，所以这一格不引入新的分叉点。
+ */
+#define RE_NEG_MAX 64
+static void re_neg_ranges(re_parse *ps, int rlo) {
+  int n = ps->nr - rlo;
+  if (n <= 0) {                       /* 空集的补 = 全集 */
+    re_add_range(ps, 0, 0xffff);
+    return;
+  }
+  if (n > RE_NEG_MAX) omni_error("regexp: internal: too many ranges to negate");
+  re_range a[RE_NEG_MAX];
+  for (int k = 0; k < n; k++) a[k] = ps->ranges[rlo + k];
+  /* 按 lo 排一遍（插入排序：n 很小 —— `\s` 10 格、`\w` 4 格、`\d` 1 格）。
+     排完之后一遍扫就求得补集，重叠与相邻顺手合掉（`next` 只往前走）。 */
+  for (int k = 1; k < n; k++) {
+    re_range t = a[k];
+    int j = k - 1;
+    while (j >= 0 && a[j].lo > t.lo) { a[j + 1] = a[j]; j--; }
+    a[j + 1] = t;
+  }
+  ps->nr = rlo;                       /* 原来那几格丢掉，写补集 */
+  uint32_t next = 0;                  /* 还没被原集合覆盖的第一个码元 */
+  for (int k = 0; k < n; k++) {
+    if ((uint32_t)a[k].lo > next) re_add_range(ps, next, (uint32_t)a[k].lo - 1);
+    if ((uint32_t)a[k].hi + 1 > next) next = (uint32_t)a[k].hi + 1;
+  }
+  if (next <= 0xffff) re_add_range(ps, next, 0xffff);
+}
+
 /* [...] / [^...]。空类 `[]` 保留成 "永不匹配"、`[^]` 成 "匹配任意码元" ——
    这是 JS 的定义，取反标志加在空集上自然就对。 */
 static int re_class(re_parse *ps) {
@@ -243,12 +299,10 @@ static int re_class(re_parse *ps) {
       uint16_t e = ps->p[ps->i++];
       int srlo, srn, sneg;
       if (re_esc_set(ps, e, &srlo, &srn, &sneg)) {
-        if (sneg) {
-          /* [\D] 这类要求 "范围集合的补" 参与并集，而这里的表示只有一个取反位。
-             实测集里没有，所以拒绝而不是硬凑 —— 硬凑出来的语义很难验。 */
-          re_err(ps, "negated class escape (\\D \\S \\W) inside [...] is not supported");
-        }
-        (void)srlo; (void)srn;
+        /* `[\D]` 这类：把刚追加的那几格**在码元空间上取补**（见 `re_neg_ranges`）——
+           补集本身就是一串范围，所以并集里的取反是算得出来的，不必新加表示。 */
+        if (sneg) re_neg_ranges(ps, srlo);
+        (void)srn;
         is_set = true;
       } else {
         lo = re_esc_char(ps, e);
@@ -356,6 +410,19 @@ static int re_atom(re_parse *ps) {
       if (e == 'b' || e == 'B') {
         int node = re_new(ps, RE_WB);
         ps->nodes[node].negate = (e == 'B');
+        return node;
+      }
+      /* **反向引用** `\1`..`\9`：`('''|"""|'|")([\s\S]*)\2` 这种"收尾必须与开头同"
+         的写法（python 的字符串字面量就是这么拆的，`ext/python/adapter/expr.js:141`）。
+         零宽那一档在下面：没捕获到的组按 JS 语义匹配**空串**（不是失败）。
+         多位数（`\10` 起）不收 —— JS 那边它按"组数够不够"在反向引用与八进制之间挑，
+         这棵树里一个都没有，而悄悄挑错一边是静静答错。 */
+      if (e >= '1' && e <= '9') {
+        if (ps->i < ps->n && ps->p[ps->i] >= '0' && ps->p[ps->i] <= '9') {
+          re_err(ps, "multi-digit backreference (\\10 and up) is not supported");
+        }
+        int node = re_new(ps, RE_BREF);
+        ps->nodes[node].ch = (uint16_t)(e - '0');
         return node;
       }
       int rlo, rn, neg;
@@ -522,6 +589,14 @@ omni_re omni_re_compile(omni_s16 pattern, omni_s16 flags) {
 
   re->head = re_alt(&ps);
   if (ps.i != ps.n) re_err(&ps, "unmatched ')'");
+  /* 反向引用指到不存在的组：JS 无 `u` flag 时按 Annex B 当八进制转义或字面量，我们不猜 ——
+     解析完统一查一遍（`\2` 可能出现在第二个组**之前**，所以不能边解析边查）。 */
+  for (int k = 0; k < ps.nn; k++) {
+    if (ps.nodes[k].kind == RE_BREF && ps.nodes[k].ch > (uint16_t)ps.ngroups) {
+      omni_errorf("regexp: \\%u refers to a capture group that does not exist"
+                  " (the pattern has %d)", (unsigned)ps.nodes[k].ch, ps.ngroups);
+    }
+  }
 
   re->nodes = ps.nodes;
   re->ranges = ps.ranges;
@@ -702,6 +777,21 @@ static bool re_m1(re_mc *cx, int node, int64_t pos, const re_kont *k) {
       case RE_CLASS:
         if (pos >= cx->slen || !re_cls_hit(cx, nd, cx->s[pos])) return false;
         node = nd->next; pos++; continue;
+      case RE_BREF: {
+        /* 那一组捕获到的**文本**再匹配一遍。没捕获到（`caps` 是 -1）按 JS 语义匹配空串 ——
+           所以 `\2*` 之类不会在这儿死循环（空转那一格由 RE_K_REP 判）。
+           比较过 `re_eq`，于是 `i` flag 也照顾到了（规范里反向引用同样按 canonicalize 比）。 */
+        int g = (int)nd->ch;
+        int64_t a = cx->caps[2 * g];
+        int64_t b = cx->caps[2 * g + 1];
+        if (a < 0 || b < 0) { node = nd->next; continue; }
+        int64_t len = b - a;
+        if (pos + len > cx->slen) return false;
+        for (int64_t j = 0; j < len; j++) {
+          if (!re_eq(cx, cx->s[pos + j], cx->s[a + j])) return false;
+        }
+        node = nd->next; pos += len; continue;
+      }
       case RE_BOL:
         if (!(pos == 0 || (cx->re->multiline && re_is_lt(cx->s[pos - 1])))) return false;
         node = nd->next; continue;
