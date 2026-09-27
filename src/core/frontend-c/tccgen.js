@@ -2699,6 +2699,16 @@ export class CGen {  /**
       this.initString(dest, off, ty, this.readStrTok(this.tokc));
       return;
     }
+    /* `char s[4] = ("ab")` —— 裹着圆括号的那一种（gcc/clang 的扩展，见 `tryParenStr`）。
+     * 要排在下面「复合字面量」那一格**前面**：那一格也认 `(`，而 `("ab")` 不是
+     * `(struct S){…}`。 */
+    if (isArray(ty.t) && btype(ty.ref.t) === VT_BYTE) {
+      const bytes = this.tryParenStr();
+      if (bytes !== null) {
+        this.initString(dest, off, ty, bytes);
+        return;
+      }
+    }
     /* `wchar_t s[4] = L"ab"` 同理。类型不对（`char s[] = L"ab"`）就**不**走这一路 ——
      * tcc 那儿的条件也是「元素类型是 wchar_t 才当字符串铺，否则当 (w)char* 表达式」
      * （`tccgen.c:8064-8070` 那个 if 的注释）。 */
@@ -2805,6 +2815,55 @@ export class CGen {  /**
     this.ungetWith(kind, merged);
     this.ungetWith(LBRACE, null);
     return null;
+  }
+
+  /**
+   * `char d[8] = ("abc")` —— 字面量裹着**圆括号**，照旧是「铺进数组」。
+   *
+   * 这是 gcc/clang 的一格扩展：C11 6.7.9 第 14 段只说了「字符串字面量，可以外加一对
+   * 花括号」。**tcc 不收**（它在这一格报 `'{' expected (got ';')`），所以这一条是我们
+   * 比尺子多出来的一格 —— 判据因此拿 clang 当参照（`gnu/` 那一组），不拿 tcc。
+   *
+   * 逼出这一格的是 CPython：`Include/internal/pycore_runtime_init.h` 那一族静态初始化式
+   * 里写的是 `._data = ("<dictcomp>")`（宏参数外面的那对括号），于是
+   * `Python/pystate.c:309` 与 `Python/pylifecycle.c:123` 两份**整份**文件卡在它上头。
+   *
+   * 判法与 `tryBracedStr` 一条：相邻的字面量先并起来，并完之后看下一格 ——
+   * `)` 之后紧跟着 `,` / `}` / `;` 才算「孤零零的一个字面量」。`("ab")[1]` 与
+   * `("a") + 1` 不算，那几个记号原样放回去、按表达式走（放回三格：`)`、串、`(`）。
+   */
+  tryParenStr(kind = TOK_STR) {
+    if (this.tok !== LPAR) return null;
+    this.next();
+    if (this.tok !== kind) {
+      this.ungetWith(LPAR, null);
+      return null;
+    }
+    const merged = kind === TOK_LSTR
+      ? this.readWStrTok(this.tokc) : this.readStrTok(this.tokc);
+    if (this.tok === RPAR) {
+      this.next();
+      if (this.tok === COMMA || this.tok === RBRACE || this.tok === SEMI) return merged;
+      this.ungetWith(RPAR, null);
+    }
+    this.ungetWith(kind, merged);
+    this.ungetWith(LPAR, null);
+    return null;
+  }
+
+  /**
+   * 当前位置是不是 `("串"` 这个形状 —— **只看，不动记号流**（看完把 `(` 放回去，
+   * 那个串连它的 `tokc` 一起留在待读的流里）。
+   *
+   * 花括号里那三个「要不要往下钻」的循环要它：`{ .d = ("abc") }` 里 `d` 是
+   * `char[N]`，不问这一句就会钻进数组、把 `("abc")` 当 `d[0]` 那一格的标量初始化式。
+   */
+  atParenStr() {
+    if (this.tok !== LPAR) return false;
+    this.next();
+    const isStr = this.tok === TOK_STR || this.tok === TOK_LSTR;
+    this.ungetWith(LPAR, null);
+    return isStr;
   }
 
   /** 把当前记号推回输入、换上 `t`（`tokc` 一起换）。`ungetTok` 只管记号号。 */
@@ -3051,6 +3110,9 @@ export class CGen {  /**
         const el = this.initElem(stack[stack.length - 1]);
         if (this.tok === LBRACE) break;                          // 花括号写全了
         if (isArray(el.ty.t) && (this.tok === TOK_STR || this.tok === TOK_LSTR)) break;
+        /* `{ .d = ("abc") }` —— 裹着圆括号的串也是「铺进这一格数组」，所以这儿一样
+         * 得停下来，别钻进数组把它当 `d[0]` 的标量初始化式（见 `tryParenStr`）。 */
+        if (isArray(el.ty.t) && this.atParenStr()) break;
         if (!isArray(el.ty.t) && !isStruct(el.ty.t)) break;       // 标量，到底了
         if (isStruct(el.ty.t) && el.ty.ref.fields === null) {
           this.err(`'${cTypeText(el.ty)}' is an incomplete type`);
@@ -3343,6 +3405,9 @@ export class CGen {  /**
         const el = this.initElem(stack[stack.length - 1]);
         if (this.tok === LBRACE) break;
         if (isArray(el.ty.t) && (this.tok === TOK_STR || this.tok === TOK_LSTR)) break;
+        /* `{ .d = ("abc") }` —— 裹着圆括号的串也是「铺进这一格数组」，所以这儿一样
+         * 得停下来，别钻进数组把它当 `d[0]` 的标量初始化式（见 `tryParenStr`）。 */
+        if (isArray(el.ty.t) && this.atParenStr()) break;
         if (!isArray(el.ty.t) && !isStruct(el.ty.t)) break;
         if (isStruct(el.ty.t) && el.ty.ref.fields === null) {
           this.err(`'${cTypeText(el.ty)}' is an incomplete type`);
@@ -3442,6 +3507,9 @@ export class CGen {  /**
         const el = this.initElem(stack[stack.length - 1]);
         if (this.tok === LBRACE) break;
         if (isArray(el.ty.t) && (this.tok === TOK_STR || this.tok === TOK_LSTR)) break;
+        /* `{ .d = ("abc") }` —— 裹着圆括号的串也是「铺进这一格数组」，所以这儿一样
+         * 得停下来，别钻进数组把它当 `d[0]` 的标量初始化式（见 `tryParenStr`）。 */
+        if (isArray(el.ty.t) && this.atParenStr()) break;
         if (!isArray(el.ty.t) && !isStruct(el.ty.t)) break;
         if (isStruct(el.ty.t) && el.ty.ref.fields === null) {
           this.err(`'${cTypeText(el.ty)}' is an incomplete type`);
@@ -8057,6 +8125,11 @@ export class CGen {  /**
               && (strBytes = this.tryBracedStr()) !== null) {
               /* `char a[] = { "abc" };`（第八刀第二十八片）—— 与上一格同一件事，
                * 只是外面多一对花括号。大小照样是 strlen + 1，而**不是**「1 个元素」。 */
+              vty = mkArray(vty.ref, strBytes.length + 1);
+            } else if (btype(vty.ref.t) === VT_BYTE
+              && (strBytes = this.tryParenStr()) !== null) {
+              /* `char a[] = ("abc");` —— 圆括号那一种（gcc/clang 的扩展，见
+               * `tryParenStr`）。长度同样是 strlen + 1。 */
               vty = mkArray(vty.ref, strBytes.length + 1);
             } else if (isWcharType(vty.ref)
               && (wstrVals = this.tryBracedStr(TOK_LSTR)) !== null) {

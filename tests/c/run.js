@@ -692,8 +692,59 @@ if (CC === null) {
   if (archs.length < 2) skip++;
 }
 
-// ------------------------------------------------------------ 5. gen-bad/：边界与语法错误
+// ------------------------------------------------------- 4.9 gnu/：**尺子换成 clang** 的那几格
+//
+// `gen/` 那一批的 oracle 是 `tcc -run`，可有些 gcc/clang 的扩展 **tcc 自己不收** ——
+// 那种格子放在 `gen/` 里会被判成「tcc 拒了这份用例」，于是只能另开一组、拿 clang 当尺子。
+//
+// 第一格是「字面量裹着圆括号铺进数组」（`char d[8] = ("abc")`）：clang/gcc 收，
+// tcc 报 `'{' expected`。CPython 的 `pycore_runtime_init.h` 一族全是这个形状
+// （`._data = ("<dictcomp>")`），`Python/pystate.c` 与 `pylifecycle.c` 两份整份文件
+// 卡在它上头 —— 也就是说这一组存在的理由很实在：借 CPython 的运行时要它。
+//
+// 走法：我们编成 `.o`、clang 链起来跑；clang 自己也编一份跑。**退出码 + stdout 逐字节**
+// 相同才算过。用 native 那条腿（真机器码）而不是解释器：这一组考的是"真的跑得对"。
+function gnuCase(dir, f) {
+  const nm = basename(f, '.c');
+  const name = `gnu/${nm}`;
+  const path = join(here, 'gnu', f);
+  const refBin = join(dir, `${nm}-cc`);
+  const w = spawnSync(CC, ['-std=gnu11', '-w', path, '-o', refBin], { encoding: 'utf8' });
+  if (w.status !== 0) {
+    bad(name, `    cc 自己就没编过：\n${w.stderr}`);
+    return;
+  }
+  const want = spawnSync(refBin, [], { encoding: 'utf8' });
+  const obj = join(dir, `${nm}-omni.o`);
+  const g = spawnSync(process.execPath, [CLI, 'c', 'obj', path, '-o', obj,
+    '--os', ABI_OS, '-f', ABI_FMT], { encoding: 'utf8' });
+  if (g.status !== 0) {
+    bad(name, `    我们编不出来：\n${g.stderr}`);
+    return;
+  }
+  const bin = join(dir, `${nm}-omni`);
+  const l = spawnSync(CC, [obj, '-o', bin], { encoding: 'utf8' });
+  if (l.status !== 0) {
+    bad(name, `    链不起来：\n${l.stderr}`);
+    return;
+  }
+  const got = spawnSync(bin, [], { encoding: 'utf8' });
+  if (got.status !== want.status || got.stdout !== want.stdout) {
+    bad(name, `    与 cc 不同：退出码 ${got.status} vs ${want.status}\n`
+      + `--- cc ---\n${want.stdout}--- ours ---\n${got.stdout}`);
+    return;
+  }
+  ok(`${name} [exit ${want.status} + ${want.stdout.length}B stdout == cc]`);
+}
 
+if (CC === null) {
+  skip++;
+} else {
+  const gnuWork = workDir('c-gnu');
+  for (const f of pick('gnu')) gnuCase(gnuWork, f);
+}
+
+// ------------------------------------------------------------ 5. gen-bad/：边界与语法错误
 for (const f of pick('gen-bad')) {
   const nm = basename(f, '.c');
   const name = `gen-bad/${nm}`;
