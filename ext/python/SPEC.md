@@ -251,10 +251,32 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 
    二分卡在一处**方法**上，记下来免得下次再走：**按行号胡乱截断没用**。
    截在 `#if` 中间报"missing #endif"、截在函数中间报"unexpected end of file"，
-   于是六个探点没有一个是有效信号。下一刀要先写一格**认边界的切法**：
-   只在"顶层那个 `}` 之后、而且 `#if` / `#endif` 配平"的地方切。
-   （预处理出来的那 50734 行 `.i` 也能当二分的料 —— 它是自带 `#line` 的，
-   报的行号照旧指回原文；`omni c cpp` 没有 `-o`，重定向就行。）
+   于是六个探点没有一个是有效信号。**认边界的切法不用自己写** —— `omni c split`
+   （ADR-0046）的 `scanTopLevel` 就是顶层声明扫描器（用语法定边界、不预处理），
+   `ppBalance` 正好答"这一段的条件编译自己配不配平"。两样一凑就是有效的二分。
+
+8. **2476 那一格破了：整份 `unicodeobject.c`（15436 行）编出来了**（1.5MB 的 `.o`）。
+
+   真因**不是**那个宏，也不是"前头某处把分析器带偏了"（那个猜想是错的）——
+   是**形参名没遮住外面同名的 typedef**：
+   `Include/internal/pycore_asdl.h:14` 真的有 `typedef PyObject * string;`，而
+   `Objects/unicodeobject.c:2470` 的 `as_ucs4(PyObject *string, …)` 正好拿 `string`
+   当形参名。不遮的话函数体里 `PyUnicode_KIND(string)` 展开出的
+   `((PyObject*)((string)))` 被读成**类型转换**（`(string)` 当成了类型名），
+   于是报 `expression expected`。C11 6.2.1 第 4 段说的就是这一格。
+   局部变量那一路本来是对的（`declareLocal` 那三处都调了 `tdefShadow`），
+   漏的只有形参。修在 `src/core/frontend-c/tccgen.js` 的 `runBody`（一行循环），
+   判据 `tests/c/gen/87-typedef-shadow-param.c`（`tests/c` 107 passed / 2 failed）。
+
+   **怎么找到的**（方法比这一格值钱）：三段二分，一共十几趟编译、每趟 0.7s。
+     1. 顶层格 + 配平那两条当切点，541 格里 11 趟定到"第 183 格"；
+     2. 那一格内部按"行首 `}`"再切 —— 意外发现**到 2467 行全绿**，
+        于是"前头把分析器带偏"这个假设当场被否掉；
+     3. 尾巴钉死成四行小函数、二分**前缀**，落到 `#include "pycore_long.h"` 那一格；
+        再逐个删 include 却全绿 —— 说明不是 include，最后对着"绿的那份与红的那份
+        逐字节 diff"，差别只剩**形参名叫 `string`**。
+
+   下一格是那条 warning：`__builtin_ctzll` 还只是隐式声明（将来会变链接错）。
 
 ## 二、进度
 

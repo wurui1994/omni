@@ -8341,6 +8341,16 @@ export class CGen {  /**
     this.ecStack = [this.enumConsts, new Map()];
     /* typedef 名同理：形参与函数体里的变量可以遮住外面的 typedef，而那只在这个函数里算。 */
     this.tdefStack = [this.typedefs, new Map()];
+    /* **形参名也遮 typedef**（上面那句话里的"形参"从前没落实 —— 只有 `declareLocal` 那三处调了
+     * `tdefShadow`）。C11 6.2.1 第 4 段：形参的作用域是这个函数，外面同名的 typedef 被它遮住。
+     *
+     * 逼出这一格的是 CPython：`Include/internal/pycore_asdl.h:14` 真的有
+     * `typedef PyObject * string;`，而 `Objects/unicodeobject.c:2470` 的
+     * `as_ucs4(PyObject *string, …)` 正好拿 `string` 当形参名。不遮的话函数体里
+     * `PyUnicode_KIND(string)` 展开出的 `((PyObject*)((string)))` 会被读成**类型转换**
+     * （`(string)` 是类型名），报 `expression expected` —— 那就是整份 `unicodeobject.c`
+     * 长期卡在第 2476 行的真因。判据在 `tests/c/gen/40-typedef-shadow.c`。 */
+    for (const p of params) this.tdefShadow(p.name);
     this.regions = [];
     this.swStack = [];
     /* 变长数组的那本账跟着函数走：形参那一层（`scopes[0]`）不经过 `pushScope`，
