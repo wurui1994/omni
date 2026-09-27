@@ -119,7 +119,7 @@ export const EVALDRAW_3D = new Map([
   ['glvertex/4', 'g3_glvert4'],
   /* 声音那一族：收下不响（见头注）。 */
   ['playsound/1', 'g3_nop1'], ['playsound/2', 'g3_nop2'], ['playsound/3', 'g3_nop3'],
-  ['playsound/4', 'g3_nop4'], ['playsound/5', 'g3_nop5'],
+  ['playsound/4', 'g3_nop4'], ['playsound/5', 'g3_nop5'], ['playsound/6', 'g3_nop6'],
   ['playtext/1', 'g3_nop1'], ['playtext/2', 'g3_nop2'], ['playtext/3', 'g3_nop3'],
   ['playtext/4', 'g3_nop4'],
   ['playsong/1', 'g3_nop1'], ['playsong/2', 'g3_nop2'],
@@ -139,6 +139,14 @@ export const EVALDRAW_3D = new Map([
      （`evaldraw.txt:544`："same as drawkv6()"）。 */
   ['drawkv6/7', 'g3_kv67'],
   ['drawspr/7', 'g3_kv67'],
+  /* **八参那一档**（`evaldraw.txt:1603`）：`drawspr("a.kv6",x,y,z,rad,hang,vang,tilt)`
+     —— 比七参多一格 `tilt`（说明书只说"with tilt parameter"，`:408`）。
+     **明写的偏差：tilt 收下不用**。绕哪根轴、正负朝哪边都得先量出来，而 evaldraw 没有
+     源码；这一族本来就已经有两处偏差（体素画成球、没有深度排序，见 `g3_kv67` 的头注）。
+     语料里五份用它（`games/asteroids/asteroids.kc` 的飞船与陨石就是这一档）—— 收下不用
+     的代价是"模型不随视线滚"，比整份脚本跑不起来小得多。 */
+  ['drawkv6/8', 'g3_kv68'],
+  ['drawspr/8', 'g3_kv68'],
   /* 十三参那一档：位置 + 一张 3×3（见 `g3_kv613` 的头注）。 */
   ['drawkv6/13', 'g3_kv613'],
   ['drawspr/13', 'g3_kv613'],
@@ -605,6 +613,15 @@ export function gfx3FnDecls(host = false, withGL = false) {
         bin('*', nm('sc'), bin('-', num(0), nm('sv'))),
         num(0),
         bin('*', nm('sc'), nm('cv'))])),
+    ]),
+    /**
+     * **八参那一档**（`evaldraw.txt:1603`）：七参再多一格 `tilt`。
+     * **tilt 收下不用**（明写的偏差，理由在上头那张表的注里）——
+     * 落法就是转手七参那一格，一个新东西都不加。
+     */
+    fn('g3_kv68', ['ni', 'sc', 'x', 'y', 'z', 'ha', 'va', 'ti'], [
+      ret(call('g3_kv67', [nm('ni'), nm('sc'), nm('x'), nm('y'), nm('z'),
+        nm('ha'), nm('va')])),
     ]),
     /**
      * **十三参那一档**（`evaldraw.txt:750`："full control of transform/rotation/shear"；
