@@ -79,7 +79,7 @@ import {
   UnitIndex, moduleDir, declRead, declPath, declWrite, launcherText, loadableText, declSpans,
   moduleOrderOf,
 } from './build/modules.js';
-import { cacheSlot, slotDone, slotRelay } from './build/modcache.js';
+import { cacheSlot, slotDone, slotRelay, ContentIds } from './build/modcache.js';
 import { check } from './hir/check.js';
 import { pruneFuncs } from './hir/prune.js';
 import { cAbiLibs, cSysLib } from './hir/c_abi.js';
@@ -2092,6 +2092,10 @@ function emitUnits(path, rest) {
     dir,
     argv: rest,
     tool: srcStamp(),
+    /* **降级器也是注入进去的**：那一份住在 `ext/`，而登记处（`lower/langs.js`）已经
+       import 了它 —— 它再反过来 import `lower/drive.js` 就成了环（`check:self` 报
+       `import cycle through 'src/core/lower/drive.js'`）。 */
+    coreSx: coreSxText,
     textToMod: cap('sx.textToMod'),
     emitEsm: (m) => target('js').emit(m, { esm: true }),
     runtimeText: jsRuntimeOnce().text,
@@ -3917,11 +3921,37 @@ function spawnPar(jobs) {
  * 于是 `mtime:size` 让两条腿的 key 永远不同：`npm run build:native` 刚编好的那 21 个
  * `.o` 明明就在 `.omni-cache/rt` 里，`dist/omni run` 也看同一个根，却一格都命中不了，
  * 只好自己重编 —— 每格约 2s，21 格四十多秒，任何 `--timeout` 都撑不住。
- * 内容相同就是同一份编译输入，所以印记只认字节。代价是每趟多读约 1 MB（几毫秒）。
+ * 内容相同就是同一份编译输入，所以印记只认字节。
+ *
+ * **可是"每趟多读约 1 MB（几毫秒）"这句话是错的**（2026-09-28 量的）：那是 34 份
+ * `.c/.h` 共 880 KB，而 `hash16` 只有 7 MB/s —— 一趟 **155ms**，而且它落在
+ * `omni run --backend jit` 这条**每趟都走**的路上（那一趟总共 1.2s）。日志上那一行还写着
+ * `runtime .o  21 objects, cache hit`：命中了，钱照花。
+ *
+ * 所以内容身份照旧，只是把预检那张表**存下来**（`<缓存根>/rt/ids.log`，公共层的
+ * `ContentIds` 本来就是干这个的）：mtime 与大小都没动就信记着的那格哈希，一个字节都不读。
+ * 常态于是只 `stat` 34 次（量出来 0ms）。两种布局那件事一点没变 —— 表按**路径**记，
+ * `dist` 那份是另一批路径，各自记各自的。
  */
+let RT_IDS = null;
+let RT_IDS_SAVED = null;
 function runtimeDeps() {
-  return readDir(RUNTIME_DIR).filter((f) => /\.[ch]$/.test(f)).sort()
-    .map((f) => `${f}:${hash16(readText(join(RUNTIME_DIR, f)))}`);
+  const names = readDir(RUNTIME_DIR).filter((f) => /\.[ch]$/.test(f)).sort();
+  const path = join(cacheRoot(), 'rt', 'ids.log');
+  if (RT_IDS === null) {
+    RT_IDS = ContentIds.load(path);
+    RT_IDS_SAVED = RT_IDS.text();
+  }
+  const out = names.map((f) => `${f}:${RT_IDS.of(join(RUNTIME_DIR, f))}`);
+  /* 真重算过就落盘。**内容变了而格数不变**也要写，所以比的是整张表的文字而不是格数
+     （34 行，几微秒）；没变就一个字节都不写。 */
+  const text = RT_IDS.text();
+  if (text !== RT_IDS_SAVED) {
+    mkdirAll(join(cacheRoot(), 'rt'));
+    writeText(path, text);
+    RT_IDS_SAVED = text;
+  }
+  return out;
 }
 
 function runtimeObjects(cc) {

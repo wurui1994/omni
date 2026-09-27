@@ -6,14 +6,19 @@
 // （`docs/design/omni-serve-studio.md` §9.3）。
 //
 // 怎么切（零件全在公共层，这一份只是接线）：
-//   1. `coreSxText(path, argv, out)` —— 跑**一趟**降级，顺手拿回 `out.rtNames`（那张名单）；
+//   1. `o.coreSx(path, argv, out, opts)` —— 跑**一趟**降级，顺手拿回 `out.rtNames`（那张名单）；
 //   2. `sxForms(text)` 切成顶层项、`sxDoStmts` 把 `(main (do …))` 拆成语句；
 //   3. 名字在名单里的归 `ev_rt`、其余归入口，拼成 `sections` 交给 `asyUnitModules`。
+//
+// **降级器那一格是调用方递进来的**（`cap`/注入，不是 import）：登记处 `lower/langs.js` 已经
+// import 了这一份（`units: evalUnitsBuild`），而降级器 `lower/drive.js` 又 import 登记处 ——
+// 这一份再去 import `drive.js` 就成了环，`check:self` 当场报
+// `import cycle through 'src/core/lower/drive.js'`（这条红从 7d731632 一直挂着没人看见）。
+// 与 `textToMod`/`emitEsm`/`runtimeText` 同一条纪律：**别人家的能力从外面递进来**。
 //
 // `ev_rt` 的**名字按内容算**（`ev_rt_<哈希>`）：于是换个脚本它一定命中盘上那一份，
 // 而我们改了 `gl-rt.js` 它就自动变成另一份 —— 与 `UnitIndex` 那套"内容定址"同一条纪律。
 
-import { coreSxText } from '../../src/core/lower/drive.js';
 import {
   sxForms, sxDoStmts, buildUnits, builtGet, builtSet, declRead,
 } from '../../src/core/build/modules.js';
@@ -85,7 +90,10 @@ export function evalUnitTexts(path, argv = [], o = {}) {
   const out = {};
   /* 运行时那一层：命中了记在这儿（`name` 是盘上那份产物名），没命中记 `key` 等着回填。 */
   const rt = { key: '', name: '', hit: false };
-  const text = coreSxText(path, argv, out, {
+  if (typeof o.coreSx !== 'function') {
+    throw new Error('evalUnitTexts：降级器那一格要调用方递进来（o.coreSx）');
+  }
+  const text = o.coreSx(path, argv, out, {
     skipBodies: (names) => {
       if (names.length === 0 || typeof o.dir !== 'string') return null;
       rt.key = `rt|${hash16(`${names.join(',')}|${o.tool ?? ''}`)}`;
@@ -158,6 +166,7 @@ export function evalUnitTexts(path, argv = [], o = {}) {
  * 出接口、写启动器）。回 `{mainPath, made, kept, names}`。
  *
  * 外面那几样由调用方注入（这一份不认识后端与能力表，也就不会把 cli 那一摊拖进来）：
+ *   `coreSx(路径, argv, out, opts)`      源码 -> 核心方言文本（`lower/drive.js` 的 `coreSxText`）
  *   `textToMod(名字, sx文本, 初始化符号)` 核心方言文本 -> 模块（`cap('sx.textToMod')`）
  *   `emitEsm(模块)`                      -> 那份 ESM 产物文本（`target('js').emit(m, {esm:true})`）
  *   `runtimeText`                        一目录一份的 `omni_rt.js`（`cap('jsgen.runtimeModule')`）
@@ -190,7 +199,9 @@ export function evalUnitsBuild(o) {
       return { mainPath: hit.mainPath, made: 0, kept: hit.names.length + 1, names: hit.names };
     }
   }
-  const r = evalUnitTexts(o.path, o.argv ?? [], { dir: o.dir, tool: o.tool ?? '' });
+  const r = evalUnitTexts(o.path, o.argv ?? [], {
+    dir: o.dir, tool: o.tool ?? '', coreSx: o.coreSx,
+  });
   if (r === null) return null;
   /* 入口那一份的名字由切法算出来（按内容）—— 这儿从单元清单里认它：唯一不是 `ev_rt_…`
      的那一份就是入口。 */
