@@ -702,6 +702,36 @@ function initMembers(ty) {
   return r.inits ?? r.fields;
 }
 
+/**
+ * `.名字` 这个指定初始化符在**按声明那张表**（`initMembers`）里的**路径**（一串下标），
+ * 穿透匿名 struct / union；找不着回 null。
+ *
+ * 为什么要路径而不是一个下标：C11 6.7.9 允许直接写匿名成员**里头**那一格的名字
+ * （`{ .ob_refcnt = 1 }`，而 `ob_refcnt` 住在一个匿名 union 的匿名 struct 里）。
+ * 初始化那一层的"第几格"数的是**按声明**的成员（匿名的算一格），所以要先挪到那个匿名成员
+ * 上、再往里下降一层，一层一格下标。
+ *
+ * 从前这儿是 `ref.fields.findIndex(…)` —— 拿**摊平**表的下标当按声明表的序号用。
+ * 两张表的长度不一样（匿名成员在摊平表里摊成了好几格），于是 `PyObject` 那种形状里
+ * 匿名 union **后面**的成员（`.ob_type`）一律错位，报 `excess elements in struct
+ * initializer`；三个指定符一起时还会错到 `int64_t` 那一格上，报
+ * `initializer element is not constant`。那就是 `Objects/object.c:2400`
+ * （`_Py_NoneStruct = _PyObject_HEAD_INIT(&_PyNone_Type)`）编不过的原因。
+ */
+function initPath(ty, name) {
+  const ms = initMembers(ty);
+  if (ms === null) return null;
+  for (let i = 0; i < ms.length; i++) {
+    if (ms[i].name === name) return [i];
+    /* 匿名成员（`name === null`）：往里找，找着就把"先挪到它、再下降"这条路记下来。 */
+    if ((ms[i].name === null || ms[i].name === '') && isStruct(ms[i].ty.t)) {
+      const sub = initPath(ms[i].ty, name);
+      if (sub !== null) return [i].concat(sub);
+    }
+  }
+  return null;
+}
+
 function mergeTentative(a, b) {
   /* 数组那一档**不能拿 `sameType(a, b)` 当门**：它自己就把"两条长度都写了而且不一样"
      判成不同型（`compareTypes` 里那一句），于是下面按长度合并的几条一格都走不到。
@@ -3163,9 +3193,15 @@ export class CGen {  /**
         if (!isStruct(lv.ty.t)) this.err('field name not in record or union initializer');
         this.next();
         const nm = this.identName();
-        const k = lv.ty.ref.fields.findIndex((x) => x.name === nm);
-        if (k < 0) this.err(`'${cTypeText(lv.ty)}' has no member named '${nm}'`);
-        lv.i = k;
+        /* 名字在**按声明那张表**里找，而且穿透匿名成员（见 `initPath` 头上那段账）。 */
+        const path = initPath(lv.ty, nm);
+        if (path === null) this.err(`'${cTypeText(lv.ty)}' has no member named '${nm}'`);
+        lv.i = path[0];
+        /* 落在匿名成员里头：一层一层下降过去（每层的序号就是路径的下一格）。 */
+        for (let d = 1; d < path.length; d++) {
+          const el = this.initElem(stack[stack.length - 1]);
+          stack.push({ ty: el.ty, off: el.off, i: path[d] });
+        }
       } else {
         this.skip(ASSIGN);
         return 1;
