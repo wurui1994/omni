@@ -176,7 +176,17 @@ function scanDecl(s, i) {
       let k = j;
       while (k < s.length && isIdCh(s.charCodeAt(k))) k++;
       const w = s.slice(j, k);
-      if (TYPE_KW.has(w)) sawKw = true;
+      /* `sawKw` 只在**深度 0** 上算。那几个关键字当"这一格声明的说明符"只可能出现在
+       * 深度 0；深度 > 0 的（形参表里的 `f(struct X *p)`、`sizeof(struct X)`、数组维度里的）
+       * 与"这一格是不是类型定义"无关。
+       *
+       * 少这一问的后果**很大**：`static int f(struct X *p) { … }` 里那个 `struct` 把
+       * `sawKw` 置真，于是 `{` 那一格走"`typedef struct {…} foo;`"那一支、一直扫到**下一个**
+       * 深度 0 的 `;` —— 后面好几格声明被并进同一格。量到过：六格的小文件切成三格，
+       * 名字分别是 `X`、`b`（struct 成员名）、`return`（关键字）；
+       * `Objects/unicodeobject.c` 的 2120..4110 行（近两千行）被并成一格 ——
+       * 二分的时候那一格大到没法用，而账记在 SPEC 里好几刀没修。 */
+      if (TYPE_KW.has(w) && depth === 0) sawKw = true;
       if (depth === 0) name = w;
       j = k;
       continue;

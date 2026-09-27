@@ -98,7 +98,38 @@ for (const p of files) {
   }
 }
 
-/* ── 第三段：**条件编译要自己配平**那道闸 ──
+/* ── 第三段：**形参表里的 `struct` 不是"这一格是类型定义"** ────────────────────
+ *
+ * 前两段都是"整棵扫得完 + 接得回去"，那种口径**照不出并格**：几格并成一格照样接得回去、
+ * 函数名也照样像名字。这一段钉的是**格数与每格的种类/名字**。
+ *
+ * 从前 `static int f(struct X *p) { … }` 里那个 `struct` 会让扫描器以为这一格是类型定义，
+ * 于是一直扫到**下一个**深度 0 的 `;` —— 下面那几格声明被并进来。量到过：这六格切成三格
+ * （名字是 `X`、`b`（struct 成员名）、`return`（关键字）），而 CPython 的
+ * `Objects/unicodeobject.c` 的 2120..4110 行（近两千行）被并成一格，二分时那一格大到没用。
+ * 修法一行：那几个关键字只在**深度 0** 上算（见 `split.js` 的 `sawKw`）。 */
+{
+  const src = [
+    'struct X { int a; };',
+    'static int f(struct X *p) { return p->a; }',
+    'static int g(void) { return 1; }',
+    'struct Y { int b; };',
+    'static int h(struct Y *q) { return q->b; }',
+    'int main(void) { return 0; }',
+    '',
+  ].join('\n');
+  const got = scanTopLevel(src).map((c) => `${c.kind}:${c.name}`).join(' ');
+  const want = 'type:X func:f func:g type:Y func:h func:main tail:';
+  if (got === want && joinChunks(src, scanTopLevel(src)) === src) {
+    pass++;
+    P('  ok   形参里的 struct 不并格（六格声明各一格，名字与种类都对）\n');
+  } else {
+    fail++;
+    P(`  FAIL 形参里的 struct 并格了\n       想要: ${want}\n       实得: ${got}\n`);
+  }
+}
+
+/* ── 第四段：**条件编译要自己配平**那道闸 ──
  *
  * 这是真踩过的坑：`eval.c` 的 `#ifdef _MSC_VER`（`kasm_state.c` 末尾）与它的
  * `#else/#endif`（`kasm_cpu.c` 开头）被切点劈成两半 —— `#include` 的边界劈不开一个
