@@ -434,11 +434,22 @@ export function readLexSpec(node, diags) {
        * 语料里 `games/traffic.kc:810` 那段多行帮助文本用的就是这个写法。
        */
       const join = flags.includes('join');
-      if (flags.some((f) => f !== 'verbatim' && f !== 'join')) {
-        diags.error(it.span, "the only flags after (string NAME \"Q\") are 'verbatim' and 'join'");
+      /**
+       * `char3`：**引号 + 一个字符 + 引号**这一档优先（那个字符**可以是引号自己**）。
+       *
+       * 正本的字符字面量就是这条规则（`polydraw_src/eval.c:6909`）：
+       * `if ((st[i]=='\'') && (st[i+1]>=32) && (st[i+2]=='\'')) i += 2;` —— 三个字符，
+       * 中间那个只要 >= 32，**没有转义这回事**。所以 `'''` 是撇号本身
+       * （`geeky/morse.kc:68` 的莫尔斯码表里就有这一行），而按"带转义的串"去扫会把
+       * 第二个引号当成收尾、第三个引号又开一个新串，整份文件从那儿起全错位。
+       * 三字符这一档不成立时（`'\n'` 那种）照旧走带转义的扫法。
+       */
+      const char3 = flags.includes('char3');
+      if (flags.some((f) => f !== 'verbatim' && f !== 'join' && f !== 'char3')) {
+        diags.error(it.span, "the only flags after (string NAME \"Q\") are 'verbatim', 'join' and 'char3'");
       }
       rules.push({
-        kind: 'string', type: nm, quote: q.value, verbatim, join, cond: c.cond, span: it.span,
+        kind: 'string', type: nm, quote: q.value, verbatim, join, char3, cond: c.cond, span: it.span,
       });
       continue;
     }
@@ -820,12 +831,19 @@ export function lexText(spec, file, diags) {
           }
         }
       } else if (src.slice(i, i + 1) === rule.quote) {
-        const s = scanString(src, i, rule.quote, rule.verbatim);
-        end = s.end;
-        value = s.value;
-        if (end < 0) {
-          diags.error(mkSpan(file, i, src.length), 'unterminated string');
-          failed = true;
+        /* `char3`：引号 + 一个字符（可以是引号自己）+ 引号，优先于带转义那条扫法。 */
+        if (rule.char3 === true && i + 2 < src.length
+            && src.slice(i + 2, i + 3) === rule.quote && src.slice(i + 1, i + 2) !== '\n') {
+          end = i + 3;
+          value = src.slice(i + 1, i + 2);
+        } else {
+          const s = scanString(src, i, rule.quote, rule.verbatim);
+          end = s.end;
+          value = s.value;
+          if (end < 0) {
+            diags.error(mkSpan(file, i, src.length), 'unterminated string');
+            failed = true;
+          }
         }
       }
       if (end > bestEnd) { best = r; bestEnd = end; bestValue = value; }

@@ -67,7 +67,10 @@
     ;; **字符字面量**（`RScript.htm` 算子表第二行："' ' Literal; substitutes a character
     ;; for its integer value"）—— `'+'`、`'\n'` 那种，值是那个字符的编码。
     ;; 语料里 `games/kenken.kc` 用它存 ALU 运算符（`o == '+'`）。
-    (string CHAR "'")
+    ;; `char3`：正本的规矩是**引号 + 一个字符（>=32）+ 引号**，没有转义
+    ;; （`polydraw_src/eval.c:6909`）—— 所以 `'''` 是撇号本身（`geeky/morse.kc:68`
+    ;; 的莫尔斯码表里就有）。三字符这一档不成立时（`'\n'`）照旧按带转义的串扫。
+    (string CHAR "'" char3)
     (token NAME (or alpha "_") (* (or alnum "_")))
 
     (keyword NAME fold-case

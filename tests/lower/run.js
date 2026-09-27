@@ -638,6 +638,17 @@ if (only.length === 0 || only.some((x) => 'eofcomment'.includes(x))) {
   } else if ((r3.stdout ?? '').trim() !== 'abcdef') {
     no('挨着的串字面量要拼起来', `期望 abcdef，得到 ${JSON.stringify(r3.stdout)}`);
   } else ok('挨着的串字面量拼成一个（跨行也算）');
+  /* **字符字面量是"引号 + 一个字符 + 引号"**（正本 `eval.c:6909` 那条规矩，没有转义）：
+     所以 `'''` 是撇号本身（`geeky/morse.kc:68` 的莫尔斯码表）。按"带转义的串"去扫会把
+     第二个引号当收尾、第三个引号又开一个新串，整份文件从那儿起全错位 —— 所以这一格
+     还要判**三字符那一档不成立时照旧认转义**（`'\n'` 要是 10）。 */
+  const c1 = write('char3.kc', "()\nprintf(\"a=%g q=%g n=%g\\n\", 'A', ''', '\\n');\n");
+  const r4 = spawnSync(process.execPath, [CLI, 'run', c1], { encoding: 'utf8', timeout: 60000 });
+  if (r4.status !== 0) {
+    no('字符字面量那三格', `退出码 ${r4.status}：${(r4.stderr ?? '').split('\n').slice(0, 2).join(' ')}`);
+  } else if ((r4.stdout ?? '').trim() !== 'a=65 q=39 n=10') {
+    no('字符字面量那三格', `期望 a=65 q=39 n=10，得到 ${JSON.stringify(r4.stdout)}`);
+  } else ok("字符字面量：`'''` 是撇号（39），`'\\n'` 照旧是转义（10）");
   rmSync(tmp, { recursive: true, force: true });
 }
 
