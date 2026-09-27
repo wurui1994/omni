@@ -450,7 +450,10 @@ static int gfx_rec(void) {
 static int gfx_is_query(const char *nm) {
   static const char *q[] = { "nextframe", "numframes", "klock", "xres", "yres",
     "mousx", "mousy", "bstatus", "setbstatus", "keystatus", "setkeystatus", "rgb",
-    "refresh", NULL };
+    "refresh",
+    /* 读资源那几格也要给真答案：脚本按 `picsiz`/`kv6siz` 的回值分支
+       （`demos/lab3d.kc` 拿 `while (pic(…) != 16777215)` 走光线 —— 截下来回 0 就是死循环）。 */
+    "picsiz", "kv6siz", "getcol", NULL };
   for (int i = 0; q[i] != NULL; i++) if (!strcmp(nm, q[i])) return 1;
   return 0;
 }
@@ -1437,11 +1440,15 @@ static char *gfx_name(omni_str s, int *isq) {
  */
 double omni_gfx_arr(omni_str name, double a0, double a1, double a2, double a3,
                     struct omni_arr_f64_s *blk) {
-  /* 录制那一档：这一族一格都不画（连名字都不用认）。 */
-  if (gfx_rec()) { g_greccnt += 1; return 0.0; }
   int nm_isq = 0;
   const char *nm = gfx_name(name, &nm_isq);
   (void)nm_isq;
+  /* 录制那一档：这一族一格都不画 —— 但**读资源那两格要放行**（`picread`/`kv6read`：
+     脚本按抄回来的内容分支，与 `gfx_is_query` 那张名单同一条理由）。 */
+  if (gfx_rec()) {
+    g_greccnt += 1;
+    if (strcmp(nm, "picread") != 0 && strcmp(nm, "kv6read") != 0) return 0.0;
+  }
   if (gfx_gl_want()) gfx_need();
   long n = blk == NULL ? 0 : (long)blk->len;
   double *items = blk == NULL ? NULL : blk->items;

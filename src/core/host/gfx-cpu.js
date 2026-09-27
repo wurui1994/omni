@@ -108,7 +108,12 @@ function recOn() {
  */
 const QUERY = new Set(['nextframe', 'numframes', 'klock', 'xres', 'yres',
   'mousx', 'mousy', 'bstatus', 'setbstatus', 'keystatus', 'setkeystatus', 'rgb',
-  'refresh']);
+  'refresh',
+  /* **读资源那几格也要给真答案**（2026-09-27 第二刀）：`picsiz`/`kv6siz` 说的是
+     "这张图/这份模型多大"，脚本**按它的回值分支**。`demos/lab3d.kc` 是拿
+     `while (pic("doubcube.png",ix,iy) != 16777215)` 走光线的 —— 截下来回 0 就是死循环，
+     与 `refresh` 那一格同一个毛病（配套的 `picread`/`kv6read` 在 `gfxArr` 里也放行）。 */
+  'picsiz', 'kv6siz', 'getcol']);
 
 /**
  * **`klock()` / `klock(0)` 的秒数**。`view` 模式是真墙上时间；`render` 模式是
@@ -1342,8 +1347,13 @@ function gfxTex(slot, w, h, d, fmt, pxs) {
  * GL 那一档转给设备。**与 `runtime/omni_fmt.c` 的 `omni_gfx_arr` 逐句相同**。
  */
 function gfxArr(name, args, blk) {
-  if (recOn()) { REC.set('gfxarr', (REC.get('gfxarr') ?? 0) + 1); return 0; }
   const nm = String(name);
+  /* **录制那一档**（`OMNI_GFX=null`）：记一笔就回 0 —— 但**读资源那两格要放行**
+     （`picread`/`kv6read`：脚本按抄回来的内容分支，见 `QUERY` 那段注）。 */
+  if (recOn()) {
+    REC.set('gfxarr', (REC.get('gfxarr') ?? 0) + 1);
+    if (nm !== 'picread' && nm !== 'kv6read') return 0;
+  }
   const a0 = Number(args[0]);
   const a1 = Number(args[1]);
   const a2 = Number(args[2]);
