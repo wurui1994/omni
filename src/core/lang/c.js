@@ -12,6 +12,7 @@ import { join, dirname } from '../host/path.js';
 import { env, exists, isDir, installDir, mtimeMs, readText, spawn, stderr } from '../host/native.js';
 import { C_INCLUDE_DIR } from '../runtime/c_runtime.js';
 import { lowerC, lowerCNative, declsOfC } from '../frontend-c/tccgen.js';
+import { linkAll } from '../mir/link.js';
 import { Cpp } from '../frontend-c/tccpp.js';
 import { verifyMir } from '../mir/verify.js';
 import { mirOptLevel, optimizeMir } from '../mir/opt/index.js';
@@ -200,6 +201,40 @@ function readOrNull(p) {
  * 这条腿的 **ABI** 仍旧是那个虚拟目标（`long double` = double、`wchar_t` = int、
  * `char` 有符号），由 `lowerC` 自己钉住 —— 见那儿的注。
  */
+/** 一份 `.c` → MIR，**不检查未定义的符号、不跑优化** —— 链接的输入走这一格。 */
+function cLowerOne(path, incs, defs, args, sysIncs, tgt) {
+  const { mod, warnings } = lowerC(path, readText(path), {
+    readFile: readOrNull,
+    includeDirs: incs,
+    sysIncludeDirs: sysIncs ?? cSysInclude(),
+    dirname,
+    join,
+    arch: tgt?.arch,
+    os: tgt?.os,
+  }, defs.map(([name, body]) => ({ name, body })), args);
+  for (const w of warnings) stderr(`${w}\n`);
+  return mod;
+}
+
+/**
+ * **好几份 `.c` 链成一份 MIR**（ADR-0047 的"第 2 道坎"，链接器在 `mir/link.js`）。
+ *
+ * 与 `cMir` 的差别只有"谁提供缺的那一格"：一份的时候缺了就是错，好几份的时候由别人补。
+ * 所以未定义符号那道检查挪到**链完之后**，优化也只跑一遍（链完的那一份）。
+ */
+export function cMirLink(paths, incs, defs, args, sysIncs, tgt) {
+  const mods = paths.map((p) => cLowerOne(p, incs, defs, args, sysIncs, tgt));
+  const mod = linkAll(mods);
+  if (mod.dataRefs.length > 0) {
+    const names = mod.dataRefs.map((r) => `'${r.name}'`).join('、');
+    throw new OmniError(`${paths.join(' ')}: error: undefined symbol ${names}`);
+  }
+  const errs = verifyMir(mod);
+  if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
+  optMir(mod, paths[0]);
+  return mod;
+}
+
 export function cMir(path, incs, defs, args, sysIncs, tgt) {
   const { mod, warnings } = lowerC(path, readText(path), {
     readFile: readOrNull,

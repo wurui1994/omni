@@ -192,6 +192,35 @@ const want = runMirModule(OIR, build('one.c', ONE));
   else bad(name, `    想要一句"重复定义"，实得：${msg}`);
 }
 
+/* **过真管子那一趟**（`lang/c.js` 的 `cMirLink`）：读文件、lower 每一份、链、
+   查未定义符号、过 verifier、再跑一遍优化。上面几格用的是裸 `lowerC`，所以这一格
+   钉的是"优化器与 verifier 也收得下链完的那一份"。 */
+{
+  const name = 'link/过 cMirLink 那条真管子';
+  const { cMirLink } = await import('../../src/core/lang/c.js');
+  const PA = 'int bee(int);\nextern int shared;\nstatic const char *t = "A";\n'
+    + 'int main(void){ shared = 4; return bee(3) + (int)t[0] + shared; }\n';
+  const PB = 'int shared;\nstatic const char *t = "B";\n'
+    + 'int bee(int x){ shared = shared + 1; return x + (int)t[0]; }\nint main(void){ return 0; }\n';
+  const PONE = 'int shared;\nstatic const char *tb = "B";\n'
+    + 'int bee(int x){ shared = shared + 1; return x + (int)tb[0]; }\n'
+    + 'static const char *t = "A";\n'
+    + 'int main(void){ shared = 4; return bee(3) + (int)t[0] + shared; }\n';
+  const pa = join(dir, 'pa.c');
+  const pb = join(dir, 'pb.c');
+  writeFileSync(pa, PA);
+  writeFileSync(pb, PB);
+  const w = runMirModule(OIR, build('pone.c', PONE));
+  let got;
+  try {
+    got = runMirModule(OIR, cMirLink([pa, pb], [], [], [], undefined, undefined));
+  } catch (e) {
+    got = `报错：${e.message.split('\n')[0]}`;
+  }
+  if (String(got) !== String(w)) bad(name, `    链完得 ${got}，拼成一份是 ${w}`);
+  else ok(`${name} [与拼成一份都是 ${w}]`);
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n`);
