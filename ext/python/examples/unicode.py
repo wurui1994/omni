@@ -73,6 +73,17 @@ def main():
     # `.Σ` 前面是个句点（既不 cased 也不可忽略）-> `σ`；`αΣʲ` 后面那个 ʲ **既 cased
     # 又可忽略**，可忽略优先 -> 那个 Σ 算尾位 -> `ς`。这两格是探针写错时唯一会红的地方。
     print(".Σ".lower(), "αΣ.".lower(), "αΣ".lower(), "αΣʲ".lower(), "αΣa".lower())
+
+    # 十一、`.title()` / `.capitalize()` / `.swapcase()` —— 同一张表、同一份逻辑
+    #   * `.title()` 按**词边界**：上一格算不算 cased（`a'b` -> `A'B`，撇号不 cased）；
+    #   * `.capitalize()` 只动头一格，**用的是首字母大写映射**（`ß` -> `Ss`、`ǅ` -> `ǅ`），
+    #     其余一律小写（`abc def` -> `Abc def`，与 title 正相反）；
+    #   * `.swapcase()` 大写换小写、小写换大写，**首字母大写那一档两边都不是**
+    #     （`ǅa` -> `ǅA`），而换出来的小写照旧走尾位 sigma（`ΣΣ` -> `σς`）。
+    print("hello wörld".title(), "a'b".title(), "3a".title(), "ǅa".title())
+    print("ß".title(), "ﬃ".title(), "σΣ".title(), "ʲΣ".title())
+    print("ß".capitalize(), "abc def".capitalize(), "ǅ".capitalize(), "σΣ".capitalize())
+    print("ΣΣ".swapcase(), "ǅa".swapcase(), "İ".swapcase(), "Groß".swapcase())
     print("abc".upper(), "ABC".lower(), "".upper(), "".lower(), "".casefold())
     print("héllo wörld".upper(), "HÉLLO WÖRLD".lower())
 

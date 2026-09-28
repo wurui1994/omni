@@ -53,6 +53,9 @@ export const LIB_METHODS = new Map([
   ['string.upper', '_str_upper'],
   ['string.lower', '_str_lower'],
   ['string.casefold', '_str_casefold'],
+  ['string.title', '_str_title'],
+  ['string.capitalize', '_str_capitalize'],
+  ['string.swapcase', '_str_swapcase'],
 ]);
 
 /** 接收者装的东西 + 方法名 → 库函数名（没有就答 null）。 */

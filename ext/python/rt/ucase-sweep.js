@@ -47,6 +47,10 @@ const PASSES = [
     `${HEAD}            print(cp, c.upper(), c.lower(), c.casefold())\n${TAIL}`],
   ['尾位 sigma 的前位与后位',
     `${HEAD}            print(cp, ("\\u03b1\\u03a3" + c).lower(), ("\\u03b1" + c + "\\u03a3").lower())\n${TAIL}`],
+  /* 三：**title / capitalize / swapcase**。`("a" + c).title()` 那一格是词边界那条规矩
+     （上一格 `a` 是 cased，所以这一格该走小写而不是首字母大写）—— 单独一格字符量不到它。 */
+  ['title / capitalize / swapcase',
+    `${HEAD}            print(cp, c.title(), c.capitalize(), c.swapcase(), ("a" + c).title())\n${TAIL}`],
 ];
 
 const dir = mkdtempSync(join(tmpdir(), 'omni-ucase-sweep-'));

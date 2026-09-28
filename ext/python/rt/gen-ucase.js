@@ -83,7 +83,13 @@ for cp in range(N):
         | (c.isupper() << 6) | (c.islower() << 7)
     fc = ("\u03b1\u03a3" + c + " ").lower()[1] == "\u03c3"
     ig = (not fc) and ("\u03b1\u03a3" + c + "a").lower()[1] == "\u03c3"
-    flags |= (int(fc) << 8) | (int(ig) << 9)
+    # 第 10 位：**Cased 本身**（不带"不可忽略"那一条）。.title() 要的是这一位 ——
+    # CPython 的 fix_title 用 _PyUnicode_IsCased 记"上一格算不算 cased"，
+    # 而上面那个 fc 是"cased 而且不可忽略"，ʲ 那一族两者不同。
+    # 探针：(c + "a").title() 的末尾 —— c 是 cased 的话后头那个 a 在词中间（照旧小写）。
+    # （这一段**不许带反引号** —— 整份 python 是个 String.raw 模板，反引号会把它截断。）
+    cased = (c + "a").title()[-1] == "a"
+    flags |= (int(fc) << 8) | (int(ig) << 9) | (int(cased) << 10)
     # 映射长到 3 个码点以上的一格都没有（CPython 的 To*Full 也只给 3）——
     # 真有就当场停下，别静静截断。
     for m in (u, l, t, f):
