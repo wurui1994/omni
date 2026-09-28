@@ -1112,6 +1112,69 @@ static inline omni_dyn omni_dyn_of_string(omni_str v) { omni_dyn d; d.tag = OMNI
 static inline omni_dyn omni_dyn_of_s16(omni_s16 v) { omni_dyn d; d.tag = OMNI_DYN_STR16; d.u.s16 = v; return d; }
 static inline omni_dyn omni_dyn_of_ref(void *v, int tag) { omni_dyn d; d.tag = tag; d.u.ref = v; return d; }
 
+/* ---------------------------------------------------------------- JS 数值运算的快路
+ *
+ * **把单态那一格搬到调用点**（J1，ADR-0047 §11.3）。量出来的动机（`int-loop`，clang -O2）：
+ * 那份循环里五个运行时 op 按自用几乎平摊（bitop 32% / arith 22% / add 16% / cmp 15%），
+ * **op 内部已经没有可捡的了** —— 剩下的全是"每个运算符一次调用 + 按值搬一个 24 字节的
+ * `omni_dyn`"。所以这一层要做的不是再优化 op，是**在常见情形下根本不调它**。
+ *
+ * 为什么是 `static inline` 函数而不是宏：宏会把操作数**求值两次**（`(a).tag == … ? … : f(a,b)`），
+ * 而操作数常常是别的调用（`f() + g()`）。函数形参只求值一次，而 `static inline` 在生成的那份
+ * C 里会被 clang 内联掉 ⇒ 判断在调用点、24 字节留在寄存器里、慢路才真的是一次调用。
+ *
+ * **判据是"与慢路逐位相同"，不是"差不多"**（每一条都照 `omni_js.c` 里对应那一支抄的）：
+ *   · `js_add` 两个 REAL：`js_objlike` 假、没有 STR16、`to_num1` 恒等、`is_int` 假 ⇒ `a.u.r + b.u.r`；
+ *   · `js_arith` 的 `- * /` 同理（`%` 是 `fmod`、`**` 是 `pow`，不值得搬，留给慢路）；
+ *   · `js_cmp` 的四格：NaN 上 `<`/`>` 在 C 与 JS 都是假 ⇒ 直接用 C 的比较；
+ *   · `js_inc`/`js_dec`：REAL 上就是 ±1.0（INT 那一支是 bigint 的回卷加，留给慢路）。
+ * 谁要改 `omni_js.c` 里那几支，这儿必须跟着改 —— 两处不一致就是"答案按 -O 档变"。
+ */
+bool omni_js_cmp(int op, omni_dyn a, omni_dyn b);
+static inline bool omni_jsf_r2(omni_dyn a, omni_dyn b) {
+  return a.tag == OMNI_DYN_REAL && b.tag == OMNI_DYN_REAL;
+}
+static inline omni_dyn omni_jsf_add(omni_dyn a, omni_dyn b) {
+  if (omni_jsf_r2(a, b)) return omni_dyn_of_real(a.u.r + b.u.r);
+  return omni_js_add(a, b);
+}
+static inline omni_dyn omni_jsf_sub(omni_dyn a, omni_dyn b) {
+  if (omni_jsf_r2(a, b)) return omni_dyn_of_real(a.u.r - b.u.r);
+  return omni_js_arith('-', a, b);
+}
+static inline omni_dyn omni_jsf_mul(omni_dyn a, omni_dyn b) {
+  if (omni_jsf_r2(a, b)) return omni_dyn_of_real(a.u.r * b.u.r);
+  return omni_js_arith('*', a, b);
+}
+static inline omni_dyn omni_jsf_div(omni_dyn a, omni_dyn b) {
+  if (omni_jsf_r2(a, b)) return omni_dyn_of_real(a.u.r / b.u.r);
+  return omni_js_arith('/', a, b);
+}
+static inline bool omni_jsf_lt(omni_dyn a, omni_dyn b) {
+  if (omni_jsf_r2(a, b)) return a.u.r < b.u.r;
+  return omni_js_cmp('<', a, b);
+}
+static inline bool omni_jsf_gt(omni_dyn a, omni_dyn b) {
+  if (omni_jsf_r2(a, b)) return a.u.r > b.u.r;
+  return omni_js_cmp('>', a, b);
+}
+static inline bool omni_jsf_le(omni_dyn a, omni_dyn b) {
+  if (omni_jsf_r2(a, b)) return a.u.r <= b.u.r;
+  return omni_js_cmp('l', a, b);
+}
+static inline bool omni_jsf_ge(omni_dyn a, omni_dyn b) {
+  if (omni_jsf_r2(a, b)) return a.u.r >= b.u.r;
+  return omni_js_cmp('g', a, b);
+}
+static inline omni_dyn omni_jsf_inc(omni_dyn v) {
+  if (v.tag == OMNI_DYN_REAL) return omni_dyn_of_real(v.u.r + 1.0);
+  return omni_js_inc(v);
+}
+static inline omni_dyn omni_jsf_dec(omni_dyn v) {
+  if (v.tag == OMNI_DYN_REAL) return omni_dyn_of_real(v.u.r - 1.0);
+  return omni_js_dec(v);
+}
+
 static inline void omni_dyn_want(omni_dyn v, int tag) {
   if (v.tag != tag) {
     omni_errorf("dynamic value is %s, expected %s", omni_dyn_tag_name(v.tag), omni_dyn_tag_name(tag));

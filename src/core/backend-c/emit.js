@@ -3030,6 +3030,29 @@ class CEmitter {
       default: {
         const abi = JS_ALL[e.name];
         if (!abi) throw new Error(`c.builtin: ${e.name}`);
+        /* **数值运算走快路那一层**（J1，ADR-0047 §11.3）：`omni_jsf_*` 是 `omni.h` 里的
+         * `static inline`，形状是「两个操作数都是 REAL 就当场算，否则调原来那一格」。
+         * 于是常见情形下**一次调用都不发**、24 字节的 `omni_dyn` 留在寄存器里。
+         *
+         * 为什么在这儿分叉而不是在运行时里头加快路：运行时那一格是**一次真调用**，
+         * 光是把两个 24 字节的实参搬进去就已经付掉了（量过：五个 op 按自用平摊、
+         * op 内部再优化墙上时间不动）。
+         *
+         * 只认 op 码是**编译期常量**的那几格（`e.op` 就在这儿），别的照旧。
+         * `%`/`**` 不在名单里：它们的快路是 `fmod`/`pow`，搬过来没有意义。 */
+        const F2 = { '-': 'omni_jsf_sub', '*': 'omni_jsf_mul', '/': 'omni_jsf_div' };
+        const FC = {
+          '<': 'omni_jsf_lt', '>': 'omni_jsf_gt', l: 'omni_jsf_le', g: 'omni_jsf_ge',
+        };
+        if (e.name === 'js_add' && a.length === 2) return `omni_jsf_add(${a.join(', ')})`;
+        if (e.name === 'js_arith' && a.length === 2 && F2[e.op] !== undefined) {
+          return `${F2[e.op]}(${a.join(', ')})`;
+        }
+        if (e.name === 'js_cmp' && a.length === 2 && FC[e.op] !== undefined) {
+          return `${FC[e.op]}(${a.join(', ')})`;
+        }
+        if (e.name === 'js_inc' && a.length === 1) return `omni_jsf_inc(${a[0]})`;
+        if (e.name === 'js_dec' && a.length === 1) return `omni_jsf_dec(${a[0]})`;
         /* `noC`：ADR-0020 P1 那一族（真对象 / Symbol / 迭代器协议）还只有 JS 侧的实现。
          * 在**发射的时候**就骂，而不是让它落成一个 C 链接期的 undefined symbol ——
          * 那种错误会指向生成的 .c 的某一行，而真相是"这条腿还没修完"。 */
