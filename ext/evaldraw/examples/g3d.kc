@@ -1,0 +1,24 @@
+// ext/evaldraw/examples/g3d.kc —— **EvalDraw 的 3D 那一族**（`ext/polydraw/gfx3-rt.js`）
+//
+// 投影在语言那一侧（设备只收 2D 图元），口径照 `evaldraw.txt:1543-1590`：
+//     screen_x = x/z*hz + hx;  screen_y = y/z*hz + hy;   默认 hx=xres/2, hy=yres/2, hz=hx
+// 320×240 ⇒ hx=160, hy=120, hz=160。相机摆在原点、往 +z 看（`setcam` 五参，弧度）。
+//
+// 所以每一格落在哪儿是**算出来的**，不是看出来的（判据里的 probes 就是这么来的）：
+//   红球  drawsph(-40,0,200,20)          -> 圆心 (-40/200*160+160, 120) = (128,120)、半径 20/200*160 = 16
+//   绿锥  drawcone(20,-30,200,5, 60,30,200,5)
+//                                        -> 两端 (176,96) 与 (208,144)、半径 4
+//   蓝线  moveto(-60,60,200) lineto(60,60,200)
+//                                        -> 从 (112,168) 到 (208,168)
+// `clz(1e32)` 这一层收下不用（没有 z 缓冲，见 gfx3-rt.js 头注第 2 条）—— 摆在这儿是为了
+// 钉住"它不报错、也不把后面的图冲掉"。
+//
+// 跑一趟：`OMNI_GFX=host node src/cli.js run ext/evaldraw/examples/g3d.kc`
+
+()
+cls(0);
+clz(1e32);
+setcam(0, 0, 0, 0, 0);
+setcol(255, 0, 0); drawsph(-40, 0, 200, 20);
+setcol(0, 255, 0); drawcone(20, -30, 200, 5, 60, 30, 200, 5);
+setcol(0, 0, 255); moveto(-60, 60, 200); lineto(60, 60, 200);
