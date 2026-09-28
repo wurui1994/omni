@@ -800,8 +800,8 @@ function tyOfCall(x, C) {
   if (nm === 'list' || nm === 'sorted' || nm === 'reversed') {
     const t = argTys[0];
     if (t === null || t === undefined) return null;
-    /* `sorted(串)` / `list(串)` 交的是一张字符表（`reversed` 只收表）。 */
-    if (t.kind === 'string' && nm !== 'reversed') return arrOf(STR);
+    /* `sorted(串)` / `list(串)` / `reversed(串)` 交的是一张字符表。 */
+    if (t.kind === 'string') return arrOf(STR);
     /* **字典走的是键**（与 `for k in d` 一条）：发射那一侧早就走 `dkeys` 了，缺的一直是
        这一格类型 —— 于是 `for k in sorted(d)` 报"用到了没赋过值的名字 'k'"（绑不上）。
        `print(sorted(d))` 看不出来：那一条路上没人问过类型。 */
@@ -843,6 +843,8 @@ function tyOfCall(x, C) {
      `d = dict(pairs)` 那格名字**一直没绑上**，发到 `.sx` 那侧报"未声明的变量 'd'"。 */
   if (nm === 'dict' && argTys.length === 1) {
     const t = argTys[0];
+    /* `dict(另一张字典)` 是抄一份 —— 类型就是它自己。 */
+    if (t != null && t.kind === 'map') return t;
     if (t == null || t.kind !== 'arr') return null;
     const tup = tupleOf(C.recOf(t.elem));
     return tup !== null && tup.length === 2 ? dictOf(tup[1], tup[0]) : null;
@@ -1174,7 +1176,12 @@ export function exprOf(x, C) {
     case 'and': case 'or': return andOrOf(x, C);
     case 'un': {
       const o = String(leaf(kids(x)[0]));
-      if (o === '+') return exprOf(kids(x)[1], C);
+      /* **一元算符也照"bool 就是 int"那条**：`+True` 是 1、`-True` 是 -1、`~True` 是 -2
+         （方言那一侧 `(un "-" (bool …))` 当场报）。 */
+      if (o === '+') {
+        const v0 = exprOf(kids(x)[1], C);
+        return intOfPy(v0, ty(v0, C));
+      }
       /* **负的字面量当场折**（`-1` / `-1.5`）：`range(3, 0, -1)` 的步长与 `xs[-1]` 的
          负下标都要"这一格是不是字面量"答得出来，不折的话那两处都退档。
          `-0.0` **不折** —— 折了符号就丢了（`(real -0)` 发出来是 `0`），而 python 印 `-0.0`。 */
@@ -1186,10 +1193,14 @@ export function exprOf(x, C) {
             : { kind: 'int', value: -v.value };
         }
       }
-      if (o === '-') return { kind: 'unop', op: '-', operand: exprOf(kids(x)[1], C) };
+      if (o === '-') {
+        const v0 = exprOf(kids(x)[1], C);
+        return { kind: 'unop', op: '-', operand: intOfPy(v0, ty(v0, C)) };
+      }
       /* `~x` —— 方言里没有按位取反，照它的定义落成 `-x - 1`（两个补码上逐位相同）。 */
       if (o === '~') {
-        const v = exprOf(kids(x)[1], C);
+        const v0 = exprOf(kids(x)[1], C);
+        const v = intOfPy(v0, ty(v0, C));
         if (ty(v, C).kind !== 'int') throw new Error('python->IR: `~` 只对 int 成立');
         return {
           kind: 'binop', op: '-',
@@ -1202,8 +1213,24 @@ export function exprOf(x, C) {
     /* `a if c else b` —— 两支要同型（方言里 `(sel c a b)` 那一格不做提升）。 */
     case 'cond': {
       const [c, a, b] = kids(x);
-      const then = exprOf(a, C);
-      const els = exprOf(b, C);
+      /* **一支是空容器字面量**（`xs if c else []`）—— 类型从**另一支**来，
+         与实参位置上那一条同一条口径（"空容器的类型从旁边来"）。不这么办的话
+         `[]` 自己退到 `(arr dyn)`，两支就成了 arr<dyn> / arr<int>，报"两支不同型"。 */
+      const isEmptyLit = (k) => ['list', 'dict'].includes(tag(k)) && kids(k).length === 0;
+      let then;
+      let els;
+      if (isEmptyLit(a) && !isEmptyLit(b)) {
+        els = exprOf(b, C);
+        const tb0 = ty(els, C);
+        then = tb0.kind === (tag(a) === 'list' ? 'arr' : 'map') ? emptyOf(tb0) : exprOf(a, C);
+      } else if (isEmptyLit(b) && !isEmptyLit(a)) {
+        then = exprOf(a, C);
+        const ta0 = ty(then, C);
+        els = ta0.kind === (tag(b) === 'list' ? 'arr' : 'map') ? emptyOf(ta0) : exprOf(b, C);
+      } else {
+        then = exprOf(a, C);
+        els = exprOf(b, C);
+      }
       const ta = ty(then, C);
       const tb = ty(els, C);
       if (!sameType(ta, tb)) {
@@ -1401,6 +1428,21 @@ function seqCmp(o, op, a, b, ta, tb, C) {
   }
   return null;
 }
+
+/**
+ * **python 里 bool 就是 int 的一种** —— `int(True)` 是 1、`float(False)` 是 0.0、
+ * `hex(True)` 是 `0x1`。方言那一侧 bool 与 int 是两档（`(toreal (bool …))` 当场报），
+ * 所以要个数的地方先过这一格。不是 bool 的原样交回。
+ */
+function intOfPy(e, t) {
+  if (t === null || t === undefined || t.kind !== 'bool') return e;
+  return {
+    kind: 'ternary', type: INT, cond: e, then: { kind: 'int', value: 1 }, else_: { kind: 'int', value: 0 },
+  };
+}
+
+/** **只吃数的那几格内建** —— 实参里的 bool 先折成 int（见 `intOfPy` 与 `builtinOf`）。 */
+const NUM_ONLY = new Set(['divmod', 'pow', 'abs', 'round']);
 
 /** 一格 `==`（`builtins.js` 那几格"找"要它 —— 元素是箱子时按标签分派）。 */
 export const cmpEq = (a, b, C) => cmpOne('==', a, b, C);
@@ -1799,14 +1841,17 @@ function convPiece(p, v, C) {
     return { kind: 'name', name: n };
   };
   const num = ['d', 'i', 'f', 'e', 'g', 'x', 'X', 'o'].includes(p.conv);
-  const val = num || p.flags.plus ? keep(v, 'pc_v') : v;
+  const sign = p.flags.plus || p.flags.space;
+  const val = num || sign ? keep(v, 'pc_v') : v;
   let s = rawConv(p, val, C);
-  /* `+` —— 非负数前面补一个加号（python 的 `"%+d" % 5` 是 `+5`）。 */
-  if (p.flags.plus && num) {
+  /* `+` —— 非负数前面补一个加号（python 的 `"%+d" % 5` 是 `+5`）；
+     **空格标志**是同一格位置上补一个空格（`"% d" % 3` 是 ` 3`），两个都给时 `+` 赢。 */
+  if (sign && num) {
+    const mark = p.flags.plus ? '+' : ' ';
     s = {
       kind: 'ternary', type: STR,
       cond: { kind: 'binop', op: '>=', left: val, right: ty(val, C).kind === 'real' ? { kind: 'real', value: 0 } : { kind: 'int', value: 0 } },
-      then: { kind: 'binop', op: '+', left: { kind: 'string', value: '+' }, right: s },
+      then: { kind: 'binop', op: '+', left: { kind: 'string', value: mark }, right: s },
       else_: s,
     };
   }
@@ -1843,6 +1888,15 @@ function rawConv(p, v, C) {
       if (t.kind !== 'int') throw new Error(`python->IR: \`%${p.conv}\` 的实参要是 int（这里是 ${t.kind}）`);
       const b = { kind: 'builtin', name: 'sbase', args: [v, { kind: 'int', value: p.conv === 'o' ? 8 : 16 }] };
       return p.conv === 'X' ? { kind: 'builtin', name: 'supper', args: [b] } : b;
+    }
+    /* `%c` —— 整数当码点（`(chr I)`）、一格字符的串原样。python 那边串长不为 1 时
+       是 TypeError；这一层不查长度（编译期不知道），照原样交出去。 */
+    case 'c': {
+      if (t.kind === 'string') return v;
+      if (!['int', 'bool'].includes(t.kind)) {
+        throw new Error(`python->IR: \`%c\` 要一格整数或一格字符的串（这里是 ${t.kind}）`);
+      }
+      return { kind: 'builtin', name: 'chr', args: [intOfPy(v, t)] };
     }
     default: throw new Error(`python->IR: \`%${p.conv}\` 还没接`);
   }
@@ -2395,7 +2449,13 @@ function dictLit(x, C) {
     if (tag(it) !== 'kv') throw new Error(`python->IR: 字典里的 \`${tag(it)}\` 还没接（** 展开那一格）`);
   }
   if (items.length === 0) {
-    throw new Error('python->IR: 空字典 `{}` 的键值类型推不出来 —— 给它一格标注（`d: dict[str, int] = {}`）');
+    /* **谁都没说键值装什么的空字典退到 `(dict string dyn)`** —— `bool({})` / `any({})` /
+       `print({})` 在 python 里都有定义，从前这一格当场报"给它一格标注"。
+       有地方说的走不到这儿（标注、形参那一侧、`d[k] = {}`、`m = {}` 之后那一句 ——
+       见 `index.js` 的 `bindEmptyDict` 与 `paramWants`）。
+       键为什么是 string 不是箱子：方言的字典键只有 int 与 string 两档（SPEC §三），
+       而空字典的键**一格都读不出来**，所以这一档挑哪个都观察不到。 */
+    return emptyOf(dictOf(DYN, STR));
   }
   const pairs = items.map((it) => [exprOf(kids(it)[0], C), exprOf(kids(it)[1], C)]);
   /* **值不同型就退到 dyn**（`{"n": 1, "s": "two"}` —— python 里的配置字典多是这个样）。
@@ -2617,7 +2677,7 @@ function partitionOf(s0, sep0, C, fromRight) {
  * `{{` / `}}` 是转义。格式说明那一套微语言直接借 f-string 那一份（`fmtSpec`）——
  * 两处本来就是同一套规矩，各写一遍必然对不上。
  */
-function formatOf(tmpl, args, C) {
+function formatOf(tmpl, args, C, named = null) {
   const out = [];
   let auto = 0;
   let lit = '';
@@ -2652,19 +2712,27 @@ function formatOf(tmpl, args, C) {
       const who = bi < 0 ? head : head.slice(0, bi);
       const conv = bi < 0 ? '' : head.slice(bi + 1);
       let at;
+      let v = null;
       if (who === '') {
         at = auto;
         auto += 1;
       } else if (/^\d+$/.test(who)) {
         at = Number(who);
       } else {
-        throw new Error(`python->IR: \`.format()\` 的 \`{${who}}\` 还没接`
-          + '（接了的是 `{}` 与 `{0}`；按名字取要命名实参那一档）');
+        /* **按名字取**（`"{k}".format(k=3)`）—— 命名实参那一档，名字在编译期就有。 */
+        if (named === null || !named.has(who)) {
+          throw new Error(`python->IR: \`.format()\` 的 \`{${who}}\` 没有对得上的命名实参`
+            + '（接了的是 `{}`、`{0}` 与 `{名字}`；`{a.b}` / `{a[0]}` 还没接）');
+        }
+        v = named.get(who);
+        at = -1;
       }
-      if (at >= args.length) {
-        throw new Error(`python->IR: \`.format()\` 要第 ${at} 格实参，可只给了 ${args.length} 格`);
+      if (at >= 0) {
+        if (at >= args.length) {
+          throw new Error(`python->IR: \`.format()\` 要第 ${at} 格实参，可只给了 ${args.length} 格`);
+        }
+        v = args[at];
       }
-      const v = args[at];
       if (conv !== '' && conv !== 'r' && conv !== 's') {
         throw new Error(`python->IR: \`.format()\` 的 \`!${conv}\` 还没接（接了 !r 与 !s）`);
       }
@@ -3005,11 +3073,18 @@ function calleeSig(fn, C) {
   }
   const def = C.fnNodes.get(key);
   if (def === undefined) return null;
-  const ps = kids(part(def, 'params') ?? { kind: 'list', items: [] }).filter((p) => tag(p) === 'p');
+  const all = kids(part(def, 'params') ?? { kind: 'list', items: [] });
+  const ps = all.filter((p) => tag(p) === 'p');
+  /* **`*` 那个标记**（`def f(a, *, b=1)`）：它后面那几格只能按名字给。
+     这儿记下"从第几格起"，`kwOrder` 拿它挡住位置实参。 */
+  const star = all.findIndex((p) => tag(p) === 'kwonly');
+  const kwFrom0 = star < 0 ? -1 : all.slice(0, star).filter((p) => tag(p) === 'p').length;
   /* 方法（含造记录走的 `__init__`）第一格是 self —— 调用点不给它。 */
   const use = key.includes('.') ? ps.slice(1) : ps;
+  const kwFrom = kwFrom0 < 0 ? -1 : (key.includes('.') ? kwFrom0 - 1 : kwFrom0);
   return {
     label,
+    kwFrom,
     names: use.map((p) => String(nameOf(kids(p)[0]))),
     defs: use.map((p) => {
       const d = part(p, 'default');
@@ -3039,8 +3114,19 @@ function calleeSig(fn, C) {
 export function kwOrder(fn, toks, C) {
   const sig = calleeSig(fn, C);
   if (sig === null) return toks;
-  const { label, names, defs } = sig;
+  const {
+    label, names, defs, kwFrom,
+  } = sig;
   const hasKw = toks.some((a) => tag(a) === 'kw');
+  /* **`*` 后面那几格只能按名字给**（python 那边位置多给一格是 TypeError）——
+     这一条要在"补默认值"之前查，不然 `f(1, 2)` 会静静落到那格名字上。 */
+  if (kwFrom >= 0) {
+    const pos = toks.filter((a) => tag(a) !== 'kw').length;
+    if (pos > kwFrom) {
+      throw new Error(`python->IR: \`${label}()\` 的 \`${names[kwFrom]}\` 在 \`*\` 后面 ——`
+        + ' 只能按名字给（python 那边多给一格位置实参是 TypeError）');
+    }
+  }
   if (!hasKw && toks.length === names.length) return toks;
   const out = toks.filter((a) => tag(a) !== 'kw');
   if (out.length > names.length) return toks;      // 个数不对，交给下游那句话去报
@@ -3308,6 +3394,23 @@ export function callOf(x, C) {
     }
     return sortedPy(exprOf(pos[0], C), C, desc, keyTok);
   }
+  /* **`"{k}".format(k=3)`** —— 也要在算实参之前拦（下面那一圈见了 `kw` 就报）。
+     名字在编译期就有，所以这一格只是"把名字对上那个值"，与 `{0}` 那一档同一条路。 */
+  if (tag(fn) === 'attr' && String(leaf(kids(fn)[1])) === 'format'
+    && argToks.some((a) => tag(a) === 'kw')
+    && !argToks.some((a) => ['star', 'starstar'].includes(tag(a)))) {
+    const recvF = exprOf(kids(fn)[0], C);
+    if (recvF.kind !== 'string') {
+      throw new Error('python->IR: `.format()` 的模板要是一格**串字面量** ——'
+        + ' 替换字段得在编译期拆开（每一格的格式说明各是一套代码）');
+    }
+    const pos = argToks.filter((a) => tag(a) !== 'kw').map((a) => exprOf(a, C));
+    const named = new Map();
+    for (const a of argToks.filter((y) => tag(y) === 'kw')) {
+      named.set(String(leaf(kids(a)[0])), exprOf(kids(a)[1], C));
+    }
+    return formatOf(String(recvF.value), pos, C, named);
+  }
   for (const a of argToks) {
     if (['kw', 'star', 'starstar'].includes(tag(a))) {
       throw new Error(`python->IR: 实参里的 \`${tag(a)}\` 还没接（命名实参 / 展开）`);
@@ -3462,7 +3565,12 @@ function keepInt(e, prefix, C) {
   return { pre: [{ kind: 'let', name: n, type: INT, init: e }], v: { kind: 'name', name: n } };
 }
 
-function builtinOf(nm, args, argToks, C) {
+function builtinOf(nm, args0, argToks, C) {
+  /* **只吃数的那几格先把 bool 折成 int** —— python 里 bool 就是 int 的一种
+     （`divmod(True, 2)` 是 `(0, 1)`、`pow(True, 2)` 是 1）。方言那一侧两档是分开的，
+     所以在这一处一次折完，省得每格各写一遍（`int` / `float` / `hex` 那几格自己还要
+     分 bool 与别的档，所以不在这张名单里）。 */
+  const args = NUM_ONLY.has(nm) ? args0.map((a) => intOfPy(a, ty(a, C))) : args0;
   const t0 = args.length > 0 ? ty(args[0], C) : null;
   switch (nm) {
     case 'print':
@@ -3474,11 +3582,7 @@ function builtinOf(nm, args, argToks, C) {
       /* **`int(3.7)` 是向零取整**（`int(-3.7)` 是 -3）—— 方言的 `toint` 正是这一格。 */
       if (t0.kind === 'real') return { kind: 'builtin', name: 'toint', args };
       /* python 的 bool 就是 int 的一种：`int(True)` 是 1。 */
-      if (t0.kind === 'bool') {
-        return {
-          kind: 'ternary', type: INT, cond: args[0], then: { kind: 'int', value: 1 }, else_: { kind: 'int', value: 0 },
-        };
-      }
+      if (t0.kind === 'bool') return intOfPy(args[0], t0);
       /* `int(s)` / `int(s, base)` —— **串转整数不用借 C**：整数逐位乘加就是精确的
          （"最短往返"那种讲究是浮点才有的）。base 要是编译期的字面量。 */
       if (t0.kind === 'string') {
@@ -3517,7 +3621,7 @@ function builtinOf(nm, args, argToks, C) {
         }
         return { kind: 'call', fn: { kind: 'name', name: inst.mangled }, args: [args[0]] };
       }
-      return t0.kind === 'real' ? args[0] : toReal(args[0], C);
+      return t0.kind === 'real' ? args[0] : toReal(intOfPy(args[0], t0), C);
     }
     case 'str':
       return pyStr(args[0], C);
@@ -3609,6 +3713,7 @@ function builtinOf(nm, args, argToks, C) {
       const dynOps = {
         boxInt: (v) => boxOf({ kind: 'int', value: v }, C),
         addDyn: (a, b) => dynBin('+', a, b, C),
+        intOf: (e) => intOfPy(e, BOOL),
       };
       if (args.length === 1) return sumOf(args[0], C, dynOps);
       if (args.length !== 2) throw new Error('python->IR: `sum()` 收一格表或者表加一格起点');
@@ -3629,7 +3734,9 @@ function builtinOf(nm, args, argToks, C) {
     /* `reversed(xs)` —— 交倒过来的**一张新表**（原表不动）。 */
     case 'reversed': {
       if (args.length !== 1) throw new Error('python->IR: `reversed()` 收一格表');
-      if (t0.kind !== 'arr') throw new Error(`python->IR: \`reversed(${t0.kind})\` 还没接（表接了）`);
+      /* `reversed(串)` —— 一格一个字符倒过来（`list(reversed("ab"))` 是 `['b', 'a']`）。 */
+      if (t0.kind === 'string') return reversedList(charsOf(args[0], C), C);
+      if (t0.kind !== 'arr') throw new Error(`python->IR: \`reversed(${t0.kind})\` 还没接（表与串接了）`);
       return reversedList(args[0], C);
     }
     /* `repr(x)` —— `str()` 那一侧已经有了，这一格只差把串加上引号（`pyRepr`）。 */
@@ -3642,10 +3749,13 @@ function builtinOf(nm, args, argToks, C) {
        （量过：`hex(-255)` python 交 `-0xff`，直接 sbase 会交 16 个 f 那一串）。 */
     case 'hex': case 'oct': case 'bin': {
       if (args.length !== 1) throw new Error(`python->IR: \`${nm}()\` 收一格实参`);
-      if (t0.kind !== 'int') throw new Error(`python->IR: \`${nm}(${t0.kind})\` —— python 里也要整数`);
+      if (!['int', 'bool'].includes(t0.kind)) {
+        throw new Error(`python->IR: \`${nm}(${t0.kind})\` —— python 里也要整数`);
+      }
       const base = { hex: 16, oct: 8, bin: 2 }[nm];
       const pre = { hex: '0x', oct: '0o', bin: '0b' }[nm];
-      const v = keepInt(args[0], `${nm}_v`, C);
+      /* bool 也收 —— python 里 bool 就是 int 的一种（`hex(True)` 是 `0x1`）。 */
+      const v = keepInt(intOfPy(args[0], t0), `${nm}_v`, C);
       const digits = (e) => ({ kind: 'builtin', name: 'sbase', args: [e, { kind: 'int', value: base }] });
       const cat = (l, r) => ({ kind: 'binop', op: '+', left: l, right: r });
       return {
@@ -3661,7 +3771,10 @@ function builtinOf(nm, args, argToks, C) {
     }
     case 'any': case 'all': {
       if (args.length !== 1) throw new Error(`python->IR: \`${nm}()\` 收一格表`);
-      return anyAllOf(args[0], nm === 'all', C, condOfExpr);
+      /* **走一遍的那一格归一成一张表**（`iterArrOf`）—— 串一格一个字符、字典走键，
+         与 `for` / `sorted` / `min` 那几处一条规矩。`all("ab")` / `any({})` 在 python 里
+         有定义，从前这儿报"收一格表"。 */
+      return anyAllOf(iterArrOf(args[0], C), nm === 'all', C, condOfExpr);
     }
     /* `zip(a, b)` / `enumerate(xs[, start])` **当值用** —— 交一张元组的表。 */
     case 'zip': {
@@ -3691,10 +3804,12 @@ function builtinOf(nm, args, argToks, C) {
       if (tupleOf(C.recOf(t)) !== null) return tupleToList(args[0], C);
       throw new Error(`python->IR: \`list(${t.kind})\` 还没接（表 / 串 / 字典 / 元组 / range 接了）`);
     }
-    /* `dict(pairs)` —— 一串两格的元组造一格字典。`dict(a=1)` 那种命名实参没接。 */
+    /* `dict(pairs)` —— 一串两格的元组造一格字典；`dict(另一张字典)` 是**抄一份**
+       （`.copy()` 同一格实现）。`dict(a=1)` 那种命名实参没接。 */
     case 'dict': {
       if (args.length !== 1) throw new Error('python->IR: `dict()` 收一格实参（一串两格的元组）');
       const t = ty(args[0], C);
+      if (t.kind === 'map') return copyDict(args[0], C);
       const tup = t.kind === 'arr' ? tupleOf(C.recOf(t.elem)) : null;
       if (tup === null || tup.length !== 2) {
         throw new Error('python->IR: `dict(…)` 只接一串**两格的元组**'

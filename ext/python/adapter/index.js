@@ -672,9 +672,11 @@ function infer(C, tree, scriptStmts) {
   /* 发射那一趟还要照着骨架现造实例（`C.requireFn`：adapter 自己要的那几格库函数）。 */
   C.shells = shells;
   for (const [nm, f] of C.fnNodes) {
-    const ps = paramsOf(f);
+    /* **`*` 那个标记**（`def f(a, *, b=1)`）—— 它自己不是一格形参，只是说"后面那几格
+       只能按名字给"。这一层把它**筛掉**，那条规矩在调用点上查（`kwOrder`）。 */
+    const ps = paramsOf(f).filter((p) => tag(p) !== 'kwonly');
     for (const p of ps) {
-      if (tag(p) !== 'p') throw new Error(`python->IR: \`def ${nm}\` 的形参里有 \`${tag(p)}\` —— 还没接（*args / **kw / 位置标记）`);
+      if (tag(p) !== 'p') throw new Error(`python->IR: \`def ${nm}\` 的形参里有 \`${tag(p)}\` —— 还没接（*args / **kw）`);
       checkDefault(nm, p, C);
     }
     /* 方法的名字是 `<类名>.<方法名>`（`declareClasses` 摆进来的）。它的第一格形参是
@@ -730,8 +732,8 @@ function infer(C, tree, scriptStmts) {
     if (round >= 2 && n === seenN) break;        // 不再长了，收工
     seenN = n;
   }
-  /* 顶层那一段里"谁都没说元素装什么"的空表 —— 最后再退到 `(arr dyn)`（见 `bindEmptyList`）。 */
-  for (const s of scriptStmts) bindEmptyList(s, C);
+  /* 顶层那一段里"谁都没说装什么"的空表 / 空字典 —— 最后再退一次（见 `bindEmptyLit`）。 */
+  for (const s of scriptStmts) bindEmptyLit(s, C);
 
   /* 名字：只有一格实例时不加后缀（多数函数是这一档），多格时加类型后缀。
      方法的名字是 `<类名>_<方法名>`（mojo 那一门同一个落点）。 */
@@ -1417,28 +1419,30 @@ function looseTy(v, C) {
 }
 
 /**
- * **`xs = []` 里那格名字谁都没说装什么** —— 退到 `(arr dyn)`。
+ * **`xs = []` / `d = {}` 里那格名字谁都没说装什么** —— 退到 `(arr dyn)` / `(dict string dyn)`。
  *
  * 这一趟**排在 `scanBinds` 之后**跑：绑定那一趟里，答案常常在**再下一句**
- * （`xs = []` 之后 `xs.append(1)`、或者形参那一侧）—— 那几条道答得更准，要让它们先说。
- * 都没说的才落这儿。不这么办的后果是：`(set xs …)` 发得出来而 `(let xs …)` 没有
- * （局部量那张表是在 `scanBinds` 之后就定下来的），到方言那侧报"未声明的变量 'xs'"。
+ * （`xs = []` 之后 `xs.append(1)`、`d = {}` 之后 `d[k] = v`、或者形参那一侧）——
+ * 那几条道答得更准，要让它们先说。都没说的才落这儿。
+ * 不这么办的后果是：`(set xs …)` 发得出来而 `(let xs …)` 没有（局部量那张表是在
+ * `scanBinds` 之后就定下来的），到方言那侧报"未声明的变量 'xs'"。
  *
- * 只管**表**那一档。空字典的键与值是两格（`(dict K V)`），键退到哪一档没有"天经地义"
- * 的答案 —— 那一格照旧走 `bindEmptyDict`（从 `d[k] = v` 那一句认）。
+ * 空字典的键为什么钉 string：方言的字典键只有 int 与 string 两档，而**空字典的键一格都
+ * 读不出来** —— 挑哪一档都观察不到（与 `expr.js` 的 `dictLit` 一条）。
  */
-function bindEmptyList(node, C) {
+function bindEmptyLit(node, C) {
   for (const s of allNodes(node)) {
     if (tag(s) !== 'assign') continue;
     const v = kids(s)[kids(s).length - 1];
-    if (tag(v) !== 'list' || kids(v).length !== 0) continue;
+    const isList = tag(v) === 'list';
+    if ((!isList && tag(v) !== 'dict') || kids(v).length !== 0) continue;
     for (const g of kids(part(s, 'lhs') ?? { kind: 'list', items: [] })) {
       const one = kids(g)[0];
       if (tag(one) !== 'n') continue;
       const n = String(nameOf(one));
       const local = C.inScope() && !C.isDeclGlobal(n);
       if ((local ? C.lookupHere(n) : C.lookup(n)) !== null) continue;
-      C.bind(C.ref(n), arrOf(DYN));
+      C.bind(C.ref(n), isList ? arrOf(DYN) : dictOf(DYN, STR));
     }
   }
 }
@@ -1521,7 +1525,7 @@ function fnDecl(nm, inst, C) {
   for (const p of inst.params) C.bind(p.name, p.type);
   /* 先只走一趟"绑定"（不建 IR）—— 于是局部量的名字与类型在发第一句之前就全知道了。 */
   scanBinds(bodyNode, C);
-  bindEmptyList(bodyNode, C);
+  bindEmptyLit(bodyNode, C);
   const pnames = new Set(inst.params.map((p) => p.name));
   const locals = C.localsHere().filter(([n]) => !pnames.has(n));
   const stmts = flatten(kids(bodyNode)).flatMap((s) => stmtsOf(s, C));

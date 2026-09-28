@@ -23,6 +23,13 @@ print(list(range(6, 2, -1)))
 
 print(any([False, False, True]), all([True, True]), all([True, False]))
 
+# `any` / `all` 按"走一遍的那一格归一成表"看实参（从前只收表，报"收一格表"）：
+# 串一格一个字符（非空的字符都是真）、字典走键。
+print(all("ab"), any(""), any("a"), all(""))
+print(all({"a": 1}), any({}), all([1, 0]), any([0]))
+# 空字典字面量：谁都没说键值装什么就退到 `(dict string dyn)` —— 这几格 python 里都有定义
+print(bool({}), bool({"a": 1}), len({}), {})
+
 print(",".join(["a", "b", "c"]))
 print("-".join(["solo"]))
 print("a,b,,c".split(","))

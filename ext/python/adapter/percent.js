@@ -12,11 +12,11 @@
 // 收的实参：右边是元组就逐格对上，不是元组就当一格（python 的规矩，`"%s" % x`）。
 
 /** 认得的转换字母。 */
-const CONV = new Set(['s', 'r', 'd', 'i', 'f', 'e', 'g', 'x', 'X', 'o', '%']);
+const CONV = new Set(['s', 'r', 'd', 'i', 'f', 'e', 'g', 'x', 'X', 'o', 'c', '%']);
 
 /**
  * 切一格格式串 → 若干段：`{ lit }` 或
- * `{ conv, flags: { left, zero, plus }, width, prec }`。
+ * `{ conv, flags: { left, zero, plus, space }, width, prec }`。
  *
  * 读不动的当场报（不猜）—— `*`（宽度从实参来）、`#`、`%(名字)s` 那一族都在这一档。
  */
@@ -27,11 +27,15 @@ export function splitPercent(fmt) {
   for (let i = 0; i < fmt.length; i += 1) {
     if (fmt[i] !== '%') { lit += fmt[i]; continue; }
     let j = i + 1;
-    const flags = { left: false, zero: false, plus: false };
+    /* `space` 是"非负数前面留一格空格"（`"% d" % 3` 是 ` 3`）；与 `+` 同时给时 `+` 赢。 */
+    const flags = {
+      left: false, zero: false, plus: false, space: false,
+    };
     for (; j < fmt.length; j += 1) {
       if (fmt[j] === '-') { flags.left = true; continue; }
       if (fmt[j] === '0') { flags.zero = true; continue; }
       if (fmt[j] === '+') { flags.plus = true; continue; }
+      if (fmt[j] === ' ') { flags.space = true; continue; }
       break;
     }
     let width = null;
@@ -48,7 +52,7 @@ export function splitPercent(fmt) {
     const conv = fmt[j];
     if (conv === undefined || !CONV.has(conv)) {
       throw new Error(`python->IR: \`%\` 格式化里的 \`%${fmt.slice(i + 1, j + 1)}\` 还没接`
-        + '（认得的是 %s %r %d %i %f %e %g %x %X %o %%，标志只有 - 0 +，'
+        + '（认得的是 %s %r %c %d %i %f %e %g %x %X %o %%，标志只有 - 0 + 空格，'
         + '宽度与精度要写成数字 —— `*` 那一档没接）');
     }
     if (conv === '%') {

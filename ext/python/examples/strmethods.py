@@ -150,3 +150,7 @@ print(["a'b", 'x"y', "t\n"], {"k'": "v\n"}, ("a'b", 1))
 # f-string 的 `!r` 与 `.format()` 的 `{!r}` 走同一条路。
 s = "a'b"
 print(f"{s!r}", "{!r}".format(s))
+
+# `.format()` 的**按名字取**（`{k}` + 命名实参）—— 名字在编译期就有，与 `{0}` 同一条路。
+print("{k}".format(k=3), "{a}{b}".format(a=1, b=2), "{0}{k}".format(9, k=8))
+print("{n:>5}|".format(n=42), "{s!r}".format(s="a'b"), "{x:.2f}".format(x=3.14159))

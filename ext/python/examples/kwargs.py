@@ -59,6 +59,12 @@ def back(x, by=BACK):
     return x + by
 
 
+# **`*` 那个标记**：它后面那几格只能按名字给（`only(1, 2)` 在 python 里是 TypeError，
+# 这一层也当场报）。标记自己不是形参，筛掉就是 —— 规矩在调用点上查。
+def only(a, *, b=2, c=3):
+    return a * 100 + b * 10 + c
+
+
 class Box:
     def __init__(self, w, h=2):
         self.w = w
@@ -169,6 +175,9 @@ def main():
     print(one, two, three)
     head, tail = "k=v".split("=", 1)
     print(head, tail)
+
+    # `*` 后面那几格按名字给（不给的补默认值）
+    print(only(1), only(1, b=5), only(1, c=9), only(1, c=9, b=5))
 
 
 main()

@@ -232,6 +232,11 @@ def main():
     cfg2["a"] = {}
     cfg2["a"]["k"] = "v"
     print(cfg2, len(cfg2["a"]))
+    # `dict(另一张字典)` 是**抄一份**（与 `.copy()` 同一格实现）—— 改抄出来那份不动原来那份
+    src = {"a": 1, "c": 3}
+    cp = dict(src)
+    cp["a"] = 9
+    print(src, cp, len(cp), dict([("k", 1)]))
 
 
 main()

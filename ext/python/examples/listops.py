@@ -37,6 +37,8 @@ def main():
     print(sorted(empty), sorted([]), empty)
     print(sum([]), sum([1, 2]), sum([1.5, 2]), any([]), all([]), bool([]))
     print(",".join([]), "".join([]))
+    # `reversed(串)` —— 一格一个字符倒过来（从前只收表）
+    print(list(reversed([1, 2, 3])), list(reversed("abc")), list(reversed("")))
 
     # 重复：n <= 0 给空表
     print(xs * 2, 2 * xs, xs * 0, xs * -1)

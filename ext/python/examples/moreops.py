@@ -100,5 +100,18 @@ def main():
     box = 2.5
     print(isinstance(box, float), isinstance(box, int))
 
+    # **bool 就是 int 的一种**（`isinstance(True, int)` 上面那条的另一半）：要个数的地方
+    # bool 先折成 int。方言那一侧两档是分开的，从前 `float(False)` / `-True` 这几格
+    # 落成 `(toreal (bool …))` / `(un "-" (bool …))`，方言当场报。
+    print(int(True), int(False), float(True), float(False))
+    print(hex(True), divmod(True, 2), pow(True, 3), abs(-True))
+    print(-True, +True, ~True, -False, True / 2)
+    # `sum(谓词 for …)` 那个惯用写法（数有几格成立）
+    s = "a1b2"
+    print(sum(c.isdigit() for c in s), sum([c.isalpha() for c in s]))
+    # 一支是空容器字面量的三目：类型从**另一支**来
+    ns = [1, 2]
+    print(ns if len(ns) > 1 else [], [] if len(ns) > 1 else ns)
+
 
 main()

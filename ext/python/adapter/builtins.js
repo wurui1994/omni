@@ -75,6 +75,25 @@ export function sumOf(xs0, C, dynOps = null) {
     });
     return h.wrap(acc);
   }
+  if (t.kind === 'arr' && t.elem.kind === 'bool' && dynOps !== null) {
+    /* **bool 的表**（`sum(c.isdigit() for c in s)` 那个惯用写法）—— python 里 bool 就是
+       int 的一种，所以一格一格折成 int 再加，交出来是 int。 */
+    const acc = h.decl('sum_a', INT, int(0));
+    const i = h.decl('sum_i', INT, int(0));
+    h.pre.push({
+      kind: 'while',
+      cond: bin('<', i, call1('alen', [xs])),
+      body: [
+        {
+          kind: 'assign',
+          target: acc,
+          value: bin('+', acc, dynOps.intOf({ kind: 'index', obj: xs, index: i })),
+        },
+        inc(i),
+      ],
+    });
+    return h.wrap(acc);
+  }
   if (t.kind !== 'arr' || !['int', 'real'].includes(t.elem.kind)) {
     throw new Error(`python->IR: \`sum()\` 只接数的表（这里是 ${t.kind === 'arr' ? `arr<${t.elem.kind}>` : t.kind}）`);
   }

@@ -19,7 +19,8 @@
 //   * 字段里**顶层**的 `!` 后面一个字母是转换（`!r` / `!s` / `!a`）—— 但 `!=` 不是；
 //   * 字段里**顶层**的 `:` 后面是格式说明（`{x:.2f}`）。切片的 `:` 在 `[]` 里，
 //     所以只认"圆/方括号都平了"那一层的 `:`；
-//   * `{x=}` 是调试用的自文档形式（印 `x=<值>`）—— 这一版**不接**，当场说清。
+//   * `{x=}` 是调试用的自文档形式 —— 印"表达式原文 + `=` + 值"，值那一侧默认按 `repr`
+//     （给了格式说明就按那一套）。拆出来的形状是"一段字面文本 + 一格字段"。
 
 /**
  * 一格 f-string 的正文 → 若干段。
@@ -42,6 +43,9 @@ export function splitFString(body) {
     if (c !== '{') { lit += c; continue; }
     flush();
     const f = readField(body, i);
+    /* `{x=}` 那一档先摆一段字面文本（表达式原文 + `=`），值照旧是下面这一段 ——
+       于是用它的那几处一行都不用改。 */
+    if (f.part.debug !== undefined) parts.push({ lit: f.part.debug });
     parts.push(f.part);
     i = f.end - 1;
   }
@@ -76,15 +80,26 @@ function readField(body, open) {
       const body0 = body.slice(open + 1, bang < 0 ? head : Math.min(bang, head));
       const src = body0.trim();
       if (src === '') throw new Error('python->IR: f-string 里有一格空的 `{}`');
-      if (src.endsWith('=')) {
-        throw new Error(`python->IR: f-string 的自文档写法（\`{${src}}\`）还没接`
-          + ' —— 它要把表达式原文也印出来');
-      }
       const conv = bang >= 0 && bang < head ? body.slice(bang + 1, head).trim() : null;
       if (conv !== null && !['r', 's', 'a'].includes(conv)) {
         throw new Error(`python->IR: f-string 的转换 \`!${conv}\` 不认（只有 !r / !s / !a）`);
       }
       const spec = colon < 0 ? null : body.slice(colon + 1, i);
+      /* **自文档写法 `{x=}`** —— 把表达式的**原文**也印出来（调试时最常用的一格）。
+         口径照 python：印出来的是"`=` 之前那一段原文（空格照抄）+ `=`"，
+         接着是那个值；**没给转换也没给格式说明时按 `repr`**（所以 `f"{s=}"` 里的串带引号），
+         给了格式说明就按那一套（那时是 `str` 那一侧）。
+         `==` / `!=` / `>=` / `<=` 结尾的不算（那是比较，`!=` 那一格在下面还会被当转换起点挡掉）。 */
+      if (src.endsWith('=') && !/[=!<>]=$/.test(src)) {
+        const inner = src.slice(0, -1).trim();
+        if (inner === '') throw new Error('python->IR: f-string 的 `{=}` 里没有表达式');
+        return {
+          part: {
+            src: inner, conv: conv ?? (spec === null ? 'r' : null), spec, debug: body0,
+          },
+          end: i + 1,
+        };
+      }
       return { part: { src, conv, spec }, end: i + 1 };
     }
     /* 顶层的 `!`（不是 `!=`）是转换的起点；顶层的 `:` 是格式说明的起点。 */
