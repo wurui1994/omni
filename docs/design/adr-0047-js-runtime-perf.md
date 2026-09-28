@@ -2,8 +2,14 @@
 
 状态：草案（2026-09-28）。上游：ADR-0011（封闭 ABI / 全 dynamic）、ADR-0020（真对象）、
 ADR-0021（分文件发射）、ADR-0045（自研 JIT）、ADR-0046（切文件）。
-参考源码都在 `/Users/wurui/Documents/Lang/reference`（quickjs-2026-06-04 / LuaJIT / mujs /
-cyber / v8 的 docs / ninja）。
+参考源码在 **`/Users/wurui/Documents/Lang/reference`（不在本仓库里）**：quickjs-2026-06-04 /
+LuaJIT / mujs / cyber / v8 的 docs / ninja。树里另有一份读码笔记
+`docs/notes/jit-jancy-cyber.md`（§2.5 就是 copy-and-patch 那一节）。
+
+> **刀号撞名，先说清**：ADR-0045 的 D1~D4 是**另一条腿**（MIR → 机器码 → 就地跳进去，
+> 仿 Ken 的 `kasm87`，为的是摆脱 LLVM 那 100MB 依赖 + 1.8s 启动）。这一份 §4 的 D1~D4 是
+> **JS 字节码 VM → copy-and-patch 基线 JIT**。两者的 "D2" 完全不是一件事；下文凡提 0045 的
+> 刀一律写成 "0045-D<n>"。两条腿共用同一格可执行内存件（`src/jit/omni_ffi_host.c`）。
 
 ## 0. 为什么要这一份
 
