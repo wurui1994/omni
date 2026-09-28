@@ -23,7 +23,7 @@ import { natCompare, byIdeOrder, mounts } from '../../src/core/studio/shared.js'
    不必拉一套无头浏览器进来。 */
 import {
   highlight, mdToHtml, epsToSvg, drawKindOf, drawBlocks, psImages, psImageUri,
-  glslSource, glslVertex, glslSizeOf, glslDeclType, STD_LIBS, GALLERY,
+  glslSource, glslVertex, glslSizeOf, glslDeclType, STD_LIBS, GALLERY, gfxRef,
 } from '../../src/studio/render.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -435,6 +435,20 @@ try {
       : kind === 'eps' && epsToSvg(out).includes('<path ');
     ok(`首页「${g.title}」真出图`, rg.json.code === 0 && good,
       `code=${rg.json.code} ${JSON.stringify(out.slice(0, 40))} err=${JSON.stringify((rg.json.stderr ?? '').slice(-300))}`);
+  }
+
+  /* **图形设备那一族同一条口径**（`kind: 'gfx'`：`.js` 的 ege 库与 EVAL 两门）：
+     stdout 上只有一行指针（`#gfx png|rgba 路径 宽 高`），像素在那一帧表面里 ——
+     所以这儿判的是"它真交出了一帧"（`gfxRef` 就是页面取图前认的那格纯函数）。
+     **像素对不对不在这儿判**：那五份 EVAL 例子在 `tests/lower` 里按算出来的 probes
+     逐格核对过（`evaldraw+2d` / `+graph2d` / `+g3d` / `+kv6` / `polydraw+gl`）。 */
+  for (const g of GALLERY.filter((x) => x.kind === 'gfx')) {
+    const rg = await post('/api/run', { path: g.path });
+    const ref = gfxRef(rg.json.stdout ?? '');
+    ok(`首页「${g.title}」真交出一帧`, rg.json.code === 0 && ref !== null
+      && ref.w > 0 && ref.h > 0,
+      `code=${rg.json.code} stdout=${JSON.stringify((rg.json.stdout ?? '').slice(0, 60))}`
+      + ` err=${JSON.stringify((rg.json.stderr ?? '').slice(-200))}`);
   }
 
   /* **不出图的 asy 不许被甩到画布上**：切不切"绘图"那一格的依据就是这一行

@@ -7916,6 +7916,18 @@ function replacer(key, value) {
  * 于是「哪条腿忘了渲染 / 忘了报超时」不可能漏掉一条。
  */
 export function runCli(argv) {
+  /**
+   * **一格进程里一趟接一趟地跑**（`omni serve` 的热工人、单体 HTML、页面）：图形设备是
+   * 模块级的，它那几格**按程序算**的状态（帧号、帧数、脏记号、性能累加、名字表）
+   * 必须在每趟开头清掉。不清的后果不是画错，而是**什么都不发生**：第二份程序一进
+   * 帧循环就发现"帧数用完了"（上一份留下的 `fno >= frames`）⇒ 一帧都不跑、
+   * 一个字都不印、退出码 0。2026-09-29 在服务里连着跑几份 EVAL 时逮到的。
+   *
+   * 两台设备都认这个名字（`host/gfx-cpu.js` 的 `gfxResetRun`、`studio/gfx-gl.js` 的
+   * `reset`），所以这儿只按名字叫 —— 不认识的设备（老的、别人的）当没有这一格。
+   */
+  const dev0 = globalThis.__OMNI_GFX;
+  if (dev0 !== undefined && dev0 !== null && typeof dev0.reset === 'function') dev0.reset();
   try {
     const st = main(argv);
     /* `--profile-out x.svg` 的第二步（第一百四十七片）：把运行时落下的折叠栈摊成火焰图。

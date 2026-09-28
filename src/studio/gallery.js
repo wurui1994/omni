@@ -99,6 +99,33 @@ export const GALLERY = [
     note: 'polyline 接出来的曲线，Bresenham 画在设备上',
   },
 
+  /* ---- gfx（EVAL 两门：`.pss` / `.kc`）。与上面那三格 `.js` 同一条路 ——
+     跑一趟、按 stdout 那行指针取回那一帧。**首页上是静态的一帧，点进 IDE 才是活的**：
+     WebGL2 那台设备是**一格**（`gfx-gl.js` 的状态是模块级的，见 §38.6），一页里同时开
+     十几格上下文不是它的形状；而首页这一格要的只是"一张真跑出来的图"。
+     挑的这五份都不用可编程管线 —— 缩略图走的是生成出来那一档设备（2D 图元 + 顶点批），
+     着色器那一族（`04-shader.pss`）要 GPU，留给 IDE 那一页。 */
+  {
+    path: 'ext/evaldraw/examples/draw2d.kc', kind: 'gfx', title: 'EvalDraw 的 2D 一族',
+    note: 'setpix / lineto / drawsph / 矩形 —— 宿主那一面的图元',
+  },
+  {
+    path: 'ext/evaldraw/examples/graph2d.kc', kind: 'gfx', title: '每像素一次的函数图',
+    note: '主函数形参是 `(x,y)` ⇒ 宿主逐像素喂坐标（graphing mode）',
+  },
+  {
+    path: 'ext/evaldraw/examples/g3d.kc', kind: 'gfx', title: '3D 那一族',
+    note: 'setcam + drawsph / drawcone / 三参走笔，投影在语言那一侧算',
+  },
+  {
+    path: 'ext/evaldraw/examples/kv6.kc', kind: 'gfx', title: 'KV6 体素模型',
+    note: '八格体素八个颜色，按深度排过（远 -> 近）',
+  },
+  {
+    path: 'ext/polydraw/examples/02-gl.pss', kind: 'gfx', title: 'PolyDraw 的 GL 立即模式',
+    note: 'glBegin/glEnd 那一族 + 矩阵栈 + 顶点色插值',
+  },
+
   /* ---- svg：跑一趟，stdout 本身就是一张 SVG（`std/plot.omni` 那一层） ---- */
   {
     path: 'ext/omni/examples/koch.omni', kind: 'svg', title: 'Koch 雪花',

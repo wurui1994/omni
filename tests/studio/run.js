@@ -132,18 +132,22 @@ ok('除 prelude 之外没有 getBuiltinModule', nBuiltin === 0, `出现 ${nBuilt
   /**
    * **画廊在这一份里只摆它跑得动的**。
    *
-   * 单体 HTML 挂的是整台 `runCli`（图那条腿 + `.js`），`.asy` 与 `.omni` 跑不了 ——
+   * 单体 HTML 挂的是整台 `runCli`（图那条腿 + `.js` + EVAL 两门），`.asy` 与 `.omni` 跑不了 ——
    * 摆上去就是一排红字，而展示模式的正事恰恰是"好看的例子摆出来"。所以 `renderGallery`
    * 按 `window.__OMNI_LOCAL` 在不在过一遍，剩下 glsl（WebGL 自己画）、html（iframe）
-   * 与 **gfx（`.js` 真跑一趟，把那一帧表面贴到 canvas 上）**三类。
+   * 与 **gfx（真跑一趟，把那一帧表面贴到 canvas 上：`.js` 的 ege 库与 `.pss`/`.kc`）**三类。
    * 这儿判两格：那道闸在拼出来的 UI 段里、且剩下的那几格确实一个服务都不用。
+   *
+   * `.pss` / `.kc` 也算"不用服务"是**有据的**：后头第 4 节那一趟里
+   * `ext/polydraw/examples/02-gl.pss` 与 `ext/evaldraw/examples/draw2d.kc` 就是在真浏览器里
+   * 跑出来、且 stdout 与本地 `omni run` 逐字节相同的。
    */
   ok('画廊那道闸在（按 __OMNI_LOCAL 过一遍）', uiSeg.includes('__OMNI_LOCAL'));
   const { GALLERY } = await import(join(root, 'src', 'studio', 'gallery.js'));
   const offline = GALLERY.filter((g) => g.kind === 'glsl' || g.kind === 'html' || g.kind === 'gfx');
   const served = GALLERY.filter((g) => g.kind === 'asy' || g.kind === 'svg');
   ok('单体里剩下的画廊卡片一个服务都不用', offline.length >= 4
-    && offline.every((g) => /\.(frag|vert|glsl|html|js)$/.test(g.path))
+    && offline.every((g) => /\.(frag|vert|glsl|html|js|pss|kc)$/.test(g.path))
     && offline.length + served.length === GALLERY.length,
     `${offline.length} 格不用服务、${served.length} 格要服务、共 ${GALLERY.length}`);
 }

@@ -552,6 +552,41 @@ export function gfxSetOut(p) { D.out = p; }
 export function gfxOpen(w = 320, h = 240) { D.on = false; need(w, h); }
 
 /**
+ * **换一份程序要清的那几格**（`runCli` 每趟开头叫一次）。
+ *
+ * 这一份设备是**模块级**的，而一格进程里可以一趟接一趟地跑好几份程序
+ * （`omni serve` 的热工人、单体 HTML、页面）。那几格**按程序算**的状态不清的话：
+ * 第二份程序一进帧循环就发现 `D.fno >= D.frames`（上一份跑完时留下的）⇒
+ * **一帧都不跑、一个字都不印、退出码 0**。2026-09-29 在服务里连着跑几份 EVAL 时逮到的：
+ * 第一份交出 `#gfx png …`，第二份起 stdout 全空（连同一份文件再跑一趟也空）。
+ *
+ * 清的是"这一趟"的东西：帧号/帧数/脏记号/只交第几帧、性能那几格累加、
+ * 名字表与着色器原文（它们的下标是**编译期**给的，按程序算）。
+ * **画布本身（`D.fb` / `D.w` / `D.h`）不清** —— 尺寸由旗子定，重开一块没有意义；
+ * 输入那几格也不清（鼠标位置是宿主的状态，不是程序的）。
+ */
+export function gfxResetRun() {
+  D.fno = 0;
+  D.frames = -1;
+  D.dirty = false;
+  D.only = -1;
+  D.mode = '';
+  D.perf = -1;
+  D.tPrev = 0;
+  D.tSum = 0;
+  D.tMin = 0;
+  D.tMax = 0;
+  D.tn = 0;
+  D.skip = 1;
+  D.wSum = 0;
+  D.wMin = 0;
+  D.wMax = 0;
+  D.wn = 0;
+  G.defs = [];
+  G.names = [];
+}
+
+/**
  * 帧循环那几格旗子读一次（第一次问 `nextframe` 的时候）。
  *
  * 两条互斥的算法：`--frame N`（`OMNI_GFX_FRAME`）是"走到第 N 帧、**只交出那一帧**"
@@ -1590,6 +1625,9 @@ function assetFind(p) {
 
 export const GFX_CPU = {
   call: gfxCall, batch, tex: gfxTex, arr: gfxArr, def: gfxDef, present,
+  /* 换一份程序时清那几格按程序算的状态（见 `gfxResetRun` 的头注）。名字与页面那台
+     WebGL2 设备一致（`gfx-gl.js` 的 `reset`）—— `runCli` 按这个名字叫，两台都认。 */
+  reset: gfxResetRun,
   /* `kind` 是给判据看的一格记号：GL 那一档挂上之后 `glNeed` 把它改成 `native-gl`
      （不然判据分不出"真走了 GPU"与"悄悄回落了 CPU 备选" —— 那是自己判自己）。
      **是可变字段而不是 getter**：这一份要过 `check:self` 那道门，取值器不在那个子集里。 */
