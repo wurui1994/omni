@@ -100,3 +100,24 @@ out2.push(site(new Proxy(new R(), { get: (t, k) => (k === 'who' ? 'trap' : t[k])
 out2.push(site(new R()));
 
 console.log(out2.join('|'));
+
+/* 11..14：**对象字面量**（这条腿上是 dict，键不带前缀、值就是值）那一支的 IC。
+   同一处代码轮着读一批字面量：名字落在不同的下标上、删掉、加键、以及读到原型上去。 */
+const out3 = [];
+const kind = (e) => String(e.kind);
+out3.push(kind({ kind: 'k0' }));
+out3.push(kind({ pad: 1, kind: 'k1' }));
+out3.push(kind({ a: 1, b: 2, c: 3, kind: 'k3' }));
+out3.push(kind({ kind: 'k0again' }));
+const e1 = { kind: 'x', v: 1 };
+out3.push(kind(e1));
+delete e1.kind;
+out3.push(kind(e1));                        // undefined
+e1.kind = 'back';
+out3.push(kind(e1));
+const e2 = { kind: 'y' };
+e2.z1 = 1; e2.z2 = 2;                       // n 变
+out3.push(kind(e2), String(e2.z2));
+out3.push(String(typeof ({ kind: 1 }).hasOwnProperty));   // 原型那一支：function
+
+console.log(out3.join('|'));

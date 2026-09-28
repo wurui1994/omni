@@ -44,7 +44,8 @@
    `static`（见 backend-c/emit.js 的 icDecl）。摆在宏外头 —— 生成的 C 在容器实例化之前就
    要看见这个类型，而且它不含任何与 LT/DT 有关的东西（两格 dict 指针都存成 void*）。
 
-   kind：0 = 空的（还没打上）、1 = 自有那一格、2 = 直接原型上那一格。
+   kind：0 = 空的（还没打上）、1 = 自有那一格、2 = 直接原型上那一格、3 = 对象字面量（DICT）
+   自己那一格（键不带前缀，值就是值）。
      - kind 1 **不认对象身份，只认下标**：拿 `slot` 去**当前**这个对象的槽表里把键验一遍
        （`keys[slot]` 与要找的键相等且 `live`）。键在一张 dict 里是唯一的，所以"这一格的键
        就是它"本身即证明 —— 于是同一个构造器出来的**所有**实例都能命中（它们的插入序相同，
@@ -850,6 +851,25 @@ static omni_dyn omni_js_obj_getk_ic(omni_dyn o, omni_str key, struct omni_js_ic_
   char kbuf[OMNI_JS_PKEY_BUF]; \
   omni_str pk; \
   omni_dyn cur; \
+  /* 对象字面量（DICT）那一支（J4b）：键**不带前缀**，值就是值（带属性位的字面量是真对象，
+     见 omni_js_obj_slots 那条注），所以只要一格"按下标验键"的自有缓存。原型上那一支
+     （`({}).hasOwnProperty`）照旧走慢路。这一支冲的是**我们自己这个编译器**：
+     C 腿上读 `e.kind` 这类走的正是它。 */ \
+  if (o.tag == OMNI_DYN_DICT) { \
+    DT d = omni_js_dict_of(o); \
+    int64_t e; \
+    if (ic->kind == 3 && ic->slot < d->n && d->live[ic->slot] \
+        && omni_eq_string(d->keys[ic->slot], key)) { \
+      return d->vals[ic->slot]; \
+    } \
+    e = DT##_find(d, key); \
+    if (e >= 0) { \
+      ic->slot = e; \
+      ic->kind = 3; \
+      return d->vals[e]; \
+    } \
+    return omni_js_obj_getk(o, key); \
+  } \
   if (o.tag != OMNI_DYN_OBJ) return omni_js_obj_getk(o, key); \
   ov = (omni_js_objv *)o.u.ref; \
   if (ov->px_h.tag != OMNI_DYN_UNDEF) return omni_js_obj_getk(o, key); \
