@@ -2850,7 +2850,23 @@ export function parseNumber(text) {
    * 就会跳到无符号。两种情况都在 64 位这一档上判 —— 这条线就是 tcc 在本机的行为。 */
   if (!unsigned && val > 0x7fffffffffffffffn) unsigned = true;
   val = unsigned ? BigInt.asUintN(64, val) : BigInt.asIntN(64, val);
-  const big = long || val > 0x7fffffffn || val < -0x80000000n;
+  /* **32 位还是 64 位：按 C11 6.4.4.1 表 1 那三列挑，不是一律拿 `0x7fffffff` 比。**
+   *   * 带 `U`：`unsigned int` -> `unsigned long long`（界是 `0xffffffff`）；
+   *   * 十进制不带后缀：只走有符号那一列（界是 `0x7fffffff`）；
+   *   * 十六/八进制不带后缀：`int` -> **`unsigned int`** -> `long long` -> `unsigned long long`。
+   *
+   * 从前 `3141592653U` 落成了 `unsigned long long`，于是 `3141592653U * key` 是
+   * **64 位乘法不回绕** —— 编得过、不报错、**答案错**。R 的 `unique.c` 里
+   * `scatter()` 就是这个形状（`3141592653U * key >> (32 - d->K)`）：整数那一路下标落到
+   * 表外还在内存里（静默答错），double 那一路直接撞野地址
+   * （`duplicated(c(1,2,2))` 头一格量到的）。判据：`tests/c/gen/91-uint-constant.c`。 */
+  let big;
+  if (unsigned) big = long || val > 0xffffffffn;
+  else if (base === 10) big = long || val > 0x7fffffffn || val < -0x80000000n;
+  else if (val > 0x7fffffffn && val <= 0xffffffffn) {
+    /* 这一格是那三列里唯一"不带 U 却是无符号"的：`0xffffffff` 是 `unsigned int`。 */
+    return { tok: long ? TOK_CULLONG : TOK_CUINT, val };
+  } else big = long || val > 0x7fffffffn || val < -0x80000000n;
   const tok = unsigned ? (big ? TOK_CULLONG : TOK_CUINT) : (big ? TOK_CLLONG : TOK_CINT);
   return { tok, val };
 }

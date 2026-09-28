@@ -1128,3 +1128,41 @@ import**，而不是整体塞进去。" 落下来的形状是**惰性桩 + 链�
 （模块只 `import` 它的路径，内容一个字都不进发出来的文本）。放着的代价是"改一行运行时
 就重发 251 份、白等 45 秒"，而那 45 秒里没有一个字节会变。
 
+## 第二十六格：base 进判据，顺着它抓出两条真缝（2026-09-28）
+
+`tests/r/rtc.js base`：按需装载那套胶水（起来 38 份）+ `omni_base_step` 一轮一轮装
+base 的 R 源码。**判据是固定句数不是固定时间** —— 时间预算那种写法机器一忙就少装几百句
+（量到过 1100 / 900 两个数），地板会时绿时红。现在装满 **800 句、0 错**，时间反过来
+当天花板（18 秒）；整趟 12 秒。
+
+往 800 句之后走，撞出两条：
+
+### 一、`stpcpy` 没有（loud，好办）
+
+R 的 `do_paste`（main/paste.c）拼字符串用 `stpcpy`（回"写完那个 NUL 的地址"）。
+补上 `stpcpy`/`stpncpy`，**按字节抄**不经 JS 字符串 —— base 里有非 ASCII 的串。
+
+### 二、`3141592653U` 被当成了 `unsigned long long`（静默答错，这条是真缝）
+
+`duplicated(c(1,2,2))` 在 JS 腿上 `memory access out of bounds: 25126669600+4`。
+往上追到 `src/main/unique.c` 的
+
+```c
+static hlen scatter(unsigned int key, HashData *d)
+{ return 3141592653U * key >> (32 - d->K); }
+```
+
+发出来的 JS 是 `$W(3141592653n * v1)` —— **64 位乘法，不回绕**。C 里两个操作数都是
+`unsigned int`，乘积必须模 2^32。根在词法那一层：`tccpp.js` 的整数常量定型两种情形
+都拿 `0x7fffffff` 比，于是带 `U` 的 `3141592653U` 越过 32 位那一档成了
+`unsigned long long`。按 C11 6.4.4.1 表 1 分三列重写：
+
+* 带 `U`：`unsigned int` -> `unsigned long long`（界 `0xffffffff`）；
+* 十进制无后缀：只有符号那一列（界 `0x7fffffff`）；
+* 十六/八进制无后缀：`int` -> **`unsigned int`** -> `long long` -> ...（`sizeof(0xffffffff)` 是 4）。
+
+**为什么整数那一路没炸只是错**：`duplicated(c(1L,2L,2L))` 也走同一个 `scatter`，
+下标落到哈希表外但仍在内存里 —— 答对了是碰巧。这就是"宁可 loud 也不许静默答错"
+那条规矩要抓的形状。判据钉在 `tests/c/gen/91-uint-constant.c`（与 cc 逐字节相同）。
+
+
