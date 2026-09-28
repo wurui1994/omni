@@ -6259,9 +6259,18 @@ function main(argv) {
   }
   /* **`run` 也走按单元产物**（任务 #38）：理由与口径在 `runUnits` 的头注里。
      这一格摆在这儿 —— `applyGfxFlags` 已经跑过（设备是靠环境变量配的），而底下那一步会
-     把 `path` 换成核心方言那份中间文本，按单元产物要的是**源码本身**。 */
+     把 `path` 换成核心方言那份中间文本，按单元产物要的是**源码本身**。
+
+     **只在装得动原生扩展的宿主上走**（`hasAddonLoader()` = node 这一侧）：页面那一档有它
+     **自己**的一条路（`emit js --units` 之后由页面 `import(URL)` 装），而这一条会在同一个
+     全局作用域里把 `omni_rt.js` **重新装一遍** —— 页面刚用 `__OMNI_INSTALL_GL` 装好的那格
+     图形设备于是被冲掉，画面整幅全黑、`frames()` 是 0。
+     量出来的（`tests/studio/run.js` 那一格"真浏览器里 WebGL2 设备画出了这一帧"）：
+     这一刀之前 74/0，接上之后 73/1；拿 `cd7ff773^` 的工作树复现过，就是这一格。
+     `hasAddonLoader()` 严格说问的是"装不装得动 N-API 扩展"，这儿当"是不是 node 那一侧"
+     用 —— 两件事在这个仓库里一直是同一件（页面那一档没有 `process.dlopen`）。 */
   if (path !== undefined && path !== null && node.key === 'run'
-      && hasJsEngine() && STAT === null && PROF === null
+      && hasJsEngine() && hasAddonLoader() && STAT === null && PROF === null
       && !rest.includes('--backend') && !rest.includes('--direct')
       && !rest.includes('--interp') && !rest.includes('--mir') && !rest.includes('--work')
       && !rest.includes('--emit-sx') && env('OMNI_UNITS_RUN') !== '0'
