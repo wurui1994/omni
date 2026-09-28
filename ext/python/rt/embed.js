@@ -17,7 +17,7 @@
 //   * 探针那一份**必须过我们自己的 C 前端**（这才是这一格的被试者）；链接器用 clang。
 //   * 期望值不写死：同一句话交给本机 python3，**逐字节相同**才算过。
 //   * 没有参考树 / 没 clang / 没 python3 / `.o` 不齐 —— 说清并跳过（exit 0），不假装绿。
-import { existsSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -122,10 +122,78 @@ for (let i = 0; i < ws.length; i += 1) {
 
 const secs = ((Date.now() - t0) / 1000).toFixed(1);
 say('');
-say(`门：${ws.length} 格与本机 python3 逐字节相同 —— ${bad === 0 ? '过' : '没过'}（${secs}s）`);
-/* 顺手记一笔"整份运行时进产物"的账：产物多大、进门多久（`.o` 全进去了，标准库还在磁盘上）。 */
-if (bad === 0) {
-  say(`账：产物 ${(statSync(BIN).size / 1048576).toFixed(1)}M；`
-    + `标准库仍在磁盘上（初始化要 encodings）—— 要去掉它得把那几份 .py 也冻进来`);
+say(`门一：${ws.length} 格与本机 python3 逐字节相同 —— ${bad === 0 ? '过' : '没过'}（${secs}s）`);
+say(`账：产物 ${(statSync(BIN).size / 1048576).toFixed(1)}M（`
+  + `这一问的初始化还要读磁盘上的 Lib —— 下面那一问就是堵这个缺口的）`);
+
+/* ---- 第二问：**产物自带标准库**（`encodings` 冻进来、搜索路径留空、不读磁盘） ---- */
+
+/** 冻一格：用第四把尺子那一趟链出来的 `_freeze_module`（**我们自己编的那份**）。 */
+function freeze(name, rel, hdr) {
+  rmSync(hdr, { force: true });   /* 不删就会拿上一趟的头比，报一片绿（量到过） */
+  const r = spawnSync(FREEZER, [name, join(SRC, 'Lib', rel), hdr], { encoding: 'utf8' });
+  return r.status === 0 && existsSync(hdr) && statSync(hdr).size > 0
+    ? null : `${name}：exit=${r.status} ${(r.stderr ?? '').trim().split('\n')[0] ?? ''}`;
 }
-process.exit(bad === 0 ? 0 : 1);
+
+const FREEZER = join(WORK, 'freeze', '_freeze_module');
+const FZ = join(OUT, 'fz');
+let bad2 = 0;
+if (!existsSync(FREEZER)) {
+  say(`门二：跳过（${FREEZER} 不在 —— 先跑 \`npm run py:freeze\`）`);
+} else {
+  mkdirSync(FZ, { recursive: true });
+  const MODS = [
+    ['encodings', 'encodings/__init__.py', 'encodings.h'],
+    ['encodings.aliases', 'encodings/aliases.py', 'encodings.aliases.h'],
+    ['encodings.utf_8', 'encodings/utf_8.py', 'encodings.utf_8.h'],
+    ['encodings.ascii', 'encodings/ascii.py', 'encodings.ascii.h'],
+    ['encodings.latin_1', 'encodings/latin_1.py', 'encodings.latin_1.h'],
+  ];
+  for (const [name, rel, hdr] of MODS) {
+    const why = freeze(name, rel, join(FZ, hdr));
+    if (why !== null) { say(`py-rt/embed: 冻不出来 ${why}`); bad2 += 1; }
+  }
+  const P2 = join(here, 'embed-frozen-probe.c');
+  const O2 = join(OUT, 'embed-frozen-probe.o');
+  const B2 = join(OUT, 'embed-frozen-probe');
+  if (bad2 === 0) {
+    const cc2 = spawnSync(process.execPath, [CLI,
+      ...flagsFor(O2, INC, SRC, [...perFileFlags('Programs/_freeze_module.c', SRC), '-I', FZ]),
+      P2], { encoding: 'utf8' });
+    if (cc2.status !== 0 || !existsSync(O2)) {
+      const diag = ((cc2.stderr ?? '') + (cc2.stdout ?? '')).split('\n')
+        .filter((l) => /error:/.test(l)).slice(0, 6).join('\n');
+      say(`py-rt/embed: 我们编不出自带标准库那一份：\n${diag || '编不出'}`);
+      bad2 += 1;
+    }
+  }
+  if (bad2 === 0) {
+    const ld2 = spawnSync(CC, ['-o', B2, O2, ...objs], { encoding: 'utf8' });
+    if (ld2.status !== 0 || !existsSync(B2)) {
+      say(`py-rt/embed: 自带标准库那一份链不起来：\n${(ld2.stderr ?? '').split('\n').slice(0, 6).join('\n')}`);
+      bad2 += 1;
+    }
+  }
+  if (bad2 === 0) {
+    /* `cwd` 特意换到 `/`：**万一**它还在偷偷读磁盘上的标准库，这一格会把它照出来。 */
+    const g2 = spawnSync(B2, [], { encoding: 'utf8', cwd: '/' });
+    const w2 = spawnSync('python3', ['-c', "print('42'.zfill(5))\nprint(7 ** 80)\n"],
+      { encoding: 'utf8' });
+    const a = (g2.stdout ?? '').trimEnd();
+    const b = (w2.stdout ?? '').trimEnd();
+    if (g2.status !== 0 || a !== b) {
+      bad2 += 1;
+      say(`门二：没过（exit=${g2.status}）\n      我们：${JSON.stringify(a.slice(0, 200))}`
+        + `\n      py  ：${JSON.stringify(b)}`);
+    } else {
+      say(`门二：**产物自带标准库** —— 搜索路径留空（cwd 换到 /），`
+        + `不靠磁盘上的 Lib，答案与 python3 相同（产物 ${(statSync(B2).size / 1048576).toFixed(1)}M）`);
+    }
+  }
+}
+
+say('');
+say(`门：两问都过才算过 —— ${bad === 0 && bad2 === 0 ? '过' : '没过'}`
+  + `（${((Date.now() - t0) / 1000).toFixed(1)}s）`);
+process.exit(bad === 0 && bad2 === 0 ? 0 : 1);

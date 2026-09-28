@@ -874,6 +874,20 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     冻进来（`freeze.js` 已经有那套工具）。这两笔是"整份运行时进产物"的真实代价，
     不是猜的。
 
+    **那个缺口当场堵上了 —— 门二：产物自带标准库**（`embed-frozen-probe.c`）。做法：
+    `encodings` 那一族（`__init__` / `aliases` / `utf_8` / `ascii` / `latin_1`）用
+    **我们自己编出来的** `_freeze_module` 冻成头，运行前把 `PyImport_FrozenModules` 换成
+    "内置那张表 + 我们这五格"（`Include/cpython/import.h:30` 留给嵌入方的口子），
+    `module_search_paths` **留空**、`cwd` 换到 `/`。读数：**跑得对，产物 21.1M**
+    （比门一只多 0.1M）。所以"编出来的 python 程序不依赖磁盘上的标准库"这件事
+    **是能做到的，已经量过**，不是设想。
+
+    这一趟还堵了增量层一处**会骗人**的地方：`tests/all.js` 的轴指纹只看
+    `tests/<轴>/` 与 `src/`，而 python 那三条轴的真活在 `ext/python/` 下
+    （尺子脚本 + 例子）—— 量出来：加完 `examples/floatsweep.py` 之后 `python-run`
+    的指纹**一个字节都没变**，也就是"改了判据照旧跳过、报上一趟绿"。
+    `tests/lib/incr.js` 现在有一张小表 `AXIS_EXTRA`（轴名 -> 还要哈希哪几棵树）。
+
 ## 二、进度
 
 ### 已落地

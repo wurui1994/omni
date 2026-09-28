@@ -517,14 +517,32 @@ export function axisDeps(axis) {
 }
 
 /**
+ * **有些轴的真活不在 `tests/<轴>/`，也不在 `src/` 下**：python 那三条轴 spawn 的是
+ * `ext/python/` 里的脚本（`build.js` / `rt/*.js`），例子在 `ext/python/examples/`。
+ * 指纹看不见它们 -> 改了尺子、加了例子照旧"输入没变、上一趟绿"就跳过 —— 那是**会骗人**的。
+ * （量出来的：加完 `examples/floatsweep.py` 之后 python-run 的指纹一个字节都没变。）
+ *
+ * 所以这儿给一张**小而明摆着的表**：轴名 -> 还要哈希哪几棵树（相对仓库根）。
+ * 保守一头：整棵 `ext/python` 动一个字节，那三条轴就重跑 —— 它们本来就是同一门语言的判据。
+ */
+const AXIS_EXTRA = new Map([
+  ['python-run', ['ext/python']],
+  ['python-rt', ['ext/python']],
+  ['python-freeze', ['ext/python']],
+]);
+
+/**
  * 一条轴的指纹。`deps` 有记录就按它算（精确）；没有就退回"整棵 src + 整棵 tests/<轴>"——
  * 那时只要源码动一个字节这条轴就重跑，是**保守但不会说谎**的一头。
  * 两头都再混一格**数据文件**的指纹：语法表那些不是模块，钩子看不见（见 dataFingerprint）。
+ * 外加 `AXIS_EXTRA` 那张表里的树（真活住在 `tests/` 与 `src/` 之外的那几条轴）。
  */
 export function axisFingerprint(axis, axisDir) {
   const deps = axisDeps(axis);
   const dep = deps === null ? hashTree(join(ROOT, 'src')) : hashList(deps);
-  return sha(`${hashTree(axisDir)}|${dep}|${dataFingerprint()}|${deps === null ? 'src' : 'deps'}`);
+  const extra = (AXIS_EXTRA.get(axis) ?? []).map((rel) => hashTree(join(ROOT, rel))).join('|');
+  return sha(`${hashTree(axisDir)}|${dep}|${dataFingerprint()}|${deps === null ? 'src' : 'deps'}`
+    + `|${extra}`);
 }
 
 /** 轴级状态（`{指纹, 上一趟的退出码}`）。只有绿的那一趟才写进去。 */
