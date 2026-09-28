@@ -32,7 +32,7 @@
 
 import {
   REAL, ARR, num, str, nm, bin, call, bi, rm, set, letR, ret, iff, whil, ex, aset, aget, ix,
-  fn, fnT, glob, anew,
+  fn, fnT, glob, anew, inum, letI, agetI, asetI,
 } from './ir.js';
 
 /** 相机与视口那几格（名字都带 `g3_` 前缀）。 */
@@ -48,6 +48,9 @@ export const GFX3_GLOBALS = [
   'g3_picn', 'g3_picw', 'g3_picy',
   /* KV6 那一族缓存着的那个模型：名字下标 +1（0 = 还没读过）、几格体素。 */
   'g3_kvn', 'g3_kvc',
+  /* KV6 画的时候那一趟**按深度排序**用的（见 `g3_kv6m`）：
+     `g3_kvoc` = 次序/深度那两块现在按几格开的、`g3_kvhn` = 桶表按几格开的。 */
+  'g3_kvoc', 'g3_kvhn',
   /* EvalDraw 的 GL 子集：那张投影矩阵要不要重算（相机动过就置 1，见 `g3_glbegin`）。 */
   'g3_pdirty',
 ];
@@ -56,8 +59,10 @@ export const GFX3_GLOBALS = [
 
 export function gfx3GlobalDecls() {
   /* `g3_picb` 是 `pic` 那一族缓存着的那一整张图（一格一个 0xRRGGBB）—— 一格 `(arr real)`。
-     `g3_kvb` 是 KV6 那一族缓存着的那份模型（一格体素四个数：x,y,z,颜色）。 */
-  return [...GFX3_GLOBALS.map((n) => glob(n)), glob('g3_picb', ARR), glob('g3_kvb', ARR)];
+     `g3_kvb` 是 KV6 那一族缓存着的那份模型（一格体素四个数：x,y,z,颜色）。
+     `g3_kvd`/`g3_kvo`/`g3_kvh` 是按深度排序那一趟的三块：每格的深度、画的次序、桶表。 */
+  return [...GFX3_GLOBALS.map((n) => glob(n)), glob('g3_picb', ARR), glob('g3_kvb', ARR),
+    glob('g3_kvd', ARR), glob('g3_kvo', ARR), glob('g3_kvh', ARR)];
 }
 
 /**
@@ -142,7 +147,7 @@ export const EVALDRAW_3D = new Map([
   /* **八参那一档**（`evaldraw.txt:1603`）：`drawspr("a.kv6",x,y,z,rad,hang,vang,tilt)`
      —— 比七参多一格 `tilt`（说明书只说"with tilt parameter"，`:408`）。
      **明写的偏差：tilt 收下不用**。绕哪根轴、正负朝哪边都得先量出来，而 evaldraw 没有
-     源码；这一族本来就已经有两处偏差（体素画成球、没有深度排序，见 `g3_kv67` 的头注）。
+     源码；这一族本来就已经有一处偏差（体素画成球，见 `g3_kv67` 的头注）。
      语料里五份用它（`games/asteroids/asteroids.kc` 的飞船与陨石就是这一档）—— 收下不用
      的代价是"模型不随视线滚"，比整份脚本跑不起来小得多。 */
   ['drawkv6/8', 'g3_kv68'],
@@ -190,6 +195,9 @@ export function d2(host) {
 
 /** 近平面：`z` 比它还小的点整格丢掉（这一版没有插值裁剪）。 */
 const ZNEAR = 1e-6;
+
+/** KV6 按深度排序那一趟的桶数（`g3_kv6m`）：桶排，不是比较排序。 */
+const KVBUCKETS = 256;
 
 export function gfx3FnDecls(host = false, withGL = false) {
   const D = d2(host);
@@ -572,15 +580,15 @@ export function gfx3FnDecls(host = false, withGL = false) {
      * `kv6read` 一次抄过来），**画**在语言这一侧 —— 于是三台设备一次全有。
      * 抄过来的一格体素四个数：`x,y,z`（已经减掉模型支点）与 `0xRRGGBB`。
      *
-     * **两处明写偏差**（EvalDraw 没有源码，这两格没有正本可抄）：
+     * **一处明写偏差**（EvalDraw 没有源码，这一格没有正本可抄）：
      *
-     * 1. **一格体素画成一个球，不是立方体**。正本是"每个 cube 带完整边界"
-     *    （`evaldraw.txt:142`）。画立方体要每格 6 个四边形 ⇒ 一份 8575 格的模型
-     *    每帧 20 万个顶点走语言层，那是另一个量级；而这一族的形状在"一团带颜色的
-     *    体素"这一步就读得出来。
-     * 2. **没有深度排序**：这一层没有 z 缓冲（`clz` 收下不用），画的次序就是文件里的
-     *    次序（x 大类、y 小类）。所以从某些角度看背面的体素会盖住正面的。
-     *    真要修得先有 z 缓冲或者每帧按深度排一趟 —— 都是另一件活。
+     * * **一格体素画成一个球，不是立方体**。正本是"每个 cube 带完整边界"
+     *   （`evaldraw.txt:142`）。画立方体要每格 6 个四边形 ⇒ 一份 8575 格的模型
+     *   每帧 20 万个顶点走语言层，那是另一个量级；而这一族的形状在"一团带颜色的
+     *   体素"这一步就读得出来。
+     *
+     * （**深度这一格已经不是偏差了**：`g3_kv6m` 每趟按深度桶排一遍、从远往近画。
+     * 这一层仍然没有 z 缓冲，所以别的图元之间照旧"后画的盖前画的"。）
      *
      * 旋转：`hang` 在 x-y 平面转（偏航）、`vang` 再在(转过之后的) x-z 平面转（俯仰），
      * 两个都是**弧度**（与 `setcam` 五参那一档同一口径）。这也是我们定的 —— 说明书
@@ -634,7 +642,21 @@ export function gfx3FnDecls(host = false, withGL = false) {
         nm('ax'), nm('ay'), nm('az'), nm('bx'), nm('by'), nm('bz'),
         nm('cx'), nm('cy'), nm('cz')])),
     ]),
-    /** 画那一份模型：位置 + 3×3（**两档共用这一格**）。 */
+    /**
+     * 画那一份模型：位置 + 3×3（**两档共用这一格**）。
+     *
+     * **画的次序是按深度排的**（远 -> 近，画家算法）：这一层没有 z 缓冲，所以次序就是
+     * 遮挡。从前照文件里的次序画（x 大类、y 小类），于是从某些角度看背面的体素会盖住
+     * 正面的 —— 两格正对着相机、一前一后时最明显（判据 `tests/lower` 的
+     * `evaldraw+kv6depth`：近的那格蓝、远的那格红，文件里"先近后远"⇒ 从前中心是红的）。
+     *
+     * 排法是**桶排**（`KVBUCKETS` 格），不是比较排序：
+     * 一格体素的深度在相机前向量上是**仿射**的 —— 世界坐标 = 基点 + vx·A + vy·B + vz·C，
+     * 于是 `深度 = 常数 + vx·(A·f) + vy·(B·f) + vz·(C·f)`，三个系数一趟算出来，
+     * 每格只剩三个乘加。常数项对排序没用，省掉。
+     * 四趟：量深度与上下界 -> 数桶 -> 前缀和（**从高往低累**，桶号大 = 远 = 先画）-> 摆次序。
+     * 同一个桶里的次序是任意的（256 格够细，同桶的两格几乎等距）。
+     */
     fn('g3_kv6m', ['ni', 'x', 'y', 'z', 'ax', 'ay', 'az', 'bx', 'by', 'bz', 'cx', 'cy', 'cz'], [
       ex(call('g3_kv6need', [nm('ni')])),
       iff(bin('<=', nm('g3_kvc'), num(0)), [ret(num(0))]),
@@ -643,13 +665,89 @@ export function gfx3FnDecls(host = false, withGL = false) {
         bin('*', nm('ax'), nm('ax')), bin('*', nm('ay'), nm('ay'))),
       bin('*', nm('az'), nm('az')))]))),
       iff(bin('<=', nm('r'), num(0)), [set('r', num(0.5))]),
-      letR('i', num(0)),
-      whil(bin('<', nm('i'), nm('g3_kvc')), [
-        letR('o', bin('*', nm('i'), num(4))),
-        letR('vx', aget('g3_kvb', nm('o'))),
-        letR('vy', aget('g3_kvb', bin('+', nm('o'), num(1)))),
-        letR('vz', aget('g3_kvb', bin('+', nm('o'), num(2)))),
-        ex(D.setcol1(aget('g3_kvb', bin('+', nm('o'), num(3))))),
+      /* 深度那三个系数（`A·f` / `B·f` / `C·f`，见头注）。相机那几格要先摆好。 */
+      ex(call('g3_need', [])),
+      letR('ka', bin('+', bin('+', bin('*', nm('ax'), nm('g3_fx')),
+        bin('*', nm('ay'), nm('g3_fy'))), bin('*', nm('az'), nm('g3_fz')))),
+      letR('kb', bin('+', bin('+', bin('*', nm('bx'), nm('g3_fx')),
+        bin('*', nm('by'), nm('g3_fy'))), bin('*', nm('bz'), nm('g3_fz')))),
+      letR('kc', bin('+', bin('+', bin('*', nm('cx'), nm('g3_fx')),
+        bin('*', nm('cy'), nm('g3_fy'))), bin('*', nm('cz'), nm('g3_fz')))),
+      /* 那三块按需重开（体素数变了才开；桶表只开一次）。 */
+      iff(bin('!=', nm('g3_kvoc'), nm('g3_kvc')), [
+        set('g3_kvd', anew(nm('g3_kvc'))),
+        set('g3_kvo', anew(nm('g3_kvc'))),
+        set('g3_kvoc', nm('g3_kvc')),
+      ]),
+      iff(bin('!=', nm('g3_kvhn'), num(KVBUCKETS)), [
+        set('g3_kvh', anew(num(KVBUCKETS))),
+        set('g3_kvhn', num(KVBUCKETS)),
+      ]),
+      /* 下标**全走 int**（`letI`/`agetI`，见 `ir.js` 那一段）：这四趟每格都在读写数组，
+         按 real 走的话每次访问先 `toint` 一趟 —— 这一层最贵的一格就是它。 */
+      letI('c', ix(nm('g3_kvc'))),
+      /* 第一趟：每格的深度 + 上下界。 */
+      letR('dmin', num(1e30)),
+      letR('dmax', num(-1e30)),
+      letI('i', inum(0)),
+      whil(bin('<', nm('i'), nm('c')), [
+        letI('o', bin('*', nm('i'), inum(4))),
+        letR('d', bin('+', bin('+',
+          bin('*', agetI('g3_kvb', nm('o')), nm('ka')),
+          bin('*', agetI('g3_kvb', bin('+', nm('o'), inum(1))), nm('kb'))),
+        bin('*', agetI('g3_kvb', bin('+', nm('o'), inum(2))), nm('kc')))),
+        asetI('g3_kvd', nm('i'), nm('d')),
+        iff(bin('<', nm('d'), nm('dmin')), [set('dmin', nm('d'))]),
+        iff(bin('>', nm('d'), nm('dmax')), [set('dmax', nm('d'))]),
+        set('i', bin('+', nm('i'), inum(1))),
+      ]),
+      /* 桶宽（整份一样深时 `sp=0` ⇒ 全落 0 号桶，次序就是文件次序）。 */
+      letR('sp', num(0)),
+      iff(bin('>', nm('dmax'), nm('dmin')), [
+        set('sp', bin('/', num(KVBUCKETS - 1), bin('-', nm('dmax'), nm('dmin')))),
+      ]),
+      letI('j', inum(0)),
+      whil(bin('<', nm('j'), inum(KVBUCKETS)), [
+        asetI('g3_kvh', nm('j'), num(0)),
+        set('j', bin('+', nm('j'), inum(1))),
+      ]),
+      /* 第二趟：数桶。**桶号顺手写回 `g3_kvd`**（第四趟就不必再算一遍）——
+         `ix` 那一趟本来就要截一次，所以这儿不必 `floor`（两个量都非负）。 */
+      set('i', inum(0)),
+      whil(bin('<', nm('i'), nm('c')), [
+        letR('bd', bin('*', bin('-', agetI('g3_kvd', nm('i')), nm('dmin')), nm('sp'))),
+        letI('b', ix(nm('bd'))),
+        asetI('g3_kvd', nm('i'), nm('bd')),
+        asetI('g3_kvh', nm('b'), bin('+', agetI('g3_kvh', nm('b')), num(1))),
+        set('i', bin('+', nm('i'), inum(1))),
+      ]),
+      /* 第三趟：前缀和**从高往低累** —— 桶号大（深度大 = 远）的排在前头，先画。 */
+      letR('acc', num(0)),
+      set('j', bin('-', inum(KVBUCKETS), inum(1))),
+      whil(bin('>=', nm('j'), inum(0)), [
+        letR('t', agetI('g3_kvh', nm('j'))),
+        asetI('g3_kvh', nm('j'), nm('acc')),
+        set('acc', bin('+', nm('acc'), nm('t'))),
+        set('j', bin('-', nm('j'), inum(1))),
+      ]),
+      /* 第四趟：摆次序（桶号是第二趟存下的）。 */
+      set('i', inum(0)),
+      whil(bin('<', nm('i'), nm('c')), [
+        letI('b', ix(agetI('g3_kvd', nm('i')))),
+        letR('p', agetI('g3_kvh', nm('b'))),
+        /* 这一块装 real（方言不给隐式转），所以下标要显式转回来。 */
+        aset('g3_kvo', nm('p'), bi('toreal', [nm('i')])),
+        asetI('g3_kvh', nm('b'), bin('+', nm('p'), num(1))),
+        set('i', bin('+', nm('i'), inum(1))),
+      ]),
+      /* 画：按 `g3_kvo` 的次序（远 -> 近）。 */
+      letI('k', inum(0)),
+      whil(bin('<', nm('k'), nm('c')), [
+        letI('o', bin('*', ix(agetI('g3_kvo', nm('k'))), inum(4))),
+        letR('vx', agetI('g3_kvb', nm('o'))),
+        letR('vy', agetI('g3_kvb', bin('+', nm('o'), inum(1)))),
+        letR('vz', agetI('g3_kvb', bin('+', nm('o'), inum(2)))),
+        ex(D.setcol1(agetI('g3_kvb', bin('+', nm('o'), inum(3))))),
         ex(call('g3_sph', [
           bin('+', nm('x'), bin('+', bin('+', bin('*', nm('vx'), nm('ax')),
             bin('*', nm('vy'), nm('bx'))), bin('*', nm('vz'), nm('cx')))),
@@ -659,7 +757,7 @@ export function gfx3FnDecls(host = false, withGL = false) {
             bin('*', nm('vy'), nm('bz'))), bin('*', nm('vz'), nm('cz')))),
           nm('r'),
         ])),
-        set('i', bin('+', nm('i'), num(1))),
+        set('k', bin('+', nm('k'), inum(1))),
       ]),
       ret(num(0)),
     ]),
