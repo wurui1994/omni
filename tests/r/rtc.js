@@ -869,6 +869,10 @@ const IMG_EVAL = [
   'length(union(1:3, 2:5))', 'length(intersect(1:5, 3:8))', 'length(setdiff(1:5, 3:8))',
   'sum(match(c("b", "c"), c("a", "b", "c")))', 'sum(rank(c(10, 30, 20)))',
   'sum(unlist(list(a = 1, b = 2)))', 'length(names(list(a = 1, b = 2)))',
+  /* `table()` 那一族**不进这儿**：量出来它**看状态**（单独跑回 -3，跟在另一句
+     `table()` 后头又回对了 —— R 那边还伴着 `options(op): option 'warn' cannot be
+     deleted`）。这种"时绿时红"的不许进判据，单独记一刀去追。
+     `head`/`tail` 也不在这儿：它们在 utils 包里，base 装完也没有。 */
   'nrow(data.frame(x = 1:3, y = 4:6))', 'sum(data.frame(x = 1:3)$x)',
   'local({ s <- 0; for (i in 1:10) s <- s + i; s })',
   'local({ f <- function(n) if (n <= 1) 1 else n * f(n - 1); f(10) })',
