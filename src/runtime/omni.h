@@ -1290,7 +1290,19 @@ static inline int64_t omni_hash_string(omni_str s) {
 static inline bool omni_eq_string(omni_str a, omni_str b) {
   if (a.len != b.len) return false;
   if (a.p == b.p) return true;
-  return a.len == 0 || memcmp(a.p, b.p, (size_t)a.len) == 0;
+  if (a.len == 0) return true;
+  /* **短键那一档不叫 memcmp**（2026-09-28）：属性名几乎都是 1~8 字节，而
+     `_platform_memcmp` 在 `bench/js/progs/method-call.js` 上自用 **13.00%** ——
+     那全是调用开销，不是比较本身。逐字节比，clang 会展开成几条 ldrb/cmp。
+     判据是"与 memcmp 逐位同义"：两边长度已经相等，逐字节全等 ⇔ memcmp == 0。 */
+  if (a.len <= 8) {
+    int64_t i;
+    for (i = 0; i < a.len; i++) {
+      if (a.p[i] != b.p[i]) return false;
+    }
+    return true;
+  }
+  return memcmp(a.p, b.p, (size_t)a.len) == 0;
 }
 
 static inline int64_t omni_hash_dyn(omni_dyn v) { return omni_hash_int(v.tag); }

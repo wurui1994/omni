@@ -378,3 +378,33 @@ QuickJS 的引用计数 + 循环检测是为长驻进程准备的，我们只在
 * 判"我这一刀有没有用"用 `bench/lua/ab.js` 交错比**两份二进制**，别看表上的绝对值 ——
   node 那一栏跟着机器负载飘（同一份程序量到过 134~438ms）；
 * 计时的 spawn 一律 `stdio: 'ignore'`。要 stdout 就另跑一趟不计时的。
+
+## 13. 属性那一轴：`memcmp` 那一格（2026-09-28 晚，J4 的前哨）
+
+`method-call` 与 `prop-mono` 的采样长一个样，而且**都不是调用约定的错**：
+
+    omni_js_obj_getk                自用 38.36%（含子 72.87%）
+    omni_dict_string_dynamic_find_h 自用 25.04%
+    _platform_memcmp                自用 13.00%
+    omni_js_call_this               自用  2.89%   <- 调用本身很便宜
+
+⇒ **刀 J3（调用约定按 arity 特化）的预期收益要下调**，J4（属性）才是这两行的共同瓶颈。
+
+先捡了 J4 路上最便宜的一格：`omni_eq_string` 对 **≤8 字节的键不叫 `memcmp`**，逐字节比。
+属性名几乎都是 1~8 字节，那 13% 全是调用开销、不是比较本身。判据是"与 memcmp 逐位同义"
+（长度已相等 ⇒ 逐字节全等 ⇔ memcmp == 0），新判据 `tests/js-exec/cases/61-prop-key-shapes.js`
+压 22 种长度/形状（含 >8 字节、只差最后一字节、非 ASCII、删键之后）。
+
+    交错 A/B（method-call）：564.8 -> 449.0ms，B/A = 0.795
+
+整张表（min of 3）：
+
+    程序           node(V8)   clang-O2    vs V8      （这一刀之前）
+    int-loop         255ms     197ms      0.8x        0.8x
+    prop-poly        198ms     130ms      0.7x        0.7x
+    prop-mono        222ms     280ms      **1.3x**    2.3x
+    method-call      181ms     391ms      **2.2x**    3.2x
+
+**小表那一档（`icap == 0`，n ≤ `OMNI_DICT_SMALL`）是线性扫 + 逐格 EQ**，所以短键比较
+在属性密集的负载上是直接命中榜首的一格。剩下的两行还差 1.3x / 2.2x，那才是真的
+shape + IC（每个调用点缓存 `(dict, ver, slot)`，命中就是两次比较 + 一次定偏移读）。
