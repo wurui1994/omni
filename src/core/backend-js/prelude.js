@@ -2761,6 +2761,20 @@ function $js_idx_set(o, k, v) {
     case "object": $js_setp(o, k, v); return v;
     // t[i] = x：写进那一格字节（低 8 位），值仍是右边那个数（JS 的赋值表达式语义）
     case "bytes": $js_buf_set_u8(o, k, v); return v;
+    /* F.prototype = v（2026-09-28）：函数不是真对象，那格原型住在 $FNPROTO 这张旁表上
+       （读那一边是 funP 上的访问器）。写那一格从前整个没有 —— 落到下面 default 那句
+       "cannot assign to an index of a function"，于是
+       Mid.prototype = Object.create(Base.prototype) 这种两层原型链写不出来。
+       与 C 腿那一格逐条对齐（omni_js_str_arr.h 的 OMNI_DYN_FN 那一支）。
+       **这段注里一个反引号都不许有** —— 这份文件整个在 String.raw 的模板串里
+       （memory: feedback_comment_delimiters，刚又踩了一次）。 */
+    case "function": {
+      if ($js_str(k) !== "prototype") {
+        $rt_error("cannot assign to '" + $js_str(k) + "' of a function");
+      }
+      $FNPROTO.set($js_asFn(o), v);
+      return v;
+    }
     // 正则上只有 lastIndex 可写（ADR-0020 P4）：别的名字照旧当场报，"成员表缺一格"
     // 这件事要留在明处
     case "regexp": {

@@ -179,6 +179,7 @@ static bool omni_js_ekey_(omni_s16 k, const char *nm, int64_t n); \
 static bool omni_js_obj_has_own(omni_dyn o, omni_dyn k); \
 static bool omni_js_obj_del_o_(omni_dyn o, omni_dyn k); \
 static omni_dyn omni_js_fn_proto_(omni_dyn f); \
+static void omni_js_fn_proto_set_(omni_dyn f, omni_dyn p); \
 static omni_dyn omni_js_obj_keys(omni_dyn o); \
 static omni_dyn omni_js_realm_proto(omni_str name); \
 static omni_dyn omni_js_realm_ctor(omni_str name); \
@@ -2707,6 +2708,14 @@ static omni_dyn omni_js_fn_proto_(omni_dyn f) { \
   omni_js_def_data_(p, omni_js_name_("constructor", 11), f, true, false, true); \
   DT##_set(ft, id, p); \
   return p; \
+} \
+/* `F.prototype = v`（2026-09-28）：读那一格早就有（上面那个 getter，原型住在按函数身份索引
+   的旁表里），**写那一格从前整个没有** —— `Mid.prototype = Object.create(Base.prototype)`
+   这种两层原型链的写法当场报 "cannot assign to an index of a function"。
+   写就是往同一张旁表里 set，一格都不用新造。 */ \
+static void omni_js_fn_proto_set_(omni_dyn f, omni_dyn p) { \
+  if (omni_js_fnproto_tbl_g == NULL) omni_js_fnproto_tbl_g = (void *)DT##_new(); \
+  DT##_set((DT)omni_js_fnproto_tbl_g, omni_js_key(f), p); \
 } \
 static omni_dyn omni_js_fn_construct(omni_dyn f, omni_dyn args) { \
   /* 右边是一格**类对象**（`new this()` / 局部类：那时候类是一格局部量，降级器发的是这条

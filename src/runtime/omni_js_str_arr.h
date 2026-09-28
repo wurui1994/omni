@@ -407,6 +407,16 @@ static omni_dyn omni_js_idx_set(omni_dyn o, omni_dyn k, omni_dyn v) { \
     case OMNI_DYN_DICT: omni_js_obj_set(o, k, v); return v; \
     case OMNI_DYN_OBJ: omni_js_setp(o, k, v, omni_dyn_undef()); return v; \
     case OMNI_DYN_BYTES: omni_js_buf_set_u8(o, k, v); return v; \
+    /* `F.prototype = v`：函数不是真对象，那格原型住在旁表上（与读那一边同一张表）。
+       别的名字照旧响错 —— 函数身上挂任意属性这一档还没落地，那是另一刀。 */ \
+    case OMNI_DYN_FN: { \
+      if (!omni_s16_eq(omni_js_as_s16(omni_js_str(k)), omni_js_s16_lit("prototype"))) { \
+        omni_errorf("cannot assign to '%s' of a function", \
+                    omni_cstr(omni_s16_to_utf8(omni_js_as_s16(omni_js_str(k))))); \
+      } \
+      omni_js_fn_proto_set_(o, v); \
+      return v; \
+    } \
     case OMNI_DYN_RE: { \
       if (!omni_s16_eq(omni_js_as_s16(omni_js_str(k)), omni_js_s16_lit("lastIndex"))) { \
         omni_errorf("cannot assign to '%s' of a regexp", omni_cstr(omni_s16_to_utf8(omni_js_as_s16(omni_js_str(k))))); \
