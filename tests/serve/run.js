@@ -451,6 +451,31 @@ try {
       + ` err=${JSON.stringify((rg.json.stderr ?? '').slice(-200))}`);
   }
 
+  /**
+   * **一个进程里连着跑几份**：这台服务是热的（`runCli` 在进程内一趟接一趟），而图形设备
+   * 是**模块级**的 —— 所以"第二份程序"是这一层最容易坏的地方，而且坏法是**什么都不发生**
+   * （不是画错）。这一族 2026-09-29 之前栽过四次（`$fnOnes` 串味、按单元产物的 run 冲掉
+   * 设备、WebGL2 攥着上一个上下文的 GL 对象、**帧号没清 ⇒ 第二份一帧都不跑**）。
+   *
+   * 所以这儿立一把够硬的尺子：**A、B、A 三趟，第一趟与第三趟的那张 PNG 要逐字节相同**。
+   * 只判"有没有交出一帧"拦不住"交出来的是上一份的图"；逐字节这条两样都拦得住。
+   */
+  {
+    const shot = async (p) => {
+      const r = await post('/api/run', { path: p });
+      const ref = gfxRef(r.json.stdout ?? '');
+      if (r.json.code !== 0 || ref === null) return null;
+      try { return readFileSync(join(root, ref.path)); } catch { return null; }
+    };
+    const a1 = await shot('ext/evaldraw/examples/draw2d.kc');
+    const mid = await shot('ext/evaldraw/examples/kv6.kc');
+    const a2 = await shot('ext/evaldraw/examples/draw2d.kc');
+    ok('一个进程里连着跑三趟：同一份程序的两张图逐字节相同',
+      a1 !== null && mid !== null && a2 !== null && a1.equals(a2),
+      `a1=${a1 === null ? '没图' : a1.length} mid=${mid === null ? '没图' : mid.length}`
+      + ` a2=${a2 === null ? '没图' : a2.length}`);
+  }
+
   /* **不出图的 asy 不许被甩到画布上**：切不切"绘图"那一格的依据就是这一行
      （`studio.js` 的 `run()` 里看 stdout 是不是 `%!PS`）。`cases` 底下那一大半是算术。 */
   const asyTxt = paths.find((p) => p.startsWith('tests/asy/cases/') && p.endsWith('.asy'));
