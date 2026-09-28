@@ -65,6 +65,7 @@
     "py:embed": "node ext/python/rt/embed.js",
     "py:selflink": "node ext/python/rt/selflink.js",
     "py:ucase": "node ext/python/rt/ucase.js",
+    "py:ucase-tab": "node ext/python/rt/gen-ucase.js --check",
     "build:python-rt": "node ext/python/build.js",
     "bench:go": "node bench/go/run.js"
   },

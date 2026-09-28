@@ -1302,9 +1302,26 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
        `lower-expr.js` 加 `{kind:'mem-kind'}`（种类词是**符号**不是串）、
        `ty-of.js` 说 `mload` 的结果类型。判据 `tests/lower/staticdata.js`（7 格）：
        直接拿标准 IR 造一张 256 格 `i16u` 的表，**解释器 / JS / 原生三条腿**读出来的
-       单格与总和都与手算相同。剩下的是"谁来生成那张表 + 逻辑写在哪儿"
+       单格与总和都与手算相同。       剩下的是"谁来生成那张表 + 逻辑写在哪儿"
        （倾向：表由 `ext/python/rt/gen-ucase.js` 从本机 python3 生成、逻辑写在
        `ext/python/lib/ucase.py`，那一层用一格内建 `_utbl(i)` 落到 `mload`）。
+       **表也生成好了**（2026-09-28，`ext/python/rt/gen-ucase.js` -> `ext/python/rt/ucase.tab`）：
+       - 读数：**292 份记录、392 个块**（块 64），合计 **101344 字节**
+         （一级索引 34816 / 二级 50176 / 记录 16352）；`.tab` 那份十六进制文本 204556 字节。
+         与先前估的 95KB 同一个量级，比借那份 `.o`（175KB）小一半，且**不要参考树**。
+       - **单格映射按差值存**（`a -> A` 与 `b -> B` 是同一格记录：-32）。第一趟按绝对码点存，
+         量出来是 **1114112 份记录、64MB**，连"记录号装得进 u16"都不成立 —— 那一格是
+         这张表能不能成立的关键。多格映射（ß -> SS、ﬃ -> FFI）照旧按绝对码点，很少。
+       - **sigma 那两条上下文规矩按行为推，不按属性名推**：`后随算不算 cased` 看
+         `("Σ"+c).lower()` 的头一格是 `σ` 还是 `ς`；`算不算 case-ignorable` 看
+         `("Σ"+c+"a").lower()`。理由：`Case_Ignorable` 里有一半是 `Word_Break` 那几格
+         （MidLetter / MidNumLet / Single_Quote），`unicodedata` 不交那个属性 ——
+         照类别猜会在 `'` 上答错，而那正是 ς 的判据要用的。
+       - 落点是**旁边一份数据文件**（`ucase.tab`），照 `frontend-asy/builtins.tab` 那条先例；
+         塞进 adapter 源码会连 `check:self`（我们自己编自己）一起拖下水。
+       - 判据：生成那一趟自己抽样 20 格（ß / ﬃ / İ / ς / Σ / 中 / emoji / `'` …）与 python3
+         逐格相同；`npm run py:ucase-tab` 是"仓库里那份与现生成的逐字节相同"
+         （本机 python3 的 Unicode 版本变了它就会喊）。
     **倾向 3** —— 它是唯一能同时满足"三条腿都对"与"产物不依赖参考树"的。
     **那一件先量的事已经量了**（2026-09-28，拿本机 python3 遍历 0..0x10FFFF 全部 1114112 个
     码点，逐格算 upper/lower/title/casefold 与 9 个分类谓词，再去重）：
