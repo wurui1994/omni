@@ -286,12 +286,12 @@ function fstringOf(x, C) {
  * 这儿收的是其中一块：填充 + 对齐（`< > ^`）、符号（`+` / `-` / 空格）、`0`、
  * 宽度、`.精度`、类型（`d f s x X o b`）。收不下的**当场报** —— 猜一个出来就是印错。
  *
- * **这一趟补了三格**（2026-09-29，都是量出来的缺口）：`e` / `E`（科学计数，走 `ssci`）、
- * `g` / `G`（走 `sgen`）、`#`（`0x` / `0o` / `0b` 前缀 —— 负数时符号在前缀之前，
- * 与 python 一致）。
- * 明说没收的：`=`（符号后填充）、`%` / `n`、宽度或精度写成 `{}`
- * （从实参来）、`#` 与零填充**同时**给、`,` / `_` 与零填充**同时**给
- * （python 那时"补的零也要分组"，这一层的补宽度在最外层）。
+ * **这一趟补了三格**（2026-09-29，都是量出来的缺口）：`%`（乘 100 再按 `f` 排）、
+ * `#` 与零填充同时给（零补在**前缀之后**，负号还在最前头）、`,` / `_` 与零填充同时给
+ * （补的零也要分组 —— 那趟循环在 `lib/str.py` 的 `_str_zgroup` 里）。
+ * 上一趟补的是 `e` / `E`（走 `ssci`）、`g` / `G`（走 `sgen`）、`#` 那几格前缀。
+ * 明说没收的：`=`（符号后填充）、`n`、宽度或精度写成 `{}`（从实参来）、
+ * `,` 与 `%` 同时给（`_str_group3` 按小数点切段，末尾那格 `%` 会把整数段认错）。
  */
 const SPEC_RE = /^(?:(.)?([<>^]))?([+ -])?(#)?(0)?(\d+)?([,_])?(?:\.(\d+))?([a-zA-Z%])?$/;
 
@@ -299,9 +299,9 @@ function fmtSpec(e0, spec, C) {
   const m = SPEC_RE.exec(spec);
   if (m === null) throw new Error(`python->IR: f-string 的格式说明 \`:${spec}\` 读不下来`);
   const [, fill0, align, sign, alt, zero, widthS, group, precS, type] = m;
-  if (type !== undefined && !'dfsxXobeEgG'.includes(type)) {
+  if (type !== undefined && !'dfsxXobeEgG%'.includes(type)) {
     throw new Error(`python->IR: f-string 的格式类型 \`${type}\` 还没接`
-      + '（接了的是 d / f / s / x / X / o / b / e / E / g / G）');
+      + '（接了的是 d / f / s / x / X / o / b / e / E / g / G / %）');
   }
   if (alt !== undefined && !'xXob'.includes(type ?? '')) {
     throw new Error('python->IR: f-string 的 `#` 只跟 x / X / o / b（别的类型还没接）');
@@ -310,6 +310,10 @@ function fmtSpec(e0, spec, C) {
   const prec = precS === undefined ? null : Number(precS);
   const t = ty(e0, C);
   const numeric = ['int', 'real'].includes(t.kind);
+  /* "零填充"这一档只在**没写填充字符、也没写别的对齐**时才算数
+     （`f"{255:<#08x}"` 里那个 0 就是普通填充字符 —— 量出来是 `0xff0000`）。 */
+  const zeroGroup = zero !== undefined && width > 0 && fill0 === undefined
+    && (align === undefined || align === '>');
 
   /* 符号那一格要读两遍（判正负 + 印出来），所以先钉住。 */
   const pre = [];
@@ -323,6 +327,7 @@ function fmtSpec(e0, spec, C) {
 
   /* 一、正文。 */
   let s;
+  let doneWidth = false;
   if (type === 'f') {
     s = { kind: 'builtin', name: 'sfix', args: [toReal(e, C), { kind: 'int', value: prec ?? 6 }] };
   } else if (type === 'e' || type === 'E') {
@@ -340,23 +345,46 @@ function fmtSpec(e0, spec, C) {
     /* `#`：`0x` / `0X` / `0o` / `0b`。**负数时符号在前缀之前**（python 印 `-0xff`），
        所以按正负分两支，不是一句拼接。 */
     if (alt !== undefined) {
-      if (zero !== undefined && width > 0) {
-        throw new Error('python->IR: f-string 的 `#` 与零填充同时给还没接'
-          + '（python 是"前缀之后再补零"，这一层的补宽度在最外层）');
-      }
       const px = { x: '0x', X: '0X', o: '0o', b: '0b' }[type];
       const neg = { kind: 'binop', op: '<', left: e, right: { kind: 'int', value: 0 } };
       const body = { kind: 'builtin', name: 'sbase', args: [{ kind: 'unop', op: '-', operand: e }, { kind: 'int', value: base }] };
       const bodyU = type === 'X' ? { kind: 'builtin', name: 'supper', args: [body] } : body;
+      /* `#` 与零填充同时给：**零补在前缀之后**（`format(255,'#08x')` 是 `0x0000ff`），
+         负号还在最前头（`format(-255,'#08x')` 是 `-0x000ff` —— 宽度把符号与前缀都算进去）。
+         所以两支各自先补到"宽度减掉符号与前缀"，补完再拼，外层那一步就不用再补了。 */
+      const zpx = zeroGroup;
+      const zpad = (x, lead) => {
+        const w = width - px.length - lead;
+        return w > 0 ? padTo(x, w, { left: false, zero: true }, C) : x;
+      };
       s = {
         kind: 'ternary', type: STR, cond: neg,
-        then: { kind: 'binop', op: '+', left: { kind: 'string', value: `-${px}` }, right: bodyU },
-        else_: { kind: 'binop', op: '+', left: { kind: 'string', value: px }, right: s },
+        then: {
+          kind: 'binop', op: '+', left: { kind: 'string', value: `-${px}` },
+          right: zpx ? zpad(bodyU, 1) : bodyU,
+        },
+        else_: {
+          kind: 'binop', op: '+', left: { kind: 'string', value: px },
+          right: zpx ? zpad(s, 0) : s,
+        },
       };
+      if (zpx) doneWidth = true;
     }
   } else if (type === 'd') {
     if (t.kind !== 'int') throw new Error(`python->IR: \`:d\` 要整数，这里是 ${t.kind}`);
     s = { kind: 'builtin', name: 'tostr', args: [e] };
+  } else if (type === '%') {
+    /* 百分号那一档：乘 100、按 `f` 排（默认也是 6 位）、末尾补一格 `%`。
+       python 里 `f"{0.25:%}"` 是 `25.000000%` —— 精度算在乘完之后的那个数上。 */
+    if (!numeric) throw new Error(`python->IR: \`:%\` 只对数（这里是 ${t.kind}）`);
+    const hundred = {
+      kind: 'binop', op: '*', left: toReal(e, C), right: { kind: 'real', value: 100 },
+    };
+    s = {
+      kind: 'binop', op: '+',
+      left: { kind: 'builtin', name: 'sfix', args: [hundred, { kind: 'int', value: prec ?? 6 }] },
+      right: { kind: 'string', value: '%' },
+    };
   } else if (prec !== null && t.kind === 'real') {
     s = { kind: 'builtin', name: 'sfix', args: [e, { kind: 'int', value: prec }] };
   } else {
@@ -383,9 +411,9 @@ function fmtSpec(e0, spec, C) {
     if (!numeric) {
       throw new Error(`python->IR: f-string 的 \`${group}\`（千分位）只对数（这里是 ${t.kind}）`);
     }
-    if (zero !== undefined && width > 0) {
-      throw new Error(`python->IR: f-string 的 \`${group}\` 与零填充同时给还没接`
-        + '（python 那时补的零也要分组）');
+    if (type === '%') {
+      throw new Error(`python->IR: f-string 的 \`${group}\` 与 \`%\` 同时给还没接`
+        + '（`_str_group3` 按小数点切段，末尾那格 `%` 会把整数段认错）');
     }
     const inst = C.requireFn === undefined ? null : C.requireFn('_str_group3', [STR, STR]);
     if (inst === null || inst === undefined) {
@@ -413,8 +441,25 @@ function fmtSpec(e0, spec, C) {
     };
   }
 
+  /* 二点五、千分位配零填充：**补的零也要分组**（`f"{1234567:012,}"` 是 `0,001,234,567`），
+     所以补宽度这一步不能交给外层那一句 —— 一位一位加零、顺手补分隔符的那趟循环在
+     `lib/str.py` 的 `_str_zgroup` 里。排在符号之后（那一格库函数自己认头上的符号）。 */
+  if (group !== undefined && zeroGroup) {
+    const inst = C.requireFn === undefined ? null : C.requireFn('_str_zgroup', [STR, STR, INT]);
+    if (inst === null || inst === undefined) {
+      throw new Error('python->IR: 千分位配零填充那一格库函数（`_str_zgroup`）没有对得上的实例');
+    }
+    s = {
+      kind: 'call',
+      fn: { kind: 'name', name: inst.mangled },
+      args: [s, { kind: 'string', value: group }, { kind: 'int', value: width }],
+      type: STR,
+    };
+    doneWidth = true;
+  }
+
   /* 三、补到宽度。**没写对齐时数右对齐、别的左对齐**（python 的规矩）。 */
-  if (width > 0) {
+  if (width > 0 && !doneWidth) {
     const fill = fill0 ?? (zero !== undefined ? '0' : ' ');
     const how = align ?? (numeric ? '>' : '<');
     if (how === '^') s = centerTo(s, width, fill, C);
@@ -509,6 +554,7 @@ const BUILTIN_RET = new Map([
   ['len', INT], ['int', INT], ['float', REAL], ['str', STR], ['bool', BOOL],
   ['ord', INT], ['chr', STR], ['input', STR], ['print', null],
   ['repr', STR], ['hex', STR], ['oct', STR], ['bin', STR], ['isinstance', BOOL],
+  ['format', STR],
 ]);
 
 /**
@@ -4122,6 +4168,18 @@ function builtinOf(nm, args0, argToks, C) {
     case 'repr': {
       if (args.length !== 1) throw new Error('python->IR: `repr()` 收一格实参');
       return pyRepr(args[0], C);
+    }
+    /* `format(x, spec)` —— 与 f-string 的 `{x:spec}` 是同一件事（python 那边 f-string
+       就是按它落的），所以直接交给 `fmtSpec`，一格新代码都不写。`format(x)` 就是 `str(x)`。
+       spec 要是编译期的串字面量 —— 那一串里每一档（类型 / 宽度 / 填充）决定发哪几句 IR。 */
+    case 'format': {
+      if (args.length === 1) return pyStr(args[0], C);
+      if (args.length !== 2) throw new Error('python->IR: `format(x, spec)` 收一或两格实参');
+      if (args[1].kind !== 'string') {
+        throw new Error('python->IR: `format()` 的格式说明要写成一格串字面量'
+          + '（类型与宽度都跟着它定）');
+      }
+      return fmtSpec(args[0], String(args[1].value), C);
     }
     /* `hex/oct/bin` —— 方言的 `(sbase E 进制)` 就是它，只差前缀与负号。
        `sbase` 把位当**无符号 64 位**读，所以负数要自己拆成 `-` 加上取反那一格
