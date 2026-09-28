@@ -1,4 +1,5 @@
-// tests/python/freeze.js —— 把**第四把尺子**挂进轴表（薄封装，真活在 `ext/python/rt/freeze.js`）
+// tests/python/freeze.js —— 把**第四把尺子 + 第五格判据**挂进轴表
+// （薄封装，真活在 `ext/python/rt/freeze.js` 与 `ext/python/rt/embed.js`）
 //
 // 为什么要这一层：那把尺子原来只在 `package.json` 的 `py:freeze` 里，于是 `tests/all.js`
 // 从来跑不到它 —— 而它是四把尺子里**唯一量"跑得对"的那一把**（前三把最远只到"链得上"）。
@@ -29,7 +30,7 @@ const work = join(root, '.omni-cache', 'py-rt');
 const src = process.env.OMNI_CPYTHON ?? join(homedir(), 'Documents', 'Lang', 'reference', 'cpython');
 
 function skip(why) {
-  console.log(`  skip 借来的 CPython 运行时真跑一趟（${why}）`);
+  console.log(`  skip 借来的 CPython 运行时真跑一趟 + 被我们编出来的代码当库调（${why}）`);
   console.log('\n0 passed, 0 failed, 1 skipped');
   process.exit(0);
 }
@@ -41,8 +42,18 @@ const objs = existsSync(join(work, 'obj'))
   ? readdirSync(join(work, 'obj')).filter((x) => x.endsWith('.o')).length : 0;
 if (objs < 150) skip(`obj/ 里只有 ${objs} 份 .o —— 先跑 \`npm run py:sweep\``);
 
-const r = spawnSync(process.execPath, [join(root, 'ext', 'python', 'rt', 'freeze.js')],
-  { cwd: root, stdio: 'inherit' });
-const ok = r.status === 0;
-console.log(`\n${ok ? 1 : 0} passed, ${ok ? 0 : 1} failed, 0 skipped`);
-process.exit(ok ? 0 : 1);
+/* 两格连着跑（前置条件一样，都要参考树 + clang + 预热过的 `obj/`）：
+ *   freeze.js —— 别人写的 main（CPython 的 `_freeze_module`）在我们编出来的运行时上跑得对；
+ *   embed.js  —— 我们自己编出来的一份 C 把那份运行时当库调（zfill / center / 7**80 /
+ *                repr(0.1+0.2)），答案与本机 python3 逐字节相同。**这一格是语言层要走的那条路**。
+ * `embed.js` 要 `freeze.js` 落下的 `Modules/config.c` 的 `.o`，所以次序是固定的。 */
+let pass = 0;
+let bad = 0;
+for (const step of ['freeze.js', 'embed.js']) {
+  const r = spawnSync(process.execPath, [join(root, 'ext', 'python', 'rt', step)],
+    { cwd: root, stdio: 'inherit' });
+  if (r.status === 0) pass += 1;
+  else bad += 1;
+}
+console.log(`\n${pass} passed, ${bad} failed, 0 skipped`);
+process.exit(bad === 0 ? 0 : 1);
