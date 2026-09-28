@@ -2159,6 +2159,34 @@ const LIBC = {
     return BigInt(x.length - y.length);
   },
   strcpy: (a) => { writeCStr(a[0], readCStr(a[1])); return BigInt(a[0]); },
+  /* `stpcpy` / `stpncpy`（POSIX）：回的是**写完那个 NUL 的地址**，于是"接着往后拼"
+     不用再走一遍 `strlen`。R 的 `do_paste`（main/paste.c）就是这么拼的 ——
+     少这一格的指纹是 `stpcpy: libc: 没有这个函数`（loud，不是静默答错）。
+     按字节抄，不经过 JS 字符串：base 里有非 ASCII 的串，转一手就不是同样的字节了。 */
+  stpcpy: (a) => {
+    const d = BigInt(a[0]);
+    const s = BigInt(a[1]);
+    for (let i = 0n; ; i += 1n) {
+      const c = memLoad('i8u', s + i, 0);
+      memStore('i8', d + i, 0, c);
+      if (c === 0n) return d + i;
+    }
+  },
+  stpncpy: (a) => {
+    const d = BigInt(a[0]);
+    const s = BigInt(a[1]);
+    const n = BigInt(a[2]);
+    let end = d + n;                    // 一个 NUL 都没抄到时回 dst + n（POSIX）
+    let i = 0n;
+    for (; i < n; i += 1n) {
+      const c = memLoad('i8u', s + i, 0);
+      memStore('i8', d + i, 0, c);
+      if (c === 0n) { end = d + i; break; }
+    }
+    /* 抄到 NUL 就把剩下的补 0 —— `strncpy` 那条规矩，`stpncpy` 也照办。 */
+    for (i += 1n; i < n; i += 1n) memStore('i8', d + i, 0, 0n);
+    return end;
+  },
   /* POSIX 的那两个不分大小写的（R 的语法分析器里 `strncasecmp` 认关键字要它）。
      只折 ASCII 的 A-Z —— locale 那一层我们这条腿上是 C，`tolower` 也只折这一段。 */
   strcasecmp: (a) => {
