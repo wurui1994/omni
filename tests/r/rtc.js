@@ -148,8 +148,12 @@ const want = (n) => only === null || only === n;
  *   * `extern T x[];` 那一对（长度后补 / 占位地址）**108/111**；
  *   * 复数算术（前端逐分量 + `__muldc3`/`__divdc3` 自己用 C 写）**110/111**；
  *   * 语句表达式里的计算跳转（R 的 `NEXT()`）**111/111** —— 全份编得过。
+ *
+ * 2026-09-28 从 111 改成 **110**，而且**不是退步**：`main/lapack.c`（那个 dlopen 的桩）
+ * 从这一组里**摘掉**了，真身换成 `src/modules/lapack/Lapack.c`（在 `lapackmod` 那一组，
+ * 也编得过）。份数总数没变（251 份），只是有一份换了组。
  */
-const FLOOR = 111;
+const FLOOR = 110;
 
 
 let pass = 0;
@@ -172,7 +176,12 @@ function mkVar(path, name) {
 }
 
 const groups = [
-  ['main', 'src/main', mkVar(join(RSRC, 'src/main/Makefile.in'), 'SOURCES_C'), true],
+  /* `main/lapack.c` **摘掉**（第三十二格）：那一份是个桩，活是
+     `R_getModuleHandle("lapack")` 去 dlopen `lapack.so`；真身在下面那个模块里，
+     两份都定义 `do_lapack`，撞名在这条腿上是 loud（链接器查重会当场喊）。
+     R 自己在静态链接那一档也是让模块那一份顶上。 */
+  ['main', 'src/main',
+    mkVar(join(RSRC, 'src/main/Makefile.in'), 'SOURCES_C').filter((n) => n !== 'lapack.c'), true],
   ['appl', 'src/appl', mkVar(join(RSRC, 'src/appl/Makefile.in'), 'SOURCES_C'), true],
   ['unix', 'src/unix', mkVar(join(RSRC, 'src/unix/Makefile.in'), 'SOURCES_C_BASE'), true],
   /* 这四组是**同一个运行时的别处**（第十八格）：nmath 那 123 份走过 `tests/r/cjs.js`，
@@ -182,6 +191,9 @@ const groups = [
   ['tre', 'src/extra/tre', mkVar(join(RSRC, 'src/extra/tre/Makefile.in'), 'SOURCES'), false],
   ['xdr', 'src/extra/xdr', mkVar(join(RSRC, 'src/extra/xdr/Makefile.in'), 'SOURCES'), false],
   ['tzone', 'src/extra/tzone', mkVar(join(RSRC, 'src/extra/tzone/Makefile.in'), 'SOURCES'), false],
+  /* `solve`/`det`/`qr`/`eigen` 的真身（`La_*` 一族）。Fortran 那一面（`dgesv_` 等）
+     照 BLAS 那格的路在宿主层映射 —— 缺哪个它自己会 loud 地喊出来。 */
+  ['lapackmod', 'src/modules/lapack', ['Lapack.c'], false],
 ];
 /** 我们自己那两份也进符号表 —— 复数那 20 个桩与 `div` 就是它们来接的。 */
 const OURS = [['omni', join(ROOT, 'ext/r/rt'), ['omni_complex.c', 'omni_libc.c', 'omni_rhost.c'], false]];

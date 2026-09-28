@@ -2637,6 +2637,111 @@ const LIBC = {
     memStore('i8', BigInt(a[1]) + BigInt(n), 0, 0n);
     return BigInt(n);
   },
+  /* ------------------------------------------------- LAPACK 那一头两格（同一条路）
+   * `solve()` 要 `dgesv_`、`det()` 要 `dgetrf_`（LU 带**部分选主元**）。都按列存、
+   * 实参全是指针、`ipiv` 是**1 起数**的行号、`info` 照 LAPACK 的规矩回
+   * （0 好、>0 是第 k 个主元为 0、<0 是第 -k 个实参不对）。
+   * 真身在 `src/modules/lapack/Lapack.c`（那一份是 C，已经编进来了）—— 这儿只补
+   * 它下面那层 Fortran。ADR-0047 第三十二格。 */
+  dgetrf_: (a) => {
+    const m = Number(memLoad('i32s', BigInt(a[0]), 0));
+    const n = Number(memLoad('i32s', BigInt(a[1]), 0));
+    const A = BigInt(a[2]);
+    const lda = Number(memLoad('i32s', BigInt(a[3]), 0));
+    const ipiv = BigInt(a[4]);
+    const info = BigInt(a[5]);
+    const at = (i, j) => A + BigInt((i + j * lda) * 8);
+    let bad = 0;
+    const k = m < n ? m : n;
+    for (let j = 0; j < k; j += 1) {
+      /* 选主元：这一列 j..m-1 里绝对值最大的那一行 */
+      let p = j;
+      let best = Math.abs(memLoad('f64', at(j, j), 0));
+      for (let i = j + 1; i < m; i += 1) {
+        const v = Math.abs(memLoad('f64', at(i, j), 0));
+        if (v > best) { best = v; p = i; }
+      }
+      memStore('i32', ipiv + BigInt(j * 4), 0, BigInt(p + 1));   // 1 起数
+      if (best === 0) { if (bad === 0) bad = j + 1; continue; }
+      if (p !== j) {                                             // 换两行（整行都换）
+        for (let c = 0; c < n; c += 1) {
+          const x = memLoad('f64', at(j, c), 0);
+          memStore('f64', at(j, c), 0, memLoad('f64', at(p, c), 0));
+          memStore('f64', at(p, c), 0, x);
+        }
+      }
+      const pivot = memLoad('f64', at(j, j), 0);
+      for (let i = j + 1; i < m; i += 1) {
+        const f = memLoad('f64', at(i, j), 0) / pivot;
+        memStore('f64', at(i, j), 0, f);                         // L 存在下三角
+        for (let c = j + 1; c < n; c += 1) {
+          memStore('f64', at(i, c), 0,
+            memLoad('f64', at(i, c), 0) - f * memLoad('f64', at(j, c), 0));
+        }
+      }
+    }
+    memStore('i32', info, 0, BigInt(bad));
+    return undefined;
+  },
+  dgesv_: (a) => {
+    const n = Number(memLoad('i32s', BigInt(a[0]), 0));
+    const nrhs = Number(memLoad('i32s', BigInt(a[1]), 0));
+    const A = BigInt(a[2]);
+    const lda = Number(memLoad('i32s', BigInt(a[3]), 0));
+    const ipiv = BigInt(a[4]);
+    const B = BigInt(a[5]);
+    const ldb = Number(memLoad('i32s', BigInt(a[6]), 0));
+    const info = BigInt(a[7]);
+    const at = (i, j) => A + BigInt((i + j * lda) * 8);
+    const bt = (i, j) => B + BigInt((i + j * ldb) * 8);
+    /* 一、LU（与上面那一格同一套，顺手把 B 的行跟着换） */
+    let bad = 0;
+    for (let j = 0; j < n; j += 1) {
+      let p = j;
+      let best = Math.abs(memLoad('f64', at(j, j), 0));
+      for (let i = j + 1; i < n; i += 1) {
+        const v = Math.abs(memLoad('f64', at(i, j), 0));
+        if (v > best) { best = v; p = i; }
+      }
+      memStore('i32', ipiv + BigInt(j * 4), 0, BigInt(p + 1));
+      if (best === 0) { memStore('i32', info, 0, BigInt(j + 1)); return undefined; }
+      if (p !== j) {
+        for (let c = 0; c < n; c += 1) {
+          const x = memLoad('f64', at(j, c), 0);
+          memStore('f64', at(j, c), 0, memLoad('f64', at(p, c), 0));
+          memStore('f64', at(p, c), 0, x);
+        }
+        for (let c = 0; c < nrhs; c += 1) {
+          const x = memLoad('f64', bt(j, c), 0);
+          memStore('f64', bt(j, c), 0, memLoad('f64', bt(p, c), 0));
+          memStore('f64', bt(p, c), 0, x);
+        }
+      }
+      const pivot = memLoad('f64', at(j, j), 0);
+      for (let i = j + 1; i < n; i += 1) {
+        const f = memLoad('f64', at(i, j), 0) / pivot;
+        memStore('f64', at(i, j), 0, f);
+        for (let c = j + 1; c < n; c += 1) {
+          memStore('f64', at(i, c), 0,
+            memLoad('f64', at(i, c), 0) - f * memLoad('f64', at(j, c), 0));
+        }
+        for (let c = 0; c < nrhs; c += 1) {                      // 前代：L y = P b
+          memStore('f64', bt(i, c), 0,
+            memLoad('f64', bt(i, c), 0) - f * memLoad('f64', bt(j, c), 0));
+        }
+      }
+    }
+    /* 二、回代：U x = y */
+    for (let c = 0; c < nrhs; c += 1) {
+      for (let i = n - 1; i >= 0; i -= 1) {
+        let s = memLoad('f64', bt(i, c), 0);
+        for (let j = i + 1; j < n; j += 1) s -= memLoad('f64', at(i, j), 0) * memLoad('f64', bt(j, c), 0);
+        memStore('f64', bt(i, c), 0, s / memLoad('f64', at(i, i), 0));
+      }
+    }
+    memStore('i32', info, 0, BigInt(bad));
+    return undefined;
+  },
   memcpy: (a) => {
     const n = Number(BigInt(a[2]));
     for (let i = 0; i < n; i++) {
