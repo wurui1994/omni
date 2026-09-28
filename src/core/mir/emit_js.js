@@ -880,8 +880,11 @@ const $callFromLibc = (fp, args) => {
     }
     if (mir.mem.max !== 0) throw new OmniError('mir.emit_js: module 档还不支持内存页上限');
     const span = mir.mem.min * MEM_PAGE - MEM_PAGE;
+    /* 第三个实参是**这份模块的记号**（落盘路径）：开机镜像那条路要把"谁的数据段在哪儿"
+       钉住 —— 镜像里的指针全是绝对地址，重来一趟时这份模块必须落回同一个基址。
+       `memAlloc` 见过这个记号（`setBaseMap`）就回那个地址，没见过就照常分配并记下来。 */
     const L = [
-      `const $B = memAlloc(${span}, 16);`,
+      `const $B = memAlloc(${span}, 16, ${JSON.stringify(this.modId ?? mir.name ?? '')});`,
       `const $D = $B - ${MEM_PAGE};`,
       'const $Dn = BigInt($D);',
     ];

@@ -88,7 +88,41 @@ let memBump = 0;
  * 不够长就 `memGrow` —— 长不动是硬错（不像 wasm 那样回 -1 让调用方查：
  * 这是装载期，装不下就是这份程序在这个宿主上跑不起来）。
  */
-function memAlloc(bytes, align) {
+/** **谁的数据段在哪儿**（开机镜像那条路）：镜像里的指针是绝对地址，所以重来一趟时
+ *  每份模块必须落回同一个基址。存像那一趟把 `baseLog()` 一起存下来，
+ *  铺像那一趟先 `setBaseMap(那张表)` 再按同样的次序装那几份 —— 基址就对得上。 */
+let baseMap = null;
+const baseLog = new Map();
+function setBaseMap(m) { baseMap = m; }
+function baseLogOut() { return Object.fromEntries(baseLog); }
+
+function memAlloc(bytes, align, id) {
+  if (baseMap !== null && id !== undefined && baseMap[id] !== undefined) {
+    const at = baseMap[id];
+    /* 钉住的那一段也得**先有内存**：铺像那一趟第一份模块就是从这儿回去的，
+       而 `memInit`/`memGrow` 本来长在下面那条分配路上（漏了这一句报的是
+       `memory access without a memory`，在 `memPut` 那一行）。 */
+    memEnsure(at + bytes);
+    /* 钉住的也记一笔：存像是**一轮一轮**的，这一轮存下去的那张表必须把上几轮钉住的
+       一起带上（漏了就只剩这一轮新装的那几份，下一轮基址全乱）。 */
+    baseLog.set(id, at);
+    return at;
+  }
+  const at = memAllocRaw(bytes, align);
+  if (id !== undefined && id !== '') baseLog.set(id, at);
+  return at;
+}
+
+/** 线性内存至少有 `end` 字节。 */
+function memEnsure(end) {
+  if (Number(memSize()) === 0) memInit(1, 0);
+  const need = Math.ceil(end / MEM_PAGE) - Number(memSize());
+  if (need > 0 && memGrow(BigInt(need)) === -1n) {
+    failRt('memAlloc: 线性内存长不到 ' + end + ' 字节');
+  }
+}
+
+function memAllocRaw(bytes, align) {
   /* **堆已经在内存尾上了**：这时晚来的模块（按需装载那条路）不能再从 bump 拿 ——
    * 堆要连续、靠 brk 往内存尾上长，bump 在它后头切一块就把它堵死了。
    * 所以这一刻起模块的 data 段**从堆里要**（那也只是内存，谁给的不重要）。 */
@@ -156,7 +190,7 @@ function memHeap() {
   if (heapDone) return;
   /* **先要那一页，再挂牌**：反过来的话 `memAlloc` 会看见 `heapDone` 就去找 `malloc`，
    * 而 `malloc` 正是叫我们来立堆的那个人 —— 堆底那一页只能从 bump 上拿。 */
-  const base = memAlloc(MEM_PAGE, MEM_PAGE);
+  const base = memAlloc(MEM_PAGE, MEM_PAGE, '$heap');
   heapDone = true;
   callLibc('__omni_heap_init', [BigInt(base)]);
 }
@@ -342,6 +376,8 @@ export const RT = {
   needFn,
   memImageSave,
   memImageLoad,
+  setBaseMap,
+  baseLog: baseLogOut,
   memData,
   memAlloc,
   memPut,

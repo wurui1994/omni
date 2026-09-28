@@ -831,5 +831,113 @@ const $F = (s) => {
   }
 }
 
+/** `img` 那一节（`tests/r/rtc.js img`）：**开机镜像**。
+ *
+ *  装整份 base 要 17 秒，而装完的结果全在线性内存里 —— 存一份、下次铺回去（2 秒）。
+ *  产物由 `node ext/r/build-rimage.js` 造（一轮一轮，每轮 30 秒以内）：
+ *  `base.img.gz` + `base.json`，后者里有**每份模块的基址**与**装载次序** ——
+ *  像里的指针是绝对地址，而按需装载那条路上模块基址本来是浮动的，所以这两样缺一不可。
+ *
+ *  这一节问的是"铺回去还活着吗"：几句**身子在 base 的 R 代码里**的函数对 Rscript。 */
+const IMG_EVAL = [
+  'mean(1:10)',
+  'nchar("hello")',
+  'sum(sapply(1:5, function(i) i * i))',
+  'as.numeric(paste0("1", "2"))',
+  'sum(duplicated(c(1, 2, 2, 3)))',
+  'as.numeric(strsplit("1,2,3", ",")[[1]][2])',
+  'sum(vapply(list(1:3, 1:5), length, 1L))',
+];
+const IMG_MS_CEIL = 8000;        // 铺完到答完的时间天花板（量到 2.8 秒）
+if (only === 'img') imgSection();
+
 process.stdout.write(`\n  ${pass} passed, ${fail} failed\n`);
 process.exit(fail > 0 ? 1 : 0);
+
+function imgSection() {
+  const dir = join(ROOT, '.omni-cache', 'r-rt', 'jsall');
+  const metaF = join(dir, 'base.json');
+  const imgF = join(dir, 'base.img.gz');
+  const symsF = join(dir, '.syms.json');
+  if (!existsSync(metaF) || !existsSync(imgF) || !existsSync(symsF)) {
+    no('铺开机镜像', '还没有像 —— 先跑 node ext/r/build-rimage.js（反复跑到"装完了"）');
+    return;
+  }
+  const meta = JSON.parse(readFileSync(metaF, 'utf8'));
+  const logFile = join(dir, '$img.log');
+  writeFileSync(logFile, '');
+  const L = [
+    "import { readFileSync, appendFileSync } from 'node:fs';",
+    "import { createRequire } from 'node:module';",
+    `import { RT as $RT } from ${JSON.stringify(join(ROOT, 'src/core/mir/js_rt.js'))};`,
+    `const LOG = ${JSON.stringify(logFile)};`,
+    'const say = (s) => appendFileSync(LOG, s + "\\n");',
+    'const $req = createRequire(import.meta.url);',
+    `const SYMS = $req(${JSON.stringify(symsF)});`,
+    `const META = ${JSON.stringify({ bump: meta.bump, bases: meta.bases, order: meta.order })};`,
+    '$RT.setBaseMap(META.bases);',
+    'const $load = (f) => { const m = $req(f); if (m.$init !== undefined) m.$init(); };',
+    '$RT.setLinkMap(new Map(Object.entries(SYMS)), $load);',
+    'const F = (s) => $RT.needFn(s);',
+    'const t0 = Date.now();',
+    'for (const f of META.order) $load(f);',
+    "const { gunzipSync } = await import('node:zlib');",
+    `const bytes = new Uint8Array(gunzipSync(readFileSync(${JSON.stringify(imgF)})));`,
+    '$RT.memImageLoad({ bytes, bump: META.bump });',
+    "say('load\\t' + (Date.now() - t0));",
+    "const st = $RT.memStoreFn('i8');",
+    "const ptr = F('omni_src_ptr')();",
+    "const ev = F('omni_eval_buf');",
+    `for (const src of ${JSON.stringify(IMG_EVAL)}) {`,
+    '  try {',
+    '    const bs = new TextEncoder().encode(src);',
+    '    for (let i = 0; i < bs.length; i++) st(ptr, i, BigInt(bs[i]));',
+    '    st(ptr, bs.length, 0n);',
+    "    say('eval\\t' + src + '\\t' + ev());",
+    "  } catch (e) { say('eval\\t' + src + '\\t炸了：' + String(e && e.message).slice(0, 120)); }",
+    '}',
+    "say('all\\t' + (Date.now() - t0));",
+  ];
+  const entry = join(dir, '$img.mjs');
+  writeFileSync(entry, `${L.join('\n')}\n`);
+  const r = spawnSync(process.execPath, [entry], {
+    encoding: 'utf8',
+    timeout: 25000,
+    killSignal: 'SIGKILL',
+    env: {
+      ...process.env,
+      NODE_COMPILE_CACHE: join(dir, '.v8cache'),
+      R_HOME: join(ROOT, '.omni-cache', 'r-rt', 'libR', 'home'),
+    },
+  });
+  const lines = (existsSync(logFile) ? readFileSync(logFile, 'utf8') : '')
+    .trim().split('\n').map((s) => s.split('\t'));
+  const one = new Map(lines.filter((a) => a[0] !== 'eval').map((a) => [a[0], a[1]]));
+  const evs = new Map(lines.filter((a) => a[0] === 'eval').map((a) => [a[1], a[2]]));
+  const bad = [];
+  const msAll = Number(one.get('all'));
+  if (!Number.isFinite(msAll)) {
+    bad.push(`铺像那一趟没跑到底（${(r.stderr ?? '').split('\n').slice(0, 2).join(' ').slice(0, 200)}）`);
+  } else if (msAll > IMG_MS_CEIL) bad.push(`铺完到答完 ${msAll}ms（天花板 ${IMG_MS_CEIL}ms）`);
+  if (meta.errs !== 0 || meta.done !== true) {
+    bad.push(`像本身不干净（装了 ${meta.stmts} 句、错 ${meta.errs}、done=${meta.done}）`);
+  }
+  const rsi = spawnSync('Rscript', ['-e',
+    IMG_EVAL.map((e) => `cat(sprintf("%.17g", {${e}}), "\\n")`).join(';')], { encoding: 'utf8' });
+  const refi = (rsi.stdout ?? '').trim().split('\n').map((x) => Number(x));
+  if (rsi.status !== 0 || refi.length !== IMG_EVAL.length) {
+    bad.push(`Rscript 那把尺子没量出来（${(rsi.stderr ?? '').split('\n')[0].slice(0, 100)}）`);
+  } else {
+    IMG_EVAL.forEach((src, i) => {
+      const v = Number(evs.get(src));
+      const w = refi[i];
+      if (!Number.isFinite(v)) { bad.push(`img ${src}: 我们 ${evs.get(src)}、R ${w}`); return; }
+      const rel = Math.abs(v - w) / Math.max(Math.abs(w), 1e-300);
+      if (rel > 1e-12) bad.push(`img ${src}: 我们 ${v}、R ${w}`);
+    });
+  }
+  if (bad.length > 0) { no('铺开机镜像', bad.slice(0, 6).join('\n       ')); return; }
+  ok('铺开机镜像', `${meta.order.length} 份模块 + ${meta.bytes} 字节的像铺回去 `
+    + `${one.get('load')}ms，装 base 那 ${meta.stmts} 句一句不用重跑（原本 17 秒）；`
+    + `${IMG_EVAL.length} 句 base 的函数都与 Rscript 对得上，铺完到答完 ${msAll}ms`);
+}
