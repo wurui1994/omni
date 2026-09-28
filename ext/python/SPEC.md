@@ -832,6 +832,26 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     `py:sweep` 201/201、`py:freeze` 26/26 + oracle 26/26、`py:link` 0 缺口，
     以及**我们自己编出来的 python 跑那份 smoke 与 clang 编的逐行相同**。
 
+23. **第四把尺子进了轴表；顺手把"该不该把借来的 dtoa 接到 `str(float)` 上"这笔账量清了**。
+
+    (a) `py:freeze` 原来只在 `package.json` 的 npm script 里，`tests/all.js` 的
+    `SUITES` 里没有它 —— 于是四把尺子里**唯一量"跑得对"的那一把从来不会被自动跑到**。
+    现在有 `tests/python/freeze.js`（薄封装，真活还在 `ext/python/rt/freeze.js`）：
+    参考树不在 / 没 clang / `obj/` 没被 `py:sweep` 预热过就**跳过而不是红**
+    （那把尺子当命令行工具用时对"缓存没预热"该 exit 1，当轴用时不该把它记成
+    "编译器坏了"）。`--oracle` 那一路不进轴表：它要 `py:symbols` 缓下来的 199 份
+    clang `.o`，预热成本比这条轴自己大一个量级。读数：26/26 + 两份下游，**7.0s**。
+
+    (b) `str(float)` 那一格**先量再决定**：`py_repr` 现在有三份实现
+    （`host/pure.js` 的 `pyReprReal` / `prelude.js` 的 `$pyrepr_real` /
+    `omni_fmt.c` 的 `omni_pyrepr_real`），本来打算用借来的 `Python/dtoa.c` 把它们
+    收成一份。量出来的账是：**三条腿（interp / js / c）在 200 个定死的位模式上与
+    python3 逐字节相同**（新例子 `ext/python/examples/floatsweep.py`），
+    `pyReprReal` 对 `tests/python/rt.js` 那批 2032 个数也全对。所以接过去
+    **买不到正确性**，只买"一件事一份实现" —— 那笔钱（`PyObject *` 打通到底 vs
+    边界转换、整份运行时进产物）该花在别处（大整数、`Modules/` 那些库函数）。
+    这一格不是"先不做"，是**账已经量清了**：谁要再提这一刀，先推翻这 200 + 2032 个数。
+
 ## 二、进度
 
 ### 已落地
@@ -1834,14 +1854,15 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 0. **把运行时真借进来**（§一之二 那条路，这一刀在别的之前）。三小步，每一步都有判据：
    a. **定值的表示**：`PyObject *` 打通到底（倾向这个），还是边界上转换。两边的代价写在
       §一之二。定下来之前不许再往"自己写一份库函数"那个堆上加东西。
-   b. **编进来**。现在卡在**一格**上：**C 前端要有原子操作**（`pyatomic.h` 三条后端一条都
-      对不上，见 §一之二 的量到哪儿了第 5 条）。两条路选一条：
-      * 补 `__atomic_*` 那一族内建（再把 `__GNUC_MINOR__` 报到 8 以上，或者直接
-        `-D_Py_USE_GCC_BUILTIN_ATOMICS=1`）；
-      * 或者补 `<stdatomic.h>` 与 `__STDC_VERSION__ >= 201112L`（C11 那条路，顺带把
-        别的借来的库也一起解开）。
-      这一格过了之后，判据是那几份 `.c` 过**我们自己的 C 前端**编得出目标文件
-      （`omni c obj` —— `dtoa.c` 已经过了，`unicodeobject.c` 卡在原子那一格）。
+      **别拿 `str(float)` 当这一格的样品** —— 那一格量过了（§一 第 23 条 (b)）：三条腿与
+      python3 在 200 + 2032 个数上逐字节相同，接借来的 dtoa 买不到正确性。样品要挑
+      **我们手上没有的那种**（`.zfill` 那一族、大整数、正则）。
+   b. ~~**编进来**~~ —— **这一小步落了**（2026-09-28，见 §一 第 19～22 条）。当时写的卡点是
+      "C 前端要有原子操作，`unicodeobject.c` 卡在那一格"；两条路里选了第一条
+      （`scope.js` 给 `-D_Py_USE_GCC_BUILTIN_ATOMICS=1` + 补 `__atomic_*` 那一族），
+      现在 `Objects/unicodeobject.c` 编出来是一份 1.4MB 的 `.o`，`py:sweep` **201/201**、
+      `py:link` **0 缺口**、`py:freeze` 真跑一趟 **26/26**，整个解释器也跑得过真脚本。
+      所以这一刀剩下的只有 (a) 那个表示的决定与 (c) 那一格样品。
    c. **一格走通两条腿**：拿 `.zfill` 当样品 —— adapter 发的是"调 `unicode_zfill`"，
       `omni build` 出的原生程序与 `--mode js`（C → MIR → JS）**都**与 python3 逐字节相同。
       这一格立住，剩下的就是按族替换（每族一刀，旧路那一族当场删掉）。
