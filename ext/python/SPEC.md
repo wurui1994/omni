@@ -1247,6 +1247,20 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
           `:4294`（`buildSelf`）、`:4453`。
        b. 外部 cc 那一路（`runtimeObjects`）同理，但成员是 clang 出的 Mach-O ——
           那批用系统 `ar` 打（macOS 的 `ar` 认 Mach-O、不认 ELF，账在第 22 条）。
+       **形状 b 也落地了**（2026-09-28）：`runtimeArgsCc(cc)` —— `ar rcs` 打一份
+       `librt-cc.a`（落在 `rt/host-<cc>` 那一格里，先进 per-process 暂存再 rename ——
+       `ar rcs` 是"往里加"，半份留在原地下一趟会把同一格 `.o` 塞第二遍），
+       `libc-` 那一批照旧裸给，msvc 那一档整个跳过（要 `lib.exe`）。
+       **有意没换的三处**：JIT 宿主（`cli.js` 的 `jitHost`）—— 那一路的符号是
+       `omni_jit_symbols.c` 那张表**按名字摆进 JIT** 的（ADR-0022 决策 2），
+       按需取用会把没进表的成员剪掉，症状是运行期解析失败；LLVM 那一路（这台机器上
+       没有 llvm-config，量不到）；以及 `libc-` 那一批。读数与判据：
+       `librt-cc.a` 483560 字节；同一份 `16-null.sx` **404488 -> 264312 字节，
+       输出逐字节相同**（另一侧是 stash 掉这一刀）；`nm` 对账 `omni_r3` 从 1 变 0、
+       `omni_prof` 照旧 3 个（被 `omni_host_init` 引用）；编译器自己过 clang
+       **18625624 字节、链得上、跑起来**（`omni — stage0 bootstrap compiler`），
+       里头 `omni_r3` 一个符号都没有；`OMNI_CC=clang NOCACHE=1 tests/sexpr`
+       112 过 0 败（真跑 113）、`OMNI_CC=clang tests/python` 30 过 0 败。
        c. 判据：`tests/sexpr` / `tests/c` / `tests/oir` / `tests/llvm` / `check:self` /
           `test:bootstrap` / `test:selfrun` / `tests/python` 三腿 —— 编译器自己是这条链
           最大的用户，它引用的运行时面最广，是最好的"别漏符号"尺子。另外

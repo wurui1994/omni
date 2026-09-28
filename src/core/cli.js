@@ -4298,6 +4298,46 @@ function runtimeArgsSelf(arch, os, fmt) {
 }
 
 /**
+ * 外部 cc 那一路的同一格（形状 b）：那一批 `.o` 是 clang / gcc 出的 **Mach-O / ELF**，
+ * 用**系统 `ar`** 打 —— 不是我们自己的 `writeArchive`。
+ *
+ * 为什么分两套：`link/ar.js` 那一份只管格式、符号索引要调用方给（我们读 ELF 的
+ * `.symtab`），而 ld64 / lld 要的索引各有各的口径（macOS 是 `__.SYMDEF`）；系统 `ar`
+ * 自己就会建，且它认得自己那个平台的目标文件。反过来它**不认 ELF**（喂它 ELF 出一份
+ * 96 字节的空库，账在第 22 条），所以自带链接器那一路不能借它。
+ *
+ * 两格边界：
+ *   * `libc-` 那一批（msvc + 自带 libc 才有）**照旧裸给** —— 它们与运行时不是一批东西，
+ *     而 msvc 那一档根本没有 `ar`（要 `lib.exe`，另一刀）。
+ *   * 出岔子退回"全给"那条老路，同 `runtimeArgsSelf`。
+ */
+function runtimeArgsCc(cc) {
+  const objs = runtimeObjects(cc);
+  if (isMsvc(cc) || objs.length === 0) return objs;
+  const rt = objs.filter((o) => !basename(o).startsWith('libc-'));
+  const rest = objs.filter((o) => basename(o).startsWith('libc-'));
+  if (rt.length === 0) return objs;
+  const lib = join(dirname(rt[0]), 'librt-cc.a');
+  try {
+    if (!exists(lib)) {
+      /* 每个进程自己一个暂存目录再 rename：`ar rcs` 是**往里加**，半份 `.a` 留在原地
+         下一趟就会被接着塞第二遍（同一格 `.o` 进两次）。 */
+      const stage = scratchDir('rt-ar');
+      const tmp = join(stage, basename(lib));
+      const r = spawn('ar', ['rcs', tmp, ...rt], 'c');
+      if (r[0] !== 0) throw new OmniError(`ar rcs 回了 ${r[0]}：${r[2] ?? ''}${r[1] ?? ''}`);
+      rename(tmp, lib);
+      dropScratch(stage);
+    }
+    vStep(`runtime .a  ${rt.length} 格打成 ${basename(lib)}  ${fileSize(lib)} bytes（系统 ar，按需取用）`);
+    return [...rest, lib];
+  } catch (e) {
+    vStep(`runtime .a  打不出来（${e.message}）—— 退回 ${objs.length} 格裸 .o`);
+    return objs;
+  }
+}
+
+/**
  * workDir 给的时候，生成的 .c 就留在那里（名字跟着产物走）——
  * `omni bootstrap` 与 `build --work DIR` 要的是"中间产物留在构建目录里"：链断在哪一代
  * 都能直接翻出那份 C 来看。不给的时候落在 `.omni-cache/work/c-<产物名>` 底下，
@@ -4382,7 +4422,7 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
       /* msvc 那一档还要多一份 `.obj`（`/Gh /GH` 要的 `_penter`/`_pexit`）—— 见 `msvcInstrObjs`。 */
       ...(PROF !== null && PROF.mode === 'cc' ? msvcInstrObjs(cc) : []),
 
-      cPath, ...runtimeObjects(cc),
+      cPath, ...runtimeArgsCc(cc),
       '-o', outPath, '-lm', ...libs, ...libLinkArgs(mod.libs)]
     : [...ccFlags(cc), ...shared, cPath, '-o', outPath, ...libs, ...libLinkArgs(mod.libs)];
   const tCc0 = nowMs();
