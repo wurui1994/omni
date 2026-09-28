@@ -1101,6 +1101,21 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     要么像 `py_repr` 那样直接做成一格 Builtin（`src/runtime/*.c` 是"额外 .o 进产物"
     唯一铺好的通道）。这一刀落下去，第 28 条那一族就能从"报还没接"变成"真答对"。
 
+    **JS / 解释器两条腿能不能改借宿主的表？量过了：只够一半。**
+    同样那 28 个词，拿 JS 的 `toUpperCase` / `toLowerCase` 与 python3 比 ——
+    **upper 与 lower 两档 28/28 全对**（含 `Straße` -> `STRASSE`、`İ`、`ǅ`、
+    尾位 sigma `ΑΣ` -> `ας` —— ECMAScript 的 `toLowerCase` 自己就带 final-sigma 规则）。
+    差的是另外两档，**12 个词差**：
+    - `casefold`：JS **没有**这一格（`toLowerCase` 不是 casefold）—— `Straße`.casefold()
+      要出 `strasse`、`ﬁ` 要拆成 `fi`、`Σ` 一律 `σ`，宿主一格都不给。
+    - `title`：JS 没有**逐字符的 titlecase 映射** —— `ǅ` 那三档要出 `ǅ`（JS 给 `Ǆ`）、
+      合字要拆（`ﬁn`.title() = `Fin`，JS 给 `FIn`）。
+    所以口径是：**三条腿要么都走借来的那张表，要么这一族就继续报"还没接"** ——
+    不拿宿主的半张表去凑 upper/lower（那会让三条腿在 casefold/title 上分叉，
+    正是 `py_repr` 那一格立的规矩要避免的）。JS 腿的正路还是 #9 主线那一条：
+    同一份借来的 C 过我们的 C 前端 -> MIR -> JS；这份 175KB 的表是那条路**最小的样本**
+    （只欠 `printf` / `strlen`，没有原子、没有 TLS、没有 Py_Initialize）。
+
 ## 二、进度
 
 ### 已落地
