@@ -13,8 +13,7 @@
 
 import {
   memInit, memData, memSize, memGrow, memLoadFn, memStoreFn, memLoadFnN, memStoreFnN,
-  flushOut, failRt, InterpFail, InterpUncaught,
-} from '../interp/builtin.js';
+  flushOut, failRt, InterpFail, InterpUncaught, memImage, memImagePut } from '../interp/builtin.js';
 import { callLibc, hasLibc, ExitCall, setFnPtrCaller, libcAtExit } from '../interp/libc.js';
 import { evalJs, stderr } from '../host/native.js';
 
@@ -212,8 +211,51 @@ function fnCallLibc(fp, args) {
   return e.rt === 1 && typeof r === 'number' ? BigInt(r) : r;
 }
 
+/**
+ * **data 段用 base64 递进来**（第一百五十二片的速度那一格）。
+ *
+ * 从前 data 段发成一个 JS 的数组字面量（`memPut(off, [1,2,3,…])`）—— 251 份模块加起来
+ * 57 MB，绝大部分就是这些数字，而 V8 解析上百万个数组元素要**28 秒**（量出来的：
+ * `import 28398ms`）。换成一个字符串字面量：字节少三成、解析快一个量级。
+ *
+ * 浏览器那一侧没有 `Buffer`，所以两条路都留着（`atob` 那条）。
+ */
+const B64_ALPHA = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+const B64_REV = new Map();
+for (let i = 0; i < B64_ALPHA.length; i += 1) B64_REV.set(B64_ALPHA[i], i);
+
+function b64(s) {
+  let n = s.length;
+  while (n > 0 && s[n - 1] === '=') n -= 1;
+  const out = [];
+  let acc = 0;
+  let bits = 0;
+  for (let i = 0; i < n; i += 1) {
+    acc = (acc << 6) | B64_REV.get(s[i]);
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out.push((acc >> bits) & 255);
+    }
+  }
+  return out;
+}
+
+/** 开机镜像那一对（第一百五十二片）：内存的字节 + 我们这边那个 bump 指针。
+ *  `heapBase`/`errnoAddr` 不进像 —— 每趟 `$init()` 都把它们摆成同一个值。 */
+function memImageSave() { return { bytes: memImage(), bump: memBump }; }
+
+function memImageLoad(img) {
+  memImagePut(img.bytes);
+  memBump = img.bump;
+  heapDone = true;            // 像里已经有堆了，别再要一页
+}
+
 export const RT = {
   memInit,
+  b64,
+  memImageSave,
+  memImageLoad,
   memData,
   memAlloc,
   memPut,

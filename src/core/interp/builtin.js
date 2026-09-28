@@ -586,6 +586,31 @@ export function memData(off, bytes) {
   linBy.set(bytes, off);
 }
 
+
+/**
+ * **整块线性内存的像**（第一百五十二片，ADR-0047 的"开机镜像"）。
+ *
+ * 为什么这一格值得有：R 装 base 那个包要把 1.4 MB 的 R 源码现场解析一遍
+ * （量出来约 30 句/秒、一分钟），而那一分钟的结果**全在这块内存里** ——
+ * 堆、SEXP、符号表、`brk` 都是内存里的字节（`heapBase`/`errnoAddr` 那两格 JS 侧的数
+ * 每趟开机都由同一串 `$init()` 摆成同一个值，所以不必进像）。
+ * 存下来、下次铺回去，一分钟就变成几十毫秒 —— 浏览器那一趟本来也要这份镜像。
+ */
+export function memImage() {
+  if (linMem === null) rtError('memImage: 还没有内存');
+  return linBy.slice(0, linMem.byteLength);
+}
+
+/** 把一份像铺回去。像比现在的内存大就先长到那么大（页数对齐）。 */
+export function memImagePut(bytes) {
+  if (linMem === null) rtError('memImagePut: 还没有内存');
+  if (bytes.length > linMem.byteLength) {
+    const need = Math.ceil((bytes.length - linMem.byteLength) / LIN_PAGE);
+    if (memGrow(BigInt(need)) === -1n) rtError('memImagePut: 内存长不到像那么大');
+  }
+  linBy.set(bytes, 0);
+}
+
 export function memSize() { return BigInt(linMem === null ? 0 : linMem.byteLength / LIN_PAGE); }
 
 /** 只增不减，回**旧**页数；加不了回 -1（wasm 的约定 —— 不抛错，让调用方查）。 */

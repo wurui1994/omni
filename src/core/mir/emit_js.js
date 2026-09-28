@@ -142,10 +142,32 @@ const JS_CMP = new Map([
  * 包括 `INT64_MIN / -1` 那两条边角 —— i32 那三条**没有**这个边角（`bin32` 里就没有，
  * 它靠 `$W32` 回绕），两处的差别是有意的，别"顺手补齐"。
  */
+/** base64 的字母表（RFC 4648）。 */
+const B64_ALPHA = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+/**
+ * 一串字节 -> base64（第一百五十二片）。为什么自己写而不用 `Buffer`：
+ * 这份编译器自己要能被自己编（`npm run check:self`），而封闭子集里没有 `Buffer`
+ * （`tests/mir/run.js` 的 `lower/cli.js` 那一格当场红）。
+ */
+function b64Encode(bytes) {
+  let out = '';
+  for (let i = 0; i < bytes.length; i += 3) {
+    const b0 = bytes[i];
+    const b1 = i + 1 < bytes.length ? bytes[i + 1] : 0;
+    const b2 = i + 2 < bytes.length ? bytes[i + 2] : 0;
+    out += B64_ALPHA[b0 >> 2];
+    out += B64_ALPHA[((b0 & 3) << 4) | (b1 >> 4)];
+    out += i + 1 < bytes.length ? B64_ALPHA[((b1 & 15) << 2) | (b2 >> 6)] : '=';
+    out += i + 2 < bytes.length ? B64_ALPHA[b2 & 63] : '=';
+  }
+  return out;
+}
+
 const JS_PROLOGUE = `'use strict';
 const { memInit, memData, memAlloc, memPut, memHeap, memSize, memGrow,
   memLoadFn, memStoreFn, memLoadFnN, memStoreFnN,
-  fnSlot, fnBind, fnCall, fnCallLibc,
+  b64, fnSlot, fnBind, fnCall, fnCallLibc,
   callLibc, hasLibc, isExitCall, failRt, flushOut, libcAtExit, setFnPtrCaller,
   sjTok, sjSet, sjThrow, sjCatch } = $rt;
 const $W = (x) => BigInt.asIntN(64, x);
@@ -894,7 +916,10 @@ const $callFromLibc = (fp, args) => {
         if (r.fn === undefined) continue;
         fix.push(`[${r.at},fnSlot(${JSON.stringify(this.linkKey(r.fn))})]`);
       }
-      L.push(`memPut(${d.off} + $D, [${d.bytes.join(',')}], [${rs.join(',')}], $D`
+      /* 字节用 base64 递（见 `js_rt.js` 的 `b64`）：数组字面量那一版 251 份模块
+         要 28 秒才装载完，换成字符串之后解析快一个量级。 */
+      const b64 = b64Encode(d.bytes);
+      L.push(`memPut(${d.off} + $D, b64(${JSON.stringify(b64)}), [${rs.join(',')}], $D`
         + `${fix.length > 0 ? `, [${fix.join(',')}]` : ''});`);
     }
     return L;
@@ -991,7 +1016,12 @@ export function emitMirJs(mir, opts) {
   const head = `import { RT as $rt } from ${JSON.stringify(spec)};\n`;
   if (modular) {
     /* 库那一档导出的是 `$init`（没有 `main` 可跑），程序那一档导出 `$run`。 */
-    return `${head}${src}\nexport { ${gen.hasRun === 'init' ? '$init' : '$run'} };\n`;
+    const text = `${head}${src}\nexport { ${gen.hasRun === 'init' ? '$init' : '$run'} };\n`;
+    /* **依赖边**也报出来（第一百五十二片）：谁装载谁由它算 —— 251 份全装要 30 秒，
+       而按根集合算传递闭包常常只要一半。`emitMirJs` 回字符串这件事不变，
+       多出来的挂在函数对象上（`emitMirJs.lastDeps`），调用方要就取。 */
+    emitMirJs.lastDeps = [...gen.imports.keys()];
+    return text;
   }
   return `${head}${src}\nprocess.exit($run());\n`;
 }

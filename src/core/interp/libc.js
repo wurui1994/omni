@@ -2655,10 +2655,21 @@ export function libcAtExit() {
  * 会是假 —— 两边印出来都是 18446744073709551615，比起来一个是 `-1n`
  * 一个是 `2n**64n-1n`。第八刀第四片踩过这一格。
  */
+/** **点名册**（`OMNI_LIBC_COUNT=1` 才开）：哪个 libc 被调了多少次。
+ *  查"时间花在哪"用得上 —— 缺省关着，一个判断的代价。 */
+const libcHits = new Map();
+const libcCounting = hostEnv('OMNI_LIBC_COUNT') !== undefined;
+
+/** 点名册的快照（大到小），给探针用。 */
+export function libcCounts() {
+  return [...libcHits].sort((a, b) => b[1] - a[1]);
+}
+
 export function callLibc(name, args) {
   if (!hasLibc(name)) {
     throw new Error(`libc: 没有这个函数 '${name}'（第六刀的 libc 还只有一小把）`);
   }
+  if (libcCounting) libcHits.set(name, (libcHits.get(name) ?? 0) + 1);
   const v = LIBC[name](args);
   return typeof v === 'bigint' ? BigInt.asIntN(64, v) : v;
 }

@@ -165,6 +165,49 @@ int omni_base_init(void) {
   return errs;
 }
 
+/**
+ * **一段一段装 base**（开机镜像那条路，第二十四格）。
+ *
+ * 装整份 base 要一分钟（1400 多句、约 30 句/秒），而"一趟不许超过一分钟"。所以拆开：
+ * 从字节偏移 `from` 开始、最多跑 `cap` 句，把停下来的偏移写回 `endpos`。
+ * 外头那个 builder（`ext/r/build-rimage.js`）一轮存一次内存像、下一轮铺回去接着跑 ——
+ * 于是"一次一分钟"变成"四次各四十秒"，而结果是同一份像。
+ *
+ * 回 0 = 到文件尾了（装完），1 = 还有，负数 = 出错（-1 打不开、-2 没 R_HOME）。
+ */
+int omni_base_step(long long from, int cap, long long *endpos, int *nerr) {
+  SEXP baseNSenv = R_BaseNamespace;
+  FILE *fp;
+  int n = 0;
+  int errs = 0;
+  int more = 1;
+  if (R_Home == NULL) R_Home = getenv("R_HOME");
+  if (R_Home == NULL) return -2;
+  if (from == 0) Init_R_Variables(baseNSenv);
+  fp = R_OpenLibraryFile("base");
+  if (fp == NULL) return -1;
+  if (from > 0) fseek(fp, (long)from, 0);
+  for (;;) {
+    ParseStatus st = PARSE_NULL;
+    SEXP e;
+    int err = 0;
+    if (n >= cap) break;
+    e = R_Parse1File(fp, 1, &st);
+    if (st == PARSE_EOF) { more = 0; break; }
+    if (st == PARSE_NULL) continue;
+    if (st != PARSE_OK) { errs += 1000; more = 0; break; }
+    PROTECT(e);
+    R_tryEval(e, baseNSenv, &err);
+    UNPROTECT(1);
+    n += 1;
+    if (err) errs += 1;
+  }
+  *endpos = (long long)ftell(fp);
+  *nerr = errs;
+  fclose(fp);
+  return more;
+}
+
 /* **任意一句 R 从 JS 递进来**：C 这边留一块固定的缓冲，JS 那边把字节写进去
  * （地址问 `omni_src_ptr()`），再叫 `omni_eval_buf()`。
  *

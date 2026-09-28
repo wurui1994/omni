@@ -307,7 +307,8 @@ export function cJsModules(units, opts) {
     });
     const lib = !m.mir.funcIndex.has('main');
     if (!lib) entry = m.out;
-    out.push({ path: m.path, out: m.out, text, lib });
+    /* `deps` = 这份模块 `import` 的那几份（装载那一侧要算传递闭包，见 ADR-0047）。 */
+    out.push({ path: m.path, out: m.out, text, lib, deps: emitMirJs.lastDeps ?? [] });
   }
   return { units: out, entry, syms: provide };
 }

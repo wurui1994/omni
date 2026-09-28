@@ -529,6 +529,7 @@ if (want('jsrun')) {
      符号表落一份 `.syms.json` —— 探针（`.omni-cache/probe/*.js`）拿它只编自己那一份胶水。 */
   const keyFile = join(dir, '.key');
   const symsFile = join(dir, '.syms.json');
+  const depsFile = join(dir, '.deps.json');
   const stampOf = (p) => { const s = statSync(p); return `${s.mtimeMs}:${s.size}`; };
   const key = [
     ...units.map((u) => `${u.path}=${stampOf(u.path)}`),
@@ -539,10 +540,15 @@ if (want('jsrun')) {
   let linked = null;
   let hit = false;
   if (existsSync(keyFile) && readFileSync(keyFile, 'utf8') === key && existsSync(symsFile)
-    && units.every((u) => existsSync(u.out))) {
+    && existsSync(depsFile) && units.every((u) => existsSync(u.out))) {
     hit = true;
     const syms = new Map(Object.entries(JSON.parse(readFileSync(symsFile, 'utf8'))));
-    linked = { units: units.map((u) => ({ path: u.path, out: u.out, lib: true })), entry: null, syms };
+    const deps = JSON.parse(readFileSync(depsFile, 'utf8'));
+    linked = {
+      units: units.map((u) => ({ path: u.path, out: u.out, lib: true, deps: deps[u.out] ?? [] })),
+      entry: null,
+      syms,
+    };
   }
   try {
     if (!hit) {
@@ -551,6 +557,9 @@ if (want('jsrun')) {
       });
       for (const u of linked.units) writeFileSync(u.out, u.text);
       writeFileSync(symsFile, JSON.stringify(Object.fromEntries(linked.syms), null, 0));
+      writeFileSync(depsFile, JSON.stringify(Object.fromEntries(
+        linked.units.map((u) => [u.out, u.deps ?? []]),
+      )));
       writeFileSync(keyFile, key);
     }
   } catch (e) {
@@ -566,6 +575,21 @@ if (want('jsrun')) {
       ok('全部运行时发成 JS 模块', `${linked.units.length} 份 .mjs、${bytes} 字节、`
         + `对外符号 ${linked.syms.size} 个${hit ? '（命中缓存，没重编）' : ''}`);
     }
+    /* **只装用得着的那些**（第一百五十二片的速度那一格）：251 份全装一趟 30 秒，
+       而判据只叫得出那几十个符号。根 = 提供这些符号的那几份 `.mjs`，再按 `deps`
+       求传递闭包 —— ESM 本来就只装这个闭包，我们要的是"该给谁叫 $init"这张名单。 */
+    const byOut = new Map(linked.units.map((u) => [u.out, u]));
+    const wanted = [...INIT_SEQ, 'Rf_type2char', 'Rf_str2type', 'Rf_asReal', 'Rf_ScalarReal',
+      'Rf_asInteger', 'Rf_ScalarInteger', 'Rf_xlength', 'Rf_allocVector', 'R_gc',
+      'omni_src_ptr', 'omni_eval_buf', ...JSRUN.map(([, sym]) => sym)];
+    const need = new Set();
+    const walk = (f) => {
+      if (f === undefined || need.has(f)) return;
+      need.add(f);
+      for (const d of byOut.get(f)?.deps ?? []) walk(d);
+    };
+    for (const nm of wanted) walk(linked.syms.get(nm));
+    const loadList = linked.units.filter((u) => need.has(u.out));
     /* 装载 + 真调。入口自己写（`cJsEntry` 要一份有 `main` 的，libR 没有）。 */
     const L = [];
     const logFile = join(dir, '$judge.log');
@@ -574,16 +598,16 @@ if (want('jsrun')) {
     L.push(`import { RT as $RT } from ${JSON.stringify(join(ROOT, 'src/core/mir/js_rt.js'))};`);
     L.push(`const LOG = ${JSON.stringify(logFile)};`);
     let k = 0;
-    for (const u of linked.units) L.push(`import { $init as $i${k++} } from ${JSON.stringify(u.out)};`);
+    for (const u of loadList) L.push(`import { $init as $i${k++} } from ${JSON.stringify(u.out)};`);
     const MAIN = JSON.stringify(join(dir, 'main__arithmetic.mjs'));
     void MAIN;
     /* 初始化那一串 + SEXP 那几格都从符号表里现找（名字在别的模块里） */
-    L.push(`const $M = [${linked.units.map((u) => JSON.stringify(u.out)).join(', ')}];`);
+    L.push(`const $M = [${loadList.map((u) => JSON.stringify(u.out)).join(', ')}];`);
     k = 0;
     for (const [mod, sym] of JSRUN) {
       L.push(`import { $fn_${sym} as $c${k++} } from ${JSON.stringify(join(dir, `${mod}.mjs`))};`);
     }
-    L.push(`const INITS = [${linked.units.map((_, i) => `$i${i}`).join(', ')}];`);
+    L.push(`const INITS = [${loadList.map((_, i) => `$i${i}`).join(', ')}];`);
     L.push('let n = 0;');
     L.push('for (const f of INITS) { f(); n += 1; }');
     L.push("process.stdout.write('$init\\t' + n + '\\n');");
@@ -656,8 +680,8 @@ if (want('jsrun')) {
       ? (rs.stdout ?? '').trim().split('\n').map((s) => Number(s))
       : JSRUN.map(([, , , , c]) => c);
     const bad = [];
-    if (got.get('$init') !== String(linked.units.length)) {
-      bad.push(`只有 ${got.get('$init')} 份的 $init 跑过（要 ${linked.units.length}）`);
+    if (got.get('$init') !== String(loadList.length)) {
+      bad.push(`只有 ${got.get('$init')} 份的 $init 跑过（要 ${loadList.length}）`);
     }
     /* 初始化那一串：该过的必须过，记着的那两笔账（缺 stat / getpid）允许炸 */
     for (const s of INIT_SEQ) {
@@ -701,7 +725,7 @@ if (want('jsrun')) {
       no('装起来真调 R 的运行时', bad.slice(0, 8).join('\n       '));
     } else {
       const skipped = INIT_SEQ.filter((s) => initOut.get(s) !== 'ok');
-      ok('装起来真调 R 的运行时', `${linked.units.length} 份的 $init 全跑过，`
+      ok('装起来真调 R 的运行时', `装了 ${loadList.length}/${linked.units.length} 份（按根集合的闭包），`
         + `R 自己那 ${INIT_SEQ.length} 步初始化过了 ${INIT_SEQ.length - skipped.length} 步`
         + `（欠的：${skipped.join('、') || '无'}），SEXP 那 ${SEXP_CHECKS.length} 格 + R_gc 都对，`
         + `R 的 ${EVAL_CHECKS.length} 句都与 Rscript 对得上，`
