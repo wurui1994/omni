@@ -131,6 +131,13 @@ const SUITES = [
      顺带是 `src/core/build/` 那台 JS ninja 的第二个生产调用者。
      没有 python3 / 参考树 / C 编译器就自己跳过。 */
   { s: 'python/rt.js' },
+  /* 同一份借来的运行时的**第四把尺子**：我们编出来的那 201 份 `.o` 链成
+     `_freeze_module`、真把 26 份 `.py` 冻成 `.h`（Parser + compile + ceval + marshal
+     全要对），再把 `Python/frozen.c` / `Modules/getpath.c` 那两份下游编出来。
+     前三把尺子最远只到"链得上"，两回真 bug（复合字面量没归零、不完整类型的 extern
+     吃掉别人的初值）它们一格都看不见。要参考树 + clang + `py:sweep` 预热过的 `obj/`，
+     缺哪一样就自己跳过（8s）。 */
+  { s: 'python/freeze.js' },
   // 可删除测试：删一支产生式（语法那一层）。默认只跑两门小语法 ——
   // 整跑一遍是分钟级的，量出来的数与理由写在那份文件的头上。
   { s: 'grammar/delete.js' },
