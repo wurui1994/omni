@@ -248,7 +248,7 @@ if (kinds.size > 0) {
  *
  * 天花板只许降、地板只许涨。这两条合起来就是"这一套离链得起还差多少"的唯一口径。
  */
-const CEIL = { dup: 0, data: 0, thunk: 0, libc: 203 };
+const CEIL = { dup: 0, data: 0, thunk: 0, libc: 195 };
 const SYMS_FLOOR = 2562;
 if (want('rt')) {
   const provide = new Map();
@@ -472,8 +472,9 @@ const INIT_SEQ = ['Rf_InitArithmetic', 'Rf_InitTempDir', 'Rf_InitMemory', 'Rf_In
   'Rf_InitBaseEnv', 'Rf_InitNames', 'InitParser', 'Rf_InitGlobalEnv', 'Rf_InitOptions', 'Rf_InitGraphics',
   'Rf_InitTypeTables', 'Rf_InitS3DefaultTypes', 'R_InitConditions', 'Rf_InitConnections',
   'omni_console_init', 'omni_toplevel_init'];
-/** 这两步现在过不去（缺 `stat` / `getpid`），是记着的账不是惊喜。 */
-const INIT_ALLOW_FAIL = new Set(['Rf_InitTempDir', 'Rf_InitEd']);
+/** 现在**一步都不许炸**（`InitTempDir` 那一步 2026-09-28 补上 stat/access/mkdtemp/
+ *  setenv 之后过了）。留这张表是为了"欠账要记名字"，不是为了放水。 */
+const INIT_ALLOW_FAIL = new Set([]);
 /** SEXP 那一层：全用 R 自己的 API 兜回来，不读内存（读内存那一路是另一格）。 */
 const SEXP_CHECKS = [
   ['str2type(type2char(REALSXP))', 14],

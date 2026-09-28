@@ -53,3 +53,45 @@ int _libiconv_version = 0x0109;
  *  —— 0 是"没有这个端口"，底下那几个 `mach_*` 调用在宿主那侧明着报不支持，
  *  **不是**悄悄回一个假优先级。 */
 unsigned int mach_task_self_ = 0;
+
+/* ---- `stat` 那一族（第一百五十二片）------------------------------------------
+ *
+ * 宿主那侧只回一串数（`__omni_stat`，13 个 i64），**`struct stat` 由这儿填** ——
+ * 那张结构的布局是平台的事（macOS 上 `st_mode` 在偏移 4、`st_size` 在 96…），
+ * 让编译器按头文件算偏移，就不必在 JS 里把 ABI 抄第二遍（抄错一格是静默答错）。
+ *
+ * R 要它们：`InitTempDir` 问临时目录在不在（`stat` + `S_IFDIR`）、
+ * `R_FileExists` / `file.info` / `R_LoadProfile` 那一路也都走这儿。
+ */
+#include <sys/stat.h>
+
+long long __omni_stat(const char *path, long long *out, long long follow);
+
+enum { OMNI_ST_MODE = 0, OMNI_ST_SIZE, OMNI_ST_MTIME, OMNI_ST_ATIME, OMNI_ST_CTIME,
+       OMNI_ST_INO, OMNI_ST_NLINK, OMNI_ST_UID, OMNI_ST_GID, OMNI_ST_DEV,
+       OMNI_ST_RDEV, OMNI_ST_BLKSIZE, OMNI_ST_BLOCKS, OMNI_ST_N };
+
+static int omni_fill_stat(const char *path, struct stat *sb, long long follow) {
+  long long v[OMNI_ST_N];
+  unsigned char *p = (unsigned char *)sb;
+  unsigned long i;
+  if (__omni_stat(path, v, follow) != 0) return -1;
+  for (i = 0; i < sizeof(struct stat); i++) p[i] = 0;
+  sb->st_mode = (mode_t)v[OMNI_ST_MODE];
+  sb->st_size = (off_t)v[OMNI_ST_SIZE];
+  sb->st_mtime = (long)v[OMNI_ST_MTIME];
+  sb->st_atime = (long)v[OMNI_ST_ATIME];
+  sb->st_ctime = (long)v[OMNI_ST_CTIME];
+  sb->st_ino = (ino_t)v[OMNI_ST_INO];
+  sb->st_nlink = (nlink_t)v[OMNI_ST_NLINK];
+  sb->st_uid = (uid_t)v[OMNI_ST_UID];
+  sb->st_gid = (gid_t)v[OMNI_ST_GID];
+  sb->st_dev = (dev_t)v[OMNI_ST_DEV];
+  sb->st_rdev = (dev_t)v[OMNI_ST_RDEV];
+  sb->st_blksize = (blksize_t)v[OMNI_ST_BLKSIZE];
+  sb->st_blocks = (blkcnt_t)v[OMNI_ST_BLOCKS];
+  return 0;
+}
+
+int stat(const char *path, struct stat *sb) { return omni_fill_stat(path, sb, 1); }
+int lstat(const char *path, struct stat *sb) { return omni_fill_stat(path, sb, 0); }

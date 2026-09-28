@@ -979,3 +979,40 @@ R 的语法分析器认关键字要它们。补在 `src/core/interp/libc.js`（�
 * `sd(c(1,2,3,4))` 还回 -3（R 里报错）：`sd` 是 **base 包的 R 代码**，那要
   `R_LoadProfile` + 序列化过的 base ——下一刀。
 * 欠的一步仍是 `InitTempDir`（要 `stat`）。
+
+## 第二十二格：初始化那 16 步**一步不欠**（已落，2026-09-28）
+
+`InitTempDir` 是最后一步欠账。追下去是四个 libc 的洞，一个一个补，每补一个
+判据往前走一格（这一路的报错都很明白：`xxx: libc: 没有这个函数`）：
+
+`stat` → `access` → `mkdtemp` → `setenv`。
+
+### `struct stat` 的布局**不在 JS 里抄**
+
+`stat` 这一格的做法值得单记。`struct stat` 的布局是**平台的事**（macOS 上
+`st_mode` 在偏移 4、`st_size` 在 96…），在 JS 里按偏移写等于把平台 ABI 抄第二遍 ——
+抄错一格是静默答错。所以分两层：
+
+* 宿主那侧只回**一串数**（`__omni_stat`，13 个 i64，我们自己的口径）；
+* `struct stat` 由 **C** 那边填（`ext/r/rt/omni_libc.c`），偏移让编译器按头文件算。
+
+`lstat` 同一个身子、只差"跟不跟符号链接"。
+
+### 宿主面那张白名单是有判据的
+
+第一版 `statInfo` 直接写进 `src/core/host/native.js`，`tests/mir/run.js` 的
+`lower/cli.js` 当场红：`'statInfo' is not part of the native host surface`。
+那张白名单（`frontend-js/link.js` 的 `NATIVE_OPS`）是自举那条腿的契约，
+不为一格 libc 扩面。于是改成**用已经在面上的四条拼**：
+`exists` / `isDir` / `fileSize` / `mtimeMs`。
+
+代价说清楚：权限位是编出来的（目录 `0755`、文件 `0644`），`st_uid`/`st_ino` 是 0，
+`access` 于是"在就都能"。R 那一路问的是"在不在、是不是目录、多大、多新"——
+这四样是真的。真要按权限分叉得往白名单上加一条 op，那是另一刀。
+
+### 账
+
+* `tests/r/rtc.js jsrun`：**16/16 步初始化都过**（`INIT_ALLOW_FAIL` 清空了），
+  18 句 R 与 Rscript 对得上，30 秒一趟。
+* 软缺的天花板 203 → **195**（`stat`/`lstat` 由我们自己的 C 提供，另六个进了 libc）。
+* `getpid` 没补（`InitEd` 要它，而那一步不在这条路上）—— `mkdtemp` 的随机改用单调时钟。

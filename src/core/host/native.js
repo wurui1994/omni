@@ -72,8 +72,7 @@ export function isDir(p) {
   return fs.statSync(p).isDirectory();
 }
 
-export function mtimeMs(p) {
-  return node('node:fs').statSync(p).mtimeMs;
+export function mtimeMs(p) {  return node('node:fs').statSync(p).mtimeMs;
 }
 
 export function fileSize(p) {

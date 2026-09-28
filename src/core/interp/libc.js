@@ -29,7 +29,7 @@ import {
   memLoad, memStore, printBytes, flushOut, memSize, memGrow, outDirect,
   gfxFrameLin, gfxCallLin,
 } from './builtin.js';
-import { stderrBytes as hostStderr, readBinary, writeBinary, removeFile, env as hostEnv, spawn as hostSpawn, nowMs } from '../host/native.js';
+import { stderrBytes as hostStderr, readBinary, writeBinary, removeFile, env as hostEnv, spawn as hostSpawn, nowMs, mkdirAll, exists as hostExists, isDir as hostIsDir, fileSize as hostFileSize, mtimeMs as hostMtimeMs } from '../host/native.js';
 
 /**
  * `exit` 抛的那个信号（第六刀第十七片）。
@@ -1061,6 +1061,28 @@ function cScan(fmt, input, va) {
 let errnoAddr = 0n;
 
 /** libc 里出错的地方写它。**没装上就什么都不做** —— 那说明这个程序没用 errno。 */
+
+/**
+ * 这条腿上的"文件信息"（第一百五十二片）：宿主面上现有的四条拼出来
+ * （`exists` / `isDir` / `fileSize` / `mtimeMs`）—— 不为 `stat` 往那张**有判据的**
+ * 白名单上加新 op。
+ *
+ * 于是权限位是**编出来的**：目录 `0755`、文件 `0644`，`st_uid`/`st_gid`/`st_ino` 都是 0。
+ * R 那一路问的是"在不在、是不是目录、多大、多新"（`InitTempDir` / `file.info` /
+ * `R_FileExists`），这四样是真的；真要按权限分叉（`access(W_OK)` 之类）得再加一条 op。
+ */
+function omniStat(path) {
+  if (!hostExists(path)) return null;
+  const dir = hostIsDir(path);
+  const S_IFDIR = 0o040000;
+  const S_IFREG = 0o100000;
+  return {
+    mode: dir ? S_IFDIR | 0o755 : S_IFREG | 0o644,
+    size: dir ? 0 : Number(hostFileSize(path)),
+    mtime: Math.floor(Number(hostMtimeMs(path)) / 1000),
+  };
+}
+
 function setErrno(v) {
   if (errnoAddr !== 0n) memStore('i32', errnoAddr, 0, BigInt(v));
 }
@@ -1547,6 +1569,21 @@ const LIBC = {
    * 都该是同一个地址（调用方会存着它）—— 所以一个名字缓存一格、住在堆上。
    * 名字查不到就回 NULL。宿主的环境**原样透出**：这一格与三条标准流同一个道理，
    * 「环境是谁的」只有宿主答得了（tinycc 的 `tcc_set_environ` 一路要它）。 */
+  /** `setenv(名, 值, 覆盖)` / `unsetenv`（第一百五十二片）：只改**本进程这张表**
+   *  （`envCache`），不动宿主的环境 —— R 的 `InitTempDir` 要 `setenv("R_SESSION_TMPDIR")`，
+   *  之后自己再 `getenv` 读回来，所以这张表自足就够。 */
+  setenv: (a) => {
+    const name = readCStr(a[0]);
+    const val = readCStr(a[1]);
+    const over = BigInt(a[2]) !== 0n;
+    if (!over && envCache.has(name) && envCache.get(name) !== 0n) return 0n;
+    const bytes = new TextEncoder().encode(val);
+    const p2 = heapAlloc(BigInt(bytes.length + 1));
+    writeCStr(p2, val);
+    envCache.set(name, p2);
+    return 0n;
+  },
+  unsetenv: (a) => { envCache.set(readCStr(a[0]), 0n); return 0n; },
   getenv: (a) => {
     const name = readCStr(a[0]);
     const hit = envCache.get(name);
@@ -1709,6 +1746,64 @@ const LIBC = {
    *
    * 标志位的数值是 macOS 的 `<sys/fcntl.h>` 量出来的 —— 与 tcc 编同一份源码时
    * 看到的是同一批数。 */
+  /**
+   * **文件信息**那一格（第一百五十二片）：`__omni_stat(路径, 出口, 跟不跟链接)`。
+   *
+   * 这不是 C 的 `stat` —— C 的 `stat` 要填一个 `struct stat`，而那张结构的布局是
+   * **平台的事**（macOS 上 `st_mode` 在偏移 4、`st_size` 在 96…）。在 JS 里按偏移写
+   * 就是把平台 ABI 抄第二遍，抄错一格是静默答错。所以这儿只回一串数（我们自己的口径，
+   * 13 个 i64），`struct stat` 由 C 那边按头文件自己填（`ext/r/rt/omni_libc.c`）。
+   *
+   * 出口那 13 格依次是：mode / size / mtime / atime / ctime / ino / nlink /
+   * uid / gid / dev / rdev / blksize / blocks。回 0 是成功，-1 是这条路不存在。
+   */
+  /** `access(路径, 模式)`：F_OK=0 / X_OK=1 / W_OK=2 / R_OK=4（第一百五十二片）。
+   *  权限位按 `stat` 的 `st_mode` 看 —— 这条腿上"谁在跑"就是本进程那个用户，
+   *  所以看的是 owner 那三位与 other 那三位的并（够 R 的 `InitTempDir` 用）。 */
+  access: (a) => {
+    const path = readCStr(a[0]);
+    const st = omniStat(path);
+    if (st === null) { setErrno(2); return -1n; }        // ENOENT
+    /* 权限那一问这条腿上只有一个答案：在就都能（见 `omniStat` 头上那段）。
+       真要分权限得往宿主面上加一条 op，那是另一刀。 */
+    return 0n;
+  },
+  /** `mkdir`：父目录不在也建（`mkdirAll`）—— 与 POSIX 的严格语义有一格差，
+   *  记在这儿：R 那一路（`InitTempDir` / `dir.create`）要的是"建出来"。 */
+  mkdir: (a) => {
+    const path = readCStr(a[0]);
+    try { mkdirAll(path); } catch { setErrno(13); return -1n; }
+    return 0n;
+  },
+  /** `mkdtemp(模板)`：模板末尾是 6 个 X，就地改成真名字并把目录建出来（第一百五十二片）。
+   *  随机那一格用进程号 + 单调时钟拼 —— 这条腿上不必抗攻击，只要同一趟里不撞。 */
+  mkdtemp: (a) => {
+    const tmpl = readCStr(a[0]);
+    if (!tmpl.endsWith('XXXXXX')) { setErrno(22); return 0n; }   // EINVAL
+    const head = tmpl.slice(0, tmpl.length - 6);
+    for (let k = 0; k < 64; k++) {
+      const tag = (Math.trunc(nowMs() * 1000) + k * 104729).toString(36);
+      const name = `${head}${tag.slice(-6).padStart(6, '0')}`;
+      if (hostExists(name)) continue;
+      try { mkdirAll(name); } catch { setErrno(13); return 0n; }
+      writeCStr(a[0], name);
+      return BigInt(a[0]);
+    }
+    setErrno(17);                                                // EEXIST
+    return 0n;
+  },
+  __omni_stat: (a) => {
+    const path = readCStr(a[0]);
+    const out = BigInt(a[1]);
+    const st = omniStat(path);
+    if (st === null) return -1n;
+    const fields = [st.mode, st.size, st.mtime, st.mtime, st.mtime, 0, 1,
+      0, 0, 0, 0, 4096, Math.ceil(st.size / 512)];
+    for (let i = 0; i < fields.length; i++) {
+      memStore('i64', out + BigInt(i * 8), 0, BigInt(Math.trunc(fields[i] ?? 0)));
+    }
+    return 0n;
+  },
   open: (a) => {
     const path = readCStr(a[0]);
     const flags = Number(BigInt.asIntN(32, BigInt(a[1])));
