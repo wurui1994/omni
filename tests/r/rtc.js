@@ -514,7 +514,18 @@ const EVAL_CHECKS = [
      **还不在这张表里**：`omni_base_init` 装得动，但装一趟 >50 秒（base 是 1.4 MB 的
      R 源码），判据不许一趟一分钟。速度那一刀之后再进来。 */
 ];
-if (want('jsrun')) {
+/** `base` 那一节（`tests/r/rtc.js base`）：装 base 那个包的 R 代码，量"多少句多少错"。
+ *  与 `jsrun` 共用同一套按需装载的胶水，所以两节合在一个 `if` 里，各自发自己那一段。
+ *
+ *  判据是**固定句数**（不是固定时间）—— 时间预算那种写法在机器忙一点的时候就少装几百句，
+ *  地板会时绿时红。时间反过来当天花板：装 `BASE_STMTS` 句要是超过 `BASE_MS_CEIL`，
+ *  那是性能退步，也得红。 */
+const BASE_CAP = 100;            // 一趟 step 装几句（C 那侧要重新 fopen + fseek）
+const BASE_STMTS = 800;          // 这一节要装完的句数（量到 85 句/秒 -> 约 9.4 秒）
+const BASE_MS_CEIL = 18000;      // 装完那 800 句的时间天花板
+if (want('jsrun') || only === 'base') {
+  const doRun = only === null || only === 'jsrun';
+  const doBase = only === 'base';
   const dir = join(ROOT, '.omni-cache', 'r-rt', 'jsall');
   mkdirSync(dir, { recursive: true });
   const units = [];
@@ -610,7 +621,7 @@ const $F = (s) => {
   try { const rv = f(); say('init\\t' + s + '\\tok\\t' + (Date.now() - t1) + 'ms rv=' + rv); }
   catch (e) { say('init\\t' + s + '\\t炸了：' + String(e && e.message).slice(0, 100)); }
 }`);
-    L.push(`{
+    if (doRun) L.push(`{
   const t2c = $F('Rf_type2char'); const s2t = $F('Rf_str2type');
   const P = (nm, v) => appendFileSync(LOG, 'sexp\\t' + nm + '\\t' + v + '\\n');
   const T = (nm, f) => { try { P(nm, f()); } catch (e) { P(nm, '炸了：' + String(e && e.message).slice(0, 120)); } };
@@ -632,10 +643,32 @@ const $F = (s) => {
   T('R_gc', () => { $F('R_gc')(); return 1; });
 }`);
     /* nmath 那十个也走同一条门 */
-    for (const [, sym] of JSRUN) {
-      L.push(`try { appendFileSync(LOG, ${JSON.stringify(sym)} + '\\t' + $F(${JSON.stringify(sym)})(`
-        + `${JSRUN.find((x) => x[1] === sym)[2]}).toPrecision(17) + '\\n'); }`
-        + ` catch (e) { appendFileSync(LOG, ${JSON.stringify(sym)} + '\\t炸了\\n'); }`);
+    if (doRun) {
+      for (const [, sym] of JSRUN) {
+        L.push(`try { appendFileSync(LOG, ${JSON.stringify(sym)} + '\\t' + $F(${JSON.stringify(sym)})(`
+          + `${JSRUN.find((x) => x[1] === sym)[2]}).toPrecision(17) + '\\n'); }`
+          + ` catch (e) { appendFileSync(LOG, ${JSON.stringify(sym)} + '\\t炸了\\n'); }`);
+      }
+    }
+    /* **base 那个包**（一段一段装，时间预算管住自己）：`omni_base_step` 自己会在
+       `from === 0` 那一趟叫 `Init_R_Variables`，所以这儿只管一轮一轮叫它。 */
+    if (doBase) {
+      L.push(`{
+  const step = $F('omni_base_step');
+  const p = $F('omni_src_ptr')();
+  const t0 = Date.now();
+  let pos = 0; let errs = 0; let more = 1; let n = 0;
+  try {
+    while (more === 1 && n < ${BASE_STMTS}) {
+      more = step(BigInt(pos), ${BASE_CAP}, p, p + 8n);
+      pos = Number($RT.memLoadFn('i64')(p, 0));
+      errs += Number($RT.memLoadFn('i32s')(p + 8n, 0));
+      if (more >= 0) n += ${BASE_CAP};
+      if (more < 0) { say('base\\t回了 ' + more); break; }
+    }
+    say('base\\t' + [n, pos, errs, Date.now() - t0, more].join(' '));
+  } catch (e) { say('base\\t炸了 ' + String(e && e.message).slice(0, 160)); }
+}`);
     }
     L.push("appendFileSync(LOG, '$loaded\\t' + $loaded.size + '\\n');");
     /* **真的起来了几份**：`$loaded` 只数"我亲手 require 的"，被别人静态 `import`
@@ -649,8 +682,9 @@ const $F = (s) => {
       encoding: 'utf8',
       maxBuffer: 1 << 26,
       /* 子进程自己也要有上限：R 的出错那条路要是转起圈来（少了顶层上下文就会），
-         这儿一等就是几分钟。30 秒够装载 + 初始化 + 那几格。 */
-      timeout: 45000,
+         这儿一等就是几分钟。一趟不许超过 30 秒，所以 25 秒砍掉 ——
+         `base` 那一节的时间预算（12 秒）也是照这个数定的。 */
+      timeout: 25000,
       killSignal: 'SIGKILL',
       env: {
         ...process.env,
@@ -665,10 +699,10 @@ const $F = (s) => {
     const got = new Map(lines.filter((a) => a[0] !== 'init' && a[0] !== 'sexp').map((a) => [a[0], a[1]]));
     const initOut = new Map(lines.filter((a) => a[0] === 'init').map((a) => [a[1], a[2]]));
     const sexpOut = new Map(lines.filter((a) => a[0] === 'sexp').map((a) => [a[1], a[2]]));
-    /* 尺子：Rscript。没有就退回记死的常数。 */
-    const rs = spawnSync('Rscript', ['-e',
+    /* 尺子：Rscript。没有就退回记死的常数。（`base` 那一节用不着它，就不去叫。） */
+    const rs = doRun ? spawnSync('Rscript', ['-e',
       JSRUN.map(([, , , expr]) => `cat(sprintf("%.17g", ${expr}), "\\n")`).join(';')],
-    { encoding: 'utf8' });
+    { encoding: 'utf8' }) : { status: 1, stdout: '' };
     const refs = rs.status === 0
       ? (rs.stdout ?? '').trim().split('\n').map((s) => Number(s))
       : JSRUN.map(([, , , , c]) => c);
@@ -692,37 +726,56 @@ const $F = (s) => {
       bad.push(`init ${s}: ${v}`);
     }
     /* SEXP 那一层：R 自己的 API 兜回来的值 */
-    for (const [nm, wantV] of SEXP_CHECKS) {
-      const v = Number(sexpOut.get(nm));
-      if (v !== wantV) bad.push(`${nm}: 我们 ${sexpOut.get(nm)}、要 ${wantV}`);
-    }
-    if (sexpOut.get('R_gc') !== '1') bad.push('R_gc 没跑过');
-    /* 真求值那几句：尺子是 Rscript（一句一趟，`{}` 包起来免得赋值那句印两遍） */
-    const rs2 = spawnSync('Rscript', ['-e',
-      EVAL_CHECKS.map((e) => `cat(sprintf("%.17g", {${e}}), "\\n")`).join(';')],
-    { encoding: 'utf8' });
-    const refs2 = (rs2.stdout ?? '').trim().split('\n').map((x) => Number(x));
-    if (rs2.status !== 0 || refs2.length !== EVAL_CHECKS.length) {
-      bad.push(`Rscript 那把尺子没量出来（${(rs2.stderr ?? '').split('\n')[0].slice(0, 100)}）`);
-    } else {
-      EVAL_CHECKS.forEach((src, i) => {
-        const got2 = sexpOut.get(`eval:${src}`);
-        const v = Number(got2);
-        const w = refs2[i];
-        if (!Number.isFinite(v)) { bad.push(`eval ${src}: 我们 ${got2}、R ${w}`); return; }
+    if (doRun) {
+      for (const [nm, wantV] of SEXP_CHECKS) {
+        const v = Number(sexpOut.get(nm));
+        if (v !== wantV) bad.push(`${nm}: 我们 ${sexpOut.get(nm)}、要 ${wantV}`);
+      }
+      if (sexpOut.get('R_gc') !== '1') bad.push('R_gc 没跑过');
+      /* 真求值那几句：尺子是 Rscript（一句一趟，`{}` 包起来免得赋值那句印两遍） */
+      const rs2 = spawnSync('Rscript', ['-e',
+        EVAL_CHECKS.map((e) => `cat(sprintf("%.17g", {${e}}), "\\n")`).join(';')],
+      { encoding: 'utf8' });
+      const refs2 = (rs2.stdout ?? '').trim().split('\n').map((x) => Number(x));
+      if (rs2.status !== 0 || refs2.length !== EVAL_CHECKS.length) {
+        bad.push(`Rscript 那把尺子没量出来（${(rs2.stderr ?? '').split('\n')[0].slice(0, 100)}）`);
+      } else {
+        EVAL_CHECKS.forEach((src, i) => {
+          const got2 = sexpOut.get(`eval:${src}`);
+          const v = Number(got2);
+          const w = refs2[i];
+          if (!Number.isFinite(v)) { bad.push(`eval ${src}: 我们 ${got2}、R ${w}`); return; }
+          const rel = Math.abs(v - w) / Math.max(Math.abs(w), 1e-300);
+          if (rel > 1e-12) bad.push(`eval ${src}: 我们 ${v}、R ${w}`);
+        });
+      }
+      JSRUN.forEach(([, sym], i) => {
+        const v = Number(got.get(sym));
+        const w = refs[i];
+        if (!Number.isFinite(v)) { bad.push(`${sym}: 没答案（${(r.stderr ?? '').split('\n')[0].slice(0, 120)}）`); return; }
         const rel = Math.abs(v - w) / Math.max(Math.abs(w), 1e-300);
-        if (rel > 1e-12) bad.push(`eval ${src}: 我们 ${v}、R ${w}`);
+        if (rel > 1e-12) bad.push(`${sym}: 我们 ${v}、R ${w}（相对差 ${rel.toExponential(2)}）`);
       });
     }
-    JSRUN.forEach(([, sym], i) => {
-      const v = Number(got.get(sym));
-      const w = refs[i];
-      if (!Number.isFinite(v)) { bad.push(`${sym}: 没答案（${(r.stderr ?? '').split('\n')[0].slice(0, 120)}）`); return; }
-      const rel = Math.abs(v - w) / Math.max(Math.abs(w), 1e-300);
-      if (rel > 1e-12) bad.push(`${sym}: 我们 ${v}、R ${w}（相对差 ${rel.toExponential(2)}）`);
-    });
+    /* base 那一节：一轮装了多少句、错几句、多快 */
+    let baseLine = null;
+    if (doBase) {
+      baseLine = (got.get('base') ?? '').split(' ');
+      const [n, pos, errs, ms, more] = baseLine.map((x) => Number(x));
+      if (!Number.isFinite(n)) bad.push(`base 那一行没印出来（${got.get('base') ?? '空'}）`);
+      else if (errs !== 0) bad.push(`base 装出 ${errs} 个错（走到字节 ${pos}）`);
+      else if (n < BASE_STMTS && more !== 0) bad.push(`只装了 ${n} 句（要 ${BASE_STMTS}）`);
+      else if (ms > BASE_MS_CEIL) bad.push(`${n} 句装了 ${ms}ms（天花板 ${BASE_MS_CEIL}ms）`);
+      else if (!Number.isFinite(more)) bad.push('base 那一行不全');
+      else baseLine = { n, pos, errs, ms, more };
+    }
     if (bad.length > 0) {
-      no('装起来真调 R 的运行时', bad.slice(0, 8).join('\n       '));
+      no(doBase ? '装 base 那个包' : '装起来真调 R 的运行时', bad.slice(0, 8).join('\n       '));
+    } else if (doBase) {
+      ok('装 base 那个包', `**按需**起来 ${got.get('$mods')} 份，`
+        + `base 装了 ${baseLine.n} 句、0 错、走到字节 ${baseLine.pos}、`
+        + `${baseLine.ms}ms（${(baseLine.n / (baseLine.ms / 1000)).toFixed(1)} 句/秒）、`
+        + `${baseLine.more === 0 ? '装完了' : '还有'}`);
     } else {
       const skipped = INIT_SEQ.filter((s) => initOut.get(s) !== 'ok');
       ok('装起来真调 R 的运行时', `**按需**装了 ${nLoaded}/${linked.units.length} 份`
