@@ -1585,6 +1585,21 @@ function call(name, args) {
  * 函数里抛了就**停下并把话留在控制台上** —— 不许一帧错一次地刷下去（那会把控制台灌满，
  * 而真浏览器那条判据判的正是"控制台一条错都没有"）。
  */
+/**
+ * **一帧的节拍器**。页面上是 `requestAnimationFrame`（跟着 vsync，帧之间让出控制权）；
+ * **Worker 里没有 rAF**（任务 #39 / §41）⇒ 退回 `setTimeout(…, 16)`（≈60Hz）。
+ *
+ * 两边的句柄空间不一样，但不会混：有 rAF 就一定走 rAF、没有就一定走 timeout，
+ * 所以 `unraf` 按同一个判断取消。
+ */
+const raf = (fn) => (typeof globalThis.requestAnimationFrame === 'function'
+  ? globalThis.requestAnimationFrame(fn) : globalThis.setTimeout(fn, 16));
+
+const unraf = (id) => {
+  if (typeof globalThis.cancelAnimationFrame === 'function') globalThis.cancelAnimationFrame(id);
+  else globalThis.clearTimeout(id);
+};
+
 function setFrame(f) {
   if (typeof f !== 'function') return;
   D.frameFn = f;
@@ -1616,9 +1631,9 @@ function setFrame(f) {
       D.psum = 0;
       D.pt0 = performance.now();
     }
-    D.raf = requestAnimationFrame(tick);
+    D.raf = raf(tick);
   };
-  D.raf = requestAnimationFrame(tick);
+  D.raf = raf(tick);
 }
 
 /**
@@ -1632,7 +1647,7 @@ function perf() {
 
 /** 停掉帧循环（换文件、判据收尾都要它 —— 不停的话上一份脚本会一直在画）。 */
 function stop() {
-  if (D.raf !== 0) cancelAnimationFrame(D.raf);
+  if (D.raf !== 0) unraf(D.raf);
   D.raf = 0;
 }
 
