@@ -40,29 +40,46 @@
 #define OMNI_JS_DATE_SEL 100
 #define OMNI_JS_DATE_N 41
 
-/* 属性读的**单态内联缓存**（ADR-0047 §14）：一个调用点一格，发射层发成文件作用域的
+/* 形状（隐藏类）那一棵树（ADR-0047 §19）。一格形状 = "从空对象起，按这个次序插过这些键"
+   的身份；孩子按**兄弟链**挂（一格形状的孩子通常只有一两个，走一趟链比开一张 dict 便宜）。
+   形状只进不出（住 arena，程序里不同的键序列有多少格就多少格）。
+
+   为什么这一格能当 IC 的守卫：槽表的条目是**按插入序追加**的，所以"同一个键序列"⇒
+   "同一个名字落在同一个下标"。`delete` 会打破这一条（墓碑 + 下次插入可能压实 `keys[]`），
+   所以删过的对象一律把 `shape` 置 NULL，从此不再命中 —— 那是保守的方向。 */
+struct omni_js_shape_s {
+  struct omni_js_shape_s *sib;   /* 同一个父亲的下一格 */
+  struct omni_js_shape_s *kid;   /* 第一个孩子 */
+  const char *kp;                /* 这一步加的键（带前缀那一份；指的是表里存着的那块） */
+  int64_t kn;
+  int64_t n;                     /* 到这一步为止的条目数 */
+};
+
+/* 属性读的**单态内联缓存**（ADR-0047 §14 / §19）：一个调用点一格，发射层发成文件作用域的
+
    `static`（见 backend-c/emit.js 的 icDecl）。摆在宏外头 —— 生成的 C 在容器实例化之前就
+
    要看见这个类型，而且它不含任何与 LT/DT 有关的东西（两格 dict 指针都存成 void*）。
 
    kind：0 = 空的（还没打上）、1 = 自有那一格、2 = 直接原型上那一格、3 = 对象字面量（DICT）
    自己那一格（键不带前缀，值就是值）。
-     - kind 1 **不认对象身份，只认下标**：拿 `slot` 去**当前**这个对象的槽表里把键验一遍
-       （`keys[slot]` 与要找的键相等且 `live`）。键在一张 dict 里是唯一的，所以"这一格的键
-       就是它"本身即证明 —— 于是同一个构造器出来的**所有**实例都能命中（它们的插入序相同，
-       所以同一个名字落在同一个下标上），而且压根不需要失效协议：判据自己会验。
-     - kind 2 要证明"自己身上**没有**这个名字"，那件事验不出来，只能认对象身份：
-       `own` 指针相同且 `own_n` 不变（`n` 只在插入时涨，删除只灭 `live`）⇒ 没插过新键
-       ⇒ 当初的"没有"仍然成立。外加 `pr` 身份（`setPrototypeOf` 换过原型就不算）。
+     - kind 1/2 的守卫是**形状**（`omni_js_shape_s`，ADR-0047 §19）：一格形状就是"按这个
+       次序插过这些键"的身份，而槽表是按插入序追加的 ⇒ 形状相同 ⇒ 同一个名字在同一个下标。
+       于是守卫只剩**一次指针比较**（键一个字节都不用比），而且同一个构造器出来的所有实例
+       都命中。`delete` 过的对象 `shape` 是 NULL，从此不命中（保守方向）。
+     - kind 2 还要两格：`pr` 身份（`setPrototypeOf` 换过就不算）与那格原型**自己的形状**
+       （原型上加键 / 删键都会变）。"自己身上没有这个名字"由自有形状本身证明。
        深度 ≥ 2 的链**不进缓存**：中间那一格插了同名键就会答旧值，而那一格没人守。
-   两种形态都要 `live[slot]` 与键相等两道：`delete` 只灭 live，compact/rehash 会搬 keys。
-   访问器槽（`items[1]`）一律不进缓存 —— 那一格每次都要真调 getter。
+     - kind 3（DICT）没有形状可用，靠"拿下标上的键重验一遍"自证（键在一张表里唯一）。
+   访问器槽（`items[1]`）一律不进缓存 —— 那一格每次都要真调 getter；
+   `defineProperty` 把数据槽原地换成访问器时形状不变，所以那一道检查必须留着。
    单线程：这条腿上 JS 只有一个线程，所以这一格不上锁（与 omni_js_fnproto_tbl_g 同理）。 */
 struct omni_js_ic_s {
-  void *own;      /* kind 2：当初那个对象的槽表指针 */
-  void *pr;       /* kind 2：当初那格原型（对象本身的地址） */
-  void *hold;     /* kind 2：真正找着的那格槽表 */
-  int64_t own_n;  /* kind 2：当初 own->n */
-  int64_t slot;   /* 条目下标（kind 1 在 own 里、kind 2 在 hold 里） */
+  void *shape;       /* kind 1/2：当初那个对象的形状 */
+  void *hold_shape;  /* kind 2：当初那格原型的形状 */
+  void *pr;          /* kind 2：当初那格原型（对象自己的地址） */
+  void *hold;        /* kind 2：原型那一格的槽表 */
+  int64_t slot;      /* 条目下标（kind 1/3 在自己表里、kind 2 在 hold 里） */
   int64_t kind;
 };
 
@@ -804,6 +821,39 @@ static LT omni_js_slot_new_(omni_dyn keyd, omni_dyn v, bool w, bool e, bool c) {
   s->len = 8; \
   return s; \
 } \
+/* 形状那一棵树（ADR-0047 §19）。根是"空对象"那一格；每插一个**新**键就沿树走一步，
+   走过的那一步以后所有对象共用 —— 所以 `new Point(x,y,z,w)` 出来的实例都是同一格形状。
+   一格形状的孩子通常只有一两个（同一个构造器），所以孩子挂兄弟链、查转移就走一趟链。
+   形状只进不出（住 arena）：不同的键序列有多少格就多少格，一份程序里那是个小数。
+   按模块那一档里这个根会一个 TU 一格（模板会抄进每个 TU）—— 那只让跨 TU 的站点少命中，
+   不会答错（守卫是指针相等）。与 omni_js_fnproto_tbl_g 同一个口径。 */ \
+static struct omni_js_shape_s *omni_js_shape_root_g = NULL; \
+static struct omni_js_shape_s *omni_js_shape_new_(struct omni_js_shape_s *par, \
+                                                  omni_str k, int64_t n) { \
+  struct omni_js_shape_s *s = \
+    (struct omni_js_shape_s *)omni_alloc(sizeof(struct omni_js_shape_s)); \
+  s->sib = NULL; \
+  s->kid = NULL; \
+  s->kp = k.p; \
+  s->kn = k.len; \
+  s->n = n; \
+  if (par != NULL) { s->sib = par->kid; par->kid = s; } \
+  return s; \
+} \
+static struct omni_js_shape_s *omni_js_shape_root_(void) { \
+  if (omni_js_shape_root_g == NULL) { \
+    omni_js_shape_root_g = omni_js_shape_new_(NULL, omni_str_new("", 0), 0); \
+  } \
+  return omni_js_shape_root_g; \
+} \
+static struct omni_js_shape_s *omni_js_shape_tr_(struct omni_js_shape_s *s, omni_str k) { \
+  struct omni_js_shape_s *c = s->kid; \
+  while (c != NULL) { \
+    if (c->kn == k.len && memcmp(c->kp, k.p, (size_t)k.len) == 0) return c; \
+    c = c->sib; \
+  } \
+  return omni_js_shape_new_(s, k, s->n + 1); \
+} \
 /* proto **缺席**（undefined）时原型是 realm 上那格 Object.prototype，给 null 才是真的没有
    原型 —— 与 prelude 的 $js_obj_new_p 一字不差（`proto === undefined ? $realm().objP : proto`）。
    这一条要紧：降级器给类的原型发的正是 js_obj_new_p(undefined)，链走不到 Object.prototype
@@ -817,6 +867,7 @@ static omni_dyn omni_js_new_bare_(omni_dyn proto) { \
   ov->ex = true; \
   ov->px_t = omni_dyn_undef(); \
   ov->px_h = omni_dyn_undef(); \
+  ov->shape = (void *)omni_js_shape_root_(); \
   return omni_dyn_of_ref((void *)ov, OMNI_DYN_OBJ); \
 } \
 static omni_dyn omni_js_obj_new_p(omni_dyn proto) { \
@@ -839,16 +890,6 @@ static LT omni_js_find_slot_(omni_dyn o, omni_str key, omni_dyn *holder) { \
     cur = ((omni_js_objv *)cur.u.ref)->pr; \
   } \
   return NULL; \
-} \
-/* "表里那个带前缀的键" vs "裸键"：只比不拼。槽表里的键形如 `'s' + 名字`（见 pkey_），
-   而发射层给的是名字本身，所以拼一份再比是白搬一趟字节。属性名几乎都是 1~8 字节，
-   所以短的走逐字节（`omni_eq_string` 那一刀同一个理由：那点长度上 memcmp 全是调用开销）。 */ \
-static bool omni_js_pkeq_(omni_str sk, omni_str key) { \
-  int64_t i; \
-  if (sk.len != key.len + 1 || sk.p[0] != 's') return false; \
-  if (key.len > 8) return memcmp(sk.p + 1, key.p, (size_t)key.len) == 0; \
-  for (i = 0; i < key.len; i++) { if (sk.p[i + 1] != key.p[i]) return false; } \
-  return true; \
 } \
 /* 带 IC 的属性读（键是编译期常量那一支）。形态与失效的理由写在宏外头那格 struct 上。
    命中时做的事：一次 tag 比、一次指针比、一次 `n` 比、一次 `live` 读、一次短键比 ——
@@ -885,22 +926,20 @@ static omni_dyn omni_js_obj_getk_ic(omni_dyn o, omni_str key, struct omni_js_ic_
   if (ov->px_h.tag != OMNI_DYN_UNDEF) return omni_js_obj_getk(o, key); \
   if (key.len >= (int64_t)sizeof(kbuf) - 1) return omni_js_obj_getk(o, key); \
   ps = (DT)ov->ps; \
-  /* 命中那一段**不拼前缀键**：直接拿"表里那个带前缀的键"与裸键比（`omni_js_pkeq_`）。
-     从前这儿先 `kbuf[0]='s' + memcpy` 拼一份再 `omni_eq_string` 比，等于把同一串字节
-     搬一趟再看一趟 —— 采样里 `_platform_memmove` 6.2%、`omni_eq_string` 22.7%。
-     拼那一份只有**没命中**时才要（`DT##_find` 要一格完整的键）。 */ \
+  /* 守卫只是**指针比较**：形状相同 ⇒ 键序列相同 ⇒ 同一个名字在同一个下标（形状非 NULL
+     还意味着这张表没删过东西，所以 `live` 与"键真的是它"都不必再验 —— 见 §19）。
+     访问器那一道要留：`defineProperty` 原地换掉槽时形状不变。 */ \
   if (ic->kind == 1) { \
-    if (ic->slot < ps->n && ps->live[ic->slot] && omni_js_pkeq_(ps->keys[ic->slot], key)) { \
+    if (ic->shape == ov->shape) { \
       LT sl = (LT)ps->vals[ic->slot].u.ref; \
       if (!sl->items[1].u.b) return sl->items[0]; \
     } \
-  } else if (ic->kind == 2 && ic->own == (void *)ps && ps->n == ic->own_n \
-             && ov->pr.tag == OMNI_DYN_OBJ && ic->pr == ov->pr.u.ref) { \
+  } else if (ic->kind == 2 && ic->shape == ov->shape \
+             && ov->pr.tag == OMNI_DYN_OBJ && ic->pr == ov->pr.u.ref \
+             && ic->hold_shape == ((omni_js_objv *)ic->pr)->shape) { \
     DT H = (DT)ic->hold; \
-    if (ic->slot < H->n && H->live[ic->slot] && omni_js_pkeq_(H->keys[ic->slot], key)) { \
-      LT sl = (LT)H->vals[ic->slot].u.ref; \
-      if (!sl->items[1].u.b) return sl->items[0]; \
-    } \
+    LT sl = (LT)H->vals[ic->slot].u.ref; \
+    if (!sl->items[1].u.b) return sl->items[0]; \
   } \
   kbuf[0] = 's'; \
   if (key.len > 0) memcpy(kbuf + 1, key.p, (size_t)key.len); \
@@ -920,15 +959,22 @@ static omni_dyn omni_js_obj_getk_ic(omni_dyn o, omni_str key, struct omni_js_ic_
         LT sl = (LT)cp->vals[e].u.ref; \
         if (sl->items[1].u.b) return omni_js_obj_getk(o, key); \
         if (depth == 0) { \
-          ic->slot = e; \
-          ic->kind = 1; \
+          /* 形状是 NULL（这张表删过东西）就**不进缓存**：那时候下标不再由键序列决定 */ \
+          if (ov->shape != NULL) { \
+            ic->shape = ov->shape; \
+            ic->slot = e; \
+            ic->kind = 1; \
+          } \
         } else if (depth == 1) { \
-          ic->own = (void *)ps; \
-          ic->own_n = ps->n; \
-          ic->pr = ov->pr.u.ref; \
-          ic->hold = (void *)cp; \
-          ic->slot = e; \
-          ic->kind = 2; \
+          omni_js_objv *pv = (omni_js_objv *)ov->pr.u.ref; \
+          if (ov->shape != NULL && pv->shape != NULL) { \
+            ic->shape = ov->shape; \
+            ic->hold_shape = pv->shape; \
+            ic->pr = (void *)pv; \
+            ic->hold = (void *)cp; \
+            ic->slot = e; \
+            ic->kind = 2; \
+          } \
         } \
         return sl->items[0]; \
       } \
@@ -940,9 +986,18 @@ static omni_dyn omni_js_obj_getk_ic(omni_dyn o, omni_str key, struct omni_js_ic_
   return omni_js_obj_getk(o, key); \
 } \
 static void omni_js_def_data_(omni_dyn o, omni_dyn k, omni_dyn v, bool w, bool e, bool c) { \
-  DT##_set(omni_js_ps_(o), omni_js_pkey_(k), \
+  omni_js_objv *ov = (omni_js_objv *)o.u.ref; \
+  DT ps = (DT)ov->ps; \
+  omni_str pk = omni_js_pkey_(k); \
+  int64_t n0 = ps->n; \
+  DT##_set(ps, pk, \
            omni_js_arr_wrap(omni_js_slot_new_(k.tag == OMNI_DYN_SYM ? k : omni_js_str(k), \
                                               v, w, e, c))); \
+  /* 形状沿树走一步 —— 只有**真插了一格新键**时才走（重定义同名键 `n` 不涨、布局不变）。
+     shape 是 NULL 的（删过东西的那些）就一直 NULL：退了优化不再回来。 */ \
+  if (ov->shape != NULL && ps->n != n0) { \
+    ov->shape = (void *)omni_js_shape_tr_((struct omni_js_shape_s *)ov->shape, pk); \
+  } \
 } \
 /* 原型链走到尽头时手里那一格。**可能不是真对象** —— 这条腿上对象字面量是 dict，所以
    Object.create({…}) 与类的原型都会让链的末端是一格 dict。取属性、问 in、for-in 都要
@@ -1149,6 +1204,9 @@ static bool omni_js_obj_del_o_(omni_dyn o, omni_dyn k) { \
   int64_t e = DT##_find(ps, key); \
   if (e < 0) return true; \
   if (!((LT)ps->vals[e].u.ref)->items[6].u.b) return false; \
+  /* 删一格就**退优化**：墓碑留在表里，而下一次插入可能把 `keys[]` 整个压实、下标就挪了
+     （见 omni_container.h 的 reindex）。所以这个对象从此没有形状，IC 再不命中它。 */ \
+  ((omni_js_objv *)o.u.ref)->shape = NULL; \
   return DT##_remove(ps, key); \
 } \
 /* 自有键，按**插入序**（规范说整数下标先升序 —— 真对象上没有下标槽的常见形状，
