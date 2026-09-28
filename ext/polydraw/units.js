@@ -186,19 +186,18 @@ export function evalUnitTexts(path, argv = [], o = {}) {
  *     身份放在 `extras` 里。
  */
 export function evalUnitsBuild(o) {
-  /* 运行时那一份的名字：调用方给了就用它（它一进程只算一次 —— `hash16` 在那 350KB 上
-     要 47ms），没给才自己算。 */
-  const rtFile = typeof o.runtimeName === 'string' ? o.runtimeName
-    : (typeof o.runtimeText === 'string'
-      ? `omni_rt_${hash16(o.runtimeText).slice(0, 8)}.js`
-      : 'omni_rt.js');
   /* **快路：这一份输入上一趟编出来的就是答案**（`built.log`，见 `builtGet` 的头注）。
      Studio 里点一次运行就是一趟这个；不带这道闸的话就算一份产物都不重编，也要把脚本
      整个降一遍才知道单元叫什么名字（`ken/balls.pss` 热进程里 117ms，产物逐字节相同）。
-     键里有：源文件内容、编译器指纹、这一趟的旗子、运行时那一份的名字。 */
+     键里有：源文件内容、编译器指纹、这一趟的旗子。
+
+     **键里刻意不带运行时那一份的名字**（2026-09-28）：那个名字是 `hash16` 那 350KB 算出来的
+     （量过 47ms，而命令行这一侧每趟是个新进程，省不掉），而运行时正文本来就是**编译器
+     自己的输出** —— 指纹（`tool` = `srcStamp()`）变了它一定跟着变。于是命中这条路上
+     压根不必知道它叫什么。 */
   const src = readText(o.path);
   const key = typeof src === 'string' ? hash16([
-    src, o.tool ?? '', (o.argv ?? []).join(' '), rtFile,
+    src, o.tool ?? '', (o.argv ?? []).join(' '),
   ].join('\u0000')) : null;
   if (key !== null) {
     const hit = builtGet(o.dir, key);
@@ -206,6 +205,15 @@ export function evalUnitsBuild(o) {
       return { mainPath: hit.mainPath, made: 0, kept: hit.names.length + 1, names: hit.names };
     }
   }
+  /* 没命中才要运行时那一份：**调用方递进来的可以是串（老口径）也可以是一格函数**
+     （要的时候才算 —— 见上面那段）。 */
+  const pick = (v) => (typeof v === 'function' ? v() : v);
+  const rtText = pick(o.runtimeText);
+  const rtGiven = pick(o.runtimeName);
+  const rtFile = typeof rtGiven === 'string' ? rtGiven
+    : (typeof rtText === 'string'
+      ? `omni_rt_${hash16(rtText).slice(0, 8)}.js`
+      : 'omni_rt.js');
   const r = evalUnitTexts(o.path, o.argv ?? [], {
     dir: o.dir, tool: o.tool ?? '', coreSx: o.coreSx,
   });
@@ -226,7 +234,7 @@ export function evalUnitsBuild(o) {
     rowOf,
     emitJs: (u) => o.emitEsm(o.textToMod(u.name, u.text, `omni_init_${u.name}`)),
     unitSym: (n) => `omni_init_${n}`,
-    runtimeText: o.runtimeText,
+    runtimeText: rtText,
     /* **运行时那一份也按内容起名**：浏览器才敢给它 immutable（四百 KB 一次都不再问）。 */
     runtimeName: rtFile,
     prelude: [`import './${rtFile}';`],
@@ -238,7 +246,7 @@ export function evalUnitsBuild(o) {
       names: built.names,
       /* 命中之前每一份都要 stat 得到 —— 少一份（缓存清过/`gc` 扫过）就退回慢路。 */
       files: [`${entry}.js`, ...built.names.map((n) => `${n}.js`),
-        ...(typeof o.runtimeText === 'string' ? ['omni_rt.js', rtFile] : [])],
+        ...(typeof rtText === 'string' ? ['omni_rt.js', rtFile] : [])],
     });
   }
   /* **运行时那一层记一格账**（键 = 那张名字表 + 编译器指纹 -> 产物名）：下一趟就能

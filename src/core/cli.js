@@ -2104,8 +2104,11 @@ function unitsBuild(path, rest) {
     coreSx: coreSxText,
     textToMod: cap('sx.textToMod'),
     emitEsm: (m) => target('js').emit(m, { esm: true }),
-    runtimeText: jsRuntimeOnce().text,
-    runtimeName: jsRuntimeOnce().name,
+    /* **运行时那一份是两格函数，不是两格串**：算它的名字要 `hash16` 那 350KB（量过 47ms），
+       而命中 `built.log` 那条快路压根用不着它（键里有编译器指纹，见 `evalUnitsBuild`）。
+       命令行这一侧每趟是个新进程，省下的就是每趟 47ms。 */
+    runtimeText: () => jsRuntimeOnce().text,
+    runtimeName: () => jsRuntimeOnce().name,
   });
   return { dir, r };
 }

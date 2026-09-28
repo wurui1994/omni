@@ -4057,3 +4057,19 @@ V8 整份编"。量出来的账（`02-gl.pss --gfx null --frames 0 --stat`，合
 * `tests/eval/scan.js`（`--leg js --gfx null`，语料那一轴）**228 / 228、0 红**（整趟 259s）。
 * 逃生口留着：`OMNI_UNITS_RUN=0` 走老路；`--backend/--direct/--interp/--mir/--stat/
   --profile/--emit-sx` 这几档**照旧走老路**（那些档要的正是"整份在手"）。
+
+### 37.5 再一刀：命中那条路上不算运行时那份的名字
+
+接上来之后量到"复用 2 份"那一步**还要 123ms**。那不是降级，是**哈希**：运行时那一份按内容
+起名（`omni_rt_<hash16>.js`），而 `hash16` 在那 350KB 上要 47ms —— 命令行这一侧每趟是个新
+进程，`jsRuntimeOnce()` 那格备忘救不了它（memory 里 `feedback_hash16_is_slow` 记的就是这条：
+"又一次以为在降级，其实在哈希"）。
+
+两处改法（`built.log` 那条快路上压根用不着那个名字）：
+* `evalUnitsBuild` 的键里**去掉运行时那份的文件名** —— 键里已经有编译器指纹（`srcStamp()`），
+  而运行时正文本来就是编译器自己的输出，指纹变了它一定跟着变；
+* `runtimeText`/`runtimeName` 改成**两格函数**（调用方递串也照旧收），没命中才 `pick()`。
+
+    eval units  123ms -> **42ms**（复用两份那一趟）
+    进程内步骤  206ms -> **87ms**（老路 185ms）
+    整条命令    0.49s -> **0.43s**（老路 0.53s，交错三趟各取最小）
