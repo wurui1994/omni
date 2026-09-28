@@ -137,6 +137,27 @@ function compile(gl, kind, src) {
 }
 
 /** 开设备：一格 canvas + 一格 WebGL2 上下文 + 那对最简着色器。 */
+/**
+ * **一格 2D 画布**（裁子图与取像素那两处用）。
+ *
+ * 页面上是 `document.createElement('canvas')`；**没有 DOM 的那一档**（Worker +
+ * OffscreenCanvas，任务 #39）是 `new OffscreenCanvas(w,h)` —— 两边都有 `getContext('2d')`
+ * / `drawImage` / `getImageData`，所以调用处一个字都不用改。两样都没有就回 null
+ * （调用处记一笔 miss，不静默当成成功）。
+ */
+function mk2d(w, h) {
+  const doc = globalThis.document;
+  if (doc !== undefined && doc !== null && typeof doc.createElement === 'function') {
+    const c = doc.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    return c;
+  }
+  const OC = globalThis.OffscreenCanvas;
+  if (typeof OC === 'function') return new OC(w, h);
+  return null;
+}
+
 function open(canvas, w, h) {
   /* **`alpha: false` 是一条判据不是一格口味**：正本画的是窗口的帧缓冲，那儿没有
      alpha 通道 —— 片元写多少 alpha 都不影响看见的颜色。浏览器这边默认 `alpha: true`
@@ -233,6 +254,15 @@ function installInput(canvas) {
   const keys = [];
   for (let i = 0; i < 256; i++) keys.push(0);
   D.keys = keys;
+  /**
+   * **没有 DOM 的那一档**（`OffscreenCanvas` / Worker 里，任务 #39）：这儿一个监听都挂不上
+   * （`OffscreenCanvas` 没有 `addEventListener`、Worker 里没有 `window`）。
+   * 那时输入由**宿主推进来**（`dev.setInput(…)`）—— 键位表照旧在这儿开好，
+   * 于是脚本读 `keystatus[…]` 读到的是 0，而不是"这一格压根没有"。
+   */
+  const canEv = typeof canvas.addEventListener === 'function';
+  const win = globalThis.window;
+  if (!canEv || win === undefined || win === null) return;
   const at = (ev) => {
     const r = canvas.getBoundingClientRect();
     D.mx = (ev.clientX - r.left) * (D.w / (r.width || D.w));
@@ -249,14 +279,36 @@ function installInput(canvas) {
     D.bst &= ~(ev.button === 0 ? 1 : (ev.button === 2 ? 2 : 4));
   });
   canvas.addEventListener('contextmenu', (ev) => { ev.preventDefault(); });
-  window.addEventListener('keydown', (ev) => {
+  win.addEventListener('keydown', (ev) => {
     const c = SCAN[ev.code];
     if (c !== undefined) D.keys[c] = 1;
   });
-  window.addEventListener('keyup', (ev) => {
+  win.addEventListener('keyup', (ev) => {
     const c = SCAN[ev.code];
     if (c !== undefined) D.keys[c] = 0;
   });
+}
+
+/**
+ * **输入从外头推进来**（没有 DOM 的那一档：Worker + OffscreenCanvas，任务 #39）。
+ *
+ * 形状与设备自己那几格一样：`mx`/`my` 是**canvas 像素**、`bst` 是按键位
+ * （0 左 / 1 右 / 2 中）、`keys` 是"扫描码 -> 0/1"的稀疏对象或数组。
+ * 给了哪几格就更新哪几格 —— 宿主那侧一般每帧只推动过的那一格。
+ */
+function setInput(v) {
+  if (v === null || v === undefined) return 0;
+  if (typeof v.mx === 'number') D.mx = v.mx;
+  if (typeof v.my === 'number') D.my = v.my;
+  if (typeof v.bst === 'number') D.bst = v.bst;
+  const ks = v.keys;
+  if (ks !== null && ks !== undefined && D.keys !== null) {
+    for (const k of Object.keys(ks)) {
+      const i = Number(k);
+      if (i >= 0 && i < 256) D.keys[i] = ks[k] === 0 ? 0 : 1;
+    }
+  }
+  return 0;
 }
 
 /* ---------------------------------------------------------------- 图元 -> 顶点 */
@@ -996,9 +1048,8 @@ function texFile(slot, name, fmt) {
       const order = [1, 3, 4, 5, 0, 2];
       const fw = im.naturalWidth;
       const fh = im.naturalHeight / 6;
-      const cut = document.createElement('canvas');
-      cut.width = fw;
-      cut.height = fh;
+      const cut = mk2d(fw, fh);
+      if (cut === null) { miss('glsettexfile:2d'); return; }
       const c2 = cut.getContext('2d');
       for (let f = 0; f < 6; f++) {
         c2.clearRect(0, 0, fw, fh);
@@ -1808,9 +1859,8 @@ function picLoad(name) {
     return false;
   };
   im.onload = () => {
-    const cv = document.createElement('canvas');
-    cv.width = im.naturalWidth;
-    cv.height = im.naturalHeight;
+    const cv = mk2d(im.naturalWidth, im.naturalHeight);
+    if (cv === null) { miss('pic:2d'); return; }
     const c2 = cv.getContext('2d', { willReadFrequently: true });
     c2.drawImage(im, 0, 0);
     e.px = c2.getImageData(0, 0, cv.width, cv.height).data;
@@ -1942,6 +1992,8 @@ export function installGlDevice(canvas, w = 320, h = 240) {
     size: () => ({ w: D.w, h: D.h }),
     /** 现在的输入（判据用：造一次事件之后核对设备真收到了）。 */
     input: () => ({ mx: D.mx, my: D.my, bst: D.bst, keys: D.keys }),
+    /** 输入从外头推进来（没有 DOM 的那一档：Worker + OffscreenCanvas，见 `setInput`）。 */
+    setInput,
   };
   globalThis.__OMNI_GFX = dev;
   return dev;

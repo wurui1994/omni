@@ -424,6 +424,41 @@ for (const c of CASES) {
         && (cr.miss ?? []).length === 0,
         JSON.stringify(cr).slice(0, 240));
       /**
+       * **没有 DOM 的那一档**（`OffscreenCanvas`，任务 #39 的第一格）：设备装在一格
+       * `OffscreenCanvas` 上 —— 那上头**挂不了事件**（没有 `addEventListener`），
+       * 裁子图与取像素那两处也没有 `document.createElement`。这一格判"照样画得出来"：
+       * 跑 `draw2d.kc`、等两次 rAF、`snapshot()` 里非背景色的格数够多。
+       * 走通它等于 `gfx-gl.js` 在 Worker 里开得起来（Worker 那一档还差 `new Image()`
+       * 那一族，见任务 #39）。
+       */
+      const op = 'async () => {'
+        + ' if (typeof OffscreenCanvas !== "function") return { skip: 1 };'
+        + ' const c = new OffscreenCanvas(320, 240);'
+        + ' const dev = window.__OMNI_INSTALL_GL(c, 320, 240);'
+        + ' globalThis.process.env.OMNI_GFX = "host";'
+        + ' const r = await window.__OMNI_LOCAL("/api/run",'
+        + '   { body: JSON.stringify({ argv: ["run", "ext/evaldraw/examples/draw2d.kc"] }) });'
+        + ' if (r.code !== 0) return { err: (r.stderr || "").slice(0, 300) };'
+        + ' await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));'
+        + ' const s = dev.snapshot();'
+        + ' const miss = dev.misses ? dev.misses() : [];'
+        + ' dev.stop();'
+        + ' const bg = [s.bytes[0], s.bytes[1], s.bytes[2]];'
+        + ' let other = 0;'
+        + ' for (let i = 0; i < s.bytes.length; i += 4) {'
+        + '   if (s.bytes[i] !== bg[0] || s.bytes[i+1] !== bg[1] || s.bytes[i+2] !== bg[2]) other++;'
+        + ' }'
+        + ' return { kind: dev.kind, w: s.w, h: s.h, bg, other, miss }; }';
+      const or = JSON.parse(await pw([S, '--raw', 'eval', op]));
+      if (or.skip === 1) {
+        console.log('  --   OffscreenCanvas 那一档跳过（这个浏览器没有它）');
+      } else {
+        ok('设备装在 OffscreenCanvas 上也画得出来（没有 DOM 的那一档）',
+          or.err === undefined && or.kind === 'webgl2' && or.w === 320 && or.h === 240
+          && or.other > 2000 && (or.miss ?? []).length === 0,
+          JSON.stringify(or).slice(0, 240));
+      }
+      /**
        * **实时那一格**（`requestAnimationFrame` 的帧循环）：产物把每帧那一格函数交给设备
        * （方言的 `(gfxframefn …)`），页面用 rAF 反复调 —— 所以"跑了几帧"不是我们数的，
        * 是浏览器按刷新率给的。
