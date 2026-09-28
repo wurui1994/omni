@@ -1008,39 +1008,97 @@ function listRepr(box, t, C) {
   };
 }
 
-/** `floor(a / b)` —— python 的 `//`。回的类型跟着操作数（两边都是 int 就 int）。 */
-function floorDiv(a, b, wantInt, C) {
-  const q = { kind: 'rmath', fn: 'floor', args: [{ kind: 'binop', op: '/', left: toReal(a, C), right: toReal(b, C) }] };
-  return wantInt ? { kind: 'builtin', name: 'toint', args: [q] } : q;
+/**
+ * 不纯的表达式先落一格临时量（`//` 与 `%` 的两边各要用两次）。
+ * 从前这一手只写在 `pyMod` 里头，现在 `floorDiv` 的整数那一支也要它。
+ */
+function holdTmp(e, p, C, pre) {
+  if (isPure(e)) return e;
+  const n = C.fresh(p);
+  const t = ty(e, C);
+  C.bind(n, t);
+  pre.push({ kind: 'let', name: n, type: t, init: e });
+  return { kind: 'name', name: n };
 }
 
+/** `m != 0 && (m ^ r) < 0` —— 余数不为零、且它与除数**异号**（那时向下取整要减一格）。
+ *  用整数的 `^` 比符号位，不拿两个 bool 去比（方言里 bool 上没有那一格）。 */
+const signsDiffer = (m, r) => ({
+  kind: 'binop', op: '&&',
+  left: { kind: 'binop', op: '!=', left: m, right: { kind: 'int', value: 0 } },
+  right: {
+    kind: 'binop',
+    op: '<',
+    left: { kind: 'binop', op: '^', left: m, right: r },
+    right: { kind: 'int', value: 0 },
+  },
+});
+
 /**
- * python 的 `%` —— **符号跟着除数**（`-7 % 2` 是 1，C 给 -1）。
- * 落成 `a - b * floor(a/b)`；a / b 各用两次，所以不纯的先落一格临时量。
- * 出浮点那一档**两边都要先提到 real**（方言的 `*` 要两边同型）。
+ * `floor(a / b)` —— python 的 `//`。回的类型跟着操作数（两边都是 int 就 int）。
+ *
+ * **整数那一支不许走 double**（第一百四十九片）：`4052555153018976267 // 3` 走
+ * `floor(a/b)` 再取整会答 …992000，python 答 …992089 —— double 只有 53 位有效位。
+ * 整数那一支落成"截向零的商 + 异号时减一格"：方言的 int `/` 是截向零的（量过：
+ * `-7 / 2` 是 -3），`%` 的符号跟着被除数（`-7 % 2` 是 -1）。
  */
-function pyMod(a, b, wantInt, C) {
-  const pre = [];
-  const keep = (e, p) => {
-    if (isPure(e)) return e;
-    const n = C.fresh(p);
-    const t = ty(e, C);
-    C.bind(n, t);
-    pre.push({ kind: 'let', name: n, type: t, init: e });
-    return { kind: 'name', name: n };
-  };
-  let l = keep(a, 'mod_a');
-  let r = keep(b, 'mod_b');
+function floorDiv(a, b, wantInt, C) {
   if (!wantInt) {
-    l = toReal(l, C);
-    r = toReal(r, C);
+    return { kind: 'rmath', fn: 'floor', args: [{ kind: 'binop', op: '/', left: toReal(a, C), right: toReal(b, C) }] };
   }
+  const pre = [];
+  const l = holdTmp(a, 'fdiv_a', C, pre);
+  const r = holdTmp(b, 'fdiv_b', C, pre);
+  const q = { kind: 'binop', op: '/', left: l, right: r };
+  const m = { kind: 'binop', op: '%', left: l, right: r };
   const value = {
-    kind: 'binop', op: '-', left: l,
-    right: { kind: 'binop', op: '*', left: r, right: floorDiv(l, r, wantInt, C) },
+    kind: 'ternary',
+    type: INT,
+    cond: signsDiffer(m, r),
+    then: { kind: 'binop', op: '-', left: q, right: { kind: 'int', value: 1 } },
+    else_: q,
   };
   return pre.length === 0 ? value : { kind: 'block-expr', stmts: pre, value };
 }
+
+
+/**
+ * python 的 `%` —— **符号跟着除数**（`-7 % 2` 是 1，C 给 -1）。
+ *
+ * 浮点那一档落成 `a - b * floor(a/b)`（两边都先提到 real —— 方言的 `*` 要同型）。
+ * **整数那一档不走 double**（第一百四十九片）：落成"C 的余数 + 异号时加一格除数"，
+ * 与 `floorDiv` 的整数支同一条口径。从前整数也走 `a - b*floor(a/b)`，于是
+ * `4052555153018976267 % 3` 答 267（python 答 0）—— double 只有 53 位有效位。
+ * a / b 各要用两次，所以不纯的先落一格临时量。
+ */
+function pyMod(a, b, wantInt, C) {
+  const pre = [];
+  const l0 = holdTmp(a, 'mod_a', C, pre);
+  const r0 = holdTmp(b, 'mod_b', C, pre);
+  const wrap = (value) => (pre.length === 0 ? value : { kind: 'block-expr', stmts: pre, value });
+  if (wantInt) {
+    const m = { kind: 'binop', op: '%', left: l0, right: r0 };
+    /* 余数要用两次（判符号 + 加一格），所以也落一格临时量。 */
+    const mn = C.fresh('mod_r');
+    C.bind(mn, INT);
+    pre.push({ kind: 'let', name: mn, type: INT, init: m });
+    const mv = { kind: 'name', name: mn };
+    return wrap({
+      kind: 'ternary',
+      type: INT,
+      cond: signsDiffer(mv, r0),
+      then: { kind: 'binop', op: '+', left: mv, right: r0 },
+      else_: mv,
+    });
+  }
+  const l = toReal(l0, C);
+  const r = toReal(r0, C);
+  return wrap({
+    kind: 'binop', op: '-', left: l,
+    right: { kind: 'binop', op: '*', left: r, right: floorDiv(l, r, false, C) },
+  });
+}
+
 
 /** 一格表达式 → 标准 IR。 */
 export function exprOf(x, C) {
