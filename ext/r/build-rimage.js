@@ -34,7 +34,7 @@ const LOG = join(OUT, 'base-build.log');
 const INIT = ['Rf_InitArithmetic', 'Rf_InitTempDir', 'Rf_InitMemory', 'Rf_InitStringHash',
   'Rf_InitBaseEnv', 'Rf_InitNames', 'InitParser', 'Rf_InitGlobalEnv', 'InitDynload',
   'Rf_InitOptions', 'Rf_InitGraphics', 'Rf_InitTypeTables', 'Rf_InitS3DefaultTypes',
-  'R_InitConditions', 'Rf_InitConnections', 'omni_console_init', 'omni_toplevel_init'];
+  'R_InitConditions', 'Rf_InitConnections', 'omni_console_init', 'omni_toplevel_init', 'omni_locale_init'];
 /* 铺完像之后问这几句 —— 身子都在 base 的 R 代码里，所以它们答对就是"像是活的"。 */
 const CHECK = [['mean(1:10)', 5.5], ['nchar("hello")', 5], ['sum(sapply(1:5, function(i) i * i))', 55],
   ['as.numeric(paste0("1", "2"))', 12], ['sum(duplicated(c(1, 2, 2, 3)))', 1]];

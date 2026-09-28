@@ -484,7 +484,7 @@ const INIT_SEQ = ['Rf_InitArithmetic', 'Rf_InitTempDir', 'Rf_InitMemory', 'Rf_In
   'Rf_InitBaseEnv', 'Rf_InitNames', 'InitParser', 'Rf_InitGlobalEnv', 'InitDynload',
   'Rf_InitOptions', 'Rf_InitGraphics',
   'Rf_InitTypeTables', 'Rf_InitS3DefaultTypes', 'R_InitConditions', 'Rf_InitConnections',
-  'omni_console_init', 'omni_toplevel_init'];
+  'omni_console_init', 'omni_toplevel_init', 'omni_locale_init'];
 /** 现在**一步都不许炸**（`InitTempDir` 那一步 2026-09-28 补上 stat/access/mkdtemp/
  *  setenv 之后过了）。留这张表是为了"欠账要记名字"，不是为了放水。 */
 const INIT_ALLOW_FAIL = new Set([]);
@@ -875,6 +875,9 @@ const IMG_EVAL = [
   'nchar(format(1234.5678, nsmall = 2))', 'utf8ToInt("A")',
   /* `perl = TRUE` 那一半正则（PCRE2 那一面映到 JS 的 RegExp）；不带 perl 的走 tre */
   'nchar(trimws("  hi  "))', 'nchar(gsub("a+", "X", "baaad", perl = TRUE))',
+  /* 多字节那一族（omni_locale_init 摆上 mbcslocale/utf8locale/R_MB_CUR_MAX 之后才对）*/
+  'nchar("中文字")', 'nchar("中文字", type = "bytes")', 'utf8ToInt("中")',
+  'nchar(substr("中文字", 2, 3))', 'nchar("héllo")',
   'sum(grepl("^a", c("apple", "banana"), perl = TRUE))',
   'sum(mapply(function(a, b) a * b, 1:3, 4:6))', 'sum(Reduce(`+`, 1:10))',
   'length(Filter(function(x) x > 2, 1:5))', 'sum(do.call(c, list(1, 2, 3)))',

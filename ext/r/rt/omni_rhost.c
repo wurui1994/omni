@@ -90,6 +90,10 @@ void omni_locale_init(void) {
   latin1locale = FALSE;
   known_to_be_utf8 = TRUE;
   known_to_be_latin1 = FALSE;
+  /* **这一格是头一版漏的，代价是 `as.numeric("1")` 回 NA**：R 自己那个
+     `R_MB_CUR_MAX`（Defn.h，不是 libc 的 MB_CUR_MAX）是 0，于是 `Mbrtowc(…, 0, …)`
+     回"还没吃完"，`isBlankString("1")` 把它当空串 —— 一路答成 NA。UTF-8 是 4。 */
+  R_MB_CUR_MAX = 4;
 }
 
 /* 顶层上下文（main.c 的 setup_Rmainloop 那一段）：R 的出错那条路要沿着

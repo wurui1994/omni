@@ -2816,6 +2816,167 @@ const LIBC = {
     memStore('i32', info, 0, 0n);
     return undefined;
   },
+  /* ------------------------------------------- 宽字符那一族（多字节 locale 要它）
+   * R 一进"多字节 locale"那条路（`mbcslocale`）就要这几个：`isBlankString` 用 `iswspace`、
+   * `nchar`/`substr` 一路用 `iswprint` 与 `towupper`/`towlower`。
+   * 这条腿上字符集是 **UTF-8**，而 `wchar_t` 里装的是**码点**，所以这几格按码点判：
+   * ASCII 那一段与 C locale 一样，非 ASCII 那一段按 Unicode 的大类给个**够用的**答案
+   * （空白只认那几个真空白、字母认"不是空白也不是标点数字的可见字符"）。
+   * 要完全对上 Unicode 得搬一张表进来，那是另一刀 —— 现在这几格的答案与
+   * `nchar`/`substr` 要的判断一致就够，而且错了是 loud（判据比得出来）。 */
+  iswspace: (a) => {
+    const c = Number(BigInt(a[0]));
+    return c === 32 || (c >= 9 && c <= 13) || c === 0x85 || c === 0xa0
+      || (c >= 0x2000 && c <= 0x200a) || c === 0x3000 ? 1n : 0n;
+  },
+  iswdigit: (a) => { const c = Number(BigInt(a[0])); return c >= 48 && c <= 57 ? 1n : 0n; },
+  iswupper: (a) => {
+    const c = Number(BigInt(a[0]));
+    const s = String.fromCodePoint(c);
+    return s !== s.toLowerCase() && s === s.toUpperCase() ? 1n : 0n;
+  },
+  iswlower: (a) => {
+    const c = Number(BigInt(a[0]));
+    const s = String.fromCodePoint(c);
+    return s !== s.toUpperCase() && s === s.toLowerCase() ? 1n : 0n;
+  },
+  iswalpha: (a) => {
+    const c = Number(BigInt(a[0]));
+    if (c < 128) return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) ? 1n : 0n;
+    /* 非 ASCII：不是空白、不是标点/符号区就算字母（CJK 也算 —— R 拿它判"能不能当名字"）。 */
+    return c >= 0x2000 && c <= 0x206f ? 0n : 1n;
+  },
+  iswalnum: (a) => {
+    const c = Number(BigInt(a[0]));
+    if (c >= 48 && c <= 57) return 1n;
+    if (c < 128) return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) ? 1n : 0n;
+    return c >= 0x2000 && c <= 0x206f ? 0n : 1n;
+  },
+  iswpunct: (a) => {
+    const c = Number(BigInt(a[0]));
+    if (c >= 128) return c >= 0x2010 && c <= 0x205e ? 1n : 0n;
+    return (c >= 33 && c <= 47) || (c >= 58 && c <= 64)
+      || (c >= 91 && c <= 96) || (c >= 123 && c <= 126) ? 1n : 0n;
+  },
+  iswcntrl: (a) => { const c = Number(BigInt(a[0])); return c < 32 || c === 127 ? 1n : 0n; },
+  iswprint: (a) => {
+    const c = Number(BigInt(a[0]));
+    return c < 32 || c === 127 || (c >= 0x80 && c <= 0x9f) ? 0n : 1n;
+  },
+  iswblank: (a) => { const c = Number(BigInt(a[0])); return c === 32 || c === 9 ? 1n : 0n; },
+  towupper: (a) => {
+    const c = Number(BigInt(a[0]));
+    if (c < 0) return BigInt(c);
+    return BigInt(String.fromCodePoint(c).toUpperCase().codePointAt(0));
+  },
+  towlower: (a) => {
+    const c = Number(BigInt(a[0]));
+    if (c < 0) return BigInt(c);
+    return BigInt(String.fromCodePoint(c).toLowerCase().codePointAt(0));
+  },
+  /** `wcrtomb`：一个码点写回 UTF-8（`mbrtowc` 的反向）。回写了几个字节。 */
+  wcrtomb: (a) => {
+    const s = BigInt(a[0]);
+    const c = Number(BigInt.asIntN(32, BigInt(a[1])));
+    if (s === 0n) return 1n;
+    const bs = new TextEncoder().encode(String.fromCodePoint(c < 0 ? 0xfffd : c));
+    for (let i = 0; i < bs.length; i += 1) memStore('i8', s + BigInt(i), 0, BigInt(bs[i]));
+    return BigInt(bs.length);
+  },
+  /** `mbstowcs`：一串 UTF-8 转成一串 `wchar_t`（4 字节一个码点）。
+   *  `dst == NULL` 时只数**字符数**（C 的规矩），否则最多写 `n` 个、写得下就补 0。
+   *  回 -1（`(size_t)-1`）表示里头有坏字节。 */
+  mbstowcs: (a) => {
+    const d = BigInt(a[0]);
+    const s = BigInt(a[1]);
+    const n = BigInt(a[2]);
+    let i = 0n;                                   // 源字节下标
+    let k = 0n;                                   // 已经产出的字符数
+    for (;;) {
+      if (d !== 0n && k >= n) break;
+      const b0 = Number(memLoad('i8u', s + i, 0));
+      if (b0 === 0) { if (d !== 0n) memStore('i32', d + k * 4n, 0, 0n); break; }
+      const need = b0 < 0x80 ? 1 : b0 >= 0xf0 ? 4 : b0 >= 0xe0 ? 3 : b0 >= 0xc0 ? 2 : -1;
+      if (need < 0) return BigInt.asIntN(64, -1n);
+      let cp = need === 1 ? b0 : b0 & (need === 2 ? 0x1f : need === 3 ? 0x0f : 0x07);
+      for (let j = 1; j < need; j += 1) {
+        const bj = Number(memLoad('i8u', s + i + BigInt(j), 0));
+        if ((bj & 0xc0) !== 0x80) return BigInt.asIntN(64, -1n);
+        cp = (cp << 6) | (bj & 0x3f);
+      }
+      if (d !== 0n) memStore('i32', d + k * 4n, 0, BigInt(cp));
+      i += BigInt(need);
+      k += 1n;
+    }
+    return k;
+  },
+  /** `wcstombs`：反向（一串码点写回 UTF-8）。`dst == NULL` 时只数**字节数**。 */
+  wcstombs: (a) => {
+    const d = BigInt(a[0]);
+    const s = BigInt(a[1]);
+    const n = BigInt(a[2]);
+    let k = 0n;                                   // 已经写出的字节数
+    for (let i = 0n; ; i += 1n) {
+      const cp = Number(BigInt.asIntN(32, memLoad('i32s', s + i * 4n, 0)));
+      if (cp === 0) { if (d !== 0n && k < n) memStore('i8', d + k, 0, 0n); break; }
+      const bs = new TextEncoder().encode(String.fromCodePoint(cp < 0 ? 0xfffd : cp));
+      if (d !== 0n && k + BigInt(bs.length) > n) break;
+      for (let j = 0; j < bs.length; j += 1) {
+        if (d !== 0n) memStore('i8', d + k + BigInt(j), 0, BigInt(bs[j]));
+      }
+      k += BigInt(bs.length);
+    }
+    return k;
+  },
+  wcslen: (a) => {
+    const s = BigInt(a[0]);
+    let i = 0n;
+    while (memLoad('i32s', s + i * 4n, 0) !== 0n) i += 1n;
+    return i;
+  },
+  wcscmp: (a) => {
+    const x = BigInt(a[0]);
+    const y = BigInt(a[1]);
+    for (let i = 0n; ; i += 1n) {
+      const p = memLoad('i32s', x + i * 4n, 0);
+      const q = memLoad('i32s', y + i * 4n, 0);
+      if (p !== q) return p < q ? -1n : 1n;
+      if (p === 0n) return 0n;
+    }
+  },
+  wcsncmp: (a) => {
+    const x = BigInt(a[0]);
+    const y = BigInt(a[1]);
+    const n = BigInt(a[2]);
+    for (let i = 0n; i < n; i += 1n) {
+      const p = memLoad('i32s', x + i * 4n, 0);
+      const q = memLoad('i32s', y + i * 4n, 0);
+      if (p !== q) return p < q ? -1n : 1n;
+      if (p === 0n) return 0n;
+    }
+    return 0n;
+  },
+  wcscpy: (a) => {
+    const d = BigInt(a[0]);
+    const s = BigInt(a[1]);
+    for (let i = 0n; ; i += 1n) {
+      const c = memLoad('i32s', s + i * 4n, 0);
+      memStore('i32', d + i * 4n, 0, c);
+      if (c === 0n) return d;
+    }
+  },
+  /** `wcwidth` / `wcswidth`：占几列。CJK 与全角那几段算 2、控制字符 -1、其余 1
+   *  （R 排版用它；要完全对上 Unicode 的 East Asian Width 得搬表，那是另一刀）。 */
+  wcwidth: (a) => {
+    const c = Number(BigInt.asIntN(32, BigInt(a[0])));
+    if (c === 0) return 0n;
+    if (c < 32 || (c >= 0x7f && c < 0xa0)) return BigInt.asIntN(32, -1n);
+    const wide = (c >= 0x1100 && c <= 0x115f) || (c >= 0x2e80 && c <= 0xa4cf)
+      || (c >= 0xac00 && c <= 0xd7a3) || (c >= 0xf900 && c <= 0xfaff)
+      || (c >= 0xfe30 && c <= 0xfe6f) || (c >= 0xff00 && c <= 0xff60)
+      || (c >= 0xffe0 && c <= 0xffe6) || (c >= 0x20000 && c <= 0x3fffd);
+    return wide ? 2n : 1n;
+  },
   memcpy: (a) => {
     const n = Number(BigInt(a[2]));
     for (let i = 0; i < n; i++) {
