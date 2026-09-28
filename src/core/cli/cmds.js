@@ -298,6 +298,18 @@ const C_GROUP = {  name: 'c',
       flags: [...C_CPP_FLAGS],
     },
     {
+      name: 'jit', key: 'c-jit', usage: 'FILE.c',
+      brief: '同上再跑，但**就在这个进程里**：铺进一块可执行内存直接跳进去（ADR-0045 D2）',
+      help: `与 \`c run\` 的差别只有"跑在哪儿"：那一条写出可执行文件再起一个子进程，
+这一条把我们自己那台后端出的 \`.o\` 当场铺进本进程的一块内存（重定位就地回填、
+\`.text\` 设成 rx 并刷指令缓存），然后跳进 \`main\`。不写文件、不起进程、
+一个外部 cc 或 LLVM 都不借。
+
+\`main\` 必须写成 \`int main(void)\`：跳进去那一格按 \`int64_t (*)(void)\` 调，
+带形参的话 x0/x1 是上一趟留下的垃圾。退出码按 \`& 0xff\` 收（与 \`exit\` 同口径）。`,
+      flags: [...C_CPP_FLAGS],
+    },
+    {
       name: 'obj', key: 'c-obj', usage: 'FILE.c -o NAME',
       brief: '编成一个真的目标文件（native，没有线性内存）',
       flags: [F_OUT, ...C_CPP_FLAGS, ...C_TARGET_FLAGS],
@@ -655,6 +667,7 @@ asy（5 分多钟），而 tests/asy/eps.js 默认不生成 —— 清掉之后�
     { name: 'c-run', key: 'c-run', hidden: true, flags: [...C_CPP_FLAGS] },
     { name: 'jit-selftest', key: 'jit-selftest', hidden: true, flags: [] },
     { name: 'c-obj', key: 'c-obj', hidden: true, flags: [F_OUT, ...C_CPP_FLAGS, ...C_TARGET_FLAGS] },
+    { name: 'c-jit', key: 'c-jit', hidden: true, flags: [...C_CPP_FLAGS] },
     { name: 'elf-r', key: 'elf-r', hidden: true, flags: [...LINK_COMMON] },
     { name: 'elf-link', key: 'elf-link', hidden: true, flags: [...LINK_COMMON, ...LINK_ELF_ONLY] },
     { name: 'macho-link', key: 'macho-link', hidden: true, flags: [...LINK_COMMON, ...LINK_MACHO_ONLY] },

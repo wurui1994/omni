@@ -159,5 +159,86 @@ if (process.arch === 'arm64') {
   }
 }
 
+/* ================================================================ D2 的后半
+ *
+ * **一整个程序在这个进程里跑起来**（`omni c-jit`，ADR-0045 的 D2）。
+ *
+ * 前半判的是"一条 `blr` 能不能调对一个 libc 符号"；这一格判的是整条链：
+ *   我们自己那台 C 前端 -> MIR -> `arm64/from_mir.js` 的机器码 -> 一份 `ET_REL`
+ *   -> `flat_image.js` 就地打完重定位 -> `protect(rx)` -> 跳进 `main`。
+ * 一个外部 cc、一份可执行文件、一个子进程都不经过。
+ *
+ * **尺子是 clang**（`-O0`，同一份 `.c`）：stdout 逐字节 + 退出码。为什么不拿
+ * `omni c run` 当尺子 —— 那一条是 **MIR 解释器**，它连 `sqrt` 都拒（量到的原话
+ * `interp: C ABI call 'sqrt' is not supported by the interpreter`）。尺子必须比被判的
+ * 那条路更全，不然判不动。clang 不在仓库的依赖里，没装就**明着跳过**。
+ *
+ * 四份例子各压一件事，都是"整程序"级别而不是一条指令：
+ *   递归 + `printf("%ld")`、串与 `%zu`、**结构体按值传参 + `sqrt`（浮点与外部数学库）**、
+ *   循环累加 + 退出码取模。少任何一件，"能跑"都可能是巧合。
+ */
+{
+  /* 这一节要的是"成不成立 + 不成立时那句话"，而上面那个 `ok` 是"两个值相不相等" ——
+     两种形状别混用（混了一次：八条全 FAIL 而两边的值明明一样）。 */
+  const okIf = (name, cond, note) => {
+    if (cond) { pass++; process.stdout.write(`  ok   ${name}\n`); return; }
+    fail++;
+    process.stdout.write(`  FAIL ${name}\n       ${note}\n`);
+  };
+  /* 尺子在不在。**用 `spawnSync` 判、而且要看 `status`** —— 写 `execFileSync` 的话
+     那个名字在这份文件里根本没 import，`try` 里抛的是 `ReferenceError`，被 `catch`
+     一口吞掉之后这一整节"安静地跳过"（踩过一次：clang 明明装着，判据说没有）。 */
+  const probe = spawnSync('clang', ['--version'], { encoding: 'utf8', timeout: 20000 });
+  const haveClang = probe.status === 0;
+
+  const CASES = {
+    'ret.c': 'int main(void) { return 42; }\n',
+    'rec.c': '#include <stdio.h>\n'
+      + 'static long fib(long n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }\n'
+      + 'int main(void) { printf("fib(24)=%ld\\n", fib(24)); return 7; }\n',
+    'fp.c': '#include <stdio.h>\n#include <math.h>\n'
+      + 'struct P { double x, y; };\n'
+      + 'static double dist(struct P a, struct P b) {\n'
+      + '  double dx = a.x - b.x, dy = a.y - b.y;\n'
+      + '  return sqrt(dx * dx + dy * dy);\n}\n'
+      + 'int main(void) {\n'
+      + '  struct P a = { 1.5, 2.5 }, b = { 4.5, 6.5 };\n'
+      + '  printf("dist=%.3f\\n", dist(a, b));\n'
+      + '  return (int)dist(a, b);\n}\n',
+    'loop.c': '#include <stdio.h>\n#include <string.h>\n'
+      + 'int main(void) {\n'
+      + '  long s = 0;\n'
+      + '  for (int i = 0; i < 1000; i++) s += i * i;\n'
+      + '  printf("sum=%ld len=%zu\\n", s, strlen("hello, own jit"));\n'
+      + '  return (int)(s % 251);\n}\n',
+  };
+
+  process.stdout.write('\nD2 后半（整个程序在本进程里跑 —— omni c-jit）\n');
+  if (!haveClang) {
+    process.stdout.write('  skip 这一节（这台机器上没有 clang，少了尺子不许假绿）\n');
+  } else {
+    const dir = join(ROOT, '.omni-cache', 'work', 'ownjit-judge');
+    mkdirSync(dir, { recursive: true });
+    for (const [name, src] of Object.entries(CASES)) {
+      const cPath = join(dir, name);
+      writeFileSync(cPath, src);
+      /* 尺子：clang -O0。`-lm` 在 macOS 上是空操作，Linux 上非给不可。 */
+      const bin = join(dir, `${name}.clang`);
+      const cc = spawnSync('clang', ['-O0', '-w', cPath, '-o', bin, '-lm'], { encoding: 'utf8' });
+      if (cc.status !== 0) { okIf(`${name} 尺子编得过`, false, cc.stderr.slice(0, 200)); continue; }
+      const want = spawnSync(bin, [], { encoding: 'utf8' });
+      /* 被判的那条路。**不许借 `-lm`** —— `sqrt` 是靠 `dlsym(RTLD_DEFAULT,…)` 在
+         这个进程里找着的（libSystem / libm 早就装着了），那正是这条路的立场。 */
+      const got = spawnSync('node', [join(ROOT, 'src/cli.js'), 'c-jit', cPath],
+        { encoding: 'utf8', timeout: 60000 });
+      okIf(`${name} 在本进程里跑出来的 stdout 与 clang 逐字节相同`,
+        got.stdout === want.stdout, `想要 ${JSON.stringify(want.stdout)}，`
+        + `量到 ${JSON.stringify(got.stdout)}${got.stderr ? ` err=${got.stderr.slice(0, 200)}` : ''}`);
+      okIf(`${name} 退出码与 clang 相同`, got.status === want.status,
+        `想要 ${want.status}，量到 ${got.status}`);
+    }
+  }
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);

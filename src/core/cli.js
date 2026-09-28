@@ -4820,6 +4820,69 @@ function ffiInject(mod) {
 }
 
 /**
+ * **`c-jit`：那份 C -> 我们自己那台后端的机器码 -> 就在这个进程里跑**（ADR-0045 的 D2）。
+ *
+ * 与 `c-obj` + `c link` + `spawn` 那条路比，少掉的是**写文件与起进程**这两步；
+ * 与 `ffiInject` 比，换掉的只有**入口的约定**：那一路跳的是
+ * `napi_register_module_v1`（注册一格 addon），这一路跳的是 `main`。
+ * 三件真东西（我们自己的代码生成 / 运行期重定位 / 可执行内存）全是现成的：
+ *
+ *   `cObj(… 'elf' …)`  MIR -> arm64/x86-64 机器码 -> 一份 `ET_REL`（`arm64/from_mir.js`）
+ *   `flatImage`        布局 + GOT + 桩子 + **发完就地回填绝对地址**（`link/flat_image.js`）
+ *   宿主那三个口子      `mem` 要页对齐的内存、`protect` 设 rx 并刷 icache、`calli` 跳进去
+ *
+ * 所以这一格是**接线**，不是第四份实现 —— ADR-0045 §3 那张表里"缺的不是会不会发机器码"
+ * 说的就是这件事。
+ *
+ * **`main` 必须是 `int main(void)`**：`calli` 按 `int64_t (*)(void)` 调，给
+ * `main(argc, argv)` 的话 x0/x1 是上一趟留下的垃圾 —— 那不是"能跑但不准"，
+ * 是**踩到哪算哪**。整份 `.sx` 程序那一档（生成的 `main` 带两个形参）要先补一格入口包装，
+ * 那是 D3 的事，这儿明着拒。
+ *
+ * 退出码按 `& 0xff` 收（POSIX 的 `exit` 就这么截），于是"这个进程里跑一趟"与
+ * "起个进程跑一趟"在判据眼里是同一件事。
+ *
+ * **这一格故意不缓存那份 `.o`**（量出来编它约 0.7s）：键要正确就得覆盖**所有**输入，
+ * 而这条路上的输入包括用户自己那几份 `#include "…"` —— 只哈主文件的键会在改了头之后
+ * 照旧命中，那是"一个会跑错程序的缓存"（`buildSelf` 的 `objKey` 那段记过同一类错）。
+ * 要缓存就等发射按单元切开（ADR-0047 §6），那时每个单元各自一格键。
+ */
+function cJitRun(path, incs, defs) {
+  const h = ffiHost();
+  const arch = hostArch();
+  const os = hostOs();
+  const stage = workDirFor('c-jit', hash16([path, srcStamp(), arch, os].join('|')));
+  const objPath = join(stage, 'prog.o');
+  cObj(path, objPath, arch, incs.concat([RUNTIME_DIR]), defs, 'elf', os, undefined, false);
+  /* `readBinary` 回的是 latin1 的串（宿主那一层就这么定的），链接器要按字节看 ——
+     与 `ffiObject` / `elf-r` 那两处是同一句话。 */
+  const s = readBinary(objPath);
+  const obj = new Uint8Array(s.length);
+  for (let k = 0; k < s.length; k++) obj[k] = s.charCodeAt(k);
+  let mem = null;
+  const img = flatImage({
+    objs: [obj],
+    page: h.page(),
+    reserve: (n) => { mem = h.mem(n); return Number(mem.addr); },
+    /* osx 上符号名前那条下划线是平台事实（`cObj` 里那格 `prefix`），而 `dlsym` 要的是
+       不带的 —— 剥它的是调用方，`flatImage` 不认识平台（与 `ffiInject` 同一格）。 */
+    resolve: (name) => {
+      const a = h.sym(name.startsWith('_') ? name.slice(1) : name);
+      return a === 0n ? null : Number(a);
+    },
+  });
+  new Uint8Array(mem.buf).set(img.bytes, 0);
+  /* 次序不能动：写完字节才改权限，`.text` 那段设成 rx 时宿主顺手刷指令缓存
+     （arm64 上少了那一句的症状是"有时候跑到旧字节上"，不可复现）。 */
+  for (const r of img.ranges) h.protect(r.addr, r.len, r.mode);
+  const entry = img.syms.get('_main') ?? img.syms.get('main');
+  if (entry === undefined) throw new OmniError(`c-jit：铺出来的映像里找不着 main（${path}）`);
+  vStep(`c-jit  ${img.size} 字节铺在 0x${img.base.toString(16)}，${img.ranges.length} 段`
+    + `（${obj.length} 字节 .o，我们自己那台后端出的机器码）`);
+  return Number(h.calli(entry)) & 0xff;
+}
+
+/**
  * 这一趟的 `$cffi` 从哪儿来：**默认注入**，`OMNI_FFI=cc` 走编到文件那条备选。
  *
  * 注入那条路要一个装得动 addon 的宿主（node）；装不动就自动退到 cc 那条 ——
@@ -7254,6 +7317,13 @@ function main(argv) {
       const fmt = fi >= 0 ? flags[fi + 1] : fmtOfOs(os);
       stdout(`${cObj(path, out, arch, incDirs(flags), defArgs(flags), fmt, os, sysIncDirs(flags))}\n`);
       return 0;
+    }
+    /* `c-jit`：C -> 真机器码 -> **就在这个进程里跑**（ADR-0045 的 D2）。
+     * 不写可执行文件、不起子进程、一个外部 cc / LLVM 都不借。
+     * `main` 要写成 `int main(void)` —— 为什么见 `cJitRun` 的头注。 */
+    case 'c-jit': {
+      const { flags } = cSplitArgs(rest);
+      return cJitRun(path, incDirs(flags), defArgs(flags));
     }
     /* `elf-r`：几个 `.o` 并成一个 `.o`，就是 `tcc -r`（第九刀第四十二片）。
      * 输入可以是 **tcc 自己出的**目标文件 —— 于是这一步的字节对账不必等代码生成对齐。
