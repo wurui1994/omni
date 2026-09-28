@@ -34,6 +34,7 @@ import {
   caseMapOf, charClassOf, rfindOf, copyList, copyDict, charsOf, dictOfPairs,
   sortByKeyStmts, pickByKeyOf,
   listEqOf, listCmpOf, dictEqOf, intOfStr, ordOf, expandTabsOf, splitLinesOf,
+  asciiCaseOf,
 } from './builtins.js';
 
 /** 这一格 IR 里是不是夹着几句话（`block-expr`）—— 摆在条件位上就要当心。 */
@@ -3774,18 +3775,25 @@ function methodOf(recvTok, name, args, C) {
      * （那是它们四条腿能是同一个函数的前提：`toupper` 看 locale，JS 的 `toUpperCase()`
      * 是 Unicode 的、长度都会变）。
      *
-     * **这是一处会答错的地方，不是"还没接"**：python 的这两个是 Unicode 的 ——
-     * 量出来 `"äöü".upper()` 我们交 `äöü`（python 交 `ÄÖÜ`）、
+     * **从"静静答错"改成"当场报还没接"**（第一百五十一片）：python 的这两个是 Unicode 的
+     * —— 量出来 `"äöü".upper()` 我们交 `äöü`（python 交 `ÄÖÜ`）、
      * `"Straße".upper()` 我们交 `STRAßE`（python 交 `STRASSE`，长度还变了）。
      * 真要对得上得借 `Objects/unicodeobject.c` 的大小写映射表（SPEC §一 的借用名单里
-     * 本来就有它）—— 在那之前**只有 ASCII 那一档是对的**。
+     * 本来就有它）。在那之前 **ASCII 那一档照旧走，非 ASCII 报"还没接"** ——
+     * 判"有没有非 ASCII"就是"字节数 != 码点数"（`asciiCaseOf` 里那一格）。
      */
-    if (name === 'upper' && args.length === 0) return { kind: 'builtin', name: 'supper', args: [recv] };
-    if (name === 'lower' && args.length === 0) return { kind: 'builtin', name: 'slower', args: [recv] };
+    if (name === 'upper' && args.length === 0) {
+      return asciiCaseOf(recv, '.upper()', (t) => ({ kind: 'builtin', name: 'supper', args: [t] }), C);
+    }
+    if (name === 'lower' && args.length === 0) {
+      return asciiCaseOf(recv, '.lower()', (t) => ({ kind: 'builtin', name: 'slower', args: [t] }), C);
+    }
     /* `.casefold()` —— **ASCII 那一档就是 `.lower()`**。真正的 casefold 与 lower 只在
        非 ASCII 上分家（`ß` → `ss`、`İ` 那一族），而非 ASCII 的大小写这一层本来就明说
        没接（要借 `unicodeobject.c`）。所以这儿走同一格，不另编一套半对的规矩。 */
-    if (name === 'casefold' && args.length === 0) return { kind: 'builtin', name: 'slower', args: [recv] };
+    if (name === 'casefold' && args.length === 0) {
+      return asciiCaseOf(recv, '.casefold()', (t) => ({ kind: 'builtin', name: 'slower', args: [t] }), C);
+    }
     if (name === 'find' && args.length === 1) return { kind: 'builtin', name: 'scpfind', args: [recv, args[0]] };
     /* 下面这几格**现场发一趟循环**（`builtins.js`）—— 方言的串那一族只有五格算子，
        python 的这几个方法是它自己的规矩（空段算一格、去哪几个空白字符）。 */

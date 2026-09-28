@@ -582,7 +582,43 @@ const SPACES = ' \t\n\r\u000b\f';
 const inSet = (set, ch) => bin('!=', call1('scpfind', [str(set), ch]), int(-1));
 
 /**
- * `.title()` / `.capitalize()` / `.swapcase()` —— 逐格走，**只动 ASCII**。
+ * **非 ASCII 就报"还没接"**（第一百五十一片）。
+ *
+ * 大小写映射与字符分类那一族要 unicode 的**表**（`Objects/unicodeobject.c`，借用名单里
+ * 本来就有它），我们手上只有 ASCII 那一档。从前这几格在非 ASCII 上**静静答错**：
+ * `"äöü".upper()` 交 `äöü`（python 交 `ÄÖÜ`）、`"é".isalpha()` 交 False（python True）。
+ * 那比报话坏得多 —— 现在当场报，话里带"还没接"，于是判据把它算作**缺口**而不是绿
+ * （`tests/python/run.js` 认这三个字）。
+ *
+ * 判"有没有非 ASCII"不必自己扫字节：**字节数 != 码点数** 就等价于"有多字节字符"
+ * （ASCII 一字节一码点）。两格现成的算子拼出来，一趟扫描。
+ *
+ * @param s 已经落成临时量的那个串（调用方保证只算一次）
+ * @param what 报话里那个方法名
+ */
+export function asciiCaseOf(s0, what, make, C) {
+  const h = holder(C);
+  const s = h.keep(s0, 'ac_s');
+  asciiOnlyGuard(s, what, h);
+  return h.wrap(make(s));
+}
+
+function asciiOnlyGuard(s, what, h) {
+  h.pre.push({
+    kind: 'if',
+    cond: bin('!=', call1('slen', [s]), call1('scplen', [s])),
+    then: [{
+      kind: 'builtin-stmt',
+      name: 'fail',
+      args: [str(`\`${what}\` 碰上非 ASCII 的串 —— unicode 的大小写/分类表还没接`
+        + `（要借 Objects/unicodeobject.c）`)],
+    }],
+    else_: null,
+  });
+}
+
+/**
+ * `.title()` / `.capitalize()` / `.swapcase()` —— 逐格走，**只动 ASCII**（非 ASCII 报话）。
  *
  * 与 `.upper()` / `.lower()` 同一条口径与同一处不足：非 ASCII 的大小写要借
  * `Objects/unicodeobject.c` 的映射表，在那之前只有 ASCII 那一档是对的。
@@ -593,6 +629,7 @@ const inSet = (set, ch) => bin('!=', call1('scpfind', [str(set), ch]), int(-1));
 export function caseMapOf(s0, mode, C) {
   const h = holder(C);
   const s = h.keep(s0, 'cm_s');
+  asciiOnlyGuard(s, `.${mode}()`, h);
   const out = h.decl('cm_o', STR, str(''));
   const i = h.decl('cm_i', INT, int(0));
   const ch = h.decl('cm_c', STR, str(''));
@@ -638,6 +675,7 @@ export function charClassOf(s0, mode, C) {
   };
   const h = holder(C);
   const s = h.keep(s0, 'cc_s');
+  asciiOnlyGuard(s, `.${mode}()`, h);
   const i = h.decl('cc_i', INT, int(0));
   const ch = h.decl('cc_c', STR, str(''));
   const n = call1('scplen', [s]);

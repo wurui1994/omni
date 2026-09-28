@@ -1060,8 +1060,19 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     我照错结论加的 `(scpchr I)` 当场撤了（它还带着一个真 bug：C 那份把栈上的缓冲区
     当字符串回出去了 —— 症状是 C 腿印出三个 `�`。**判据抓住了它**，三条腿那一趟当场红）。
 
-    **还剩一格**（这一条的收口）：`.upper()` / `.lower()`（以及 `isalpha` 那一族）对非 ASCII
-    不动 —— 那要 unicode 的**表**，是借 `unicodeobject.c` 的事，不是 UTF-8 算术。
+    **最后那一格：从"静静答错"改成"当场报还没接"**（第一百五十一片）。
+    `.upper()` / `.lower()` / `.casefold()` / `.title()` / `.capitalize()` / `.swapcase()` 与
+    `isalpha` / `isdigit` / `isalnum` / `isspace` / `isupper` / `islower` 这一族要 unicode 的
+    **表**（借 `unicodeobject.c` 的事，不是 UTF-8 算术）。在借进来之前：
+    **ASCII 那一档照旧走，非 ASCII 当场报**「`.upper()` 碰上非 ASCII 的串 —— unicode 的
+    大小写/分类表还没接（要借 Objects/unicodeobject.c）」。话里带"还没接"，于是
+    `tests/python/run.js` 把它算作**缺口**（skip）而不是绿。
+    判"有没有非 ASCII"不必自己扫字节：**字节数 != 码点数**就等价于"有多字节字符"
+    （`(slen s)` 与 `(scplen s)` 两格现成的算子，一趟扫描）。
+    读数：`tests/python` 全套 **90 过 0 败**（ASCII 那一档一格没动）。
+
+    于是这一条收口了：**六格静静答错 -> 五格真答对（len / 下标 / 切片 / find / ord）
+    + 一族当场报还没接（大小写与分类）**。
 
 ## 二、进度
 
