@@ -3634,8 +3634,13 @@ function builtinOf(nm, args, argToks, C) {
          `bankRound` 用 floor / fmod 拼出来（方言的 `(rmath "round")` 是 C 的"远离零"，
          `.5` 那一档差一：量到过 `round(2.5)` 从前交 3）。 */
       if (args.length === 1) {
+        /* **实参已经是 int 就原样交回**（python 的 `round(int)` 就是那个 int）——
+           从前一律先提到 real 再取整，于是 `round(4052555153018976267)` 答 …256：
+           double 只有 53 位有效位。同一族的规矩：int 上的运算不许借 double 的路。 */
+        if (isInt(ty(args[0], C))) return args[0];
         return { kind: 'builtin', name: 'toint', args: [bankRound(toReal(args[0], C), C)] };
       }
+
       if (args.length !== 2) throw new Error('python->IR: `round()` 收一格或两格实参');
       /* `round(x, n)` —— 交的是 real（python 也是）。**n 要写成字面量**：10^n 要在
          编译期算出来（而 n 在实际代码里几乎总是字面量）。先乘上去、半数取偶、再除回来。
