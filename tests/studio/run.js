@@ -385,6 +385,41 @@ for (const c of CASES) {
         && wr.other > 2000,
         JSON.stringify(wr).slice(0, 240));
       /**
+       * **四参 `glcapture(槽,宽,高,格)`**（画进一张真纹理，`eval-realtime-gpu.md` §38）：
+       * 这一格**只有真浏览器里才验得到** —— WebGL2 上没有 `glGetTexImage`，`capBegin4`/`texGet`
+       * 两半都是照本机那一档另写的一份（自己一格 FBO、格→内部格式那张映射、浮点附件要
+       * `EXT_color_buffer_float`）。§38.5 里先前明写着"这一半还没在真浏览器里量过"，这就是那一趟。
+       *
+       * **判像素不判那行 printf**：页面这一档的帧体在 rAF 上跑，`/api/run` 回来的时候
+       * 一帧还没走 ⇒ `r.stdout` 是空的（本机那一档才拿得到 `capture4 0.250 0.250` 那行，
+       * `tests/gl/run.js` 判的是它）。而这份例子最后一句把那张纹理铺满屏、片元 `r * 4`：
+       * 写进去的是 0.25 ⇒ **整幅该是白的**；抓屏没抓到（纹理还是零）就是整幅黑。
+       */
+      const cp = 'async () => {'
+        + ' const c = document.createElement("canvas");'
+        + ' c.style.position = "fixed"; c.style.left = "-9999px";'
+        + ' document.body.appendChild(c);'
+        + ' const dev = window.__OMNI_INSTALL_GL(c, 320, 240);'
+        + ' globalThis.process.env.OMNI_GFX = "host";'
+        + ' const r = await window.__OMNI_LOCAL("/api/run",'
+        + '   { body: JSON.stringify({ argv: ["run", "ext/polydraw/examples/07-capture4.pss"] }) });'
+        + ' if (r.code !== 0) return { err: (r.stderr || "").slice(0, 300) };'
+        + ' await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));'
+        + ' const s = dev.snapshot();'
+        + ' const miss = dev.misses ? dev.misses() : [];'
+        + ' dev.stop();'
+        + ' let white = 0, black = 0;'
+        + ' for (let i = 0; i < s.bytes.length; i += 4) {'
+        + '   if (s.bytes[i] > 200 && s.bytes[i+1] > 200 && s.bytes[i+2] > 200) white++;'
+        + '   else if (s.bytes[i] < 40 && s.bytes[i+1] < 40 && s.bytes[i+2] < 40) black++;'
+        + ' }'
+        + ' return { n: s.bytes.length / 4, white, black, miss }; }';
+      const cr = JSON.parse(await pw([S, '--raw', 'eval', cp]));
+      ok('真浏览器里四参 `glcapture` 画进了真纹理（铺满屏是白的）',
+        cr.err === undefined && cr.black === 0 && cr.white === cr.n
+        && (cr.miss ?? []).length === 0,
+        JSON.stringify(cr).slice(0, 240));
+      /**
        * **实时那一格**（`requestAnimationFrame` 的帧循环）：产物把每帧那一格函数交给设备
        * （方言的 `(gfxframefn …)`），页面用 rAF 反复调 —— 所以"跑了几帧"不是我们数的，
        * 是浏览器按刷新率给的。

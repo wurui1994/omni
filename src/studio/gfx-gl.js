@@ -176,6 +176,41 @@ function open(canvas, w, h) {
   D.buf = gl.createBuffer();
   D.w = w;
   D.h = h;
+  /**
+   * **换上下文就得把攥着 GL 对象的缓存全丢掉**（一页里连着跑两份产物才看得见）。
+   *
+   * 这一层的状态是模块级的（`SH` / `TX` / `B` / `G` / `CAP` / `CAP4`），而每装一次设备
+   * 都是**一格新的 WebGL2 上下文** —— 上一趟留下的 program / 纹理 / FBO 属于那个已经
+   * 没人要的上下文，拿到这一格里用就是"静静地什么都不发生"。
+   * 现形的那一趟（2026-09-29）：先跑 `07-capture4.pss`（它末尾 `glsetshader("vert","showtex")`
+   * 留着 `SH.cur`）、再跑 `02-gl.pss` ⇒ 后者**整幅全黑**（批带着一格外来的 program）。
+   * 判据里先前只是被次序盖住了：那两格之间从来没有"前一份挑过着色器"的组合。
+   *
+   * **`SH.src` / `SH.names` 不能丢**：那是文本与名字，而 `(gfxdef …)` 可能在开设备**之前**
+   * 就登记过了（本机那一档也是这条，见 §13.6）—— 丢了就成"这格设备没有那份着色器"。
+   */
+  SH.progs.clear();
+  SH.cur = null;
+  TX.slots.clear();
+  TX.unit = 0;
+  CAP.on = false;
+  CAP.w = 0;
+  CAP.h = 0;
+  CAP4.fbo = null;
+  CAP4.on = false;
+  B.prog = 0;
+  B.mvp = ident();
+  B.mv = ident();
+  B.mvpVer = 0;
+  B.blend = 1;
+  G.attrs.clear();
+  G.attrVer = 0;
+  G.depth = false;
+  G.cull = 0;
+  /* 攒着的那几段顶点也属于上一个上下文（上一份程序的最后一帧没交完的话）。 */
+  D.batches.length = 0;
+  D.dseq = 0;
+  D.fno = 0;
   canvas.width = w;
   canvas.height = h;
   gl.viewport(0, 0, w, h);
