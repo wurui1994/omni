@@ -1165,4 +1165,29 @@ static hlen scatter(unsigned int key, HashData *d)
 下标落到哈希表外但仍在内存里 —— 答对了是碰巧。这就是"宁可 loud 也不许静默答错"
 那条规矩要抓的形状。判据钉在 `tests/c/gen/91-uint-constant.c`（与 cc 逐字节相同）。
 
+### 三、少一步 `InitDynload`（base 最后一句要它）
+
+base.R 最后一句是 `getDLLRegisteredRoutines("base")` 那一段（把 `.F_dqrcf` 一族
+绑到 `.BaseNamespaceEnv`）。我们的 16 步初始化照 `setup_Rmainloop` 抄，但**漏了
+`InitDynload()`**（main.c:992，在 `InitGlobalEnv` 与 `InitOptions` 之间）——
+于是那一句报 `No DLL currently loaded with name or path 'base'`。补上之后它自己就过了
+（`InitDynload` 里 `addDLL("base")` + `R_init_base(dll)`）。
+
+连带补了 `getrlimit`/`setrlimit`：`initLoadedDLL` 按 fd 上限算"最多装几个 DLL"。
+这条腿上没有 fd 这回事（句柄是我们自己发的号），所以给 4096 —— 够它算到 614 个 DLL。
+
+### base 现在的账（全份）
+
+`.omni-cache/probe/base-all.js`：**整份 base 装完、0 错**、走到字节 837930、
+16.8 秒、按需起来 **54 份**。判据里那一节只装 800 句（7~8 秒），因为整份加上开机
+那 17 步就压着 30 秒那道线 —— **下一刀是开机镜像**，把这 17 秒变成一次性的。
+
+### 一笔反直觉的性能账：一趟别装太多句
+
+`omni_base_step(from, cap, …)` 的 `cap` 从 100 调到 800（少 7 次 `fopen`/`fseek`，
+"显然更快"），同样 800 句 **8.3 秒变 22.3 秒**；而且多出来的那 14 秒不在 CPU 上
+（`real 26.6s` vs `user 13.2s`）。一趟 C 调用里连着跑几百句 R，等的是别的东西 ——
+真因还没追，记在这儿。
+
+
 

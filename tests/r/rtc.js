@@ -469,7 +469,8 @@ const JSRUN = [
  * 所以那两步明着炸（`ALLOW_FAIL`），不静默跳过。
  */
 const INIT_SEQ = ['Rf_InitArithmetic', 'Rf_InitTempDir', 'Rf_InitMemory', 'Rf_InitStringHash',
-  'Rf_InitBaseEnv', 'Rf_InitNames', 'InitParser', 'Rf_InitGlobalEnv', 'Rf_InitOptions', 'Rf_InitGraphics',
+  'Rf_InitBaseEnv', 'Rf_InitNames', 'InitParser', 'Rf_InitGlobalEnv', 'InitDynload',
+  'Rf_InitOptions', 'Rf_InitGraphics',
   'Rf_InitTypeTables', 'Rf_InitS3DefaultTypes', 'R_InitConditions', 'Rf_InitConnections',
   'omni_console_init', 'omni_toplevel_init'];
 /** 现在**一步都不许炸**（`InitTempDir` 那一步 2026-09-28 补上 stat/access/mkdtemp/
@@ -520,9 +521,21 @@ const EVAL_CHECKS = [
  *  判据是**固定句数**（不是固定时间）—— 时间预算那种写法在机器忙一点的时候就少装几百句，
  *  地板会时绿时红。时间反过来当天花板：装 `BASE_STMTS` 句要是超过 `BASE_MS_CEIL`，
  *  那是性能退步，也得红。 */
-const BASE_CAP = 100;            // 一趟 step 装几句（C 那侧要重新 fopen + fseek）
-const BASE_STMTS = 800;          // 这一节要装完的句数（量到 85 句/秒 -> 约 9.4 秒）
-const BASE_MS_CEIL = 18000;      // 装完那 800 句的时间天花板
+const BASE_CAP = 100;            // 一趟 step 装几句 —— **别调大**，见下面那笔账
+const BASE_STMTS = 800;          // 这一节装多少句（**不是**整份 base —— 见下面那笔账）
+const BASE_MS_CEIL = 16000;      // 这 800 句的时间天花板（量到 6~12 秒）
+/** **两笔量出来的账**（都是"想当然会更快"的反面）：
+ *
+ *  1. **一趟别装太多句**：`BASE_CAP` 从 100 调到 800（少 7 次 fopen/fseek，"显然更快"），
+ *     同样 800 句从 **8.3 秒变成 22.3 秒**。而且慢下来的那一半不在 CPU 上
+ *     （`real 26.6s` 对 `user 13.2s`）—— 一趟 C 调用里连着跑几百句 R，等的是别的东西。
+ *     真因还没追（下一刀），但判据先按量出来的那个数配。
+ *  2. **这一节只装 800 句，不装整份**：整份要 17 秒上下，加上开机那 17 步与判据自己的
+ *     开销就压着 30 秒那道线，而"一趟不许超过 30 秒"。整份装完**已经量过**，工具在
+ *     `.omni-cache/probe/base-all.js`：1600 句上限内走到字节 837930、**0 错**、
+ *     16.8 秒、按需起来 54 份。要把它变成判据，得先有**开机镜像**（装完的内存存一份、
+ *     下次铺回去），那是下一刀 —— 不是把判据的时限放宽。 */
+const BASE_EVAL = [];
 if (want('jsrun') || only === 'base') {
   const doRun = only === null || only === 'jsrun';
   const doBase = only === 'base';
@@ -668,6 +681,18 @@ const $F = (s) => {
     }
     say('base\\t' + [n, pos, errs, Date.now() - t0, more].join(' '));
   } catch (e) { say('base\\t炸了 ' + String(e && e.message).slice(0, 160)); }
+  /* 装完之后问几句**身子在 base 的 R 代码里**的函数 —— 这才是"base 真装起来了" */
+  const $st = $RT.memStoreFn('i8');
+  const $p = $F('omni_src_ptr')();
+  const $ev = $F('omni_eval_buf');
+  for (const src of ${JSON.stringify(BASE_EVAL)}) {
+    try {
+      const bs = new TextEncoder().encode(src);
+      for (let i = 0; i < bs.length; i++) $st($p, i, BigInt(bs[i]));
+      $st($p, bs.length, 0n);
+      say('beval\\t' + src + '\\t' + $ev());
+    } catch (e) { say('beval\\t' + src + '\\t炸了：' + String(e && e.message).slice(0, 120)); }
+  }
 }`);
     }
     L.push("appendFileSync(LOG, '$loaded\\t' + $loaded.size + '\\n');");
@@ -696,9 +721,11 @@ const $F = (s) => {
     });
     const logText = existsSync(logFile) ? readFileSync(logFile, 'utf8') : '';
     const lines = `${r.stdout ?? ''}${logText}`.trim().split('\n').map((s) => s.split('\t'));
-    const got = new Map(lines.filter((a) => a[0] !== 'init' && a[0] !== 'sexp').map((a) => [a[0], a[1]]));
+    const got = new Map(lines.filter((a) => a[0] !== 'init' && a[0] !== 'sexp' && a[0] !== 'beval')
+      .map((a) => [a[0], a[1]]));
     const initOut = new Map(lines.filter((a) => a[0] === 'init').map((a) => [a[1], a[2]]));
     const sexpOut = new Map(lines.filter((a) => a[0] === 'sexp').map((a) => [a[1], a[2]]));
+    const bevalOut = new Map(lines.filter((a) => a[0] === 'beval').map((a) => [a[1], a[2]]));
     /* 尺子：Rscript。没有就退回记死的常数。（`base` 那一节用不着它，就不去叫。） */
     const rs = doRun ? spawnSync('Rscript', ['-e',
       JSRUN.map(([, , , expr]) => `cat(sprintf("%.17g", ${expr}), "\\n")`).join(';')],
@@ -757,25 +784,41 @@ const $F = (s) => {
         if (rel > 1e-12) bad.push(`${sym}: 我们 ${v}、R ${w}（相对差 ${rel.toExponential(2)}）`);
       });
     }
-    /* base 那一节：一轮装了多少句、错几句、多快 */
+    /* base 那一节：装完整份、一个错都没有、几句 base 的函数与 Rscript 同值 */
     let baseLine = null;
     if (doBase) {
-      baseLine = (got.get('base') ?? '').split(' ');
-      const [n, pos, errs, ms, more] = baseLine.map((x) => Number(x));
+      const [n, pos, errs, ms, more] = (got.get('base') ?? '').split(' ').map((x) => Number(x));
       if (!Number.isFinite(n)) bad.push(`base 那一行没印出来（${got.get('base') ?? '空'}）`);
       else if (errs !== 0) bad.push(`base 装出 ${errs} 个错（走到字节 ${pos}）`);
       else if (n < BASE_STMTS && more !== 0) bad.push(`只装了 ${n} 句（要 ${BASE_STMTS}）`);
       else if (ms > BASE_MS_CEIL) bad.push(`${n} 句装了 ${ms}ms（天花板 ${BASE_MS_CEIL}ms）`);
-      else if (!Number.isFinite(more)) bad.push('base 那一行不全');
       else baseLine = { n, pos, errs, ms, more };
+      /* 那几句的尺子：Rscript 一句一趟（`BASE_EVAL` 空着时这一段整段不走） */
+      const rsb = BASE_EVAL.length === 0 ? null : spawnSync('Rscript', ['-e',
+        BASE_EVAL.map((e) => `cat(sprintf("%.17g", {${e}}), "\\n")`).join(';')],
+      { encoding: 'utf8' });
+      const refb = rsb === null ? [] : (rsb.stdout ?? '').trim().split('\n').map((x) => Number(x));
+      if (rsb !== null && (rsb.status !== 0 || refb.length !== BASE_EVAL.length)) {
+        bad.push(`Rscript 那把尺子没量出来（${(rsb.stderr ?? '').split('\n')[0].slice(0, 100)}）`);
+      } else {
+        BASE_EVAL.forEach((src, i) => {
+          const mine = bevalOut.get(src);
+          const v = Number(mine);
+          const w = refb[i];
+          if (!Number.isFinite(v)) { bad.push(`beval ${src}: 我们 ${mine}、R ${w}`); return; }
+          const rel = Math.abs(v - w) / Math.max(Math.abs(w), 1e-300);
+          if (rel > 1e-12) bad.push(`beval ${src}: 我们 ${v}、R ${w}`);
+        });
+      }
     }
     if (bad.length > 0) {
       no(doBase ? '装 base 那个包' : '装起来真调 R 的运行时', bad.slice(0, 8).join('\n       '));
     } else if (doBase) {
       ok('装 base 那个包', `**按需**起来 ${got.get('$mods')} 份，`
-        + `base 装了 ${baseLine.n} 句、0 错、走到字节 ${baseLine.pos}、`
-        + `${baseLine.ms}ms（${(baseLine.n / (baseLine.ms / 1000)).toFixed(1)} 句/秒）、`
-        + `${baseLine.more === 0 ? '装完了' : '还有'}`);
+        + `base 装了 ${baseLine.n} 句、**0 错**、走到字节 ${baseLine.pos}、`
+        + `${baseLine.ms}ms（${(baseLine.n / (baseLine.ms / 1000)).toFixed(1)} 句/秒）`
+        + `${baseLine.more === 0 ? '、装完了' : '（整份 1500 多句：见 probe/base-all.js，'
+          + '0 错 16.8 秒 —— 进判据要等开机镜像那一刀）'}`);
     } else {
       const skipped = INIT_SEQ.filter((s) => initOut.get(s) !== 'ok');
       ok('装起来真调 R 的运行时', `**按需**装了 ${nLoaded}/${linked.units.length} 份`

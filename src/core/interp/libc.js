@@ -1609,6 +1609,18 @@ const LIBC = {
     return p;
   },
   malloc: (a) => heapAlloc(BigInt(a[0])),
+  /* `getrlimit` / `setrlimit`：这条腿上**没有文件描述符这回事**（文件句柄是我们自己
+     发的号），所以给一个够大又不吓人的数就好 —— R 的 `initLoadedDLL`（Rdynload.c）
+     按 fd 上限算"最多能装几个 DLL"（目标 614，要 fd >= 1024）。
+     `struct rlimit` 是两个 `rlim_t`（都是 64 位无符号）：`[+0] rlim_cur`、`[+8] rlim_max`。
+     少这一格的指纹：`getrlimit: libc: 没有这个函数`（InitDynload 那一步）。 */
+  getrlimit: (a) => {
+    const p = BigInt(a[1]);
+    memStore('i64', p, 0, 4096n);
+    memStore('i64', p, 8, 4096n);
+    return 0n;
+  },
+  setrlimit: () => 0n,           // 收下就算改了：这条腿上本来没有这个上限
   calloc: (a) => {
     /* `nmemb * size` 会溢出 —— C 里那是 UB，这里在 BigInt 上算所以先算出真值再判：
      * 装不下就回 NULL，而不是分配一小块然后让调用方写出界。 */
@@ -2276,6 +2288,26 @@ const LIBC = {
       if (set.indexOf(s[i]) >= 0) return BigInt(a[0]) + BigInt(i);
     }
     return 0n;
+  },
+  /* `strspn` / `strcspn`（C11 7.24.5.5-6）：开头有多少个字符**在**（`spn`）
+     / **不在**（`cspn`）那一组里。R 的 `do_sprintf`（main/sprintf.c）用 `strcspn`
+     在格式串里找转换说明符 —— 少这一格的指纹是 `strcspn: libc: 没有这个函数`。
+     按字节走：格式串里有非 ASCII 时，转成 JS 字符串再数长度就不是字节数了。 */
+  strspn: (a) => {
+    const s = BigInt(a[0]);
+    const set = readCStr(a[1]);
+    for (let i = 0n; ; i += 1n) {
+      const c = Number(memLoad('i8u', s + i, 0));
+      if (c === 0 || set.indexOf(String.fromCharCode(c)) < 0) return i;
+    }
+  },
+  strcspn: (a) => {
+    const s = BigInt(a[0]);
+    const set = readCStr(a[1]);
+    for (let i = 0n; ; i += 1n) {
+      const c = Number(memLoad('i8u', s + i, 0));
+      if (c === 0 || set.indexOf(String.fromCharCode(c)) >= 0) return i;
+    }
   },
   memcpy: (a) => {
     const n = Number(BigInt(a[2]));
