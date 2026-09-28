@@ -150,6 +150,14 @@ const SUITES = [
      （同一份 C -> MIR -> JS）。后者是"整份运行时出 JS"那条路的最小样本。
      要参考树 + clang + python3 + 探过的 `pyconfig.h`，**不要**预热过的 `obj/`（32s）。 */
   { s: 'python/ucase.js' },
+  /* **查表那一刀的总判据**（表在仓库里：`ext/python/rt/ucase.tab`，292→295 份记录）：
+     同一份 `.py` 我们跑一遍、python3 跑一遍，逐字节比。四趟 —— 四个映射 / 尾位 sigma 的
+     前位与后位 / title·capitalize·swapcase / 分类那八格。这一格走**稀的步长**
+     （每 211 个码点，5272 格、9s）；全量（111 万格、90s）是 `npm run py:ucase-sweep`。
+     每一趟都带一格**多字符**（`"αΣ"+c` / `("a"+c).title()` / `("A"+c).isupper()`）——
+     上下文那几条规矩只有多字符才现形（两回探针写错都躲过了单字符那一趟）。
+     只要 python3，不要参考树、不要外部 cc。 */
+  { s: 'python/ucase-sweep.js' },
   // 可删除测试：删一支产生式（语法那一层）。默认只跑两门小语法 ——
   // 整跑一遍是分钟级的，量出来的数与理由写在那份文件的头上。
   { s: 'grammar/delete.js' },
