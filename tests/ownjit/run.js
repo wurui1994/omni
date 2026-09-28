@@ -97,5 +97,67 @@ if (code === null) {
   H.protect(p2.addr, 4096, 0);            /* 再 rx（这一次必须刷 icache，不然拿到 11） */
   ok('改完再 rx（icache 刷没刷）', H.calli(p2.addr), 22);
 }
+/* ================================================================ D2 的前半
+ *
+ * **在 JS 里发一段真会调别人的机器码**：装实参 -> 装被调地址 -> `blr` -> 带栈帧地返回。
+ * 这一格通了才谈得上"把 MIR 的一个函数整体发出来"（0045-D2 的后半）。
+ *
+ * 编码不是猜的：每一条都拿 `clang -c` 编同一句汇编、`otool -t` 读回指令字对过
+ * （`stp x29,x30,[sp,#-16]!` = a9bf7bfd · `mov x29,sp` = 910003fd ·
+ *  `movz xN,#imm16` = d2800000|imm<<5|N · `movk … lsl16/32/48` = f2a0/f2c0/f2e0 同形 ·
+ *  `neg x0,x0` = cb0003e0 · `blr x16` = d63f0200 · `ldp x29,x30,[sp],#16` = a8c17bfd ·
+ *  `ret` = d65f03c0）。**这一小格编码器将来要搬进 `src/core/jit/a64.js`** ——
+ * 现在留在判据里是因为它还只服务这一格判据，搬家要等 D2 后半有第二个调用方。
+ */
+function movImm64(reg, v) {
+  const out = [];
+  const h = [v & 0xffffn, (v >> 16n) & 0xffffn, (v >> 32n) & 0xffffn, (v >> 48n) & 0xffffn];
+  out.push(0xd2800000 | (Number(h[0]) << 5) | reg);                 /* movz xN, #imm16 */
+  if (h[1] !== 0n) out.push(0xf2a00000 | (Number(h[1]) << 5) | reg); /* movk … lsl #16 */
+  if (h[2] !== 0n) out.push(0xf2c00000 | (Number(h[2]) << 5) | reg); /* movk … lsl #32 */
+  if (h[3] !== 0n) out.push(0xf2e00000 | (Number(h[3]) << 5) | reg); /* movk … lsl #48 */
+  return out;
+}
+
+/** `return <被调>(<一个整数实参>)`；`neg` 为真时实参取负（movz 只装得下非负的 16 位段）。 */
+function emitCall1(addr, arg, neg) {
+  const w = [0xa9bf7bfd, 0x910003fd];
+  w.push(...movImm64(0, arg));
+  if (neg) w.push(0xcb0003e0);
+  w.push(...movImm64(16, addr));
+  w.push(0xd63f0200, 0xa8c17bfd, 0xd65f03c0);
+  return w;
+}
+
+/** 一段指令字写进一页、改成可执行、跳进去。 */
+function runWords(words) {
+  const page = H.mem(4096);
+  const dv = new DataView(page.buf);
+  words.forEach((w, i) => dv.setUint32(i * 4, w >>> 0, true));
+  H.protect(page.addr, 4096, 0);
+  return H.calli(page.addr);
+}
+
+if (process.arch === 'arm64') {
+  process.stdout.write('\nD2 前半（发码调符号）\n');
+  /* libc 的符号在 node 进程里本来就看得见（`dlsym(RTLD_DEFAULT, …)`），不用 dlopen。 */
+  const llabs = H.sym('llabs');
+  ok('sym("llabs") 拿到地址', llabs !== 0n, true);
+  if (llabs !== 0n) {
+    /* 64 位整数往返：-1234567890123 -> llabs -> 1234567890123（`calli` 按 int64 读回值，
+       所以这一格同时验了"高 32 位没被截掉"）。 */
+    ok('发码调 llabs(-1234567890123)', runWords(emitCall1(llabs, 1234567890123n, true)), 1234567890123n);
+    ok('发码调 llabs(-7)', runWords(emitCall1(llabs, 7n, true)), 7n);
+  }
+  /* 指针实参：另开一页写 "hello\0"，把那个地址装进 x0 调 strlen。 */
+  const strlen = H.sym('strlen');
+  ok('sym("strlen") 拿到地址', strlen !== 0n, true);
+  if (strlen !== 0n) {
+    const data = H.mem(4096);
+    new Uint8Array(data.buf).set([104, 101, 108, 108, 111, 0]);   /* "hello\0" */
+    ok('发码调 strlen("hello")（指针实参）', runWords(emitCall1(strlen, data.addr, false)), 5n);
+  }
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);
