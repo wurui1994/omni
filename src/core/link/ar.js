@@ -50,6 +50,47 @@ function beAt(bytes, at, n) {
 }
 
 /**
+ * BSD（macOS 的 `ar`）那一套与上面 GNU 那一套差三处，都在这儿收：
+ *
+ *  1. **长名字**：名字那一格写成 `#1/<n>`，真名字在成员**内容的头 n 个字节**里
+ *     （尾部用 0 补齐）；头里的长度**包含**那 n 个字节。
+ *  2. **符号索引**不叫 `/`，叫 `__.SYMDEF` 或 `__.SYMDEF SORTED`（也走 `#1/` 那一格），
+ *     而且是**小端**：`ranlib 数组的字节数` + 一串 `{名字在串表里的偏移, 成员头的偏移}`
+ *     + `串表的字节数` + 串表。`__.SYMDEF_64` 那一种每格 8 字节。
+ *  3. 成员次序里没有 `//`（长名字表）—— 名字就住在成员自己身上。
+ *
+ * 为什么要收：macOS 上 `ar rcs` 出来的就是这一套，而"把借来的那份 CPython 打成 `.a`
+ * 摞进产物"这条路上第一脚就踩在它上面（我们自己的链接器原来只认 GNU 那一套，
+ * 当场报"这个库没有符号索引"）。
+ */
+const BSD_SYMDEF = new Set(['__.SYMDEF', '__.SYMDEF SORTED', '__.SYMDEF_64', '__.SYMDEF SORTED_64']);
+
+/** 小端读 `n` 个字节（BSD 的索引是小端 —— 与 GNU 正好相反）。 */
+function leAt(bytes, at, n) {
+  let v = 0;
+  for (let i = n - 1; i >= 0; i--) v = v * 256 + bytes[at + i];
+  return v;
+}
+
+/** 读 BSD 的 `__.SYMDEF`。回 `{entry, syms}`，`syms[i].at` 与 GNU 那一路同一个意思。 */
+function bsdSymdef(body, wide) {
+  const e = wide ? 8 : 4;
+  const ranSize = leAt(body, 0, e);
+  const n = Math.floor(ranSize / (e * 2));
+  const strAt = e + ranSize + e;              // ranlib 数组之后还有一格"串表多长"
+  const syms = [];
+  for (let i = 0; i < n; i++) {
+    const p = e + i * e * 2;
+    const strx = leAt(body, p, e);
+    const at = leAt(body, p + e, e);
+    let end = strAt + strx;
+    while (end < body.length && body[end] !== 0) end++;
+    syms.push({ name: arStr(body, strAt + strx, end - (strAt + strx)), at });
+  }
+  return { entry: e, syms };
+}
+
+/**
  * 读一个静态库。
  *
  * @param bytes 整个 `.a`
@@ -64,12 +105,21 @@ export function readArchive(bytes) {
   let at = ARMAG.length;
   while (at + HDR_SIZE <= bytes.length) {
     if (arStr(bytes, FMAG_AT + at, 2) !== '`\n') throw new OmniError(`ar: 0x${at.toString(16)} 处的成员头不对`);
-    const name = trimName(arStr(bytes, at, NAME_LEN));
+    let name = trimName(arStr(bytes, at, NAME_LEN));
     const size = parseInt(arStr(bytes, at + SIZE_AT, SIZE_LEN).trim(), 10);
     if (!Number.isFinite(size) || size < 0) throw new OmniError(`ar: 成员 '${name}' 的长度读不出来`);
-    const body = bytes.subarray(at + HDR_SIZE, at + HDR_SIZE + size);
+    let body = bytes.subarray(at + HDR_SIZE, at + HDR_SIZE + size);
+    /* BSD 的长名字：真名字在内容的头 n 个字节里（0 补齐），内容从它后面开始。 */
+    if (name.startsWith('#1/')) {
+      const n = parseInt(name.slice(3), 10);
+      if (!Number.isFinite(n) || n < 0 || n > size) throw new OmniError(`ar: 0x${at.toString(16)} 处的长名字长度不对`);
+      let e = 0;
+      while (e < n && body[e] !== 0) e++;
+      name = arStr(body, 0, e);
+      body = body.subarray(n);
+    }
     if (name === '/' || name === '/SYM64/') {
-      /* 符号索引：大端，先个数，再每个符号一个偏移，再一串名字。 */
+      /* GNU 的符号索引：大端，先个数，再每个符号一个偏移，再一串名字。 */
       const entry = name === '/' ? 4 : 8;
       const nsyms = beAt(body, 0, entry);
       const syms = [];
@@ -81,6 +131,8 @@ export function readArchive(bytes) {
         p = e + 1;
       }
       index = { entry, syms };
+    } else if (BSD_SYMDEF.has(name)) {
+      index = bsdSymdef(body, name.endsWith('_64'));
     } else if (name !== '//') {
       members.push({ name, at, bytes: body });
     }
@@ -88,6 +140,7 @@ export function readArchive(bytes) {
   }
   return { index, members };
 }
+
 
 /**
  * 按需取用（`tcc_load_alacarte`）：只把「能补上当前未定义符号」的成员拉进来，

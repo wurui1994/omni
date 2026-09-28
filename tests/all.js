@@ -144,6 +144,11 @@ const SUITES = [
   // 整跑一遍是分钟级的，量出来的数与理由写在那份文件的头上。
   { s: 'grammar/delete.js' },
   { s: 'incr/run.js' }, { s: 'c/run.js' }, { s: 'c/ldscript.js' }, { s: 'c/syscall.js' },
+  /* 静态库读得对（第九刀第四十六片 + 第一百四十八片）：GNU 那一套（索引 `/`、大端、
+     16 字节名字）与 **BSD 那一套**（macOS 的 `ar`：`#1/<n>` 长名字、`__.SYMDEF`、小端）
+     同一段代码两种编码。这一门从前**不在轴表里**（只能手跑），而"把借来的 CPython 打成
+     `.a` 摞进产物"第一脚就踩在 BSD 那一套上。 */
+  { s: 'c/ar-read.js' },
   // 自带 libc 的九条判据（第一百四十片）。除了前两条，都要 arm64 macOS（本机自己编、
   // 自己链、自己跑，还要 codesign），别的机器上它们自己跳过 —— 不是靠这儿挑。
   { s: 'c/libc-malloc.js' }, { s: 'c/libc-self.js' },
