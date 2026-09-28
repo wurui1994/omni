@@ -1334,6 +1334,28 @@ strsplit/vapply）都与 Rscript 对得上，**铺完到答完 3.8 秒**（整�
 成本也量过：改单子会动发射缓存的 key（`tests/r/rtc.js` 那张单子在判据里），
 所以要付一次**全量重发 45 秒 + 开机镜像三轮**。
 
+### 头一版摘错了，以及读完源码之后的正解
+
+试过把 `main/lapack.c` 摘掉（以为它只是桩）—— **错的**。两份是**一对**：
+
+* `main/lapack.c`：FunTab 要的 `do_lapack` 在这儿，外加一个**文件静态**的
+  `R_LapackRoutines *ptr` 与 `initialized`；第一次被调时走 `La_Init()`。
+* `modules/lapack/Lapack.c`：`static mod_do_lapack` + `R_init_lapack`，
+  后者把 `tmp->do_lapack = mod_do_lapack` 填进那张表。
+
+`La_Init()` 干的是 `R_moduleCdynload("lapack", 1, 1)` —— **dlopen + dlsym**。
+而 `initialized` 是文件静态的，从外头改不着，所以"自己叫一句 `R_init_lapack`"**不够**：
+`do_lapack` 还是会去 `La_Init()`，dlopen 失败就 `error("LAPACK routines cannot be loaded")`。
+
+**正解是把 `dlopen`/`dlsym` 映射到我们自己的符号表**（宿主层，`interp/libc.js`）：
+`dlopen("lapack.so")` 回一个假句柄、`dlsym(h, "R_init_lapack")` 回**那个函数在全程序
+函数表里的指针值**（`fnSlot(名字)`），剩下的事 R 自己那套机件就跑通了 ——
+一个 C 源文件都不用改，而且**对每个模块都成立**（stats / grDevices 同一条路）。
+要补的一格机件：libc 那一层现在只有"按指针调"（`setFnPtrCaller`），
+还需要一条"按名字取指针"的门（把 `js_rt` 的 `fnSlot` 递进去）。
+好处是这一刀**不动发射缓存**（libc 不在 key 里）—— 252 份现编的那套就够。
+
+
 
 
 
