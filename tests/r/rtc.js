@@ -482,11 +482,33 @@ const SEXP_CHECKS = [
   ['asInteger(ScalarInteger(7))', 7],
   ['xlength(allocVector(REALSXP,5))', 5],
 ];
-/** **真跑 R**（第二十一格）：一句 R 进去、一个数出来，与 Rscript 比。
- *  `sd(...)` 那一句要 base 那个包的 R 代码（还没装），所以它现在该回 -3（R 里报了错）。 */
+/** **真跑 R**（第二十一格）：一句 R 进去、一个数出来，与 `Rscript` 比。
+ *
+ * 挑的都是**不要 base 那个包的 R 代码**的（**原语**）。这条线比想象的细：`sd`/`mean`
+ * 是 R 写的没错，而 `nchar`/`paste0` 也是 —— 它们是 base 里的 R 函数，身子只有一句
+ * `.Internal(nchar(...))`。所以"C 里有 do_nchar"不等于"这句 R 跑得动"，
+ * 要 `R_LoadProfile` 把序列化过的 base 装进来（下一刀）。量出来的：那两句回 -3（R 里报错）。
+ * 这张表就是"R 这条腿上现在能跑多少"的量尺，往里加句子是最省的推进方式。
+ */
 const EVAL_CHECKS = [
-  ['omni_eval_1p1', '1+1', 2],
-  ['omni_eval_sum', 'sum(1:10)', 55],
+  '1+1',
+  'sum(1:10)',
+  'max(c(3,9,2))',
+  'min(c(3,9,2))',
+  'length(c(1,2,3,4))',
+  'sqrt(2)',
+  'exp(1)',
+  'abs(-3)',
+  'round(2.567, 2)',
+  'as.integer("42")',
+  'sum(as.numeric(c("1", "2", "3")))',
+  'as.numeric("2.5") * 2',
+  'if (1 < 2) 10 else 20',
+  'x <- 5; x * 3',
+  'f <- function(a) a * 2; f(21)',
+  'sum(rep(2, 5))',
+  'prod(2:5)',
+  'sum(seq_len(100))',
 ];
 if (want('jsrun')) {
   const dir = join(ROOT, '.omni-cache', 'r-rt', 'jsall');
@@ -545,6 +567,7 @@ if (want('jsrun')) {
     const logFile = join(dir, '$judge.log');
     writeFileSync(logFile, '');
     L.push("import { appendFileSync } from 'node:fs';");
+    L.push(`import { RT as $RT } from ${JSON.stringify(join(ROOT, 'src/core/mir/js_rt.js'))};`);
     L.push(`const LOG = ${JSON.stringify(logFile)};`);
     let k = 0;
     for (const u of linked.units) L.push(`import { $init as $i${k++} } from ${JSON.stringify(u.out)};`);
@@ -579,7 +602,16 @@ if (want('jsrun')) {
   T('asReal(ScalarReal(3.5))', () => $F('Rf_asReal')($F('Rf_ScalarReal')(3.5)));
   T('asInteger(ScalarInteger(7))', () => $F('Rf_asInteger')($F('Rf_ScalarInteger')(7)));
   T('xlength(allocVector(REALSXP,5))', () => $F('Rf_xlength')($F('Rf_allocVector')(14, 5n)));
-  for (const nm of ${JSON.stringify(EVAL_CHECKS.map((c) => c[0]))}) T(nm, () => $F(nm)());
+  /* 一句一句递进去：地址问 omni_src_ptr()，字节用 RT 的 i8 访问器写，末尾补 0 */
+  const $st = $RT.memStoreFn('i8');
+  const $put = (src) => {
+    const p = $F('omni_src_ptr')();
+    const bs = new TextEncoder().encode(src);
+    for (let i = 0; i < bs.length; i++) $st(p, i, BigInt(bs[i]));
+    $st(p, bs.length, 0n);
+  };
+  const $ev = $F('omni_eval_buf');
+  for (const src of ${JSON.stringify(EVAL_CHECKS)}) T('eval:' + src, () => { $put(src); return $ev(); });
   T('R_gc', () => { $F('R_gc')(); return 1; });
 }`);
     k = 0;
@@ -630,17 +662,23 @@ if (want('jsrun')) {
       if (v !== wantV) bad.push(`${nm}: 我们 ${sexpOut.get(nm)}、要 ${wantV}`);
     }
     if (sexpOut.get('R_gc') !== '1') bad.push('R_gc 没跑过');
-    /* 真求值那两格：尺子还是 Rscript */
+    /* 真求值那几句：尺子是 Rscript（一句一趟，`{}` 包起来免得赋值那句印两遍） */
     const rs2 = spawnSync('Rscript', ['-e',
-      EVAL_CHECKS.map(([, expr]) => `cat(sprintf("%.17g", ${expr}), "\\n")`).join(';')],
+      EVAL_CHECKS.map((e) => `cat(sprintf("%.17g", {${e}}), "\\n")`).join(';')],
     { encoding: 'utf8' });
-    const refs2 = rs2.status === 0
-      ? (rs2.stdout ?? '').trim().split('\n').map((x) => Number(x))
-      : EVAL_CHECKS.map(([, , c]) => c);
-    EVAL_CHECKS.forEach(([nm, expr], i) => {
-      const v = Number(sexpOut.get(nm));
-      if (v !== refs2[i]) bad.push(`${nm}（${expr}）: 我们 ${sexpOut.get(nm)}、R ${refs2[i]}`);
-    });
+    const refs2 = (rs2.stdout ?? '').trim().split('\n').map((x) => Number(x));
+    if (rs2.status !== 0 || refs2.length !== EVAL_CHECKS.length) {
+      bad.push(`Rscript 那把尺子没量出来（${(rs2.stderr ?? '').split('\n')[0].slice(0, 100)}）`);
+    } else {
+      EVAL_CHECKS.forEach((src, i) => {
+        const got2 = sexpOut.get(`eval:${src}`);
+        const v = Number(got2);
+        const w = refs2[i];
+        if (!Number.isFinite(v)) { bad.push(`eval ${src}: 我们 ${got2}、R ${w}`); return; }
+        const rel = Math.abs(v - w) / Math.max(Math.abs(w), 1e-300);
+        if (rel > 1e-12) bad.push(`eval ${src}: 我们 ${v}、R ${w}`);
+      });
+    }
     JSRUN.forEach(([, sym], i) => {
       const v = Number(got.get(sym));
       const w = refs[i];
@@ -655,7 +693,7 @@ if (want('jsrun')) {
       ok('装起来真调 R 的运行时', `${linked.units.length} 份的 $init 全跑过，`
         + `R 自己那 ${INIT_SEQ.length} 步初始化过了 ${INIT_SEQ.length - skipped.length} 步`
         + `（欠的：${skipped.join('、') || '无'}），SEXP 那 ${SEXP_CHECKS.length} 格 + R_gc 都对，`
-        + `R 真跑起来了（${EVAL_CHECKS.map(([, e]) => e).join('、')}），`
+        + `R 的 ${EVAL_CHECKS.length} 句都与 Rscript 对得上，`
         + `${JSRUN.length} 个函数与 ${rs.status === 0 ? 'Rscript' : '记死的常数'} 的相对差都 <= 1e-12`);
     }
   }

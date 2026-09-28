@@ -120,3 +120,14 @@ void omni_console_init(void) {
 double omni_eval_1p1(void) { return omni_eval1("1+1"); }
 double omni_eval_sum(void) { return omni_eval1("sum(1:10)"); }
 double omni_eval_sd(void) { return omni_eval1("sd(c(1,2,3,4))"); }
+
+/* **任意一句 R 从 JS 递进来**：C 这边留一块固定的缓冲，JS 那边把字节写进去
+ * （地址问 `omni_src_ptr()`），再叫 `omni_eval_buf()`。
+ *
+ * 为什么不在 JS 里直接造一个 C 串：那要在 JS 那侧管 malloc 与结尾的 0，两头都容易错；
+ * 一块固定缓冲把"谁管这块内存"说得最清楚。4 KB 够判据用（一句一句地试）。 */
+static char omni_src_buf[4096];
+
+char *omni_src_ptr(void) { return omni_src_buf; }
+int omni_src_size(void) { return (int)sizeof(omni_src_buf); }
+double omni_eval_buf(void) { return omni_eval1(omni_src_buf); }
