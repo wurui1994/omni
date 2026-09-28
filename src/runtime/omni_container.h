@@ -218,8 +218,22 @@ static LNAME NAME##_keys(NAME d) { \
   for (int64_t i = 0; i < d->n; i++) if (d->live[i]) a->items[a->len++] = d->keys[i]; \
   return a; \
 } \
+/* **一次建好**：按 n 先把三条数组各分配一次，再逐格 set。
+   从前是 `new` 加 n 次 `set`，而 `set` 的第一格就要三次 `omni_grow`（keys/vals/live，
+   cap 0 -> 4），键多一点还要再翻一倍 —— 量出来的：原生腿上 `_platform_memmove` 8.19%、
+   `omni_dict_string_dynamic_new` 2.61% 都落在这儿（对象字面量是它最大的调用方，
+   见 `backend-c/emit.js` 的 `objLitChain`）。语义一个字没变：照旧走 `set`，
+   所以重复键仍然后者赢、小表那一档仍然不建索引。 */ \
 static NAME NAME##_from(const KT *ks, const VT *vs, int64_t n) { \
   NAME d = NAME##_new(); \
+  if (n > 0) { \
+    int64_t c = 4; \
+    while (c < n) c *= 2; \
+    d->keys = (KT *)omni_alloc(sizeof(KT) * (size_t)c); \
+    d->vals = (VT *)omni_alloc(sizeof(VT) * (size_t)c); \
+    d->live = (bool *)omni_alloc(sizeof(bool) * (size_t)c); \
+    d->cap = c; \
+  } \
   for (int64_t i = 0; i < n; i++) NAME##_set(d, ks[i], vs[i]); \
   return d; \
 }

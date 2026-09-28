@@ -2713,6 +2713,36 @@ class CEmitter {
       + `${a.items.length}, ${a.items.length} }`;
   }
 
+  /**
+   * `js_obj_new` + 一串常量键 `js_obj_set` -> 一句 `_from(ks, vs, n)`；不是这个形状回 null。
+   * 见 `builtin` 开头那段账。
+   * @returns {string | null}
+   */
+  objLitChain(e) {
+    const ks = [];
+    const vs = [];
+    let cur = e;
+    for (;;) {
+      if (!cur || cur.kind !== 'Builtin') return null;
+      if (cur.name === 'js_obj_new') break;
+      if (cur.name !== 'js_obj_set' || (cur.args ?? []).length !== 3) return null;
+      const k = constKey(cur.args[1]);
+      if (k === null) return null;
+      ks.unshift(k);
+      vs.unshift(cur.args[2]);
+      cur = cur.args[0];
+    }
+    if (ks.length === 0) return null;
+    /* 键重复就不折 —— 两条路其实都是"后者赢"，可少一处要想的地方（字面量里本来就少见）。 */
+    if (new Set(ks).size !== ks.length) return null;
+    const kt = ks.map((k) => this.strLit(k)).join(', ');
+    const vt = vs.map((v) => this.expr(v)).join(', ');
+    /* 类型名写死成"普通对象那一格 dict"：`omni_js_obj_new` 里的 `DT` 就是它
+       （`OMNI_JS_DEFINE(…, omni_dict_string_dynamic, …)`），整族函数跟着它一起发。 */
+    return `omni_js_dict_wrap(omni_dict_string_dynamic_from((omni_str[]){${kt}}, `
+      + `(omni_dyn[]){${vt}}, ${ks.length}))`;
+  }
+
   /** 容器字面量用复合字面量传数组，避免为了构造值而引入语句表达式 */
   listLit(e) {    const n = cTypeName(e.type);
     if (!e.items.length) return `${n}_from(NULL, 0)`;
@@ -2793,6 +2823,33 @@ class CEmitter {
   }
 
   builtin(e) {
+    /* **对象字面量一次建好**（第二刀）。
+     *
+     * `{a:1,b:2,c:3}` 从前降成 `js_obj_new()` 再一层套一层 `js_obj_set` ⇒ 发出来是
+     * `omni_js_obj_setk(omni_js_obj_setk(omni_js_obj_new(), k1, v1), k2, v2)`。每一次
+     * `setk` 都要：在 noext 那张**全局旁表**里查一次（`omni_js_noext_` -> 又一次哈希查找）、
+     * 在 dict 里 find 一次、然后可能三次 `omni_grow`（keys/vals/live，cap 0 -> 4）。
+     *
+     * 量出来的（`OMNI_PROF=sample dist/omni run tests/asy/cases/01-arith.asy`，第一刀之后）：
+     *   omni_dict_string_dynamic_set_h 9.33% · _platform_memmove 8.19% ·
+     *   omni_hash_string 5.29% · _platform_memcmp 5.10% · dict_new 2.61%
+     * 词法器每个记号要建两三格对象（`{type, node, span}` / `{kind, value, span}`），
+     * 这一族就是那 30s 里的下一大块。
+     *
+     * 折成**一句** `omni_js_dict_wrap(omni_dict_string_dynamic_from(ks, vs, n))`：
+     * 普通对象在这条腿上就是一格 dict（`omni_js_obj_new` 自己就是
+     * `omni_js_dict_wrap(DT_new())`，见 `runtime/omni_js_obj.h`），而 `_from` 现在按 n
+     * 预留一次（`runtime/omni_container.h`）。语义等价的依据：
+     *   * 新建的 dict 上 `setk` 那几个前置分支全不成立（tag 是 DICT，不是 OBJ/NULL/LIST；
+     *     `omni_js_noext_` 查的是旁表，刚建的不在里头）—— 落点就是 `DT_set(dict, key, v)`；
+     *   * `_from` 内部照旧走 `DT_set`，所以重复键"后者赢"、小表不建索引这两条都没变；
+     *   * 实参求值从左到右 = 原来从内到外，副作用次序不变。
+     * 只认"键全是字面量、而且互不相同"这一个形状（`__proto__` / 访问器 / 计算键在
+     * `frontend-js/lower.js` 那一层就走别的 op 了，到不了这儿）。 */
+    if (e.name === 'js_obj_set') {
+      const lit = this.objLitChain(e);
+      if (lit !== null) return lit;
+    }
     /* **调用点那条实参 list 上栈**（第一百五十五片；`stackArgs` 那一条的另一半）。
      *
      * 量出来的：`OMNI_PROF=sample dist/omni run tests/cases/01_basics.omni --timeout 10`
