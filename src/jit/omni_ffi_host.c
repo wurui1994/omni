@@ -9,6 +9,8 @@
  *   dlopen(path)           dlopen(RTLD_NOW | RTLD_GLOBAL)
  *   sym(name)              dlsym(RTLD_DEFAULT, name) -> BigInt
  *   init(addr)             把那个地址当成 napi_register_module_v1 叫一次
+ *   calli(addr)            把那个地址当成 int64_t (*)(void) 叫一次
+ *   calln(addr, a0..a3)    同上，但带四个整数/指针实参（`main(argc, argv)` 走这一格）
  *
  * 重定位在 JS 里做（link/elf_merge.js 的 flatImage），不在这儿。
  * 宿主只回答两个问题："装到哪个地址"（mem）与"外面那些符号在哪"（sym）。
@@ -230,6 +232,51 @@ static napi_value omni_fh_calli(napi_env env, napi_callback_info info) {
   return v;
 }
 
+/* ================================================================== calln
+ *
+ * 同上，但**带几个整数/指针实参**：`int64_t (*)(int64_t, int64_t, int64_t, int64_t)`。
+ *
+ * 为什么要它（ADR-0045 的 D3 第一步）：`calli` 只够调 `int(void)` 那一档，而
+ * 我们生成的程序入口是 `int main(int argc, char **argv)` —— 用 `calli` 调它的话
+ * x0/x1（x86-64 上 rdi/rsi）是**上一趟留下的垃圾**，那不是"能跑但不准"，是踩到哪算哪。
+ *
+ * **四格就够、而且是刻意的**：arm64（x0-x7）与 x86-64（rdi/rsi/rdx/rcx）上头四个
+ * 整数实参都在寄存器里，不碰栈 ⇒ 这一格不必知道调用约定的任何别的事。
+ * 递少了的那几格照 C 的规矩是"被调方不看"，所以 `main(argc, argv)` 直接递四个也对。
+ *
+ * 浮点实参不在这儿 —— 那要另一组寄存器（v0-v7 / xmm0-7），而到现在为止没有一个
+ * 调用方需要它。要的时候再加一格，别先造。
+ */
+static napi_value omni_fh_calln(napi_env env, napi_callback_info info) {
+  napi_value a[5];
+  void *p = NULL;
+  int64_t v[4] = { 0, 0, 0, 0 };
+  if (!omni_fh_args(env, info, 1, a)) return omni_fh_err(env, "omni ffi host: calln(addr, …)");
+  /* 实参个数是**可变的**，所以重新问一次 —— `omni_fh_args` 只保证至少有 want 个。 */
+  size_t argc = 5;
+  if (napi_get_cb_info(env, info, &argc, a, NULL, NULL) != omni_napi_ok) return NULL;
+  if (!omni_fh_addr(env, a[0], &p) || p == NULL) {
+    return omni_fh_err(env, "omni ffi host: calln 的 addr 要一格非零 BigInt");
+  }
+  for (size_t i = 1; i < argc && i <= 4; i++) {
+    bool lossless = false;
+    /* 两种都收：小整数从 JS 递过来是 number 更顺手，地址一定是 BigInt。 */
+    if (napi_get_value_bigint_int64(env, a[i], &v[i - 1], &lossless) != omni_napi_ok) {
+      int64_t n = 0;
+      if (napi_get_value_int64(env, a[i], &n) != omni_napi_ok) {
+        return omni_fh_err(env, "omni ffi host: calln 的实参要 BigInt 或整数");
+      }
+      v[i - 1] = n;
+    }
+  }
+  int64_t (*entry)(int64_t, int64_t, int64_t, int64_t)
+    = (int64_t (*)(int64_t, int64_t, int64_t, int64_t))p;
+  int64_t r = entry(v[0], v[1], v[2], v[3]);
+  napi_value out;
+  if (napi_create_bigint_int64(env, r, &out) != omni_napi_ok) return NULL;
+  return out;
+}
+
 /* ================================================================== 装配 */
 static napi_value omni_fh_pagesize(napi_env env, napi_callback_info info) {
   (void)info;
@@ -252,6 +299,7 @@ napi_value napi_register_module_v1(napi_env env, napi_value exports) {
   omni_fh_put(env, exports, "sym", omni_fh_sym);
   omni_fh_put(env, exports, "init", omni_fh_init);
   omni_fh_put(env, exports, "calli", omni_fh_calli);
+  omni_fh_put(env, exports, "calln", omni_fh_calln);
   return exports;
 }
 

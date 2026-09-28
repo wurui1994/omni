@@ -240,5 +240,48 @@ if (process.arch === 'arm64') {
   }
 }
 
+/* ================================================================ D3 的头两步
+ *
+ * **整份 Omni / polydraw 程序在这个进程里跑**（`omni c jit … --rt`）。
+ *
+ * 上一节判的是"一份自带 `main` 的 C"；这一节判的是**我们自己生成的那份 C** ——
+ * 它与那种 C 差两件事，两件都是这一节的全部内容：
+ *
+ *   1. 入口是 `int main(int argc, char **argv)`，第一句就是 `omni_host_init(argc, argv)`
+ *      ⇒ 必须走宿主那格 `calln` 递真的 argc/argv（用 `calli` 调它是踩到哪算哪）；
+ *   2. 它调运行时那一族（`omni_print_int` / `omni_run_entry` / …）
+ *      ⇒ 运行时那二十来份 `.o` 要与程序那份**一起铺**（`--rt`）。
+ *
+ * 尺子是**同一份源码走正路**（`omni run`）：stdout 逐字节。
+ * 这一格顺手把 ADR-0045 D2 里那句"跑 `01-arith` 一族"兑现了 —— 那是这台 JIT 的目标语料。
+ */
+{
+  const okIf = (name, cond, note) => {
+    if (cond) { pass++; process.stdout.write(`  ok   ${name}\n`); return; }
+    fail++;
+    process.stdout.write(`  FAIL ${name}\n       ${note}\n`);
+  };
+  const OMNI = join(ROOT, 'src/cli.js');
+  const dir = join(ROOT, '.omni-cache', 'work', 'ownjit-judge');
+  mkdirSync(dir, { recursive: true });
+  const big = { encoding: 'utf8', timeout: 180000, maxBuffer: 64 * 1024 * 1024 };
+  process.stdout.write('\nD3 头两步（整份 Omni / polydraw 程序在本进程里跑 —— c jit --rt）\n');
+  for (const prog of ['tests/cases/01_basics.omni', 'ext/polydraw/examples/01-arith.pss']) {
+    const src = join(ROOT, prog);
+    /* 先把那份 C 要出来 —— `emit c` 是正路上的一步，不是这一节新造的东西。 */
+    const gen = spawnSync('node', [OMNI, 'emit', 'c', src], big);
+    if (gen.status !== 0) { okIf(`${prog} emit c 过得去`, false, gen.stderr.slice(0, 200)); continue; }
+    const cPath = join(dir, `${prog.replace(/[/.]/g, '_')}.c`);
+    writeFileSync(cPath, gen.stdout);
+    const got = spawnSync('node', [OMNI, 'c-jit', cPath, '--rt'], big);
+    const want = spawnSync('node', [OMNI, 'run', src], big);
+    okIf(`${prog} 在本进程里跑出来的 stdout 与正路逐字节相同`,
+      got.stdout === want.stdout && want.stdout.length > 0,
+      `想要 ${JSON.stringify(want.stdout.slice(0, 160))}，`
+      + `量到 ${JSON.stringify(got.stdout.slice(0, 160))}`
+      + `${got.stderr ? ` err=${got.stderr.slice(0, 200)}` : ''}`);
+  }
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);

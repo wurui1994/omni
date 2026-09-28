@@ -305,9 +305,13 @@ const C_GROUP = {  name: 'c',
 \`.text\` 设成 rx 并刷指令缓存），然后跳进 \`main\`。不写文件、不起进程、
 一个外部 cc 或 LLVM 都不借。
 
-\`main\` 必须写成 \`int main(void)\`：跳进去那一格按 \`int64_t (*)(void)\` 调，
-带形参的话 x0/x1 是上一趟留下的垃圾。退出码按 \`& 0xff\` 收（与 \`exit\` 同口径）。`,
-      flags: [...C_CPP_FLAGS],
+\`main\` 两种形状都收（\`int main(void)\` 与 \`int main(int, char**)\`）：后者的 \`argv\`
+是我们自己在一块可执行内存旁边摆出来的 \`{ "omni-c-jit", NULL }\`。
+退出码按 \`& 0xff\` 收（与 \`exit\` 同口径）。
+
+\`--rt\` 把运行时那二十来份 \`.o\` 一起铺进来 —— \`omni emit c\` 出的那份 C 要它们
+（\`omni_print_int\` / \`omni_host_init\` / \`omni_run_entry\` 那一族）。纯 C 程序不用给。`,
+      flags: [...C_CPP_FLAGS, { name: '--rt', arity: 0 }],
     },
     {
       name: 'obj', key: 'c-obj', usage: 'FILE.c -o NAME',
@@ -667,7 +671,7 @@ asy（5 分多钟），而 tests/asy/eps.js 默认不生成 —— 清掉之后�
     { name: 'c-run', key: 'c-run', hidden: true, flags: [...C_CPP_FLAGS] },
     { name: 'jit-selftest', key: 'jit-selftest', hidden: true, flags: [] },
     { name: 'c-obj', key: 'c-obj', hidden: true, flags: [F_OUT, ...C_CPP_FLAGS, ...C_TARGET_FLAGS] },
-    { name: 'c-jit', key: 'c-jit', hidden: true, flags: [...C_CPP_FLAGS] },
+    { name: 'c-jit', key: 'c-jit', hidden: true, flags: [...C_CPP_FLAGS, { name: '--rt', arity: 0 }] },
     { name: 'elf-r', key: 'elf-r', hidden: true, flags: [...LINK_COMMON] },
     { name: 'elf-link', key: 'elf-link', hidden: true, flags: [...LINK_COMMON, ...LINK_ELF_ONLY] },
     { name: 'macho-link', key: 'macho-link', hidden: true, flags: [...LINK_COMMON, ...LINK_MACHO_ONLY] },

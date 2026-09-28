@@ -4836,8 +4836,14 @@ function ffiInject(mod) {
  *
  * **`main` 必须是 `int main(void)`**：`calli` 按 `int64_t (*)(void)` 调，给
  * `main(argc, argv)` 的话 x0/x1 是上一趟留下的垃圾 —— 那不是"能跑但不准"，
- * 是**踩到哪算哪**。整份 `.sx` 程序那一档（生成的 `main` 带两个形参）要先补一格入口包装，
- * 那是 D3 的事，这儿明着拒。
+ * 是**踩到哪算哪**。（2026-09-28 补：带形参那一档现在走 `calln`，见下面那段。）
+ *
+ * **`main` 两种形状都收**（`int main(void)` 与 `int main(int, char**)`）：
+ * 后者走宿主那格 `calln`，`argv` 是**我们自己在一块 `mem` 里摆出来的**
+ * `{ "omni-c-jit", NULL }`。用 `calli` 调带形参的 `main` 是错的 —— x0/x1
+ * （x86-64 上 rdi/rsi）会是上一趟留下的垃圾，而生成的 `main` 第一句就是
+ * `omni_host_init(argc, argv)`：那不是"能跑但不准"，是踩到哪算哪。
+ * 这一格让整份 `.sx`/`.pss` 程序的入口也进得来（ADR-0045 的 D3 第一步）。
  *
  * 退出码按 `& 0xff` 收（POSIX 的 `exit` 就这么截），于是"这个进程里跑一趟"与
  * "起个进程跑一趟"在判据眼里是同一件事。
@@ -4847,7 +4853,7 @@ function ffiInject(mod) {
  * 照旧命中，那是"一个会跑错程序的缓存"（`buildSelf` 的 `objKey` 那段记过同一类错）。
  * 要缓存就等发射按单元切开（ADR-0047 §6），那时每个单元各自一格键。
  */
-function cJitRun(path, incs, defs) {
+function cJitRun(path, incs, defs, withRt) {
   const h = ffiHost();
   const arch = hostArch();
   const os = hostOs();
@@ -4856,12 +4862,25 @@ function cJitRun(path, incs, defs) {
   cObj(path, objPath, arch, incs.concat([RUNTIME_DIR]), defs, 'elf', os, undefined, false);
   /* `readBinary` 回的是 latin1 的串（宿主那一层就这么定的），链接器要按字节看 ——
      与 `ffiObject` / `elf-r` 那两处是同一句话。 */
-  const s = readBinary(objPath);
-  const obj = new Uint8Array(s.length);
-  for (let k = 0; k < s.length; k++) obj[k] = s.charCodeAt(k);
+  const bytesOf = (p) => {
+    const s = readBinary(p);
+    const b = new Uint8Array(s.length);
+    for (let k = 0; k < s.length; k++) b[k] = s.charCodeAt(k);
+    return b;
+  };
+  /* `--rt`：把运行时那二十来份 `.o` 一起铺进来（`omni emit c` 出的那份 C 要它们 ——
+     `omni_print_int` / `omni_host_init` / `omni_run_entry` 那一族）。
+     **同一份清单、同一格暖存**（`runtimeObjectsSelf`），与 `buildSelf` 链的是同一批字节。
+     不默认带上：纯 C 程序一个都用不着，而多铺二十份 `.o` 是白花的时间与地址空间。 */
+  const objs = [bytesOf(objPath)];
+  if (withRt === true) {
+    const rt = runtimeObjectsSelf(arch, os);
+    for (const p of rt) objs.push(bytesOf(p));
+    vStep(`c-jit rt  ${rt.length} 份运行时 .o 一起铺`);
+  }
   let mem = null;
   const img = flatImage({
-    objs: [obj],
+    objs,
     page: h.page(),
     reserve: (n) => { mem = h.mem(n); return Number(mem.addr); },
     /* osx 上符号名前那条下划线是平台事实（`cObj` 里那格 `prefix`），而 `dlsym` 要的是
@@ -4878,8 +4897,20 @@ function cJitRun(path, incs, defs) {
   const entry = img.syms.get('_main') ?? img.syms.get('main');
   if (entry === undefined) throw new OmniError(`c-jit：铺出来的映像里找不着 main（${path}）`);
   vStep(`c-jit  ${img.size} 字节铺在 0x${img.base.toString(16)}，${img.ranges.length} 段`
-    + `（${obj.length} 字节 .o，我们自己那台后端出的机器码）`);
-  return Number(h.calli(entry)) & 0xff;
+    + `（${objs.length} 份 .o，我们自己那台后端出的机器码）`);
+  /* `argv` 摆在自己那一格 `mem` 里：`{ "omni-c-jit\0", NULL }`。
+     一页够（两个指针 + 十来个字节），而且这块内存的生命期跟着进程 —— 被调方可以留着它
+     （生成的 `main` 第一句 `omni_host_init(argc, argv)` 就是把它记下来）。 */
+  const av = h.mem(h.page());
+  const ab = new Uint8Array(av.buf);
+  const name = 'omni-c-jit';
+  const strOff = 32;                                    /* 前 32 字节留给那张指针表 */
+  for (let k = 0; k < name.length; k++) ab[strOff + k] = name.charCodeAt(k);
+  ab[strOff + name.length] = 0;
+  const dv = new DataView(av.buf);
+  dv.setBigInt64(0, av.addr + BigInt(strOff), true);     /* argv[0] */
+  dv.setBigInt64(8, 0n, true);                          /* argv[1] = NULL */
+  return Number(h.calln(entry, 1, av.addr)) & 0xff;
 }
 
 /**
@@ -7320,10 +7351,10 @@ function main(argv) {
     }
     /* `c-jit`：C -> 真机器码 -> **就在这个进程里跑**（ADR-0045 的 D2）。
      * 不写可执行文件、不起子进程、一个外部 cc / LLVM 都不借。
-     * `main` 要写成 `int main(void)` —— 为什么见 `cJitRun` 的头注。 */
+     * `--rt` 把运行时那二十来份 `.o` 一起铺（`omni emit c` 出的那份 C 要它们）。 */
     case 'c-jit': {
       const { flags } = cSplitArgs(rest);
-      return cJitRun(path, incDirs(flags), defArgs(flags));
+      return cJitRun(path, incDirs(flags), defArgs(flags), flags.includes('--rt'));
     }
     /* `elf-r`：几个 `.o` 并成一个 `.o`，就是 `tcc -r`（第九刀第四十二片）。
      * 输入可以是 **tcc 自己出的**目标文件 —— 于是这一步的字节对账不必等代码生成对齐。
