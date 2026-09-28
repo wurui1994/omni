@@ -121,3 +121,50 @@ out3.push(kind(e2), String(e2.z2));
 out3.push(String(typeof ({ kind: 1 }).hasOwnProperty));   // 原型那一支：function
 
 console.log(out3.join('|'));
+
+/* 15..19：属性**写**那一边的 IC（只缓存"自有、数据槽、可写"这一种，见 ADR-0047 §20）。
+   每一格都是"不许走那条快路"的一种理由。 */
+const out4 = [];
+function W(a) { this.a = a; this.b = 0; }
+/* 就是这一处写的调用点。`try` 是因为 ESM 是**严格模式**：写不可写的一格 node 会抛，
+   而我们这条腿是非严格的口径（静静地丢）。这一份判的是**值有没有变**，不是抛不抛
+   —— 那是另一轴的事（严格模式），不该混进 IC 的判据里。 */
+const put = (o, v) => { try { o.b = v; } catch (e) { /* 见上 */ } return String(o.b); };
+
+
+/* 15. 一批同构实例都得对（形状相同 ⇒ 同一个下标） */
+for (let i = 0; i < 3; i++) out4.push(put(new W(i), i * 10));
+/* 形状不同的那一格（名字落在别的下标上）也得对 */
+const w2 = { pad: 1, b: 0 };
+out4.push(put(w2, 7));
+out4.push(put(new W(9), 99));
+
+/* 16. 不可写：非严格赋值静静地丢 */
+const ro = new W(1);
+Object.defineProperty(ro, 'b', { value: 'fixed', writable: false });
+out4.push(put(ro, 'nope'));                  // fixed
+
+/* 17. 原型上的 setter 优先，不许在自己身上新建一格 */
+const log = [];
+function S() {}
+Object.defineProperty(S.prototype, 'b', {
+  set(v) { log.push('set:' + v); }, get() { return 'via-getter'; }, configurable: true,
+});
+const sv = new S();
+out4.push(put(sv, 5));                       // via-getter
+out4.push(String(Object.keys(sv).length));   // 0
+out4.push(log.join(','));
+
+/* 18. 冻结之后写不进去 */
+const fz = new W(2);
+Object.freeze(fz);
+out4.push(put(fz, 'x'));                     // 0
+
+/* 19. 自己那一格原地变成访问器：必须去调 setter */
+const ac = new W(3);
+out4.push(put(ac, 4));
+const seen = [];
+Object.defineProperty(ac, 'b', { set(v) { seen.push(v); }, get() { return 'acc'; }, configurable: true });
+out4.push(put(ac, 5), seen.join(','));
+
+console.log(out4.join('|'));

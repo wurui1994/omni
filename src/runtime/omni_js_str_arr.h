@@ -435,6 +435,53 @@ static omni_dyn omni_js_idx_set(omni_dyn o, omni_dyn k, omni_dyn v) { \
       return omni_dyn_undef(); \
   } \
 } \
+/* 属性**写**那一边的 IC（ADR-0047 §20）。`o.x = v` 降下来是 `js_idx_set`（不是 js_obj_set
+   —— 我一开始把 IC 接到了后者上，发出来的 C 里一处都没有，白量了一趟），所以这一格住在
+   idx_set 旁边。
+   只缓存**一种**情形：真对象、自有、数据槽、可写。命中就是一次指针比较（形状）+ 两个位，
+   然后原地写。别的一律原封不动交回 `omni_js_idx_set`（链上的 setter、不可写、要新建一格、
+   代理、不是真对象 —— 那些的口径只有 setp 那一份），回值也跟着它给 v。
+   顺手省掉一次 UTF-8 -> UTF-16：慢路才现造那格 dyn 键。 */ \
+static omni_dyn omni_js_idx_setk_ic(omni_dyn o, omni_str key, omni_dyn v, \
+                                    struct omni_js_ic_s *ic) { \
+  if (o.tag == OMNI_DYN_OBJ) { \
+    omni_js_objv *ov = (omni_js_objv *)o.u.ref; \
+    if (ov->px_h.tag == OMNI_DYN_UNDEF && key.len < OMNI_JS_PKEY_BUF - 1) { \
+      DT ps = (DT)ov->ps; \
+      char kbuf[OMNI_JS_PKEY_BUF]; \
+      omni_str pk; \
+      int64_t e; \
+      if (ic->kind == 4 && ic->shape == ov->shape) { \
+        LT sl = (LT)ps->vals[ic->slot].u.ref; \
+        if (!sl->items[1].u.b && sl->items[4].u.b) { \
+          sl->items[0] = v; \
+          return v; \
+        } \
+      } \
+      kbuf[0] = 's'; \
+      if (key.len > 0) memcpy(kbuf + 1, key.p, (size_t)key.len); \
+      pk.p = kbuf; \
+      pk.len = key.len + 1; \
+      e = DT##_find(ps, pk); \
+      if (e >= 0) { \
+        LT own = (LT)ps->vals[e].u.ref; \
+        if (!own->items[1].u.b) { \
+          /* 不可写的那一格：非严格赋值**静静地丢**（与 setp 一字不差），也不进缓存 */ \
+          if (own->items[4].u.b) { \
+            own->items[0] = v; \
+            if (ov->shape != NULL) { \
+              ic->shape = ov->shape; \
+              ic->slot = e; \
+              ic->kind = 4; \
+            } \
+          } \
+          return v; \
+        } \
+      } \
+    } \
+  } \
+  return omni_js_idx_set(o, omni_dyn_of_s16(omni_s16_of_utf8(key)), v); \
+} \
 /* Object.fromEntries（规范 20.1.2.7）：把一串 [k, v] 摊成一格对象。JS 那条腿上造的是
    真对象（$JSObj + Object.prototype），这条腿上"普通对象"就是 dict —— 键都过一遍
    ToPropertyKey、值原样存，可观察的那几样（取键、Object.keys、JSON）逐格相同。 */ \

@@ -3016,6 +3016,17 @@ class CEmitter {
         if (k !== null) return `omni_js_arr_geti(${a[0]}, ${k})`;
         return `omni_js_arr_get(${a[0]}, ${a[1]})`;
       }
+      /* `o.x = v` 降下来是这一格（**不是 js_obj_set** —— 那条路上属性写一次也不走）。
+       * 键是编译期常量的字符串时带一格**写的 IC**（ADR-0047 §20）：只有"真对象、自有、
+       * 数据槽、可写"那一种命中，别的原样交回 `omni_js_idx_set`（口径与回值都跟它）。 */
+      case 'js_idx_set': {
+        const k = constKey(e.args[1]);
+        if (k !== null && a.length === 3) {
+          const ic = this.icN++;
+          return `omni_js_idx_setk_ic(${a[0]}, ${this.strLit(k)}, ${a[2]}, &omni_ic_${ic})`;
+        }
+        return `${JS_ALL[e.name].c}(${a.join(', ')})`;
+      }
       // `x === "字面量"`：特化成能内联的 omni_js_eq_s16k（见 omni.h）。switch 降下来是
       // 一条 if-else 链，编译器自己的 switch (e.kind) 动辄四十路，省下的是四十次调用。
       case 'js_eq': {
@@ -3033,7 +3044,8 @@ class CEmitter {
         const k = constKey(e.args[1]);
         if (k !== null) {
           /* 读 + 常量键那一支再带一格**单态 IC**（ADR-0047 §14）：命中时几条整数比较就答，
-             哈希与线性扫都不做。形态与失效的理由写在 omni_js_obj.h 那格 struct 上。 */
+             哈希与线性扫都不做。形态与失效的理由写在 omni_js_obj.h 那格 struct 上。
+             写那一边同样一格（§20，只缓存"自有、数据槽、可写"这一种情形）。 */
           if (e.name === 'js_obj_get') {
             const ic = this.icN++;
             return `omni_js_obj_getk_ic(${a[0]}, ${this.strLit(k)}, &omni_ic_${ic})`;
