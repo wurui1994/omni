@@ -19,7 +19,7 @@
 //
 // 语料里每一个词的四个映射（upper / lower / casefold / title）与本机 python3 **逐字节相同**。
 // 没有参考树 / clang（链接那一步）/ python3 / 没探过 `pyconfig.h` 就说清并跳过（不假装绿）。
-import { existsSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -133,8 +133,61 @@ const jsBad = compare(js.stdout ?? '');
 bad += jsBad;
 say(`门二（JS 腿：同一份 C -> MIR -> JS）：${jsBad === 0 ? '逐字节相同' : `${jsBad} 个不同`}`);
 
+/* 六、**方言层调得通吗**：`(lib 那份 .o)` + `(cabi)` + `(pnew)` + `(ccall)`。
+ *
+ * 这一门量的是"语言层怎么用那张表"那一刀的前提 —— 不是我们自己写的 C 去调它，
+ * 而是**方言写的程序**去调它。三格要照顾：
+ *   * `ptr` 那格缓冲区走 `(pnew (ptr int) N)`（方言里**没有** `(addr 局部量)`）；
+ *   * 方言的 `int` 是 8 字节、没有 u32 —— 一格装两个 `Py_UCS4`，自己拆（小端）；
+ *   * `.o` 只有**外部 cc** 那一路收（自带链接器只吃动态库），所以挂 `OMNI_CC=clang`。
+ */
+const CPS = [65, 223, 912, 0x3A3, 20013];         // A / ß / ΐ / Σ / 中
+const sx = [
+  '(module',
+  `  (lib ${JSON.stringify(TABLE)})`,
+  '  (cabi _PyUnicode_ToUpperFull i32 (i32 ptr))',
+  '  (fn lo32 ((w int)) int (ret (bin "&" (var w) (int 4294967295))))',
+  '  (fn hi32 ((w int)) int (ret (bin "u>>" (var w) (int 32))))',
+  '  (main',
+  ...CPS.flatMap((cp, k) => [
+    /* 一格码点一块新的缓冲（`pnew` 是零初始化的）—— `ToUpperFull` 只写它回的那 n 格，
+       共用一块的话剩下的格子里是上一次的残留，那是它的语义，不是 bug。 */
+    `    (let out${k} (ptr int) (pnew (ptr int) (int 2)))`,
+    `    (let n${k} int (ccall _PyUnicode_ToUpperFull (int ${cp}) (var out${k})))`,
+    `    (let a${k} int (pload (var out${k})))`,
+    `    (let b${k} int (pload (padd (var out${k}) (int 1))))`,
+    `    (print (var n${k}))`,
+    `    (print (call lo32 (var a${k})))`,
+    `    (print (call hi32 (var a${k})))`,
+    `    (print (call lo32 (var b${k})))`,
+  ]),
+  '    ))',
+].join('\n');
+const SX = join(OUT, 'ucase-probe.sx');
+writeFileSync(SX, `${sx}\n`);
+const sxRun = spawnSync(process.execPath, [CLI, 'run-c', SX],
+  { encoding: 'utf8', env: { ...process.env, OMNI_CC: CC } });
+/* 期望值是 python3 算的：`chr(cp).upper()` 的码点，补到 3 格（ToUpperFull 只写 n 格，
+   剩下的是 `pnew` 给的零）。 */
+const sxWant = spawnSync('python3', ['-c',
+  'import sys\n'
+  + 'for a in sys.argv[1:]:\n'
+  + '    cs = [ord(c) for c in chr(int(a)).upper()]\n'
+  + '    print("\\n".join(str(x) for x in [len(cs)] + (cs + [0, 0, 0])[:3]))\n',
+  ...CPS.map(String)], { encoding: 'utf8' });
+const sxBad = (sxRun.stdout ?? '').trim() === (sxWant.stdout ?? '').trim() ? 0 : 1;
+if (sxBad !== 0) {
+  say(`  方言那一门不同：\n    我们：${JSON.stringify((sxRun.stdout ?? '').trim())}`
+    + `\n    py  ：${JSON.stringify((sxWant.stdout ?? '').trim())}`
+    + `${sxRun.status === 0 ? '' : `\n    （exit=${sxRun.status}）${(sxRun.stderr ?? '').split('\n').slice(0, 4).join('\n')}`}`);
+}
+bad += sxBad;
+say(`门三（方言调它：(lib .o) + (cabi) + (pnew) + (ccall)，${CPS.length} 个码点的 upper）：`
+  + `${sxBad === 0 ? '与 python3 相同' : '不同'}`);
+
 say('');
-say(`两门都过 = 借来的那张表在**两条腿上**都与 python3 相同（${((Date.now() - t0) / 1000).toFixed(1)}s）`);
+say(`三门都过 = 借来的那张表在原生腿、JS 腿、**方言层**上都与 python3 相同`
+  + `（${((Date.now() - t0) / 1000).toFixed(1)}s）`);
 if (bad === 0) {
   say('账：只借了 Objects/unicodectype.c（纯函数 + 那张表），**没借运行时** ——'
     + ' 不用 Py_Initialize，产物里多的就是那张表。');
