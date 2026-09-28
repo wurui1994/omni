@@ -91,24 +91,50 @@ const WORDS = [
 
 
 /* 四、两边各跑一趟，逐字节比。 */
-const got = spawnSync(BIN, WORDS, { encoding: 'utf8' });
-const want = spawnSync('python3', ['-c',
+const pyOut = () => spawnSync('python3', ['-c',
   'import sys\n'
   + 'for w in sys.argv[1:]:\n'
   + '    print("|".join([w.upper(), w.lower(), w.casefold(), w.title()]))\n', ...WORDS],
-{ encoding: 'utf8' });
+{ encoding: 'utf8' }).stdout ?? '';
+const WANT = pyOut().split('\n');
+
+/** 一条腿的读数与 python3 比，回"几个词不同"。 */
+const compare = (out) => {
+  const gs = out.split('\n');
+  let n = 0;
+  for (let i = 0; i < WORDS.length; i += 1) {
+    if (gs[i] === WANT[i]) continue;
+    n += 1;
+    if (n <= 6) say(`  不同 ${JSON.stringify(WORDS[i])}\n       我们：${gs[i]}\n       py  ：${WANT[i]}`);
+  }
+  return n;
+};
+
+const got = spawnSync(BIN, WORDS, { encoding: 'utf8' });
 if (got.status !== 0) { say(`py-rt/ucase: 探针跑不起来（exit=${got.status}）`); process.exit(1); }
-const gs = (got.stdout ?? '').split('\n');
-const ws = (want.stdout ?? '').split('\n');
-let bad = 0;
-for (let i = 0; i < WORDS.length; i += 1) {
-  if (gs[i] === ws[i]) continue;
-  bad += 1;
-  if (bad <= 6) say(`  不同 ${JSON.stringify(WORDS[i])}\n       我们：${gs[i]}\n       py  ：${ws[i]}`);
+let bad = compare(got.stdout ?? '');
+say(`门一（原生腿）：${WORDS.length} 个词 × 4 个映射（upper/lower/casefold/title）与本机 python3`
+  + ` —— ${bad === 0 ? '逐字节相同' : `${bad} 个不同`}`);
+
+/* 五、**JS 那条腿**：同一份借来的 C 过我们的 C 前端 -> MIR -> JS（`c run-js`）。
+ *
+ * 一份翻译单元（那条路上没有链接器），所以走 `ucase-js-probe.c`（把表 include 进来）。
+ * `--stack-size`：那张表里有个几千格的 switch，发出来是**几千层嵌套**的标号块，
+ * V8 **解析**时按嵌套深度递归 —— 默认栈不够（记在 SPEC 第 29 条，是 emit_js 的真缺口）。
+ */
+const jsArgs = flagsFor(OBJ, INC, SRC, perFileFlags('Objects/unicodectype.c', SRC)).slice(2, -2);
+const js = spawnSync(process.execPath, ['--stack-size=4000', CLI, 'c', 'run-js',
+  ...jsArgs, '-I', SRC, join(here, 'ucase-js-probe.c'), '--', ...WORDS], { encoding: 'utf8' });
+if (js.status !== 0) {
+  say(`py-rt/ucase: JS 那条腿跑不起来（exit=${js.status}）：\n${(js.stderr ?? '').split('\n').slice(0, 6).join('\n')}`);
+  process.exit(1);
 }
+const jsBad = compare(js.stdout ?? '');
+bad += jsBad;
+say(`门二（JS 腿：同一份 C -> MIR -> JS）：${jsBad === 0 ? '逐字节相同' : `${jsBad} 个不同`}`);
+
 say('');
-say(`门：${WORDS.length} 个词 × 4 个映射（upper/lower/casefold/title）与本机 python3`
-  + ` —— ${bad === 0 ? '逐字节相同' : `${bad} 个不同`}（${((Date.now() - t0) / 1000).toFixed(1)}s）`);
+say(`两门都过 = 借来的那张表在**两条腿上**都与 python3 相同（${((Date.now() - t0) / 1000).toFixed(1)}s）`);
 if (bad === 0) {
   say('账：只借了 Objects/unicodectype.c（纯函数 + 那张表），**没借运行时** ——'
     + ' 不用 Py_Initialize，产物里多的就是那张表。');

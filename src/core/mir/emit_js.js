@@ -223,6 +223,32 @@ const $ccall = (name, args) => {
 const JS_NUM_LD = new Set(['i8s', 'i8u', 'i16s', 'i16u', 'i32s', 'i32u']);
 const JS_NUM_ST = new Set(['i8', 'i16', 'i32']);
 
+/**
+ * data 段**首尾相接的就并成一段**（`{off, bytes}` 的数组进、同样形状出）。
+ *
+ * 为什么要这一步：C 前端把每个初始化项发成一段（一个 `int` = 四字节一段），
+ * 一张 292KB 的表照原样发就是 5 万多条 `memData(...)` 语句、35MB 的 JS ——
+ * V8 在**解析**那一个函数时就爆栈。并完之后语句数按真正的空洞算。
+ *
+ * 只并"输入顺序上恰好接得上"的（`prev.off + prev.bytes.length === d.off`），
+ * **不排序、不合重叠的** —— 段与段若有重叠，写入顺序就是语义，动了就错。
+ * 每段封顶 `CAP` 个字节：一个数组字面量太长，V8 解析也不痛快。
+ */
+const DATA_CAP = 1 << 16;
+function mergedData(data) {
+  const out = [];
+  for (const d of data) {
+    const last = out.length > 0 ? out[out.length - 1] : null;
+    if (last !== null && last.off + last.bytes.length === d.off
+      && last.bytes.length + d.bytes.length <= DATA_CAP) {
+      for (const b of d.bytes) last.bytes.push(b);
+      continue;
+    }
+    out.push({ off: d.off, bytes: Array.from(d.bytes) });
+  }
+  return out;
+}
+
 class JsFromMir {
   constructor(mir, modular, syms) {
     this.mir = mir;
@@ -582,7 +608,17 @@ class JsFromMir {
     /* ---- `setjmp` 那一层（见 `SETJMP_NAMES` 的头注）。没有落点就一个字节都不多发。 */
     const sj = this.sjPlan(f, endOf, elseOf);
     const stack = [];
+    /* 缩进**封顶**（`IND_CAP` 层）。一个几千格的 `switch` 在这一层是几千层嵌套的
+     * `L{i}: { … }`，一层两个空格照加下去，行首的空白自己就成了产物的大头 ——
+     * 量过一例：CPython 那张 unicode 表里 2350 层嵌套，行首 4700 个空格，
+     * 一份 292KB 的 C 发成 34MB 的 JS，其中绝大多数字节是空白。
+     * 封顶只改可读性（超过这个深度本来也没人数得清），不改语义。 */
+    const IND_CAP = 40;
+    let depth = 1;
     let ind = '  ';
+    const reind = () => { ind = '  '.repeat(depth < IND_CAP ? depth : IND_CAP); };
+    const deeper = () => { depth += 1; reind(); };
+    const shallower = () => { depth -= 1; reind(); };
     if (sj !== null) {
       L.push('  let $rs = 0;');
       L.push('  let $jv = 0;');
@@ -590,7 +626,7 @@ class JsFromMir {
       L.push('  const $TOK = sjTok();');
       L.push('  $RETRY: for (;;) {');
       L.push('    try {');
-      ind = '      ';
+      depth += 2; reind();      /* 包上 $RETRY/try 那两层（六格） */
     }
     /* 一段"不在路上"的语句攒在这儿：到了路上的那条指令（或者区域的头尾）就落盘，
        落的时候裹一层 `if ($rs === 0)` —— 导航的时候整段跳过去。 */
@@ -617,14 +653,13 @@ class JsFromMir {
     /** 路上那几条：先把攒着的落盘，再原样发出去（它们是 JS 的块结构，不能被裹）。 */
     const pushPath = (s) => { flush(); L.push(ind + s); };
     const onPath = (i) => sj !== null && sj.pathIdx.has(i);
-
     for (let i = 0; i < f.count(); i++) {
       this.at = i;
       const op = f.op[i];
       const x = f.aux[i];
       const emit = onPath(i) ? pushPath : push;
-      if (op === OP.BLOCK) { emit(`L${i}: {`); stack.push(i); ind += '  '; continue; }
-      if (op === OP.LOOP) { emit(`L${i}: while (true) {`); stack.push(i); ind += '  '; continue; }
+      if (op === OP.BLOCK) { emit(`L${i}: {`); stack.push(i); deeper(); continue; }
+      if (op === OP.LOOP) { emit(`L${i}: while (true) {`); stack.push(i); deeper(); continue; }
       if (op === OP.IF) {
         /* 导航中（`$rs !== 0`）：这一支底下有没有那个落点，有就进，没有就走 else。
            原来那个条件在导航时**不看** —— 它的输入是上一趟算出来的，重算没有意义。 */
@@ -635,13 +670,13 @@ class JsFromMir {
           : c;
         emit(`L${i}: if (${cond}) {`);
         stack.push(i);
-        ind += '  ';
+        deeper();
         continue;
       }
-      if (op === OP.ELSE) { ind = ind.slice(2); emit('} else {'); ind += '  '; continue; }
+      if (op === OP.ELSE) { shallower(); emit('} else {'); deeper(); continue; }
       if (op === OP.END) {
         const s = stack.pop();
-        ind = ind.slice(2);
+        shallower();
         /* LOOP 落到底是**退出**循环（wasm 的 loop 不自动回头），所以补一条 break。
          * 少这一句就是死循环 —— 而它只在"真的能落到底"时才发得出来（不可达的话
          * V8 也不在意，那一句就是死代码）。 */
@@ -997,8 +1032,14 @@ const $callFromLibc = (fp, args) => {
       /* data 段就是一串数字字面量。不走 base64/`Buffer`：**这一份自己也要能被 omni
        * 编译**（自举那条门），而 `Buffer` 不在封闭子集里。代价只是源码大一点，
        * 而 data 段只在装载时走一次。
-       * module 档不在这儿铺 —— 那一档在**装载期**就铺好了（见 `moduleBase`）。 */
-      for (const d of mir.mem.data) {
+       * module 档不在这儿铺 —— 那一档在**装载期**就铺好了（见 `moduleBase`）。
+       *
+       * **相邻的段先并起来**：C 前端把每一个初始化项发成一段（一个 `int` 就是四字节
+       * 一段），照原样一段一条语句发出来，一张 292KB 的表会变成 52089 条 `memData(...)`
+       * —— 量出来是 35MB 的 JS，V8 在**解析**那一个函数时就 `Maximum call stack size
+       * exceeded`（还没跑起来）。并完之后语句数按"真正不连续的空洞"算，
+       * 那张表就是几条。*/
+      for (const d of mergedData(mir.mem.data)) {
         L.push(`  memData(${d.off}, [${d.bytes.join(',')}]);`);
       }
     }

@@ -57,6 +57,7 @@
     "test:python": "node tests/python/run.js",
     "test:python-rt": "node tests/python/rt.js",
     "test:python-freeze": "node tests/python/freeze.js",
+    "test:python-ucase": "node tests/python/ucase.js",
     "py:sweep": "node ext/python/rt/sweep.js",
     "py:symbols": "node ext/python/rt/symbols.js",
     "py:link": "node ext/python/rt/link.js",

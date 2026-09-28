@@ -317,6 +317,19 @@ const C_GROUP = {  name: 'c',
       brief: '同上再跑。退出码是 C main 的返回值，所以 tcc -run 是 oracle',
       flags: [...C_CPP_FLAGS],
     },
+    /* JS 那条腿的两格，摆在这一组里是为了能吃 `-D` / `-isystem` 这一族（顶层的
+     * `emit js` / `run --backend js` 只有 `-I`，读别人的源码当语料时不够 ——
+     * 一份 C 该配哪几个 `-D` 只有那棵树的构建系统知道）。实现与顶层那两条同一个 key。 */
+    {
+      name: 'js', key: 'c-emit-js', usage: 'FILE.c',
+      brief: '同 `emit js`，但认 C 的那一族开关（-D/-isystem/…）',
+      flags: [...C_CPP_FLAGS],
+    },
+    {
+      name: 'run-js', key: 'c-run-js', usage: 'FILE.c [-- args...]',
+      brief: '同 `run --backend js`，但认 C 的那一族开关',
+      flags: [...C_CPP_FLAGS],
+    },
     {
       name: 'jit', key: 'c-jit', usage: 'FILE.c',
       brief: '同上再跑，但**就在这个进程里**：铺进一块可执行内存直接跳进去（ADR-0045 D2）',

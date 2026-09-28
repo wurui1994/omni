@@ -1116,6 +1116,34 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     同一份借来的 C 过我们的 C 前端 -> MIR -> JS；这份 175KB 的表是那条路**最小的样本**
     （只欠 `printf` / `strlen`，没有原子、没有 TLS、没有 Py_Initialize）。
 
+30. **JS 腿的第一个真样本跑通了：借来的那张表 -> 我们的 C 前端 -> MIR -> JS**
+    （2026-09-28，`py:ucase` 的门二）。同一份语料、同样四个映射，**与 python3 逐字节相同**
+    （`ΣΣΣ` -> `σσς|σσσ|Σσς`、`Straße` -> `STRASSE|straße|strasse|Straße`、
+    `ﬁn` -> `FIN|ﬁn|fin|Fin`）。这不只是"这一族能不能做对"，更是 #9 里 **JS 腿那一大块的
+    第一个真读数** —— 它证明"同一份借来的 C 出两条腿"这条路是通的。
+    一份翻译单元（那条路上**没有链接器**）：`ext/python/rt/ucase-js-probe.c` 三行，
+    把 `Objects/unicodectype.c` `#include` 进来（参考树只读，include 就是读），
+    逻辑一个字不重复。
+    **路上补了命令行表一格**：`-D` / `-isystem` 这一族只挂在 `omni c` 组上（那是有意的：
+    它们是 C 的事实，不该进与语言无关的顶层），而 JS 出口从前只在顶层
+    （`emit js` / `run --backend js`，只认 `-I`）—— 读别人的源码当语料时不够用。
+    于是在 `c` 组里加了两条：`omni c js` 与 `omni c run-js`（key 复用原来那两个实现）。
+    **量出来 `mir/emit_js.js` 的两格真问题（都修了）**：
+    a. data 段**一段一条语句**。C 前端把每个初始化项发成一段（一个 `int` 四字节一段），
+       那张表照原样发是 **52089 条 `memData(...)`**；首尾相接的并起来之后是 **6 条**。
+    b. 缩进**没有封顶**。表里那个几千格的 switch 发出来是 **2350 层嵌套**的标号块，
+       一层两个空格照加，行首就有 4700 个空格 —— 一份 292KB 的 C 发成 **34MB 的 JS**，
+       绝大多数字节是空白。封顶 40 层之后是 **1.35MB**。
+    **剩下的那格缺口（记下来，没修）**：嵌套深度本身没变，V8 **解析**时按深度递归，
+    默认栈过不去（`RangeError: Maximum call stack size exceeded`，**还没跑起来就报**）。
+    判据里挂的是 `node --stack-size=4000`（量过 4000 够、默认约 984KB 不够）。
+    真修法是换形状 —— 几千格的 switch 不该发成几千层嵌套块（发成 JS 的 `switch`，
+    或退回 pc 循环）。这一格在"整份运行时出 JS"那一刀上会再撞见，届时一起动。
+    **两门都挂进了轴表**：`tests/python/ucase.js`（薄封装）+ `tests/all.js` 的
+    `{ s: 'python/ucase.js' }` + `tests/lib/incr.js` 的 `AXIS_EXTRA`（`ext/python` 动了就重跑）。
+    改动过的核心（`mir/emit_js.js`）的判据：`tests/c` **339 过 0 败**（含第 4.6 组那条
+    JS 腿）、`tests/mir` 两门绿、`check:self` 绿。
+
 ## 二、进度
 
 ### 已落地

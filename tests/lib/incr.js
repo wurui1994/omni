@@ -523,12 +523,13 @@ export function axisDeps(axis) {
  * （量出来的：加完 `examples/floatsweep.py` 之后 python-run 的指纹一个字节都没变。）
  *
  * 所以这儿给一张**小而明摆着的表**：轴名 -> 还要哈希哪几棵树（相对仓库根）。
- * 保守一头：整棵 `ext/python` 动一个字节，那三条轴就重跑 —— 它们本来就是同一门语言的判据。
+ * 保守一头：整棵 `ext/python` 动一个字节，那四条轴就重跑 —— 它们本来就是同一门语言的判据。
  */
 const AXIS_EXTRA = new Map([
   ['python-run', ['ext/python']],
   ['python-rt', ['ext/python']],
   ['python-freeze', ['ext/python']],
+  ['python-ucase', ['ext/python']],
 ]);
 
 /**

@@ -140,6 +140,12 @@ const SUITES = [
      （复合字面量没归零、不完整类型的 extern 吃掉别人的初值）它们一格都看不见。
      要参考树 + clang + python3 + `py:sweep` 预热过的 `obj/`，缺哪一样就自己跳过（9.5s）。 */
   { s: 'python/freeze.js' },
+  /* **只借 unicode 的那一张表**（`Objects/unicodectype.c`，纯函数 + 表，179KB）：
+     28 个词 × 4 个映射（upper / lower / casefold / title）与本机 python3 逐字节相同，
+     **两条腿**都比 —— 原生腿（表与探针都过我们的 C 前端，只链这两份）与 JS 腿
+     （同一份 C -> MIR -> JS）。后者是"整份运行时出 JS"那条路的最小样本。
+     要参考树 + clang + python3 + 探过的 `pyconfig.h`，**不要**预热过的 `obj/`（32s）。 */
+  { s: 'python/ucase.js' },
   // 可删除测试：删一支产生式（语法那一层）。默认只跑两门小语法 ——
   // 整跑一遍是分钟级的，量出来的数与理由写在那份文件的头上。
   { s: 'grammar/delete.js' },
