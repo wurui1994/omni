@@ -1315,6 +1315,26 @@ strsplit/vapply）都与 Rscript 对得上，**铺完到答完 3.8 秒**（整�
 `regmatches(regexpr(…))` 两句就是它，早就绿着。欠的只有 `perl=TRUE` 那一半
 （`trimws` 是其中一个）。
 
+## 下一刀（已量清楚，还没落）：LAPACK 那一族 —— 难的不是 Fortran，是"模块"
+
+`solve` / `det` / `qr` / `eigen` 在 R 里**不在 libR 里**，在 `lapack.so` 那个**动态模块**里
+（`src/modules/lapack/Lapack.c`）。量出来的三条事实：
+
+1. `do_lapack` 我们**有**，但那是 `src/main/lapack.c` 里的**桩** —— 它的活是
+   `R_getModuleHandle("lapack")` 去 dlopen 那个模块。`La_solve` / `dgesv_` /
+   `R_init_lapack` 在符号表里**一个都没有**（`.syms.json` 里查过）。
+2. 所以这一刀的第一步不是补函数，是**把模块当普通 .c 编进来**：
+   `src/modules/lapack/Lapack.c` 进单子。它自带 `do_lapack`，会与 main 那个桩**撞名** ——
+   撞名在这条腿上是 loud（链接器查重），所以得把 `main/lapack.c` 从单子里摘掉，
+   让模块那一份顶上（R 自己在静态链接那一档也是这么干的）。
+3. 第二步才是 Fortran 那一面，按 BLAS 那格的同一条路映射：`solve` 要 `dgesv_`、
+   `det` 要 `dgetrf_`（LU 带部分选主元）、`qr` 要 `dgeqrf_`+`dorgqr_`、
+   `eigen` 要 `dsyevr_`/`dgeev_`。前两个是几十行，后面几个是真活。
+
+成本也量过：改单子会动发射缓存的 key（`tests/r/rtc.js` 那张单子在判据里），
+所以要付一次**全量重发 45 秒 + 开机镜像三轮**。
+
+
 
 
 
