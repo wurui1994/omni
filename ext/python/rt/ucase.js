@@ -11,15 +11,18 @@
 // 查 `unicodetype_db.h` 那张表），**不借整份运行时** —— 不用 Py_Initialize，也不用 21M 产物。
 // UTF-8 的解与编那一半是我们自己的（"串怎么表示"的算术）。
 //
-// 读数（这台机器）：那张表编出来的 `.o` **175KB**，链完只欠 libc 的 `printf` / `strlen`；
-// 表与探针**两份都过我们自己的 C 前端** —— 不必先 `py:sweep` 把 201 份预热出来，
-// 要的只是参考树里那两份文件（`Objects/unicodectype.c` + `unicodetype_db.h`）。
+// 读数（这台机器）：那张表编出来的 `.o` **178KB**（ELF），链完只欠 libc 的 `printf` / `strlen`；
+// 表与探针**两份都过我们自己的 C 前端、由我们自己的链接器链** —— 不必先 `py:sweep`
+// 把 201 份预热出来，也**不要外部 cc**；要的只是参考树里那两份文件
+// （`Objects/unicodectype.c` + `unicodetype_db.h`）与一份 python3 当 oracle。
 //
-// ## 门
+// ## 三门
 //
-// 语料里每一个词的四个映射（upper / lower / casefold / title）与本机 python3 **逐字节相同**。
-// 没有参考树 / clang（链接那一步）/ python3 / 没探过 `pyconfig.h` 就说清并跳过（不假装绿）。
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+// 一、**原生腿**：语料里每个词的四个映射（upper / lower / casefold / title）与 python3 逐字节相同。
+// 二、**JS 腿**：同一份借来的 C 过我们的 C 前端 -> MIR -> JS（`c run-js`），同样逐字节相同。
+// 三、**方言层**：`(lib 那份 .a)` + `(cabi)` + `(pnew)` + `(ccall)` 自己调它，全自己一条链。
+// 没有参考树 / python3 / 没探过 `pyconfig.h` 就说清并跳过（不假装绿）。
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -36,19 +39,18 @@ const SRC = process.env.OMNI_CPYTHON ?? join(homedir(), 'Documents', 'Lang', 're
 const WORK = join(root, '.omni-cache', 'py-rt');
 const OUT = join(WORK, 'ucase');
 const INC = incDirFor(WORK, false);
-const CC = process.env.CC ?? 'clang';
 const say = (s) => process.stdout.write(`${s}\n`);
 const skip = (why) => { say(`py-rt/ucase: ${why} —— 跳过`); process.exit(0); };
 
 if (!existsSync(join(SRC, 'Objects', 'unicodectype.c'))) skip(`参考树不在（${SRC}）`);
 if (!existsSync(join(INC, 'pyconfig.h'))) skip('还没探过 pyconfig.h（先 `npm run py:sweep`）');
-if (spawnSync(CC, ['--version'], { encoding: 'utf8' }).status !== 0) skip(`本机没有 ${CC}`);
 if (spawnSync('python3', ['--version'], { encoding: 'utf8' }).status !== 0) skip('本机没有 python3');
 
 /* 编一份 `.o`：过**我们自己的 C 前端**，一格外部编译器都不用。
-   `more` 里可以再加开关（门三要 `--format elf`：自带链接器吃的是 ELF）。 */
-const ourCC = (src, obj, rel, more = []) => spawnSync(process.execPath, [CLI,
-  ...flagsFor(obj, INC, SRC, [...perFileFlags(rel, SRC), ...more]), src], { encoding: 'utf8' });
+   `--format elf` 是给**我们自己的链接器**用的（tcc 的老路：内部表示 ELF、输出才是 Mach-O）。 */
+const ourCC = (src, obj, rel) => spawnSync(process.execPath, [CLI,
+  ...flagsFor(obj, INC, SRC, [...perFileFlags(rel, SRC), '--format', 'elf']), src],
+{ encoding: 'utf8' });
 const diagOf = (r) => ((r.stderr ?? '') + (r.stdout ?? '')).split('\n')
   .filter((l) => /error:/.test(l)).slice(0, 6).join('\n');
 
@@ -68,13 +70,16 @@ if (tb.status !== 0 || !existsSync(TABLE)) {
   process.exit(1);
 }
 
-/* 二、只与**那一份**借来的 `.o` 链（链得上就说明那几个函数真是纯的）。 */
+/* 二、只与**那一份**借来的 `.o` 链（链得上就说明那几个函数真是纯的），
+   链的是**我们自己的链接器**（`c link`，`--stdlib` 带 libc）—— 一个外部工具都不用。 */
 const BIN = join(OUT, 'ucase-probe');
-const ld = spawnSync(CC, ['-o', BIN, OBJ, TABLE], { encoding: 'utf8' });
+const ld = spawnSync(process.execPath, [CLI, 'c', 'link', OBJ, TABLE, '-o', BIN, '--stdlib', '-q'],
+  { encoding: 'utf8' });
 if (ld.status !== 0 || !existsSync(BIN)) {
-  say(`py-rt/ucase: 链不起来（说明那一份不是纯的，还牵着别的符号）：\n${(ld.stderr ?? '').split('\n').slice(0, 8).join('\n')}`);
+  say(`py-rt/ucase: 链不起来（说明那一份不是纯的，还牵着别的符号）：\n${((ld.stderr ?? '') + (ld.stdout ?? '')).split('\n').slice(0, 8).join('\n')}`);
   process.exit(1);
 }
+chmodSync(BIN, 0o755);
 say(`cc: 探针与借来的那份表**都过我们自己的 C 前端**`
   + `（表的 .o ${(statSync(TABLE).size / 1024).toFixed(0)}KB）；ld: 只这两份`
   + `（产物 ${(statSync(BIN).size / 1024).toFixed(0)}KB）`);
@@ -150,16 +155,10 @@ say(`门二（JS 腿：同一份 C -> MIR -> JS）：${jsBad === 0 ? '逐字节�
  */
 const LIB = join(OUT, 'libucase.a');
 {
-  /* 自带链接器吃的是 **ELF** 的 `.o`（tcc 的老路：内部表示 ELF、输出才是 Mach-O），
-     而门一那份表是 Mach-O（要与 clang 链）—— 所以这儿**另编一份 ELF 的**。 */
-  const TABLE_ELF = join(OUT, 'unicodectype-elf.o');
-  const te = ourCC(join(SRC, 'Objects', 'unicodectype.c'), TABLE_ELF,
-    'Objects/unicodectype.c', ['--format', 'elf']);
-  if (te.status !== 0 || !existsSync(TABLE_ELF)) {
-    say(`py-rt/ucase: ELF 那份表编不出来：\n${diagOf(te) || '编不出'}`);
-    process.exit(1);
-  }
-  const buf = readFileSync(TABLE_ELF);
+  /* 那份表的 `.o` 已经是 ELF（门一要它，自带链接器吃的就是 ELF）。
+     打成 `.a` 才进得去：`c link` 对 `--dylib` 的参数按后缀分派，`.a` 走按需取用。
+     `syms` 由 `.symtab` 说 —— 没有符号索引，按需取用就取不出成员。 */
+  const buf = readFileSync(TABLE);
   const bytes = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
   const syms = readSymbols(readObject(bytes))
     .filter((s) => s.name !== '' && s.bind === 1 && s.shndx !== 0).map((s) => s.name);

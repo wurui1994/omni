@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "Python.h"
+#include "pycore_unicodectype.h"   /* `_PyUnicode_To*Full` / `_PyUnicode_Is*` 的原型 */
 
 #define MAXCP 256
 

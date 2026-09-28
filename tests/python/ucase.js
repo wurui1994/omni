@@ -9,8 +9,9 @@
 // all.js 只会 `node tests/<这条轴>`，所以这儿 spawn 过去、退出码原样透传。
 //
 // **前置条件不满足就跳过，不算红**（口径与 `tests/python/freeze.js` 一致）：参考树、
-// 探过的 `pyconfig.h`（`npm run py:sweep`）、clang（链接那一步）、python3（oracle）。
-// 与 freeze 那条轴不同的是**不要预热过的 `obj/`** —— 那张表我们自己编。
+// 探过的 `pyconfig.h`（`npm run py:sweep`）、python3（oracle）。
+// 与 freeze 那条轴不同的是**不要预热过的 `obj/`、也不要外部 cc** —— 表我们自己编、
+// 自己打 `.a`、自己链。
 
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -24,14 +25,13 @@ const work = join(root, '.omni-cache', 'py-rt');
 const src = process.env.OMNI_CPYTHON ?? join(homedir(), 'Documents', 'Lang', 'reference', 'cpython');
 
 function skip(why) {
-  console.log(`  skip 只借 unicode 的表：大小写映射与 python3 相同（两条腿）（${why}）`);
+  console.log(`  skip 只借 unicode 的表：大小写映射与 python3 相同（三门）（${why}）`);
   console.log('\n0 passed, 0 failed, 1 skipped');
   process.exit(0);
 }
 
 if (!existsSync(join(src, 'Objects', 'unicodectype.c'))) skip(`参考树不在（${src}）`);
 if (!existsSync(join(work, 'inc', 'pyconfig.h'))) skip('还没探过 pyconfig.h —— 先跑 `npm run py:sweep`');
-if (spawnSync('clang', ['--version'], { encoding: 'utf8' }).status !== 0) skip('本机没有 clang');
 if (spawnSync('python3', ['--version'], { encoding: 'utf8' }).status !== 0) skip('本机没有 python3');
 
 const r = spawnSync(process.execPath, [join(root, 'ext', 'python', 'rt', 'ucase.js')],
