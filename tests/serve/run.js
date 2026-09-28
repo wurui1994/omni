@@ -312,6 +312,26 @@ try {
   }
   ok('静态拦不存在的', (await get('/nope.js')).code === 404);
 
+  /**
+   * **跨源隔离那两个头**（`serve.js` 的 `isoHead`）。
+   *
+   * 为什么它是判据：EVAL 语料里二十几份脚本自己在死循环里用 `refresh()` 驱动帧，
+   * 要跑进 Worker 才等得住（任务 #39），而 Worker 里那个等待点只有 `Atomics.wait`
+   * 不烧 CPU —— 它要 `SharedArrayBuffer`，**而浏览器只在跨源隔离的页面上给 SAB**。
+   * 拿 playwright 量过（2026-09-29，同一份页面只差这两个头）：
+   * 不带 `crossOriginIsolated=false` 且 `typeof SharedArrayBuffer === "undefined"`；
+   * 带上 `true` / `"function"`，Worker 里 `Atomics.wait(…,50)` 回 `timed-out`、墙上 57ms。
+   * 这一格掉了的话 #39 那一族会**静静地退回忙等**（还能跑，但烧一核）。
+   */
+  {
+    const r0 = await fetch(`${s.url}/`);
+    const coop = r0.headers.get('cross-origin-opener-policy');
+    const coep = r0.headers.get('cross-origin-embedder-policy');
+    await r0.text();
+    ok('页面带跨源隔离那两个头（SAB / Atomics.wait 的前置）',
+      coop === 'same-origin' && coep === 'require-corp', `coop=${coop} coep=${coep}`);
+  }
+
   /* **这一层唯一的真判据**：服务跑出来的与本地跑出来的逐字节相同。 */
   const cse = paths.find((p) => p.startsWith('tests/go/cases/01-'));
   const r = await post('/api/run', { path: cse, lang: 'go' });

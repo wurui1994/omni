@@ -65,6 +65,30 @@ function mimeOf(path) { return MIME[extOf(path)] ?? 'application/octet-stream'; 
 
 /* ---- HTTP 服务 ---- */
 
+/**
+ * **跨源隔离那几个头**（加在页面与它那几样子资源上）。
+ *
+ * 为什么服务这一档要它：EVAL 语料里二十几份"自己在死循环里 `refresh()` 驱动帧"的脚本
+ * 要跑进 Worker 才等得住（任务 #39），而 Worker 里那个等待点只有 `Atomics.wait` 不烧 CPU
+ * —— 它要 `SharedArrayBuffer`，**而浏览器只在跨源隔离的页面上给 SAB**。
+ *
+ * 量过（2026-09-29，同一份页面、同一台 playwright、只差这两个头）：
+ *   不带：`crossOriginIsolated=false`、`typeof SharedArrayBuffer === "undefined"`
+ *   带上：`true` / `"function"`，Worker 里 `Atomics.wait(…, 50)` 回 `timed-out`、墙上 57ms
+ *
+ * 前提是**这一页所有子资源都同源**（判据里"外链一格都不许剩"那条正好守着它）——
+ * 同源请求不受 `require-corp` 限制；那几条子资源也顺手带上 `same-origin` 的 CORP。
+ *
+ * **单体 HTML（`file://`）那一档拿不到任何头**，所以 SAB 在那儿永远没有 ⇒ Worker 里的
+ * 等待点必须留一条忙等的退路（量过：忙等 50ms 误差 < 1ms，而且不冻主线程）。
+ */
+function isoHead(h) {
+  h['Cross-Origin-Opener-Policy'] = 'same-origin';
+  h['Cross-Origin-Embedder-Policy'] = 'require-corp';
+  h['Cross-Origin-Resource-Policy'] = 'same-origin';
+  return h;
+}
+
 /** 一格 JSON 响应（自动 Content-Type + CORS）。 */
 function json(res, code, obj) {
   const body = JSON.stringify(obj);
@@ -508,11 +532,11 @@ export function startServer(opts) {
           const s = readBinary(abs);
           const m = decodeKv6(Uint8Array.from(s, (ch) => ch.charCodeAt(0) & 255));
           if (m === null) return json(res, 415, { error: 'kv6: 解不开' });
-          res.writeHead(200, {
+          res.writeHead(200, isoHead({
             'content-type': MIME[ext],
             'x-kv6-voxels': String(m.n),
             'cache-control': 'no-cache',
-          });
+          }));
           /* **按字节发出去这一步在这儿打包**（`m.vox` 是一格普通数组）：解码器那一份要过
              我们自己那台 JS 前端，那儿没有 `Float64Array`（见 `host/kv6.js` 的头注）；
              而 serve 是**另一个进程**（`cli.js` 只是 spawn 它），node 的东西随便用。
@@ -521,11 +545,11 @@ export function startServer(opts) {
           res.end(Buffer.from(new Float64Array(m.vox).buffer, 0, m.n * 32));
           return undefined;
         }
-        res.writeHead(200, {
+        res.writeHead(200, isoHead({
           'content-type': MIME[ext],
           /* 图是源文件不是产物（名字里没有内容哈希）—— 所以要问一句，别 immutable。 */
           'cache-control': 'no-cache',
-        });
+        }));
         res.end(Buffer.from(readBinary(abs), 'latin1'));
         return undefined;
       }
@@ -548,10 +572,10 @@ export function startServer(opts) {
         const abs = join(root, '.omni-cache', 'modules', 'js-eval', name);
         if (!exists(abs)) return json(res, 404, { error: 'not found' });
         const immutable = /^(ev_rt|omni_rt)_[0-9a-f]+\.js$/.test(name);
-        res.writeHead(200, {
+        res.writeHead(200, isoHead({
           'content-type': 'text/javascript; charset=utf-8',
           'cache-control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
-        });
+        }));
         res.end(readText(abs));
         return undefined;
       }
@@ -639,7 +663,7 @@ export function startServer(opts) {
       const ct = mimeOf(abs);
       const body = ct.includes('text') || ct.includes('javascript') || ct.includes('json') || ct.includes('svg')
         ? readText(abs) : nodeMod('node:fs').readFileSync(abs);
-      res.writeHead(200, { 'Content-Type': ct, 'Cache-Control': 'no-cache' });
+      res.writeHead(200, isoHead({ 'Content-Type': ct, 'Cache-Control': 'no-cache' }));
       res.end(body);
     } catch (e) {
       json(res, 500, { error: String(e.message ?? e) });
