@@ -606,8 +606,14 @@ export function tyOfCst(x, C) {
       return o === 'not' ? BOOL : tyOfCst(kids(x)[1], C);
     }
     case 'cond': {
+      /* 两支同型就是那一型；**不同型退到箱子**（与 `exprOf` 的 `cond` 那一支同一条口径 ——
+         不这么答的症状：`v = 3 if ok else "n"` 里 `v` 按 int 绑上，发射那一趟交的是箱子，
+         于是报"'v' 先装 int、后装 dyn"）。一边答不出来就听另一边。 */
       const t = tyOfCst(kids(x)[1], C);
-      return t !== null ? t : tyOfCst(kids(x)[2], C);
+      const u = tyOfCst(kids(x)[2], C);
+      if (t === null || t === undefined) return u ?? null;
+      if (u === null || u === undefined) return t;
+      return sameType(t, u) ? t : DYN;
     }
     case 'bin': return tyOfBin(x, C);
     case 'list': {
@@ -1268,6 +1274,18 @@ export function exprOf(x, C) {
       const ta = ty(then, C);
       const tb = ty(els, C);
       if (!sameType(ta, tb)) {
+        /* **两支不同型就退到箱子**（`3 if ok else "n"` / `x if ok else None` /
+           `1.5 if ok else 2` —— python 里这三种都天经地义）。装得进箱子的才行：
+           表与记录装不进（见 `dyn.js` 文件头），那一档照旧当场报。
+           **int 与 real 混着也走这条**：不能把 int 提到 real —— python 的
+           `1 if ok else 2.5` 交的是 `1`，印 `1` 不是 `1.0`。 */
+        const boxOK = (t0) => ['int', 'real', 'bool', 'string', 'dyn'].includes(t0.kind);
+        if (boxOK(ta) && boxOK(tb)) {
+          return {
+            kind: 'ternary', type: DYN, cond: condOf(c, C),
+            then: boxOf(then, C), else_: boxOf(els, C),
+          };
+        }
         throw new Error(`python->IR: \`a if c else b\` 的两支不同型（${ta.kind} / ${tb.kind}）—— 还没接`);
       }
       return { kind: 'ternary', type: ta, cond: condOf(c, C), then, else_: els };

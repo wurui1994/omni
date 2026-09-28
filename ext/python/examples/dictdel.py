@@ -84,5 +84,16 @@ def main():
     k, v = e2.popitem()
     print(k, v, len(e2))
 
+    # **`del xs[a:b]` 就是 `xs[a:b] = []`**（python 那边这两句是同一件事），所以不另写一套
+    xs = [1, 2, 3, 4, 5]
+    del xs[1:3]
+    print(xs)
+    del xs[0:1]
+    print(xs)
+    del xs[5:9]
+    print(xs)
+    del xs[-1:]
+    print(xs, len(xs))
+
 
 main()

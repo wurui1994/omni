@@ -1638,10 +1638,21 @@ function delOne(t, C) {
       + ' —— `del` 只接下标那一格（`del d[k]` / `del xs[i]`）。'
       + '`del 名字` 要有"这一格还绑着没有"那一层，方言里一格变量就是一格槽位，没有那一档');
   }
+  const subs0 = kids(part(t, 'subs') ?? { kind: 'list', items: [] });
+  if (subs0.length !== 1) throw new Error('python->IR: `del` 收一格下标');
+  /* **`del xs[a:b]` 就是 `xs[a:b] = []`**（python 那边这两句是同一件事）——
+     那条路已经有了（`sliceAssignStmts`），所以这一格不另写一套。
+     带步长的（`del xs[::2]`）照旧报 —— 那是另一条规矩（见 `writeTo` 里那句话）。
+     在算 box 之前先分道：`writeTo` 自己会算一遍，算两遍会把里头那几句发两回。 */
+  if (tag(subs0[0]) === 'slice') {
+    const bt0 = tyOfCst(kids(t)[0], C);
+    if (bt0 !== null && bt0 !== undefined && bt0.kind === 'arr') {
+      return writeTo(t, emptyOf(bt0), C);
+    }
+    throw new Error(`python->IR: \`del\` 的切片那一档只接表（这里是 ${bt0 === null || bt0 === undefined ? '推不出来' : bt0.kind}）`);
+  }
   const box = exprOf(kids(t)[0], C);
-  const subs = kids(part(t, 'subs') ?? { kind: 'list', items: [] });
-  if (subs.length !== 1) throw new Error('python->IR: `del` 收一格下标');
-  if (tag(subs[0]) === 'slice') throw new Error('python->IR: `del xs[1:3]` 还没接');
+  const subs = subs0;
   const bt = typeOfIR(box, C);
   const key = exprOf(subs[0], C);
   if (bt.kind === 'map') {

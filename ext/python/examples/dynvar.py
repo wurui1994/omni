@@ -144,3 +144,14 @@ ps = [Point(1, 2), Point(0.5, 0.5)]
 for p in ps:
     print(p, p.total())
 
+# **三目两支不同型也退到箱子**（`3 if ok else "n"` / `x if ok else None` 在 python 里
+# 天经地义）。int 与 real 混着来也走这条 —— **不能把 int 提到 real**：`1 if ok else 2.5`
+# 交的是 `1`，印 `1` 不是 `1.0`。
+ok = True
+print(1 if ok else "a", "a" if not ok else 2, 1.5 if ok else 2, 1 if ok else 2.5)
+print(1 if ok else None, None if not ok else "x")
+w = 3 if ok else "n"
+print(w, str(w), f"{w}")
+w = "n" if ok else 3
+print(w, len(str(w)))
+
