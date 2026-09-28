@@ -1,0 +1,36 @@
+// ext/polydraw/examples/07-capture4.pss —— **四参 `glcapture`**（画进一张真纹理，任务 #26）
+//
+// 与零参那一档的分别（`myext[]` 里是两条：`"GLCAPTURE()"` 与 `"GLCAPTURE(,,,)"`）：
+//   零参：照常画在帧缓冲上，`glcaptureend(槽)` 再把整帧**拷**进那一槽（8 位、只能整帧大小）；
+//   四参：`glcapture(槽,宽,高,格)` **直接画进那张纹理**（设备那一侧自己一格 FBO），
+//         尺寸与像素格都是脚本说的 —— GPGPU 那一族（`ken/gpgpu.pss`）非它不可。
+//
+// 这一份是**自己报数的判据**：往一张 4x4 的 `KGL_FLOAT` 纹理里写 0.25，
+// `glgettex` 读回来印两格（第一格与最后一格）。那一句 `capture4 0.250 0.250` 里的两个数
+// 只有"真画进了那张纹理 + 真读回来了"才对得上 —— 而且**印的是数，不是像素**，
+// 所以判据不必解 PNG。
+//
+// 跑一趟：`omni run ext/polydraw/examples/07-capture4.pss --gfx gl --frames 1`
+
+()
+{
+   enum {N=4};
+   static buf[N*N];
+   glcapture(2,N,N,KGL_FLOAT);
+   glsetshader("vert","quarter");
+   glquad(1);
+   glcaptureend(2);
+   glgettex(2,buf,N,N,KGL_FLOAT);
+   printf("capture4 %.3f %.3f\n",buf[0],buf[N*N-1]);
+      //画一格给人看：把那张纹理铺满屏（判 PNG 的那一轴用得上）
+   glsetshader("vert","showtex");
+   glactivetexture(0); glbindtexture(2);
+   glquad(1);
+}
+@v:vert
+void main() { gl_Position = ftransform(); gl_TexCoord[0] = gl_MultiTexCoord0; }
+@f:quarter
+void main() { gl_FragColor = vec4(0.25, 0.25, 0.25, 1.0); }
+@f:showtex
+uniform sampler2D tex0;
+void main() { gl_FragColor = vec4(texture2D(tex0, gl_TexCoord[0].xy).rrr * 4.0, 1.0); }

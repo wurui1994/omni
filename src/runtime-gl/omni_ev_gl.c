@@ -64,6 +64,14 @@ static int g_vpw, g_vph;
 static int g_capw, g_caph;
 /** 抓屏配上对没有（原版那格 `glastcap`，见 `omni_ev_gl_capend` 里那段头注）。 */
 static int g_capon;
+/** 四参那一档（画进真纹理）：自己一格 FBO + 一格"这一趟是四参"的记号。 */
+static GLuint g_capfbo;
+static int g_cap4;
+/** **现在往哪一格帧缓冲上画**：平时是 `g_fbo`，四参抓屏那一趟是 `g_capfbo`。
+    画那条路（`ev_draw_*` 里 `!g_st_bound` 那一支）只认这一格 —— 从前它写死了 `g_fbo`，
+    于是四参抓屏刚绑好的目标被下一次画**当场绑回去**，画的东西全落在主帧缓冲上、
+    而那张纹理还是零（症状：`glgettex` 读回来全 0.000）。 */
+static GLuint g_target;
 #define EV_MAXLOC 32
 /** 按 program 记住的那几个位置 / 复用的 float 缓冲 / 属性指针的脏记号（`ev_loc_at`）。 */
 static int g_nloc;
@@ -198,6 +206,7 @@ static int ev_setup(int w, int h) {
   glGenVertexArrays(1, &g_vao);
   glBindVertexArray(g_vao);
   glGenFramebuffers(1, &g_fbo);
+  g_target = g_fbo;
   glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
   glGenTextures(1, &g_color);
   glBindTexture(GL_TEXTURE_2D, g_color);
@@ -1060,6 +1069,7 @@ int omni_ev_gl_capbegin(int siz) {
   g_capw = g_w;
   g_caph = g_h;
   g_capon = 1;
+  g_target = g_fbo;
   glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
   glViewport(0, 0, g_vpw, g_vph);
   g_st_bound = 0;
@@ -1071,7 +1081,87 @@ int omni_ev_gl_capbegin(int siz) {
   return 0;
 }
 
+/**
+ * `glcapture(槽, 宽, 高, 格)`（四参那一档 —— `polydraw.c:1217` 的 `kglCapture`）。
+ *
+ * 与零参那一档是**两件事**：零参是"照常画在帧缓冲上，`glcaptureend` 再拷一张进纹理"；
+ * 四参是**直接画进那张纹理**（自己一格 FBO，纹理当 COLOR_ATTACHMENT0）。GPGPU 那一族
+ * （`myext[]` 里 `"GLCAPTURE(,,,)"`）要的是后者：一趟把结果算进一张浮点纹理，
+ * 下一趟拿它当输入采样 —— 走零参那条路的话精度只有 8 位，而且尺寸只能是整帧。
+ *
+ * 跟原版的三处：
+ * * 形状/格不对才重造那张空纹理（原版 `CreateEmptyTexture`）；
+ * * 视口换成 `宽 × 高`；
+ * * `glastcap = 1` —— 于是 `glcaptureend` 走"还原 + 解绑，**不拷也不清**"那条
+ *   （原版 `qglEndCapture` 在那一支提前 return，见 `omni_ev_gl_capend` 的头注）。
+ *
+ * **矩阵那一半照旧不动**（与零参同一个理由）：原版在这儿压了
+ * `gluPerspective(45,1,.1,1000)` + `glScalef(高/宽,1,1)`，而我们这条腿上矩阵住在语言那一侧
+ * （`ext/polydraw/gl-rt.js`），设备只管视口与帧缓冲。要对齐那一格得在语言层做，另一刀。
+ *
+ * 回 -1 = 尺寸不合（原版同样回 -1：`<1` 或 `宽*高 > 64Mi`）。
+ */
+int omni_ev_gl_capbegin4(int slot, int w, int h, int fmt) {
+  if (!g_on) return 0;
+  if (w < 1 || h < 1 || (double)w * (double)h > 67108864.0) return -1;
+  CGLSetCurrentContext(g_ctx);
+  int i = ev_tex_slot(slot);
+  if (i < 0) return -1;
+  if (g_capfbo == 0) glGenFramebuffers(1, &g_capfbo);
+  if (g_tex[i].w != w || g_tex[i].h != h || g_tex[i].fmt != fmt
+      || g_tex[i].tar != GL_TEXTURE_2D) {
+    g_tex[i].tar = GL_TEXTURE_2D;
+    glActiveTexture(GL_TEXTURE0 + g_texunit);
+    glBindTexture(GL_TEXTURE_2D, g_tex[i].id);
+    int kind = fmt & 15;
+    GLint ifmt = kind == 1 ? GL_R8
+      : (kind == 4 ? GL_R32F : (kind == 5 ? GL_RGBA32F : GL_RGBA8));
+    GLenum efmt = (kind == 1 || kind == 4) ? GL_RED : GL_RGBA;
+    GLenum ety = (kind == 4 || kind == 5) ? GL_FLOAT : GL_UNSIGNED_BYTE;
+    glTexImage2D(GL_TEXTURE_2D, 0, ifmt, w, h, 0, efmt, ety, NULL);
+    /* **不许要 mipmap**：这张纹理只有第 0 层，min 过滤挑了 `LINEAR_MIPMAP_LINEAR` 的话
+       它就是**不完整**的纹理，采出来一片黑。所以把过滤那一段位里 `>= 0x20`（要 mipmap）
+       那一档降成 LINEAR —— 环绕那一段照旧听脚本的。 */
+    ev_tex_params_t(GL_TEXTURE_2D, (fmt & 0xf0) >= 0x20 ? (fmt & ~0xf0) : fmt);
+    g_tex[i].w = w;
+    g_tex[i].h = h;
+    g_tex[i].fmt = fmt;
+  }
+  g_target = g_capfbo;
+  glBindFramebuffer(GL_FRAMEBUFFER, g_capfbo);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                         g_tex[i].id, 0);
+  { GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (st != GL_FRAMEBUFFER_COMPLETE) {
+      /* 这一格**要当场说**：不完整的 FBO 上画东西是静静地什么都不发生（查起来要命）。 */
+      ev_err("glcapture(槽,宽,高,格)：这张纹理当不了渲染目标（FBO 状态 0x%x）", NULL);
+      g_target = g_fbo;
+      glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
+      g_cap4 = 0;
+      return -1;
+    } }
+  glViewport(0, 0, w, h);
+  g_st_bound = 0;
+  g_st_vp = w * 65536 + h;
+  g_cap4 = 1;
+  g_capon = 0;
+  return 0;
+}
+
 int omni_ev_gl_capend(int slot) {
+  /* **四参那一趟**：还原视口与帧缓冲就完了 —— 不拷（画的时候就在那张纹理上）、
+     不清（原版 `qglEndCapture` 在 `glastcap` 那一支提前 return）。 */
+  if (g_cap4) {
+    if (!g_on) { g_cap4 = 0; return 0; }
+    CGLSetCurrentContext(g_ctx);
+    g_target = g_fbo;
+    glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
+    glViewport(0, 0, g_vpw, g_vph);
+    g_st_bound = 0;
+    g_st_vp = g_vpw * 65536 + g_vph;
+    g_cap4 = 0;
+    return 0;
+  }
   if (!g_on) return 0;
   CGLSetCurrentContext(g_ctx);
   int i = ev_tex_slot(slot);
@@ -1175,7 +1265,7 @@ void omni_ev_gl_batch(int kind, long n, const double *verts) {
   for (size_t i = 0; i < want; i++) buf[i] = (float)verts[i];
 
   if (!g_st_bound) {
-    glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_target);
     glBindVertexArray(g_vao);
     g_st_bound = 1;
   }
@@ -1528,6 +1618,8 @@ int omni_ev_gl_win_present(const unsigned char *rgba) {
   g_st_mat_prog = 0;
   g_vattr_dirty = 1;
   glBindVertexArray(g_vao);
+  g_target = g_fbo;
+  g_cap4 = 0;
   glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
   glViewport(0, 0, g_vpw, g_vph);
   return evw.should_close(g_win) ? 0 : 1;

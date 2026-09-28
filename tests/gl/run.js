@@ -564,6 +564,33 @@ for (const [name, minFill, minColors] of [['04-shader.pss', 0.9, 1000],
   }
 }
 
+/* ── 四参 `glcapture`：画进一张真纹理，再 `glgettex` 读回来（任务 #26） ────────
+   这一格判的是**数**不是像素：往 4x4 的 `KGL_FLOAT` 纹理里写 0.25，读回来第一格与最后
+   一格都该是 0.250。两个坑都由它守着：
+     1. 设备那一侧要自己一格 FBO，而且**画那条路要认这个目标**（从前 `!g_st_bound`
+        那一支写死主帧缓冲，刚绑好的目标被下一次画当场绑回去 ⇒ 读回来全 0.000）；
+     2. 语言那一侧要从 `gl-rt.js` 转（`gl_capbegin4`），不能让 adapter 按名字直接递给设备
+        —— 那样 `glquad` 那一批会在 `glcaptureend` 之后才冲出去。 */
+{
+  /* **`--gfx gl` 要明着给**（不能只靠环境里那格 `OMNI_GFX`）：设备那份 `.node` 的路径是
+     `cli.js` 的 `glDevicePaths()` 在认这个旗子的时候摆进 `OMNI_EV_GL_ADDON` 的 ——
+     只设环境量的话 js 腿找不着那份扩展，当场退回 CPU 备选（症状：报"这格设备没有可编程
+     管线"）。别的用例走的是 `--backend c`，那条腿靠 `dlopen` 自己找，所以没踩到这一格。 */
+  const rp = spawnSync(process.execPath,
+    [join(ROOT, 'src/cli.js'), 'run', join(ROOT, 'ext/polydraw/examples/07-capture4.pss'),
+      '--gfx', 'gl', '--frames', '1'],
+    { encoding: 'utf8', cwd: ROOT, timeout: 180000,
+      env: { ...process.env, OMNI_GFX_MODE: 'render' } });
+  const got = (rp.stdout ?? '').split('\n').find((l) => l.startsWith('capture4')) ?? '';
+  if (got.trim() === 'capture4 0.250 0.250') {
+    ok('四参 `glcapture(槽,宽,高,格)`：画进真纹理 + `glgettex` 读回来', got.trim());
+  } else {
+    no('四参 `glcapture(槽,宽,高,格)`：画进真纹理 + `glgettex` 读回来',
+      `印的是 ${JSON.stringify(got.trim())}（该是 "capture4 0.250 0.250"）`
+      + ` ${(rp.stderr ?? '').trim().slice(0, 200)}`);
+  }
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed（本机 OpenGL 设备）\n`);
 process.exit(fail === 0 ? 0 : 1);
 

@@ -215,6 +215,7 @@ export const POLYDRAW_GL = uniqMap([
      我们按 0 号槽 —— `disco blur shader +blur.pss` 就是这么用的（它只有一张抓屏纹理）。 */
   ['glcapture/0', 'gl_capbegin0'],
   ['glcapture/1', 'gl_capbegin'],
+  ['glcapture/4', 'gl_capbegin4'],
   ['glcaptureend/0', 'gl_capend0'],
   ['glcaptureend/1', 'gl_capend'],
   ['glgetattribloc/1', 'gl_attrloc'],
@@ -1126,6 +1127,21 @@ function glMatrixDecls() {
       ret(dev('glcapture', [nm('siz')])),
     ]),
     fn('gl_capbegin0', [], [ex(call('gl_capbegin', [num(0)])), ret(num(0))]),
+    /**
+     * **四参那一档**（`glcapture(槽,宽,高,格)` —— `myext[]` 里 `"GLCAPTURE(,,,)"`，
+     * `polydraw.c:1217` 的 `kglCapture`）：直接画进那张纹理（设备那一侧自己一格 FBO）。
+     *
+     * **非得从这儿转不可**：GL 那一族的顶点攒在语言这一侧的批里，只有 `gl_flush` 那一刻
+     * 才交给设备。要是让 adapter 按"宿主名字"把这一句直接递给设备（前缀那条路），
+     * `glcapture` / `glcaptureend` 就**插不进批的次序里** —— `glquad(1)` 那一批会在
+     * `glcaptureend` 之后才冲出去，于是画在主帧缓冲上，而那张纹理还是刚建出来的零。
+     * 症状正是"读回来全是 0.000"（踩过，判据是 `examples/07-capture4.pss` 那一行）。
+     */
+    fn('gl_capbegin4', ['t', 'w', 'h', 'f'], [
+      ex(call('gl_need', [])),
+      ex(call('gl_flush', [])),
+      ret(dev('glcapture', [nm('t'), nm('w'), nm('h'), nm('f')])),
+    ]),
     fn('gl_capend', ['t'], [
       ex(call('gl_need', [])),
       ex(call('gl_flush', [])),

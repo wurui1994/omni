@@ -508,6 +508,7 @@ typedef int (*gfx_gl_gettex_fn)(int, int, int, long, double *);
 /* **抓屏那一族**（`glcapture 边长` / `glcaptureend 槽`，§22）：语言那一侧发的是
    一参那两格，矩阵那一半在它那儿；设备这侧只换视口 + 一次 `glCopyTexImage2D`。 */
 typedef int (*gfx_gl_cap_fn)(int);
+typedef int (*gfx_gl_cap4_fn)(int, int, int, int);
 /* **窗口那一档**（`--mode view`，任务 #24）：开窗口 / 交一帧 / 读输入 / 写标题。
    老库上 dlsym 不到就当这一族没有 —— 那就还是离屏（与"挂不上就回落"同一手）。 */
 typedef int (*gfx_gl_win_fn)(int, int, const char *);
@@ -538,6 +539,7 @@ static struct {
   gfx_gl_univ_fn univ;
   gfx_gl_gettex_fn gettex;
   gfx_gl_cap_fn capbegin, capend;
+  gfx_gl_cap4_fn capbegin4;
   gfx_gl_win_fn win;
   gfx_gl_winpresent_fn winpresent;
   gfx_gl_wininput_fn wininput;
@@ -1085,6 +1087,7 @@ static int gfx_gl_need(void) {
     g_gl.univ = (gfx_gl_univ_fn)dlsym(h, "omni_ev_gl_univ");
     g_gl.gettex = (gfx_gl_gettex_fn)dlsym(h, "omni_ev_gl_gettex");
     g_gl.capbegin = (gfx_gl_cap_fn)dlsym(h, "omni_ev_gl_capbegin");
+    g_gl.capbegin4 = (gfx_gl_cap4_fn)dlsym(h, "omni_ev_gl_capbegin4");
     g_gl.capend = (gfx_gl_cap_fn)dlsym(h, "omni_ev_gl_capend");
     g_gl.win = (gfx_gl_win_fn)dlsym(h, "omni_ev_gl_win");
     g_gl.winpresent = (gfx_gl_winpresent_fn)dlsym(h, "omni_ev_gl_win_present");
@@ -1799,6 +1802,12 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
     }
     if (!strcmp(nm, "glcaptureend") && argc == 1 && g_gl.capend != NULL) {
       return (double)g_gl.capend((int)a0);
+    }
+    /* **四参那一档**（`glcapture(槽,宽,高,格)`，`polydraw.c:1217` 的 `kglCapture`）：
+       直接画进那张纹理（设备那一侧自己一格 FBO），GPGPU 那一族靠它。
+       与 `host/gfx-cpu.js` 的 `glcapture/4` 逐句相同。 */
+    if (!strcmp(nm, "glcapture") && argc == 4 && g_gl.capbegin4 != NULL) {
+      return (double)g_gl.capbegin4((int)a0, (int)a1, (int)a2, (int)a3);
     }
     /* **文件纹理**（`glsettexfile 槽 名字下标 colmode`，§20）：路径在这一层拼
        （目录只有宿主知道），解码与上传在设备 —— 与 `host/gfx-cpu.js` 那一格同一手。 */

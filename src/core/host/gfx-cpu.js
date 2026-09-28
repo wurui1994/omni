@@ -945,12 +945,21 @@ export function gfxCall(name, args) {
       if (!G.on) return 0;
       return G.m.capend(Math.trunc(a(0)));
     }
+    /* **四参那一档**（`glcapture(槽,宽,高,格)`，`polydraw.c:1217` 的 `kglCapture`）：
+       直接画进那张纹理（设备那一侧自己一格 FBO）。GPGPU 那一族要的是它 —— 走零参那条路
+       只有 8 位精度、尺寸还只能是整帧。CPU 备选照旧收下不管（这一层没有纹理采样）。 */
+    case 'glcapture/4': {
+      need(320, 240);
+      if (!G.on || typeof G.m.capbegin4 !== 'function') return 0;
+      return G.m.capbegin4(Math.trunc(a(0)), Math.trunc(a(1)), Math.trunc(a(2)),
+                           Math.trunc(a(3)));
+    }
     case 'pic/1': case 'pic/2': case 'pic/3': case 'pic/4': case 'pic/5': case 'pic/6':
     case 'glsettex/1': case 'glsettex/2': case 'glsettex/3': case 'glsettex/4':
     case 'glsettex/5': case 'glsettex/6':
     case 'glgettex/4': case 'glgettex/5':
     case 'glbindtexture/1': case 'glactivetexture/1':
-    case 'glcapture/0': case 'glcapture/4': case 'glcaptureend/0':
+    case 'glcapture/0': case 'glcaptureend/0':
     case 'mountzip/1': case 'mountzip/2': case 'glulookat/9':
     case 'drawspr/4': case 'drawspr/5': case 'drawspr/6':
     case 'drawkv6/4': case 'drawkv6/5': case 'drawkv6/7': case 'drawkv6/8':

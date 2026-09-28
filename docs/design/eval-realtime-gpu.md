@@ -4096,3 +4096,55 @@ V8 整份编"。量出来的账（`02-gl.pss --gfx null --frames 0 --stat`，合
 就是错的。那 400~500ms 的 exec 里绝大部分是**真在跑**（运行时的顶层初始化 + 那两帧），
 不是编译。⇒ 要继续压 exec 就得去量"跑"那一半，别再去动"编"。
 （记账口径：`-v` 里那两格步骤，别只看整条命令的墙上时间 —— 这台机器上单趟抖得比差值大。）
+
+## 38. 四参 `glcapture`（画进一张真纹理）落地了（任务 #26 的第一格，2026-09-28）
+
+### 38.1 正本里是两条，不是一条
+
+`myext[]`（`polydraw.c:2074` 起那张表）里抓屏是**两条**：
+
+    {"GLCAPTURE()"    ,qglCapture }   零参：照常画在帧缓冲上，`glcaptureend` 再拷一张进纹理
+    {"GLCAPTURE(,,,)" ,kglCapture }   四参：`glcapture(槽,宽,高,格)` **直接画进那张纹理**
+
+`kglCapture`（`pd/pd_host_gl.c:255`）做的事：验尺寸（`<1` 或 `宽*高 > 64Mi` 回 -1）· 懒建一格
+FBO（`gmyfb`）· 形状/格不对就重造那张空纹理 · 把它挂上 `COLOR_ATTACHMENT0` · 视口换成
+`宽 × 高` · `glastcap = 1`。而 `qglEndCapture` 在 `glastcap` 那一支**提前 return** ——
+不拷也不清（我们这儿 `g_capon` 那格记号原来就是照它写的）。
+
+GPGPU 那一族非它不可：零参那条路只有 8 位、而且尺寸只能是整帧。语料里
+`ken/gpgpu.pss` 是唯一用它的（`glcapture(2,XS,YS,KGL_FLOAT)` -> 着色器算 -> `glgettex` 读回）。
+
+### 38.2 落在四处
+
+* `runtime-gl/omni_ev_gl.c`：`omni_ev_gl_capbegin4(槽,宽,高,格)` + 一格自己的 `g_capfbo`；
+  `capend` 认 `g_cap4`（还原视口与帧缓冲，不拷不清）。格 -> 内部格式与 `glsettex` 那一份
+  **同一张映射**（0=RGBA8 / 1=R8 / 4=R32F / 5=RGBA32F）。
+* `runtime-gl/omni_ev_gl_napi.c`：`capbegin4` 那一格（js 腿走 FFI）。
+* `runtime/omni_fmt.c`：`glcapture` argc==4 -> `g_gl.capbegin4`（c 腿）。
+* `host/gfx-cpu.js`：`glcapture/4` -> `G.m.capbegin4`（CPU 备选照旧收下不管）。
+* `ext/polydraw/gl-rt.js`：`glcapture/4` -> `gl_capbegin4`（**语言那一侧**）。
+
+### 38.3 两个坑，都是"静静地什么都没发生"
+
+1. **画那条路把目标绑回去了**。设备里 `!g_st_bound` 那一支写死 `glBindFramebuffer(…, g_fbo)`
+   —— 四参抓屏刚绑好的纹理目标，被**下一次画**当场绑回主帧缓冲。而我在 `capbegin4` 里
+   还特意把 `g_st_bound = 0`（想让状态重新铺一遍），正好每次都触发它。
+   修法：加一格 `g_target`（现在往哪儿画），画那条路只认它。
+2. **语言那一侧必须从 `gl-rt.js` 转**。GL 那一族的顶点攒在语言侧的批里，`gl_flush` 才交给
+   设备。让 adapter 按"宿主名字"把 `glcapture` 直接递给设备（前缀那条路）的话，
+   `glquad(1)` 那一批会在 `glcaptureend` **之后**才冲出去 —— 画在主帧缓冲上，纹理还是零。
+
+两处的症状**一模一样**：`glgettex` 读回来全 0.000，一句报错都没有。分开它们靠的是
+**直接敲设备的探针**（`process.dlopen` 那份 `.node`，`capbegin4` + `cls` + `capend` + `gettex`
+给 0.502 = 128/255）—— 设备是对的，那问题就只能在上头那两层。
+外加在 `capbegin4` 里补了一句 `glCheckFramebufferStatus`：不完整的 FBO 上画东西同样是
+静静地什么都不发生，这一格当场报出来。
+
+### 38.4 判据
+
+`tests/gl/run.js` 加一格：**判数不判像素** —— `examples/07-capture4.pss` 往 4x4 的
+`KGL_FLOAT` 纹理里写 0.25，`glgettex` 读回来印 `capture4 0.250 0.250`。
+**26 / 26**（js 腿走 `--gfx gl`，c 腿单独手验过同一行）。
+出图正确性那一轴**整趟 46 过 / 0 红 / 16 不计**（与改之前同一张账，64s）。
+判据那一格要**明着给 `--gfx gl`**：设备那份 `.node` 的路径是 `glDevicePaths()` 认这个旗子时
+才摆进 `OMNI_EV_GL_ADDON` 的，只设环境量的话 js 腿退回 CPU 备选（踩过一次）。
