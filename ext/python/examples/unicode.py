@@ -107,5 +107,16 @@ def main():
     print("abc".upper(), "ABC".lower(), "".upper(), "".lower(), "".casefold())
     print("héllo wörld".upper(), "HÉLLO WÖRLD".lower())
 
+    # 十四、**`isprintable` 与 `isidentifier`** —— 表里新添的三位（第 11 / 12 / 13 位，
+    # 都是直接问本机 python3 的：`c.isprintable()` / `c.isidentifier()` / `("a"+c)` 那一问）。
+    # 两处口径要记住：`isprintable` 的**空串是 True**（分类那一族里独它一格反过来），
+    # 而 `isidentifier` **不排关键字**（`"if"` 也算）。NBSP 与 EM SPACE 是 Zs，不可打印。
+    print("abc".isidentifier(), "1a".isidentifier(), "".isidentifier(), "_x9".isidentifier())
+    print("if".isidentifier(), "a-b".isidentifier(), "变量".isidentifier(), "a b".isidentifier())
+    print("abc".isprintable(), "a\nb".isprintable(), "".isprintable(), "ab ".isprintable())
+    print("a\u00a0b".isprintable(), "中文".isprintable(), "\t".isprintable(), "\u2003".isprintable())
+    # `isascii` 不用查表（码点 < 128 就是）；空串也是 True。
+    print("abc".isascii(), "".isascii(), "héllo".isascii(), "中".isascii(), "\t".isascii())
+
 
 main()

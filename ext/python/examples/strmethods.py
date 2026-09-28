@@ -144,6 +144,10 @@ print(f"{12345.6789:e} {12345.6789:E} {0.00001234:g} {0.00001234:G} {1.5:.2e}")
 print(repr("a'b"), repr('x"y'), repr("q'\"w"), repr("ab"), repr(""))
 # `\\` 与三格有名字的控制字符；别的 ASCII 控制字符是 `\xHH`（小写、补到两位）。
 print(repr("a\\b"), repr("t\n"), repr("r\r"), repr("t\tb"), repr(chr(7)), repr(chr(127)))
+# **非 ASCII 的不可打印字符**也要转义（问的是表里第 11 位 `isprintable`）：按码点分三档
+# `\xHH` / `\uHHHH` / `\U` 八位。能打印的照旧原样印（中文 / 带音标的字母 / emoji）。
+print(repr("a\u00a0b"), repr("\u200b"), repr("\u0301"), repr("中文"), repr("héllo"))
+print(repr("\U0001f600"), ["\u00a0", "ok"])
 # **容器里的元素走 repr** —— 源码里一个 `repr` 字都没有，那一格库函数是 adapter
 # 自己要出来的（`C.requireFn`）。
 print(["a'b", 'x"y', "t\n"], {"k'": "v\n"}, ("a'b", 1))

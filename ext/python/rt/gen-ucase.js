@@ -90,6 +90,11 @@ for cp in range(N):
     # （这一段**不许带反引号** —— 整份 python 是个 String.raw 模板，反引号会把它截断。）
     cased = (c + "a").title()[-1] == "a"
     flags |= (int(fc) << 8) | (int(ig) << 9) | (int(cased) << 10)
+    # 第 11 / 12 / 13 位：isprintable、标识符的**头一格**（XID_Start 加下划线）、
+    # 标识符的**后随**（XID_Continue）。三位都**直接问本机 python3**，不照标准猜：
+    # c.isidentifier() 就是"单独一格能不能当标识符"，("a" + c) 那一问是后随。
+    flags |= (int(c.isprintable()) << 11) | (int(c.isidentifier()) << 12) \
+        | (int(("a" + c).isidentifier()) << 13)
     # 映射长到 3 个码点以上的一格都没有（CPython 的 To*Full 也只给 3）——
     # 真有就当场停下，别静静截断。
     for m in (u, l, t, f):

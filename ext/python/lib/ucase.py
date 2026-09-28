@@ -188,6 +188,35 @@ def _str_isspace(s):
     return _ucase_all(s, 5)
 
 
+def _str_isprintable(s):
+    # **空串是 True**（与 `isalpha` 那一族正好相反 —— 量出来的）。第 11 位直接是
+    # 本机 python3 的 `chr(cp).isprintable()`，所以不必在这儿复述"哪几个类别算可打印"。
+    n = len(s)
+    i = 0
+    while i < n:
+        if (_urecf(_ucase_rec(ord(s[i]))) >> 11) & 1 == 0:
+            return False
+        i = i + 1
+    return True
+
+
+def _str_isidentifier(s):
+    # 头一格看第 12 位（`chr(cp).isidentifier()` —— XID_Start 加下划线），
+    # 其余看第 13 位（后随，`("a" + chr(cp)).isidentifier()`）。空串是 False。
+    # 关键字照旧算标识符（`"if".isidentifier()` python 也答 True）。
+    n = len(s)
+    if n == 0:
+        return False
+    if (_urecf(_ucase_rec(ord(s[0]))) >> 12) & 1 == 0:
+        return False
+    i = 1
+    while i < n:
+        if (_urecf(_ucase_rec(ord(s[i]))) >> 13) & 1 == 0:
+            return False
+        i = i + 1
+    return True
+
+
 def _str_isupper(s):
     # **不是"每一格都大写"**：口径是"有至少一格 cased，而且没有小写、没有首字母大写那一档"
     # （CPython 的 `unicode_isupper`）。所以 `"A1".isupper()` 是 True、`"1"` 是 False、

@@ -52,9 +52,8 @@ def _str_repr(s):
     #     别的一律单引号。`repr("a'b")` 是 `"a'b"`，这一层从前答的是 `'a'b'`。
     #   * `\\` 与"包它那一格引号"要转义；`\n` / `\r` / `\t` 有自己的写法，别的 ASCII
     #     控制字符走 `\xHH`（小写十六进制、补到两位）。
-    #
-    # **明说的不足**：非 ASCII 的不可打印字符（`\u200b` 那一族）这一层照原样放过 ——
-    # python 那边转成 `\u200b`。要接得先有 `isprintable` 那张表（见 SPEC）。
+    #   * **非 ASCII 的不可打印字符**（`\u200b` / NBSP 那一族）也要转义 —— 那一档问
+    #     `_str_isprintable`（表里第 11 位），按码点分三档：`\xHH` / `\uHHHH` / `\U` 八位。
     q = "'"
     if "'" in s and '"' not in s:
         q = '"'
@@ -77,10 +76,45 @@ def _str_repr(s):
         elif o < 32 or o == 127:
             d = "0123456789abcdef"
             out = out + "\\x" + d[o // 16] + d[o % 16]
-        else:
+        elif o < 128:
             out = out + c
+        elif _str_isprintable(c):
+            out = out + c
+        else:
+            out = out + _str_hexesc(o)
         i = i + 1
     return out + q
+
+
+def _str_isascii(s):
+    # 空串是 True。ASCII 就是"每一格码点 < 128" —— 这一格不查表
+    # （从前记在账上说"拿字节值只有 ord() 那一条、它在非 ASCII 上当场报"，
+    # 那笔账早过时了：`ord()` 现在交的是**码点**，非 ASCII 也答得出来）。
+    n = len(s)
+    i = 0
+    while i < n:
+        if ord(s[i]) > 127:
+            return False
+        i = i + 1
+    return True
+
+
+def _str_hexesc(o):
+    # 一个码点的转义写法：`\xHH`（< 0x100）/ `\uHHHH`（< 0x10000）/ `\U` 八位 ——
+    # CPython 的 `unicode_repr` 就这三档，十六进制一律小写。
+    d = "0123456789abcdef"
+    if o < 256:
+        return "\\x" + d[(o >> 4) & 15] + d[o & 15]
+    if o < 65536:
+        out = "\\u"
+        k = 3
+    else:
+        out = "\\U"
+        k = 7
+    while k >= 0:
+        out = out + d[(o >> (4 * k)) & 15]
+        k = k - 1
+    return out
 
 
 def _str_group3(s, sep):

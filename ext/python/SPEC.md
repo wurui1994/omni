@@ -1372,8 +1372,16 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
       引号按"里头有没有 `'` / `\"`"挑，`\\` / `\n` / `\r` / `\t` 与 ASCII 控制字符转义）。
       剩下的一格是**非 ASCII 的不可打印字符**：python 的 `repr("\u00a0")` 是 `'\xa0'`，
       我们原样印出来。那要 `isprintable` 那张表（与这一张不同），记在这儿。
-    - 还没接到这条路上的：`isidentifier` / `isprintable`（那是另外两张表）、
-      **dyn 接收者上的方法**（那一格明着报"还没接"，不是静静答错）。
+    - 还没接到这条路上的：**dyn 接收者上的方法**（那一格明着报"还没接"，不是静静答错）。
+      **`isidentifier` / `isprintable` 已经接了**（2026-09-29，第九趟扫）：不另起一张表，
+      **在这张表上加三位**（第 11 位 = `c.isprintable()`、第 12 位 = `c.isidentifier()`、
+      第 13 位 = `("a" + c).isidentifier()` 也就是后随）—— 三位都直接问本机 python3，
+      不照 Unicode 的类别名猜（`XID_Start` / `XID_Continue` 那两个属性 `unicodedata`
+      根本不交）。flags 是 u16，加完还空着两位。加位之后的读数：**310 份记录、458 个块，
+      合计 110800 字节**；`.tab` 223625 字节（记录多了 15 份 —— 那三位把从前同型的记录拆开了）。
+      `isprintable` 的**空串是 True**，与 `isalpha` 那一族正好相反；`isidentifier`
+      **不排关键字**（`"if"` 也算）。判据：`ucase-sweep` 第四趟多了三格（那一趟整表
+      111 万码点都跑过），外加 `examples/unicode.py` 四行。
       `.istitle()` 也接上了（2026-09-29）：口径是"大写那一档前面不许也是 cased、
       小写那一档前面必须是 cased、一格 cased 都没有也是 False"（`"AB"` False /
       `"aA"` False / `"123"` False / `"ǅa"` True）。**大小写与分类那一族收完了**（2026-09-29）：
@@ -1404,6 +1412,31 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 ## 二、进度
 
 ### 已落地
+
+- **`isprintable` / `isidentifier` 与 `repr` 的非 ASCII 转义（2026-09-29）** —— 第九趟扫
+  （这三格从前都在"明说还没接"的账上，共用一件事：**表里缺位**）：
+  - **不另起一张表**，在 `rt/ucase.tab` 上**加三位**：第 11 位 `c.isprintable()`、
+    第 12 位 `c.isidentifier()`（XID_Start 加下划线）、第 13 位 `("a" + c).isidentifier()`
+    （后随）。三位都**直接问本机 python3** —— `XID_Start` / `XID_Continue` 那两个属性
+    `unicodedata` 根本不交，照类别猜就会错。flags 是 u16，加完还空着两位。
+    读数从 295 份记录 / 420 个块变成 **310 份记录 / 458 个块、110800 字节**
+    （`.tab` 223625 字节）—— 新的三位把从前同型的 15 份记录拆开了。
+  - 两处口径：`isprintable` 的**空串是 True**（分类那一族里独它一格反过来）、
+    `isidentifier` **不排关键字**（`"if".isidentifier()` python 也答 True）。
+  - **`repr()` 对非 ASCII 不可打印字符**（`repr("a\u00a0b")` 该是 `'a\xa0b'`）—— 这一格
+    从前是**静静答错**（原样印出去，印出来的那串 python 自己读不回来）。现在 `_str_repr`
+    问第 11 位，按码点分三档 `\xHH` / `\uHHHH` / `\U` 八位（`_str_hexesc`），
+    与 CPython 的 `unicode_repr` 同一套。箱子那一侧走同一份（`libReprCall`）。
+  - **`.isascii()`** 顺带也接了 —— 它不用查表（每一格码点 < 128），写在 `lib/str.py`。
+    从前记在账上的理由（"拿字节值只有 `ord()` 那一条、它在非 ASCII 上当场报"）早过时了。
+  - **一格机制上的缺口**（这一趟暴露的）：`requireFn` 现造的库函数，**它体里再要下一格
+    就落不到 `C.insts` 上** —— 单态化那一趟只从源码的调用点收实例，而 `_str_repr` 是
+    adapter 现造的、`_str_hexesc` 又是它体里才冒出来的。症状：`print(一张表)` 报
+    "`_str_hexesc(int)` 没有对得上的那一格（这份源码里生成的是 <空>）"。落法：`exprOf`
+    的用户函数那一支，**库函数**（`C.libFns`）没实例时现造一格，`drainLib` 那趟发出来；
+    用户写的函数照旧当场报（它们该在源码里有调用点）。
+  判据：`ucase-sweep` 第四趟多了三格 —— **整表 111 万码点**那一趟（步长 1）四趟全绿；
+  `examples/unicode.py` 四行、`examples/strmethods.py` 两行（三条腿逐字节相同）。
 
 - **`format(x, spec)`、`%` 那一档、`#` / `,` 配零填充（2026-09-29）** —— 第八趟扫
   （格式说明那套微语言剩下的几格）：
@@ -1585,8 +1618,9 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
   判据：`examples/strmethods.py` 末尾五行（repr 的引号 / 转义 / 容器里的元素 / `!r`）、
   `examples/dynlist.py` 末尾两行（箱子里的串）、`examples/listops.py` 那六行（空表那一批）
   —— 三条腿（interp / js / c）与 python3 逐字节相同；`tests/python` 全量 30 过 0 败。
-  **还没接的一格**（明说）：非 ASCII 的不可打印字符（`repr("\u200b")` 那一档）照旧原样
-  放过 —— 要 `isprintable` 那张表。
+  **还没接的一格**（明说）：非 ASCII 的不可打印字符（`repr("\u200b")` 那一档）——
+  **第九趟（2026-09-29）接上了**：表里加了 `isprintable` 那一位，按码点分三档
+  `\xHH` / `\uHHHH` / `\U` 八位（`lib/str.py` 的 `_str_hexesc`）。
 
 - **`float(串)`（2026-09-29）** —— 从前是"当场报还没接"，理由写着"自己写的解析会在末位上
   差一点"。那条理由只挡住**自己写算法**，挡不住**借宿主那份正确取整的解析器**：
@@ -2462,8 +2496,9 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     非 ASCII 上分家（`ß` → `ss`），而非 ASCII 的大小写本来就明说没接，所以走同一格，
     不另编一套半对的规矩。
   判据：`strmethods.py` 末尾三段三条腿与 python3 逐字节相同。
-  **明说的不足**：`.isascii()` / `.isidentifier()` 还没接（前者要"这一格字节小不小于
-  0x80"，而这一层拿字节值只有 `ord()` 那一条、它在非 ASCII 上是当场报的 —— 先不猜）。
+  **`.isascii()` / `.isidentifier()` 第九趟（2026-09-29）都接上了**：前者不用查表
+  （码点 < 128，写在 `lib/str.py`）—— 从前记的理由"拿字节值只有 `ord()` 那一条、
+  它在非 ASCII 上当场报"早过时了，`ord()` 现在交的是码点；后者走表里新加的第 12 / 13 位。
 
 * **`.insert` 的负下标**（又一处会答错的）：python 的 `insert(i, x)` 落在
   `max(0, len + i)`，而 len 是**插之前**那个长度 —— 所以 `-1` 是"插在最后一格之前"。

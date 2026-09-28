@@ -67,6 +67,12 @@ export const LIB_METHODS = new Map([
   ['string.isupper', '_str_isupper'],
   ['string.islower', '_str_islower'],
   ['string.istitle', '_str_istitle'],
+  /* `isprintable` 与 `isidentifier`：表里第 11 / 12 / 13 位（三位都是直接问本机 python3
+     的，见 `rt/gen-ucase.js`）。`isprintable` 的**空串是 True**，与上面那一族相反。 */
+  ['string.isprintable', '_str_isprintable'],
+  ['string.isidentifier', '_str_isidentifier'],
+  /* `isascii` 不用查表（码点 < 128 就是），写在 `lib/str.py`。 */
+  ['string.isascii', '_str_isascii'],
   /* `strip` 那三格：**不给 chars 时按表里的空白位**（python 的空白是 Unicode 的 ——
      NBSP / EM SPACE / 全角空格都算；从前只认 ASCII 那六个，静静少剥）。
      **按实参个数分两格函数**（键上带 `/0` 与 `/1`）：合成一格的话 chars 形参在"没给"

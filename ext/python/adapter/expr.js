@@ -4394,7 +4394,14 @@ function builtinOf(nm, args0, argToks, C) {
     default: {
       /* 用户函数。**单态化**：按实参类型挑一格实例（`add__int_int` / `add__float_float`）。 */
       const argTys = args.map((a) => ty(a, C));
-      const inst = C.resolveFn(nm, argTys);
+      let inst = C.resolveFn(nm, argTys);
+      /* **库里那几格自己套着调**（`_str_repr` 体里调 `_str_hexesc`）—— 单态化那一趟只从
+         源码的调用点收实例，而 `requireFn` 现造的那一格是发射时才冒出来的，它体里再要
+         下一格就落不到 `C.insts` 上。这儿补一手：库函数没有对得上的实例时现造一格，
+         `drainLib` 那一趟会把它发出来（用户写的函数照旧当场报，它们该在源码里有调用点）。 */
+      if (inst === null && C.libFns.has(nm) && C.requireFn !== undefined) {
+        inst = C.requireFn(nm, argTys);
+      }
       if (inst === null) {
         if (!C.insts.has(nm)) {
           throw new Error(`python->IR: 不认识 \`${nm}()\` —— 内建里没有，这份源码里也没定义`);
