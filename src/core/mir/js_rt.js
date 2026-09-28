@@ -14,7 +14,7 @@
 import {
   memInit, memData, memSize, memGrow, memLoadFn, memStoreFn, memLoadFnN, memStoreFnN,
   flushOut, failRt, InterpFail, InterpUncaught, memImage, memImagePut } from '../interp/builtin.js';
-import { callLibc, hasLibc, ExitCall, setFnPtrCaller, libcAtExit, setHeapInit } from '../interp/libc.js';
+import { callLibc, hasLibc, ExitCall, setFnPtrCaller, libcAtExit, setHeapInit, setSymLookup } from '../interp/libc.js';
 import { evalJs, stderr } from '../host/native.js';
 
 /* ---- `setjmp` / `longjmp` 那一格（ADR-0047） --------------------------------
@@ -203,6 +203,14 @@ function memPut(off, bytes, relocs, delta, fixes) {
 let heapDone = false;
 /* 第一次 `malloc` 就把堆立起来（按需装载那条路上没有"入口"替它发 CCALL）。 */
 setHeapInit(() => { memHeap(); });
+/** `dlsym` 那扇门（第三十四格）：**按名字在我们自己的符号表里取指针** ——
+ *  函数先 `needFn`（它会按图把那一份装进来并 `fnBind`），再回它在全程序函数表里的槽位；
+ *  不是函数就试数据符号表。两边都没有就回 0n（NULL）—— 那正是 `dlsym` 的规矩，
+ *  R 会拿它当"这个模块里没有这个入口"，自己报得明明白白。 */
+setSymLookup((name) => {
+  try { needFn(name); return fnSlot(name); } catch { /* 不是函数，往下试数据 */ }
+  try { return needSym(name); } catch { return 0n; }
+});
 
 function memHeap() {
   if (heapDone) return;

@@ -884,6 +884,13 @@ const IMG_EVAL = [
   'sum(matrix(c(1.5, 2, 3, 4), 2) %*% c(1, 2))', 'sum(outer(1:3, 1:3))',
   'sum(crossprod(matrix(1:4, 2)))', 'sum(tcrossprod(matrix(1:6, 2)))',
   'sum(diag(crossprod(matrix(c(1, 2, 3, 4), 2))))',
+  /* LAPACK 那一族（`solve`/`det`）：真身是 `modules/lapack/Lapack.c`，靠把
+     `dlopen`/`dlsym` 映到我们自己的符号表进来的；下面那层 Fortran
+     （`dgesv_`/`dgetrf_`/`dlange_`/`dgecon_`）在宿主层映射。
+     `det` 与 R 差一个 2e-16 的浮点尾巴（两边都是 LU），在 1e-12 那道门里。 */
+  'sum(solve(matrix(c(2, 0, 0, 4), 2)))',
+  'sum(solve(matrix(c(2, 1, 1, 3), 2), c(1, 2)))',
+  'det(matrix(c(2, 1, 1, 3), 2))',
   'nrow(cbind(1:3, 4:6))', 'sum(apply(matrix(1:6, 2), 1, sum))',
   'sort(c(3, 1, 2))[1]', 'order(c(3, 1, 2))[1]', 'which.max(c(1, 9, 3))',
   'length(union(1:3, 2:5))', 'length(intersect(1:5, 3:8))', 'length(setdiff(1:5, 3:8))',

@@ -478,6 +478,11 @@ let heapBase = 0n;       // 0 = 还没初始化（也就是这个模块没用到
 let heapInitHook = null;
 
 export function setHeapInit(fn) { heapInitHook = fn; }
+/** `dlsym` 那扇门要的"**按名字取指针**"（第三十四格）：`js_rt` 把它递进来
+ *  （函数走全程序函数表、数据走那张数据符号表，找不到回 0n = NULL）。
+ *  为什么不在这一层自己查：符号表与装载器都在 `js_rt` 那边，libc 只认地址。 */
+let symLookup = null;
+export function setSymLookup(fn) { symLookup = fn; }
 
 function heapNeed(n) {
   /* `malloc(0)` 也给一块真地址（C11 7.22.3 允许两种，glibc 与 tcc 的 libc 都给地址）——
@@ -2740,6 +2745,75 @@ const LIBC = {
       }
     }
     memStore('i32', info, 0, BigInt(bad));
+    return undefined;
+  },
+  /* --------------------------------------------------- dlopen / dlsym 那一格
+   *
+   * **R 的模块（lapack / stats / grDevices）就是靠这扇门进来的**（第三十四格）：
+   * `La_Init()` 走 `R_moduleCdynload("lapack", …)` -> `dlopen` + `dlsym("R_init_lapack")`，
+   * 拿到函数指针就自己把那张表填上。而 `initialized`/`ptr` 都是 `main/lapack.c` 里的
+   * **文件静态**，从外头改不着 —— 所以"自己叫一句 R_init_lapack"不够，得把这扇门装上。
+   *
+   * 我们这条腿上没有 .so，但**有一张全程序符号表**（`js_rt` 的函数表 + 数据符号表）。
+   * 所以：`dlopen` 回一个非 NULL 的假句柄（真地址，R 会存进 DllInfo）、
+   * `dlsym(h, name)` 就是**按名字在那张表里取指针** —— 剩下的事 R 自己那套机件全通。
+   * 一个 C 源文件都不用改，而且对每个模块都成立。找不到就回 NULL（dlsym 的规矩）。 */
+  dlopen: () => pcreBlock('dlhandle'),
+  dlclose: () => 0n,
+  dlerror: () => 0n,                         // NULL = 没错（R 只在回 NULL 时取它）
+  dlsym: (a) => {
+    if (symLookup === null) return 0n;
+    return symLookup(readCStr(a[1]));
+  },
+  /** `dlange_`：矩阵范数（'M' 最大绝对值、'1'/'O' 最大列和、'I' 最大行和、'F'/'E' Frobenius）。 */
+  dlange_: (a) => {
+    const w = Number(memLoad('i8u', BigInt(a[0]), 0));
+    const m = Number(memLoad('i32s', BigInt(a[1]), 0));
+    const n = Number(memLoad('i32s', BigInt(a[2]), 0));
+    const A = BigInt(a[3]);
+    const lda = Number(memLoad('i32s', BigInt(a[4]), 0));
+    const at = (i, j) => memLoad('f64', A + BigInt((i + j * lda) * 8), 0);
+    let r = 0;
+    if (w === 77 || w === 109) {                                 // 'M'/'m'
+      for (let j = 0; j < n; j += 1) for (let i = 0; i < m; i += 1) r = Math.max(r, Math.abs(at(i, j)));
+    } else if (w === 49 || w === 79 || w === 111) {               // '1'/'O'/'o'
+      for (let j = 0; j < n; j += 1) {
+        let s = 0;
+        for (let i = 0; i < m; i += 1) s += Math.abs(at(i, j));
+        r = Math.max(r, s);
+      }
+    } else if (w === 73 || w === 105) {                           // 'I'/'i'
+      for (let i = 0; i < m; i += 1) {
+        let s = 0;
+        for (let j = 0; j < n; j += 1) s += Math.abs(at(i, j));
+        r = Math.max(r, s);
+      }
+    } else {                                                     // 'F'/'E'
+      let s = 0;
+      for (let j = 0; j < n; j += 1) for (let i = 0; i < m; i += 1) s += at(i, j) * at(i, j);
+      r = Math.sqrt(s);
+    }
+    return r;
+  },
+  /** `dgecon_`：条件数的倒数。**这一格是近似**（LAPACK 那个是逆矩阵范数的估计器）：
+   *  拿 LU 之后 U 的对角线 `min|Uii| / max|Uii|`。方向对得上 —— 奇异时回 0，
+   *  而 R 只把它与 `tol` 比一下判"这矩阵能不能解"（`solve.default` 里那一句）。
+   *  真要与 LAPACK 逐位相同得把 `dlacn2` 那套估计器也搬过来，记在 ADR 里。 */
+  dgecon_: (a) => {
+    const n = Number(memLoad('i32s', BigInt(a[1]), 0));
+    const A = BigInt(a[2]);
+    const lda = Number(memLoad('i32s', BigInt(a[3]), 0));
+    const rcond = BigInt(a[5]);
+    const info = BigInt(a[8]);
+    let lo = Infinity;
+    let hi = 0;
+    for (let i = 0; i < n; i += 1) {
+      const v = Math.abs(memLoad('f64', A + BigInt((i + i * lda) * 8), 0));
+      lo = Math.min(lo, v);
+      hi = Math.max(hi, v);
+    }
+    memStore('f64', rcond, 0, hi === 0 || !Number.isFinite(lo) ? 0 : lo / hi);
+    memStore('i32', info, 0, 0n);
     return undefined;
   },
   memcpy: (a) => {
