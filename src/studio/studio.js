@@ -624,13 +624,19 @@ function initConsole() {
 function renderPreview(kind, payload) {
   const host = $('#preview');
   const tab = document.querySelector('#out-tabs button[data-tab="preview"]');
+  /* **"预览"这一栏永远点得动**（2026-09-28 修）：从前没预览时把按钮 `disabled` 掉，
+     那是早期的设置，两条都不对 ——
+       1. 栏本身不拆（上面那句注释就是为了"右边整块不跳"），可按钮又是死的，于是
+          用户点不进去、也不知道为什么，只能以为坏了；
+       2. `disabled` 让"这份文件现在没有图"与"这一栏坏了"长得一模一样。
+     现在改成：按钮照旧可点，点进去看见一句"没有预览"的空状态（`.preview.empty`
+     的 `::after`，见 studio.css）。`showPreviewTab()` 那一格只管"要不要自动切过去"，
+     与"点不点得动"是两件事。 */
   if (kind === null) {
     host.textContent = '';
     host.classList.add('empty');
-    tab.disabled = true;
     return;
   }
-  tab.disabled = false;
   host.classList.remove('empty');
   if (kind === 'md') { host.innerHTML = `<article class="md">${mdToHtml(payload)}</article>`; return; }
   if (kind === 'eps') {

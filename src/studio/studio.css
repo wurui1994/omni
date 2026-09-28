@@ -201,7 +201,13 @@ body {
 
 /* ---- 预览区（markdown 排版 / asy 的图 / glsl 着色器） ---- */
 .preview { width: 100%; height: 100%; overflow: auto; display: flex; position: relative; }
-.preview.empty { display: none; }
+.preview.empty { display: grid; place-items: center; }
+/* 空状态要**说话**：这一栏永远点得动（见 studio.js 的 `renderPreview`），
+   所以"没有图"必须与"坏了"长得不一样。 */
+.preview.empty::after {
+  content: '这份文件没有预览 —— 跑一趟，有图就出现在这儿';
+  color: var(--fg-3); font-size: 13px; padding: 0 24px; text-align: center;
+}
 .svg-wrap {
   display: flex; align-items: center; justify-content: center;
   width: 100%; height: 100%; padding: 16px; box-sizing: border-box;
