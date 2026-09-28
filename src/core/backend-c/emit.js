@@ -2428,8 +2428,24 @@ class CEmitter {
         return `${e.make}(${e.args.map((x) => this.expr(x)).join(', ')})`;
       }
       case 'CaptureRef': return `self->c_${e.name}`;
-      case 'CallFn':
-        return `omni_call_${typeKey(e.fnType)}(${[this.expr(e.callee), ...e.args.map((a) => this.expr(a))].join(', ')})`;
+      case 'CallFn': {
+        /* **间接调用那条实参 list 也上栈**（与 `stackArgs` / `stackArgList` 同一条不变量）。
+         *
+         * 量出来的：`OMNI_PROF=sample dist/omni run tests/asy/cases/01-arith.asy` 里
+         * `u_lexText` 含子 93.8%，而**自用第一名是 `omni_list_dynamic_from` 32.97%** ——
+         * 词法器里每一次 `mkSpan(…)` / `push(…)` / `skipTrivia()` 都是一次
+         * `omni_call_fn_list_dynamic__dynamic(…, omni_list_dynamic_from(…))`，也就是
+         * **两次 arena 分配**（struct + items），连空实参（`_from(NULL, 0)`）也要一次。
+         * 这一趟自编译的产物里这样的点有 **18757 处**（15828 带实参 + 2929 空）。
+         *
+         * 为什么能上栈：不变量与被调者是谁无关（`stackArgs` 的头注写着"什么时候能上栈：
+         * **总是**"）—— 绑形参走只读的 `js_arr_get`、rest 走拷一份的 `js_arr_slice`、
+         * `arguments` 自己拷一份；而 `omni_call_fn_…` 只是把指针转手给目标
+         * （`return ((omni_dyn (*)(omni_fn, omni_list_dynamic))omni_fn_ck(f)->fp)(f, a0);`）。
+         * 直接调用与方法调用两条路早就这么做了，只有"调一个函数值"这条没沾上。 */
+        const as = e.args.map((a) => this.stackListLit(a) ?? this.expr(a));
+        return `omni_call_${typeKey(e.fnType)}(${[this.expr(e.callee), ...as].join(', ')})`;
+      }
       case 'NewContainer': return `${cTypeName(e.type)}_new()`;
       case 'ListLit': return this.listLit(e);
       case 'DictLit': return this.dictLit(e);
@@ -2678,6 +2694,23 @@ class CEmitter {
     const items = a.items.map((x) => this.expr(x)).join(', ');
     return `${dyn}{ (${cTypeName(a.type.elem)}[]){${items}}, `
       + `${a.items.length}, ${a.items.length} }, OMNI_DYN_LIST)`;
+  }
+
+  /**
+   * 一条**列表字面量**落成栈上那一份（`&(struct …_s){ … }`）；不是这个形状回 null。
+   *
+   * 与 `stackArgs` / `stackArgList` 是同一件事的第三处调用点（"调一个函数值"那条路，
+   * 见 `CallFn` 那一格的注）。**空 list 也走这一条** —— `_from(NULL, 0)` 照样要分配一个
+   * struct，而空实参是最常见的一格（`this.next()` / `skipTrivia()`）。
+   * @returns {string | null}
+   */
+  stackListLit(a) {
+    if (!a || a.kind !== 'ListLit') return null;
+    const n = cTypeName(a.type);
+    if (a.items.length === 0) return `&(struct ${n}_s){ NULL, 0, 0 }`;
+    const items = a.items.map((x) => this.expr(x)).join(', ');
+    return `&(struct ${n}_s){ (${cTypeName(a.type.elem)}[]){${items}}, `
+      + `${a.items.length}, ${a.items.length} }`;
   }
 
   /** 容器字面量用复合字面量传数组，避免为了构造值而引入语句表达式 */

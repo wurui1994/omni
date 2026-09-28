@@ -256,9 +256,40 @@ export function applyRenames(m, ren) {
  * @param {Map<string, any>} mods 路径 -> 模块
  * @returns {Set<string>} 已经靠改写解决掉的本地名
  */
+/**
+ * 这个模块里**任何一层**绑过的名字（形参 / 局部 / catch / 类名 / for 头 都算）。
+ *
+ * 谁要它：`renameImports` 要判"改名的**落点**会不会被某一层的局部名遮住"。
+ * `walk` 那份遮蔽表管的是**旧名**（`mkSpan` 被局部遮住就不动它），而真正咬人的是**新名**：
+ * `import { span as mkSpan }` 改写成 `span(…)` 之后，`glr/lex.js` 里那两句
+ * `const span = mkSpan(file, at, end);` 反过来把它遮住了 —— 于是调用的是**那个 Span 对象**。
+ * 症状：原生腿上凡是走语法的语言（asy 与 `ext/` 那十一门）一律
+ * `runtime error: undefined is not a function`，而 node 那条腿全绿（那儿没有改写这件事）。
+ */
+function boundAnywhere(x, out) {
+  if (Array.isArray(x)) { for (const y of x) boundAnywhere(y, out); return out; }
+  if (x === null || typeof x !== 'object') return out;
+  if (isNode(x)) {
+    const own = shadowed(x);
+    if (own !== null) for (const n of own) out.add(n);
+    /* catch 的形参不走 `shadowed`（那一格只遮 handler 那一段）—— 这儿只问"绑过没有"。 */
+    if (x.type === 'Try' && x.param !== null && x.param !== undefined) {
+      for (const n of patNames(x.param, [])) out.add(n);
+    }
+  }
+  for (const k of Object.keys(x)) {
+    if (NOT_NODE.has(k)) continue;
+    boundAnywhere(x[k], out);
+  }
+  return out;
+}
+
 export function renameImports(m, mods) {
   const ren = new Map();
   const done = new Set();
+  /* 落点被某一层局部名遮住的那几格**不改写** —— 回落到 `link.js` 摊一句
+     `const 本地名 = 提供方名;`。那一句在**模块级**，那儿没有局部遮蔽，所以它是对的。 */
+  const inner = boundAnywhere(m.body, new Set());
   for (const imp of m.imports) {
     const target = mods.get(imp.path);
     if (target === undefined) continue;
@@ -266,6 +297,7 @@ export function renameImports(m, mods) {
       if (sp.kind !== 'named') continue;
       const provider = target.exports.get(sp.imported);
       if (provider === undefined || provider === sp.local) continue;
+      if (inner.has(provider)) continue;
       ren.set(sp.local, provider);
       done.add(sp.local);
     }

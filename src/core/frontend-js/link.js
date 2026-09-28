@@ -513,15 +513,21 @@ export function linkJs(entry, read, diags) {
         }
         /* 改名的导入（`import { A as B }`）：**引用已经在 rename.js 那一遍改写过了**
          * （`renameImports`），所以这儿不再摊那句 `const B = A;` —— 少占一格模块级名字，
-         * 而且 `let` 那种活绑定也跟着对。只有"改写没管到"的才回落到老办法。 */
+         * 而且 `let` 那种活绑定也跟着对。只有"改写没管到"的才回落到老办法。
+         *
+         * **回落那一句要指到提供方现在那个本地名**（`target.exports.get(…)`），不是导入名：
+         * 提供方的本地名可能被 `planRenames` 改过（`名字$模块短名`），那时候按导入名发
+         * 就是指向一个不存在的名字。改写那条路本来就是这么取的（`renameImports` 里
+         * 同一句），两条路口径一致。 */
+        const providerLocal = target.exports.get(sp.imported);
         if (sp.local !== sp.imported && !(rewritten.get(m.path) ?? new Set()).has(sp.local)
-          && bindAlias(sp.local, sp.imported, imp.span)) {
+          && bindAlias(sp.local, providerLocal, imp.span)) {
           body.push({
             type: 'VarDecl',
             kind: 'const',
             decls: [{
               id: { type: 'Ident', name: sp.local, span: imp.span },
-              init: { type: 'Ident', name: sp.imported, span: imp.span },
+              init: { type: 'Ident', name: providerLocal, span: imp.span },
             }],
             span: imp.span,
           });
