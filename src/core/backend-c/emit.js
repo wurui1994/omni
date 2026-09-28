@@ -187,6 +187,8 @@ class CEmitter {
     this.poolExt = new Map();
     /** 内容哈希 -> 串（撞了要认出来）。 */
     this.poolByHash = new Map();
+    /** 属性读的 IC（ADR-0047 §14）：一个调用点一格，计数就是名字。 */
+    this.icN = 0;
     /** 串 -> 内容哈希（poolHash 的备忘录，见那儿的量）。 */
     this.hashOf = new Map();
     if (this.bind !== null) {
@@ -464,6 +466,11 @@ class CEmitter {
         if (share) this.syms.push(`${id}_s|@str:${this.poolHash(s)}`);
       }
     }
+    /* 属性读的 IC（ADR-0047 §14）：一个调用点一格，发在池子这一段 —— 这一段是**函数体
+       都发完之后**才填进去的（三个出口都是这个次序），所以 `icN` 在这儿已经是终值。
+       一律 `static`：按模块/切文件那几档里这一段会抄进每个 TU，于是各 TU 各自一份缓存，
+       语义上没有分别（一个调用点只住在一个 TU 里），只是多占几十字节。 */
+    for (let i = 0; i < this.icN; i++) out.push(`static struct omni_js_ic_s omni_ic_${i};`);
     return out;
   }
 
@@ -1739,8 +1746,11 @@ class CEmitter {
        * `idx_get` 是 `xs.at` / `xs[k]` 落下来的那几个 —— 读出来的那格值靠成员表算
        * （omni_js_obj.h 的 pm_find），而那张表只含 `used` 里的名字。
        * 从前只认 realm_proto 一条，于是 `typeof xs.at` 在 C 腿上是 undefined 而
-       * node / js 腿给 function（tests/js-exec 的 44-proto-member-values）。 */
-      if (!proto && (ln.includes('omni_js_realm_proto(') || ln.includes('omni_js_obj_getk(')
+       * node / js 腿给 function（tests/js-exec 的 44-proto-member-values）。
+       * `omni_js_obj_getk` 这一格**刻意不带左括号**：带 IC 的那一支发的是
+       * `omni_js_obj_getk_ic(`（ADR-0047 §14），带括号就认不出来 —— 同一个坑第二次，
+       * 症状一模一样（44 那一份整行 undefined 外加 `at.call` 报 TypeError）。 */
+      if (!proto && (ln.includes('omni_js_realm_proto(') || ln.includes('omni_js_obj_getk')
         || ln.includes('omni_js_obj_get(') || ln.includes('omni_js_getp(')
         || ln.includes('omni_js_idx_get('))) proto = true;
     }
@@ -3022,6 +3032,12 @@ class CEmitter {
       case 'js_obj_get': case 'js_obj_set': case 'js_obj_has': case 'js_obj_delete': {
         const k = constKey(e.args[1]);
         if (k !== null) {
+          /* 读 + 常量键那一支再带一格**单态 IC**（ADR-0047 §14）：命中时几条整数比较就答，
+             哈希与线性扫都不做。形态与失效的理由写在 omni_js_obj.h 那格 struct 上。 */
+          if (e.name === 'js_obj_get') {
+            const ic = this.icN++;
+            return `omni_js_obj_getk_ic(${a[0]}, ${this.strLit(k)}, &omni_ic_${ic})`;
+          }
           const args = [a[0], this.strLit(k), ...a.slice(2)];
           return `omni_${e.name}k(${args.join(', ')})`;
         }

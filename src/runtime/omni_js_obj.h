@@ -40,6 +40,31 @@
 #define OMNI_JS_DATE_SEL 100
 #define OMNI_JS_DATE_N 41
 
+/* 属性读的**单态内联缓存**（ADR-0047 §14）：一个调用点一格，发射层发成文件作用域的
+   `static`（见 backend-c/emit.js 的 icDecl）。摆在宏外头 —— 生成的 C 在容器实例化之前就
+   要看见这个类型，而且它不含任何与 LT/DT 有关的东西（两格 dict 指针都存成 void*）。
+
+   kind：0 = 空的（还没打上）、1 = 自有那一格、2 = 直接原型上那一格。
+     - kind 1 **不认对象身份，只认下标**：拿 `slot` 去**当前**这个对象的槽表里把键验一遍
+       （`keys[slot]` 与要找的键相等且 `live`）。键在一张 dict 里是唯一的，所以"这一格的键
+       就是它"本身即证明 —— 于是同一个构造器出来的**所有**实例都能命中（它们的插入序相同，
+       所以同一个名字落在同一个下标上），而且压根不需要失效协议：判据自己会验。
+     - kind 2 要证明"自己身上**没有**这个名字"，那件事验不出来，只能认对象身份：
+       `own` 指针相同且 `own_n` 不变（`n` 只在插入时涨，删除只灭 `live`）⇒ 没插过新键
+       ⇒ 当初的"没有"仍然成立。外加 `pr` 身份（`setPrototypeOf` 换过原型就不算）。
+       深度 ≥ 2 的链**不进缓存**：中间那一格插了同名键就会答旧值，而那一格没人守。
+   两种形态都要 `live[slot]` 与键相等两道：`delete` 只灭 live，compact/rehash 会搬 keys。
+   访问器槽（`items[1]`）一律不进缓存 —— 那一格每次都要真调 getter。
+   单线程：这条腿上 JS 只有一个线程，所以这一格不上锁（与 omni_js_fnproto_tbl_g 同理）。 */
+struct omni_js_ic_s {
+  void *own;      /* kind 2：当初那个对象的槽表指针 */
+  void *pr;       /* kind 2：当初那格原型（对象本身的地址） */
+  void *hold;     /* kind 2：真正找着的那格槽表 */
+  int64_t own_n;  /* kind 2：当初 own->n */
+  int64_t slot;   /* 条目下标（kind 1 在 own 里、kind 2 在 hold 里） */
+  int64_t kind;
+};
+
 #define OMNI_JS_OBJ(LT, DT) \
 static DT omni_js_dict_of(omni_dyn v) { return (DT)omni_dyn_as_ref(v, OMNI_DYN_DICT); } \
 static omni_dyn omni_js_dict_wrap(DT d) { return omni_dyn_of_ref((void *)d, OMNI_DYN_DICT); } \
@@ -813,6 +838,72 @@ static LT omni_js_find_slot_(omni_dyn o, omni_str key, omni_dyn *holder) { \
     cur = ((omni_js_objv *)cur.u.ref)->pr; \
   } \
   return NULL; \
+} \
+/* 带 IC 的属性读（键是编译期常量那一支）。形态与失效的理由写在宏外头那格 struct 上。
+   命中时做的事：一次 tag 比、一次指针比、一次 `n` 比、一次 `live` 读、一次短键比 ——
+   哈希与线性扫都不做。没命中就走一趟真查找，顺手把这一格记上；凡是**形状不合**
+   （不是真对象、代理、链上夹代理、访问器、深度 ≥ 2、键太长、自有与原型链上都没有）
+   一律原封不动交回 `omni_js_obj_getk` —— 口径一字不差是这一刀的底线。 */ \
+static omni_dyn omni_js_obj_getk_ic(omni_dyn o, omni_str key, struct omni_js_ic_s *ic) { \
+  omni_js_objv *ov; \
+  DT ps; \
+  char kbuf[OMNI_JS_PKEY_BUF]; \
+  omni_str pk; \
+  omni_dyn cur; \
+  if (o.tag != OMNI_DYN_OBJ) return omni_js_obj_getk(o, key); \
+  ov = (omni_js_objv *)o.u.ref; \
+  if (ov->px_h.tag != OMNI_DYN_UNDEF) return omni_js_obj_getk(o, key); \
+  if (key.len >= (int64_t)sizeof(kbuf) - 1) return omni_js_obj_getk(o, key); \
+  kbuf[0] = 's'; \
+  if (key.len > 0) memcpy(kbuf + 1, key.p, (size_t)key.len); \
+  pk.p = kbuf; \
+  pk.len = key.len + 1; \
+  ps = (DT)ov->ps; \
+  if (ic->kind == 1) { \
+    if (ic->slot < ps->n && ps->live[ic->slot] && omni_eq_string(ps->keys[ic->slot], pk)) { \
+      LT sl = (LT)ps->vals[ic->slot].u.ref; \
+      if (!sl->items[1].u.b) return sl->items[0]; \
+    } \
+  } else if (ic->kind == 2 && ic->own == (void *)ps && ps->n == ic->own_n \
+             && ov->pr.tag == OMNI_DYN_OBJ && ic->pr == ov->pr.u.ref) { \
+    DT H = (DT)ic->hold; \
+    if (ic->slot < H->n && H->live[ic->slot] && omni_eq_string(H->keys[ic->slot], pk)) { \
+      LT sl = (LT)H->vals[ic->slot].u.ref; \
+      if (!sl->items[1].u.b) return sl->items[0]; \
+    } \
+  } \
+  cur = o; \
+  { \
+    int64_t depth = 0; \
+    while (cur.tag == OMNI_DYN_OBJ) { \
+      omni_js_objv *cv = (omni_js_objv *)cur.u.ref; \
+      DT cp = (DT)cv->ps; \
+      int64_t e; \
+      /* 链上夹着代理：陷阱的口径只有慢路那一份，整件事交回去 */ \
+      if (cv->px_h.tag != OMNI_DYN_UNDEF) return omni_js_obj_getk(o, key); \
+      e = DT##_find(cp, pk); \
+      if (e >= 0) { \
+        LT sl = (LT)cp->vals[e].u.ref; \
+        if (sl->items[1].u.b) return omni_js_obj_getk(o, key); \
+        if (depth == 0) { \
+          ic->slot = e; \
+          ic->kind = 1; \
+        } else if (depth == 1) { \
+          ic->own = (void *)ps; \
+          ic->own_n = ps->n; \
+          ic->pr = ov->pr.u.ref; \
+          ic->hold = (void *)cp; \
+          ic->slot = e; \
+          ic->kind = 2; \
+        } \
+        return sl->items[0]; \
+      } \
+      cur = cv->pr; \
+      depth++; \
+    } \
+  } \
+  /* 自有与原型链上都没有：链的尾巴可能是一格 dict，那一支的口径在慢路上 */ \
+  return omni_js_obj_getk(o, key); \
 } \
 static void omni_js_def_data_(omni_dyn o, omni_dyn k, omni_dyn v, bool w, bool e, bool c) { \
   DT##_set(omni_js_ps_(o), omni_js_pkey_(k), \

@@ -11,6 +11,7 @@
 //   4. 把原型上那格方法**换掉**（holder 那格 dict 变了）；
 //   5. 读的键在**原型链第二层**（holder 不是自己那格 dict）；
 //   6. 同名键在自己身上把原型那格**遮住**（shadow）之后再 `delete`，露出原型那格。
+// 后四格（7..10）是照落地之后那格 IC 的两种形态补的，见下面各自那条注。
 function A() { this.k = 'A'; }
 function B() { this.k = 'B'; this.extra = 1; }
 
@@ -63,3 +64,39 @@ delete s.own;
 out.push(String(s.own));                   // 回到 proto
 
 console.log(out.join('|'));
+
+/* 下面四格是照**落地之后的 IC**（omni_js_obj.h 的 omni_js_ic_s）补的：那一格分两种形态，
+   每种都有自己"会答旧值"的路子。 */
+const out2 = [];
+
+/* 7. 自有那一格**不认对象身份、只认下标**：同一处代码读一批同构的实例必须都对；
+      而"名字相同但落在别的下标上"的实例（插入序不同）也必须对 —— 判据是缓存里那个
+      下标上的**键**要重新验一遍，不是"下标合法就用"。 */
+function Q(x) { this.x = x; }
+for (let i = 0; i < 4; i++) out2.push(String(new Q(i).x));
+const q2 = {};
+q2.pad1 = 1; q2.pad2 = 2; q2.x = 'late';     // x 落在第 3 格，不是第 0 格
+out2.push(String(q2.x));
+out2.push(String(new Q(9).x));               // 换回去，还得是 9
+
+/* 8. 同一个键**原地变成访问器**：缓存里记的是"数据槽"，defineProperty 之后必须去调 getter */
+const acc = new Q(1);
+out2.push(String(acc.x));
+Object.defineProperty(acc, 'x', { get() { return 'got'; }, configurable: true });
+out2.push(String(acc.x));
+
+/* 9. 换原型（setPrototypeOf）：原型那一格的缓存认 pr 的身份，换过就不许再命中 */
+function R() { this.n = 0; }
+R.prototype.who = 'R';
+const r = new R();
+out2.push(String(r.who));
+Object.setPrototypeOf(r, { who: 'other' });
+out2.push(String(r.who));
+
+/* 10. 同一处代码上先读真对象、再读**代理**：陷阱的口径只有慢路那一份 */
+const site = (o) => String(o.who);
+out2.push(site(new R()));
+out2.push(site(new Proxy(new R(), { get: (t, k) => (k === 'who' ? 'trap' : t[k]) })));
+out2.push(site(new R()));
+
+console.log(out2.join('|'));
