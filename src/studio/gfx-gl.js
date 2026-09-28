@@ -745,6 +745,58 @@ function texIn(slot, w, h, d, fmt, px) {
  * （`myext[]` 里是零参的 `GLCAPTURE()`），边长在正本里就是栈上的垃圾。
  */
 const CAP = { w: 0, h: 0, on: false };
+/** 四参那一档（画进真纹理）：自己一格 FBO + "这一趟是四参"的记号（本机那档的 `g_cap4`）。 */
+const CAP4 = { fbo: null, on: false };
+
+/**
+ * **四参 `glcapture(槽,宽,高,格)`**（`myext[]` 里 `"GLCAPTURE(,,,)"`，`polydraw.c:1217`
+ * 的 `kglCapture`）：往**一张真纹理**上画，而不是零参那种"画完再从画布拷一张"。
+ * 口径与本机那一档（`omni_ev_gl_capbegin4`）逐句对应，两处一起改。
+ *
+ * 浮点那两格（`KGL_FLOAT` / `KGL_VEC4`）要 `EXT_color_buffer_float` 才当得了渲染目标 ——
+ * 那一格在开设备时就问过（见上头 `getExtension`）。不完整的 FBO 上画东西是**静静地什么都
+ * 不发生**，所以这儿 `checkFramebufferStatus` 当场记一笔 miss 并回 -1。
+ */
+function capBegin4(slot, w, h, fmt) {
+  const gl = D.gl;
+  if (gl === null) return 0;
+  if (w < 1 || h < 1 || w * h > 67108864) return -1;
+  flush();
+  if (CAP4.fbo === null) CAP4.fbo = gl.createFramebuffer();
+  const t = texOf(slot);
+  if (t.tar !== gl.TEXTURE_2D && t.w !== 0) {
+    gl.deleteTexture(t.id);
+    t.id = gl.createTexture();
+  }
+  t.tar = gl.TEXTURE_2D;
+  gl.activeTexture(gl.TEXTURE0 + TX.unit);
+  gl.bindTexture(gl.TEXTURE_2D, t.id);
+  if (t.w !== w || t.h !== h || t.fmt !== fmt) {
+    const kind = fmt & 15;
+    const ifmt = kind === 1 ? gl.R8
+      : (kind === 4 ? gl.R32F : (kind === 5 ? gl.RGBA32F : gl.RGBA8));
+    const efmt = (kind === 1 || kind === 4) ? gl.RED : gl.RGBA;
+    const ety = (kind === 4 || kind === 5) ? gl.FLOAT : gl.UNSIGNED_BYTE;
+    gl.texImage2D(gl.TEXTURE_2D, 0, ifmt, w, h, 0, efmt, ety, null);
+    /* **不许要 mipmap**：只有第 0 层的纹理挑了 mipmap 过滤就是不完整的，采出来一片黑。
+       过滤那一段位里 `>= 0x20`（要 mipmap）的降成 LINEAR，环绕照旧听脚本的。 */
+    texParams((fmt & 0xf0) >= 0x20 ? (fmt & ~0xf0) : fmt);
+    t.w = w;
+    t.h = h;
+    t.fmt = fmt;
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, CAP4.fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t.id, 0);
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    CAP4.on = false;
+    return miss('glcapture:fbo') - 1;
+  }
+  gl.viewport(0, 0, w, h);
+  CAP4.on = true;
+  CAP.on = false;
+  return 0;
+}
 
 function capBegin() {
   const gl = D.gl;
@@ -763,6 +815,14 @@ function capEnd(slot) {
   const gl = D.gl;
   if (gl === null) return 0;
   flush();
+  /* **四参那一趟**：解绑 + 还原视口就完了 —— 不拷（画的时候就在那张纹理上）、不清
+     （原版 `qglEndCapture` 在 `glastcap` 那一支提前 return）。 */
+  if (CAP4.on) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, D.w, D.h);
+    CAP4.on = false;
+    return 0;
+  }
   const w = CAP.w === 0 ? D.w : CAP.w;
   const h = CAP.h === 0 ? D.h : CAP.h;
   const t = texOf(slot);
@@ -1299,6 +1359,8 @@ function call(name, args) {
     case 'kv6siz/1': return kv6Siz(a(0));
     /* **抓屏那一族**（见 `CAP` 的头注）。 */
     case 'glcapture/1': return capBegin();
+    case 'glcapture/4':
+      return capBegin4(Math.trunc(a(0)), Math.trunc(a(1)), Math.trunc(a(2)), Math.trunc(a(3)));
     case 'glcaptureend/1': return capEnd(Math.trunc(a(0)));
     /* 收下但不管的那几格（光照/混合/剔除/线宽）。 */
     case 'glnormal/3':

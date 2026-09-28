@@ -4148,3 +4148,15 @@ GPGPU 那一族非它不可：零参那条路只有 8 位、而且尺寸只能�
 出图正确性那一轴**整趟 46 过 / 0 红 / 16 不计**（与改之前同一张账，64s）。
 判据那一格要**明着给 `--gfx gl`**：设备那份 `.node` 的路径是 `glDevicePaths()` 认这个旗子时
 才摆进 `OMNI_EV_GL_ADDON` 的，只设环境量的话 js 腿退回 CPU 备选（踩过一次）。
+
+### 38.5 页面那一档也补上了（两个宿主别只加一半）
+
+`src/studio/gfx-gl.js`：`capBegin4` + `capEnd` 的四参那一支 + `glcapture/4` 那一格派发。
+与本机那一档逐句对应（自己一格 FBO、格→内部格式同一张映射、mipmap 那一档降成 LINEAR、
+`checkFramebufferStatus` 不完整就记 miss 回 -1）。浮点那两格要 `EXT_color_buffer_float`
+才当得了渲染目标 —— 那一句在开设备时就问过了（`gfx-gl.js:152`）。
+
+**这一半还没在真浏览器里量过**（只过了语法与 `tests/studio/run.js` 那一趟"控制台一条错都没有"）。
+要量就照 `tests/studio/run.js` 第 4 节那套：起一格静态服务、`playwright-cli` 开页面、
+把 `examples/07-capture4.pss` 跑起来、看控制台那一行是不是 `capture4 0.250 0.250`。
+写在这儿免得当成"两边都验过了"。
