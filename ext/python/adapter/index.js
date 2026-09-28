@@ -1174,7 +1174,7 @@ function pairFor(x, pair, once, pre, C) {
   const at = (box) => {
     const t = typeOfIR(box, C);
     if (t.kind === 'arr') return { kind: 'index', obj: box, index: idx };
-    if (t.kind === 'string') return { kind: 'builtin', name: 'ssub', args: [box, idx, { kind: 'int', value: 1 }] };
+    if (t.kind === 'string') return { kind: 'builtin', name: 'scpsub', args: [box, idx, { kind: 'int', value: 1 }] };
     throw new Error(`python->IR: \`${pair.fn}()\` 在 ${t.kind} 上还没接（表与串接了）`);
   };
   let cond;
@@ -2215,7 +2215,7 @@ function forStmt(x, C) {
     ? { kind: 'index', obj: src, index: { kind: 'name', name: i } }
     : {
       /* `(ssub E I N)` 是"从 I 起取 N 个" —— 一格字符就是 N = 1。 */
-      kind: 'builtin', name: 'ssub',
+      kind: 'builtin', name: 'scpsub',
       args: [src, { kind: 'name', name: i }, { kind: 'int', value: 1 }],
     };
   return {

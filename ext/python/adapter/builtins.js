@@ -418,7 +418,7 @@ export function stepSlice(box, start, bound, step, isStr, C) {
     : call1('anew', [{ kind: 'type', type: t }, int(0)]));
   const i = h.decl('sp_i', INT, start);
   const at = isStr
-    ? call1('ssub', [src, i, int(1)])
+    ? call1('scpsub', [src, i, int(1)])
     : { kind: 'index', obj: src, index: i };
   h.pre.push({
     kind: 'while',
@@ -579,7 +579,7 @@ const DIGITS = '0123456789';
 const SPACES = ' \t\n\r\u000b\f';
 
 /** 一格字符在不在某一串里。 */
-const inSet = (set, ch) => bin('!=', call1('sfind', [str(set), ch]), int(-1));
+const inSet = (set, ch) => bin('!=', call1('scpfind', [str(set), ch]), int(-1));
 
 /**
  * `.title()` / `.capitalize()` / `.swapcase()` —— 逐格走，**只动 ASCII**。
@@ -597,7 +597,7 @@ export function caseMapOf(s0, mode, C) {
   const i = h.decl('cm_i', INT, int(0));
   const ch = h.decl('cm_c', STR, str(''));
   const add = (v) => ({ kind: 'assign', target: out, value: bin('+', out, v) });
-  const body = [{ kind: 'assign', target: ch, value: call1('ssub', [s, i, int(1)]) }];
+  const body = [{ kind: 'assign', target: ch, value: call1('scpsub', [s, i, int(1)]) }];
   if (mode === 'swapcase') {
     body.push({
       kind: 'if',
@@ -620,7 +620,7 @@ export function caseMapOf(s0, mode, C) {
         : { kind: 'bool', value: false },
     });
   }
-  h.pre.push({ kind: 'while', cond: bin('<', i, call1('slen', [s])), body: [...body, inc(i)] });
+  h.pre.push({ kind: 'while', cond: bin('<', i, call1('scplen', [s])), body: [...body, inc(i)] });
   return h.wrap(out);
 }
 
@@ -640,8 +640,8 @@ export function charClassOf(s0, mode, C) {
   const s = h.keep(s0, 'cc_s');
   const i = h.decl('cc_i', INT, int(0));
   const ch = h.decl('cc_c', STR, str(''));
-  const n = call1('slen', [s]);
-  const step = [{ kind: 'assign', target: ch, value: call1('ssub', [s, i, int(1)]) }];
+  const n = call1('scplen', [s]);
+  const step = [{ kind: 'assign', target: ch, value: call1('scpsub', [s, i, int(1)]) }];
   if (CLASS[mode] !== undefined) {
     const ok = h.decl('cc_k', BOOL, bin('>', n, int(0)));
     h.pre.push({
@@ -683,8 +683,8 @@ export function rfindOf(s0, p0, C) {
   const h = holder(C);
   const s = h.keep(s0, 'rf_s');
   const p = h.keep(p0, 'rf_p');
-  const lp = h.decl('rf_lp', INT, call1('slen', [p]));
-  const at = h.decl('rf_at', INT, bin('-', call1('slen', [s]), lp));
+  const lp = h.decl('rf_lp', INT, call1('scplen', [p]));
+  const at = h.decl('rf_at', INT, bin('-', call1('scplen', [s]), lp));
   const out = h.decl('rf_o', INT, int(-1));
   h.pre.push({
     kind: 'while',
@@ -692,7 +692,7 @@ export function rfindOf(s0, p0, C) {
     body: [
       {
         kind: 'if',
-        cond: bin('==', call1('ssub', [s, at, lp]), p),
+        cond: bin('==', call1('scpsub', [s, at, lp]), p),
         then: [{ kind: 'assign', target: out, value: at }],
         else_: null,
       },
@@ -749,9 +749,9 @@ export function charsOf(s0, C) {
   const i = h.decl('ch_i', INT, int(0));
   h.pre.push({
     kind: 'while',
-    cond: bin('<', i, call1('slen', [s])),
+    cond: bin('<', i, call1('scplen', [s])),
     body: [
-      { kind: 'builtin-stmt', name: 'apush', args: [out, call1('ssub', [s, i, int(1)])] },
+      { kind: 'builtin-stmt', name: 'apush', args: [out, call1('scpsub', [s, i, int(1)])] },
       inc(i),
     ],
   });
@@ -1020,12 +1020,12 @@ export function rsplitOf(s0, sep0, C, maxsplit = null) {
   const sep = h.keep(sep0, 'rs_d');
   const t = arrOf(STR);
   const out = h.decl('rs_o', t, { kind: 'builtin', name: 'anew', args: [{ kind: 'type', type: t }, int(0)] });
-  const end = h.decl('rs_e', INT, call1('slen', [s]));
+  const end = h.decl('rs_e', INT, call1('scplen', [s]));
   const head = h.decl('rs_h', STR, str(''));
   const hit = h.decl('rs_i', INT, int(0));
   h.pre.push({
     kind: 'if',
-    cond: bin('==', call1('slen', [sep]), int(0)),
+    cond: bin('==', call1('scplen', [sep]), int(0)),
     then: [{ kind: 'builtin-stmt', name: 'fail', args: [str('empty separator')] }],
     else_: null,
   });
@@ -1034,7 +1034,7 @@ export function rsplitOf(s0, sep0, C, maxsplit = null) {
     kind: 'while',
     cond: { kind: 'bool', value: true },
     body: [
-      { kind: 'assign', target: head, value: call1('ssub', [s, int(0), end]) },
+      { kind: 'assign', target: head, value: call1('scpsub', [s, int(0), end]) },
       { kind: 'assign', target: hit, value: rfindOf(head, sep, C) },
       ...(cut === null ? [] : [{
         kind: 'if',
@@ -1053,10 +1053,10 @@ export function rsplitOf(s0, sep0, C, maxsplit = null) {
           {
             kind: 'builtin-stmt',
             name: 'apush',
-            args: [out, call1('ssub', [
+            args: [out, call1('scpsub', [
               s,
-              bin('+', hit, call1('slen', [sep])),
-              bin('-', bin('-', end, hit), call1('slen', [sep])),
+              bin('+', hit, call1('scplen', [sep])),
+              bin('-', bin('-', end, hit), call1('scplen', [sep])),
             ])],
           },
           { kind: 'assign', target: end, value: hit },
@@ -1079,7 +1079,7 @@ export function splitOf(s0, sep0, C, maxsplit = null) {
   const rest = h.decl('sp_r', STR, str(''));
   h.pre.push({
     kind: 'if',
-    cond: bin('==', call1('slen', [sep]), int(0)),
+    cond: bin('==', call1('scplen', [sep]), int(0)),
     then: [{ kind: 'builtin-stmt', name: 'fail', args: [str('empty separator')] }],
     else_: null,
   });
@@ -1094,9 +1094,9 @@ export function splitOf(s0, sep0, C, maxsplit = null) {
       {
         kind: 'assign',
         target: rest,
-        value: call1('ssub', [s, at, bin('-', call1('slen', [s]), at)]),
+        value: call1('scpsub', [s, at, bin('-', call1('scplen', [s]), at)]),
       },
-      { kind: 'assign', target: hit, value: call1('sfind', [rest, sep]) },
+      { kind: 'assign', target: hit, value: call1('scpfind', [rest, sep]) },
       ...(cut === null ? [] : [{
         kind: 'if',
         cond: bin('>=', cut, int(maxsplit)),
@@ -1111,8 +1111,8 @@ export function splitOf(s0, sep0, C, maxsplit = null) {
           { kind: 'break', label: null },
         ],
         else_: [
-          { kind: 'builtin-stmt', name: 'apush', args: [out, call1('ssub', [rest, int(0), hit])] },
-          { kind: 'assign', target: at, value: bin('+', bin('+', at, hit), call1('slen', [sep])) },
+          { kind: 'builtin-stmt', name: 'apush', args: [out, call1('scpsub', [rest, int(0), hit])] },
+          { kind: 'assign', target: at, value: bin('+', bin('+', at, hit), call1('scplen', [sep])) },
         ],
       },
     ],
@@ -1127,8 +1127,8 @@ export function stripOf(s0, left, right, C, chars0 = null) {
   /* 要去掉的那几个字符：没给就是空白那一串（python 的默认）。 */
   const set = chars0 === null ? str(' \t\n\r\u000b\f') : h.keep(chars0, 'tr_cs', STR);
   const a = h.decl('tr_a', INT, int(0));
-  const b = h.decl('tr_b', INT, call1('slen', [s]));
-  const isWs = (i) => bin('!=', call1('sfind', [set, call1('ssub', [s, i, int(1)])]), int(-1));
+  const b = h.decl('tr_b', INT, call1('scplen', [s]));
+  const isWs = (i) => bin('!=', call1('scpfind', [set, call1('scpsub', [s, i, int(1)])]), int(-1));
   if (left) {
     h.pre.push({
       kind: 'while',
@@ -1143,7 +1143,7 @@ export function stripOf(s0, left, right, C, chars0 = null) {
       body: [{ kind: 'assign', target: b, value: bin('-', b, int(1)) }],
     });
   }
-  return h.wrap(call1('ssub', [s, a, bin('-', b, a)]));
+  return h.wrap(call1('scpsub', [s, a, bin('-', b, a)]));
 }
 
 /**
@@ -1156,11 +1156,11 @@ export function splitWsOf(s0, C, maxsplit = null) {
   const s = h.keep(s0, 'sw_s');
   const t = arrOf(STR);
   const out = h.decl('sw_o', t, { kind: 'builtin', name: 'anew', args: [{ kind: 'type', type: t }, int(0)] });
-  const ls = h.decl('sw_l', INT, call1('slen', [s]));
+  const ls = h.decl('sw_l', INT, call1('scplen', [s]));
   const i = h.decl('sw_i', INT, int(0));
   const a = h.decl('sw_a', INT, int(0));
   const cut = maxsplit === null || maxsplit < 0 ? null : h.decl('sw_n', INT, int(0));
-  const isWs = (at) => bin('!=', call1('sfind', [str(' \t\n\r\u000b\f'), call1('ssub', [s, at, int(1)])]), int(-1));
+  const isWs = (at) => bin('!=', call1('scpfind', [str(' \t\n\r\u000b\f'), call1('scpsub', [s, at, int(1)])]), int(-1));
   h.pre.push({
     kind: 'while',
     cond: { kind: 'bool', value: true },
@@ -1173,7 +1173,7 @@ export function splitWsOf(s0, C, maxsplit = null) {
         kind: 'if',
         cond: bin('>=', cut, int(maxsplit)),
         then: [
-          { kind: 'builtin-stmt', name: 'apush', args: [out, call1('ssub', [s, i, bin('-', ls, i)])] },
+          { kind: 'builtin-stmt', name: 'apush', args: [out, call1('scpsub', [s, i, bin('-', ls, i)])] },
           { kind: 'break', label: null },
         ],
         else_: [{ kind: 'assign', target: cut, value: bin('+', cut, int(1)) }],
@@ -1184,7 +1184,7 @@ export function splitWsOf(s0, C, maxsplit = null) {
         cond: bin('&&', bin('<', i, ls), { kind: 'unop', op: '!', operand: isWs(i) }),
         body: [inc(i)],
       },
-      { kind: 'builtin-stmt', name: 'apush', args: [out, call1('ssub', [s, a, bin('-', i, a)])] },
+      { kind: 'builtin-stmt', name: 'apush', args: [out, call1('scpsub', [s, a, bin('-', i, a)])] },
     ],
   });
   return h.wrap(out);
@@ -1199,8 +1199,8 @@ export function countOf(s0, sub0, C, start0 = null, end0 = null) {
   const h = holder(C);
   const s = h.keep(s0, 'ct_s');
   const sub = h.keep(sub0, 'ct_b');
-  const ls = h.decl('ct_l', INT, call1('slen', [s]));
-  const lb = h.decl('ct_n', INT, call1('slen', [sub]));
+  const ls = h.decl('ct_l', INT, call1('scplen', [s]));
+  const lb = h.decl('ct_n', INT, call1('scplen', [sub]));
   /* start / end 按 python 的规矩折：负的加长度，再夹到 [0, len] 里。 */
   const clamp = (v) => {
     const x = h.decl('ct_x', INT, v);
@@ -1243,7 +1243,7 @@ export function countOf(s0, sub0, C, start0 = null, end0 = null) {
       body: [
         {
           kind: 'if',
-          cond: bin('==', call1('ssub', [s, i, lb]), sub),
+          cond: bin('==', call1('scpsub', [s, i, lb]), sub),
           then: [
             { kind: 'assign', target: cnt, value: bin('+', cnt, int(1)) },
             /* 不重叠：对上了就跳过整段 */
@@ -1383,13 +1383,13 @@ export function intOfStr(s0, base, C, badMsg) {
   const h = holder(C);
   const raw = h.keep(s0, 'is_r');
   const s = h.decl('is_s', STR, stripOf(raw, true, true, C));
-  const n = h.decl('is_n', INT, call1('slen', [s]));
+  const n = h.decl('is_n', INT, call1('scplen', [s]));
   const i = h.decl('is_i', INT, int(0));
   const neg = h.decl('is_g', BOOL, { kind: 'bool', value: false });
   const acc = h.decl('is_a', INT, int(0));
   const got = h.decl('is_k', INT, int(0));
   const d = h.decl('is_d', INT, int(0));
-  const ch = (at) => call1('ssub', [s, at, int(1)]);
+  const ch = (at) => call1('scpsub', [s, at, int(1)]);
   /* 报错那句话**先落一格临时量**：下面两处都要用它，直接摆两遍会把里头那几格
      临时量声明两次（`repr(s)` 自己也会现发几格）。 */
   const msg = h.decl('is_m', STR, badMsg);
@@ -1428,7 +1428,7 @@ export function intOfStr(s0, base, C, badMsg) {
       cond: bin('==', ch(i), str('_')),
       then: [inc(i)],
       else_: [
-        { kind: 'assign', target: d, value: call1('sfind', [str(digits), call1('slower', [ch(i)])]) },
+        { kind: 'assign', target: d, value: call1('scpfind', [str(digits), call1('slower', [ch(i)])]) },
         { kind: 'if', cond: bin('<', d, int(0)), then: [bad], else_: null },
         { kind: 'assign', target: acc, value: bin('+', bin('*', acc, int(base)), d) },
         { kind: 'assign', target: got, value: bin('+', got, int(1)) },
@@ -1454,7 +1454,7 @@ export function ordOf(c0, C) {
   const i = h.decl('od_i', INT, int(0));
   h.pre.push({
     kind: 'if',
-    cond: bin('!=', call1('slen', [c]), int(1)),
+    cond: bin('!=', call1('scplen', [c]), int(1)),
     then: [{
       kind: 'builtin-stmt',
       name: 'fail',
@@ -1498,9 +1498,9 @@ export function expandTabsOf(s0, n, C) {
   const pad = h.decl('et_p', INT, int(0));
   h.pre.push({
     kind: 'while',
-    cond: bin('<', i, call1('slen', [s])),
+    cond: bin('<', i, call1('scplen', [s])),
     body: [
-      { kind: 'assign', target: ch, value: call1('ssub', [s, i, int(1)]) },
+      { kind: 'assign', target: ch, value: call1('scpsub', [s, i, int(1)]) },
       {
         kind: 'if',
         cond: bin('==', ch, str('\t')),
@@ -1536,7 +1536,7 @@ export function splitLinesOf(s0, C) {
   const s = h.keep(s0, 'sl_s');
   const t = arrOf(STR);
   const out = h.decl('sl_o', t, { kind: 'builtin', name: 'anew', args: [{ kind: 'type', type: t }, int(0)] });
-  const ls = h.decl('sl_l', INT, call1('slen', [s]));
+  const ls = h.decl('sl_l', INT, call1('scplen', [s]));
   const i = h.decl('sl_i', INT, int(0));
   const a = h.decl('sl_a', INT, int(0));
   const ch = h.decl('sl_h', STR, str(''));
@@ -1544,18 +1544,18 @@ export function splitLinesOf(s0, C) {
     kind: 'while',
     cond: bin('<', i, ls),
     body: [
-      { kind: 'assign', target: ch, value: call1('ssub', [s, i, int(1)]) },
+      { kind: 'assign', target: ch, value: call1('scpsub', [s, i, int(1)]) },
       {
         kind: 'if',
         cond: bin('||', bin('==', ch, str('\n')), bin('==', ch, str('\r'))),
         then: [
-          { kind: 'builtin-stmt', name: 'apush', args: [out, call1('ssub', [s, a, bin('-', i, a)])] },
+          { kind: 'builtin-stmt', name: 'apush', args: [out, call1('scpsub', [s, a, bin('-', i, a)])] },
           /* `\r\n` 算**一个**分隔。 */
           {
             kind: 'if',
             cond: bin('&&', bin('==', ch, str('\r')),
               bin('&&', bin('<', bin('+', i, int(1)), ls),
-                bin('==', call1('ssub', [s, bin('+', i, int(1)), int(1)]), str('\n')))),
+                bin('==', call1('scpsub', [s, bin('+', i, int(1)), int(1)]), str('\n')))),
             then: [inc(i)],
             else_: null,
           },
@@ -1570,7 +1570,7 @@ export function splitLinesOf(s0, C) {
   h.pre.push({
     kind: 'if',
     cond: bin('<', a, ls),
-    then: [{ kind: 'builtin-stmt', name: 'apush', args: [out, call1('ssub', [s, a, bin('-', ls, a)])] }],
+    then: [{ kind: 'builtin-stmt', name: 'apush', args: [out, call1('scpsub', [s, a, bin('-', ls, a)])] }],
     else_: null,
   });
   return h.wrap(out);
@@ -1762,9 +1762,9 @@ export function startsEndsOf(s0, p0, atStart, C) {
   const h = holder(C);
   const s = h.keep(s0, 'se_s');
   const p = h.keep(p0, 'se_p');
-  const ls = call1('slen', [s]);
-  const lp = call1('slen', [p]);
-  const seg = call1('ssub', [s, atStart ? int(0) : bin('-', ls, lp), lp]);
+  const ls = call1('scplen', [s]);
+  const lp = call1('scplen', [p]);
+  const seg = call1('scpsub', [s, atStart ? int(0) : bin('-', ls, lp), lp]);
   return h.wrap(bin('&&', bin('>=', ls, lp), bin('==', seg, p)));
 }
 
@@ -1783,7 +1783,7 @@ export function replaceOf(s0, a0, b0, C, count = null) {
   const cap = count === null || count < 0 ? null : h.decl('rp_n', INT, int(0));
   h.pre.push({
     kind: 'if',
-    cond: bin('==', call1('slen', [from]), int(0)),
+    cond: bin('==', call1('scplen', [from]), int(0)),
     then: [{ kind: 'builtin-stmt', name: 'fail', args: [str('empty pattern in replace()')] }],
     else_: null,
   });
@@ -1794,9 +1794,9 @@ export function replaceOf(s0, a0, b0, C, count = null) {
       {
         kind: 'assign',
         target: rest,
-        value: call1('ssub', [s, at, bin('-', call1('slen', [s]), at)]),
+        value: call1('scpsub', [s, at, bin('-', call1('scplen', [s]), at)]),
       },
-      { kind: 'assign', target: hit, value: call1('sfind', [rest, from]) },
+      { kind: 'assign', target: hit, value: call1('scpfind', [rest, from]) },
       ...(cap === null ? [] : [{
         kind: 'if',
         cond: bin('>=', cap, int(count)),
@@ -1814,9 +1814,9 @@ export function replaceOf(s0, a0, b0, C, count = null) {
           {
             kind: 'assign',
             target: out,
-            value: bin('+', bin('+', out, call1('ssub', [rest, int(0), hit])), to),
+            value: bin('+', bin('+', out, call1('scpsub', [rest, int(0), hit])), to),
           },
-          { kind: 'assign', target: at, value: bin('+', bin('+', at, hit), call1('slen', [from])) },
+          { kind: 'assign', target: at, value: bin('+', bin('+', at, hit), call1('scplen', [from])) },
         ],
       },
     ],

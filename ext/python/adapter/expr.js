@@ -329,9 +329,9 @@ function fmtSpec(e0, spec, C) {
     s = pyStr(e, C);
     /* `:.N` 作用在串上是**截到 N 个字符**（python 的规矩）。 */
     if (prec !== null) {
-      const len = { kind: 'builtin', name: 'slen', args: [s] };
+      const len = { kind: 'builtin', name: 'scplen', args: [s] };
       s = {
-        kind: 'builtin', name: 'ssub',
+        kind: 'builtin', name: 'scpsub',
         args: [s, { kind: 'int', value: 0 }, {
           kind: 'ternary', type: INT,
           cond: { kind: 'binop', op: '<', left: len, right: { kind: 'int', value: prec } },
@@ -371,7 +371,7 @@ function fmtSpec(e0, spec, C) {
 function padFill(s, width, ch, left, C) {
   const n = {
     kind: 'binop', op: '-', left: { kind: 'int', value: width },
-    right: { kind: 'builtin', name: 'slen', args: [s] },
+    right: { kind: 'builtin', name: 'scplen', args: [s] },
   };
   const pad = { kind: 'builtin', name: 'srep', args: [{ kind: 'string', value: ch }, n] };
   return left
@@ -395,7 +395,7 @@ function centerTo(s0, width, ch, C, leftHeavy = false) {
   }
   const gap = {
     kind: 'binop', op: '-', left: { kind: 'int', value: width },
-    right: { kind: 'builtin', name: 'slen', args: [s] },
+    right: { kind: 'builtin', name: 'scplen', args: [s] },
   };
   const rep = (cnt) => ({ kind: 'builtin', name: 'srep', args: [{ kind: 'string', value: ch }, cnt] });
   /* 两边都是 int 时方言的 `/` 就是整除，而这儿的差是非负的 —— 所以不必走 `//`
@@ -1670,7 +1670,7 @@ function containsOf(box, needle, C) {
   if (t.kind === 'string') {
     return {
       kind: 'binop', op: '!=',
-      left: { kind: 'builtin', name: 'sfind', args: [box, needle] },
+      left: { kind: 'builtin', name: 'scpfind', args: [box, needle] },
       right: { kind: 'int', value: -1 },
     };
   }
@@ -1768,9 +1768,9 @@ function rawConv(p, v, C) {
       /* `%.3s` —— 截到前 N 个字符。 */
       if (prec === null) return s;
       const n = { kind: 'int', value: prec };
-      const l = { kind: 'builtin', name: 'slen', args: [s] };
+      const l = { kind: 'builtin', name: 'scplen', args: [s] };
       return {
-        kind: 'builtin', name: 'ssub',
+        kind: 'builtin', name: 'scpsub',
         args: [s, { kind: 'int', value: 0 }, {
           kind: 'ternary', type: INT, cond: { kind: 'binop', op: '<', left: l, right: n }, then: l, else_: n,
         }],
@@ -1799,16 +1799,16 @@ function rawConv(p, v, C) {
 function padTo(s, width, flags, C) {
   const n = {
     kind: 'binop', op: '-', left: { kind: 'int', value: width },
-    right: { kind: 'builtin', name: 'slen', args: [s] },
+    right: { kind: 'builtin', name: 'scplen', args: [s] },
   };
   /* `(srep S N)` 在 N <= 0 时交空串 —— 正好是"不用补"那一档。 */
   const fill = (ch) => ({ kind: 'builtin', name: 'srep', args: [{ kind: 'string', value: ch }, n] });
   if (flags.left) return { kind: 'binop', op: '+', left: s, right: fill(' ') };
   if (!flags.zero) return { kind: 'binop', op: '+', left: fill(' '), right: s };
-  const head = { kind: 'builtin', name: 'ssub', args: [s, { kind: 'int', value: 0 }, { kind: 'int', value: 1 }] };
+  const head = { kind: 'builtin', name: 'scpsub', args: [s, { kind: 'int', value: 0 }, { kind: 'int', value: 1 }] };
   const tail = {
-    kind: 'builtin', name: 'ssub',
-    args: [s, { kind: 'int', value: 1 }, { kind: 'binop', op: '-', left: { kind: 'builtin', name: 'slen', args: [s] }, right: { kind: 'int', value: 1 } }],
+    kind: 'builtin', name: 'scpsub',
+    args: [s, { kind: 'int', value: 1 }, { kind: 'binop', op: '-', left: { kind: 'builtin', name: 'scplen', args: [s] }, right: { kind: 'int', value: 1 } }],
   };
   return {
     kind: 'ternary', type: STR,
@@ -2119,7 +2119,7 @@ function compLoop(g, body, C) {
   const sv = { kind: 'name', name: src };
   const iv = { kind: 'name', name: i };
   const at = st.kind === 'string'
-    ? { kind: 'builtin', name: 'ssub', args: [sv, iv, { kind: 'int', value: 1 }] }
+    ? { kind: 'builtin', name: 'scpsub', args: [sv, iv, { kind: 'int', value: 1 }] }
     : { kind: 'index', obj: sv, index: iv };
   /* N 格目标：体开头把 `_0` … `_{n-1}` 逐格取出来（`compBind` 记下的那张拆包表）。 */
   const ups = g.unpack === undefined ? [] : g.unpack;
@@ -2172,7 +2172,7 @@ function compPairLoop(g, body, C) {
     return { v: { kind: 'name', name: n }, t };
   };
   const at = (s) => (s.t.kind === 'string'
-    ? { kind: 'builtin', name: 'ssub', args: [s.v, iv, { kind: 'int', value: 1 }] }
+    ? { kind: 'builtin', name: 'scpsub', args: [s.v, iv, { kind: 'int', value: 1 }] }
     : { kind: 'index', obj: s.v, index: iv });
   let cond;
   let first;
@@ -2370,7 +2370,7 @@ function dictLit(x, C) {
 export function lenOf(box, C) {
   const t = ty(box, C);
   if (t.kind === 'arr') return { kind: 'builtin', name: 'alen', args: [box] };
-  if (t.kind === 'string') return { kind: 'builtin', name: 'slen', args: [box] };
+  if (t.kind === 'string') return { kind: 'builtin', name: 'scplen', args: [box] };
   if (t.kind === 'map') return { kind: 'builtin', name: 'dlen', args: [box] };
   /* 元组：格数在**编译期**就定了（形状的一部分），所以这是一格常量。 */
   const tup = tupleOf(C.recOf(t));
@@ -2508,7 +2508,7 @@ function partitionOf(s0, sep0, C, fromRight) {
     kind: 'let',
     name: atN,
     type: INT,
-    init: fromRight ? rfindOf(s, sep, C) : { kind: 'builtin', name: 'sfind', args: [s, sep] },
+    init: fromRight ? rfindOf(s, sep, C) : { kind: 'builtin', name: 'scpfind', args: [s, sep] },
   });
   const rec = tupleRec([STR, STR, STR], C);
   const empty = { kind: 'string', value: '' };
@@ -2523,19 +2523,19 @@ function partitionOf(s0, sep0, C, fromRight) {
   const p0 = slot('pt_0');
   const p1 = slot('pt_1');
   const p2 = slot('pt_2');
-  const ls = { kind: 'builtin', name: 'slen', args: [s] };
-  const after = { kind: 'binop', op: '+', left: at, right: { kind: 'builtin', name: 'slen', args: [sep] } };
+  const ls = { kind: 'builtin', name: 'scplen', args: [s] };
+  const after = { kind: 'binop', op: '+', left: at, right: { kind: 'builtin', name: 'scplen', args: [sep] } };
   pre.push({
     kind: 'if',
     cond: { kind: 'binop', op: '<', left: at, right: { kind: 'int', value: 0 } },
     then: [{ kind: 'assign', target: fromRight ? p2 : p0, value: s }],
     else_: [
-      { kind: 'assign', target: p0, value: { kind: 'builtin', name: 'ssub', args: [s, { kind: 'int', value: 0 }, at] } },
+      { kind: 'assign', target: p0, value: { kind: 'builtin', name: 'scpsub', args: [s, { kind: 'int', value: 0 }, at] } },
       { kind: 'assign', target: p1, value: sep },
       {
         kind: 'assign',
         target: p2,
-        value: { kind: 'builtin', name: 'ssub', args: [s, after, { kind: 'binop', op: '-', left: ls, right: after }] },
+        value: { kind: 'builtin', name: 'scpsub', args: [s, after, { kind: 'binop', op: '-', left: ls, right: after }] },
       },
     ],
   });
@@ -2757,7 +2757,7 @@ function indexOf(x, C) {
   if (t.kind === 'string') {
     const i = wrapIndex(box, key, C);
     /* `(ssub E I N)` 是"从 I 起、取 N 个"（**不是** I..J）—— 方言那一侧的口径。 */
-    return { kind: 'builtin', name: 'ssub', args: [box, i, { kind: 'int', value: 1 }] };
+    return { kind: 'builtin', name: 'scpsub', args: [box, i, { kind: 'int', value: 1 }] };
   }
   if (t.kind !== 'arr') throw new Error(`python->IR: 下标作用在 ${t.kind} 上还没接`);
   return { kind: 'index', obj: box, index: wrapIndex(box, key, C) };
@@ -2849,7 +2849,7 @@ function sliceOf(box, sliceTok, C) {
   }
 
   if (t.kind === 'string') {
-    const value = { kind: 'builtin', name: 'ssub', args: [src, from, count] };
+    const value = { kind: 'builtin', name: 'scpsub', args: [src, from, count] };
     return pre.length === 0 ? value : { kind: 'block-expr', stmts: pre, value };
   }
   const out = C.fresh('slice');
@@ -3096,7 +3096,7 @@ function pairsList(kind, args, C) {
   C.bind(i, INT);
   const iv = { kind: 'name', name: i };
   const at = (s) => (s.t.kind === 'string'
-    ? { kind: 'builtin', name: 'ssub', args: [s.v, iv, { kind: 'int', value: 1 }] }
+    ? { kind: 'builtin', name: 'scpsub', args: [s.v, iv, { kind: 'int', value: 1 }] }
     : { kind: 'index', obj: s.v, index: iv });
   let cond;
   /** 逐格要摆进元组的那几个值（`zip` 是 **N 格**，`enumerate` / `items` 是两格）。 */
@@ -3784,7 +3784,7 @@ function methodOf(recvTok, name, args, C) {
        非 ASCII 上分家（`ß` → `ss`、`İ` 那一族），而非 ASCII 的大小写这一层本来就明说
        没接（要借 `unicodeobject.c`）。所以这儿走同一格，不另编一套半对的规矩。 */
     if (name === 'casefold' && args.length === 0) return { kind: 'builtin', name: 'slower', args: [recv] };
-    if (name === 'find' && args.length === 1) return { kind: 'builtin', name: 'sfind', args: [recv, args[0]] };
+    if (name === 'find' && args.length === 1) return { kind: 'builtin', name: 'scpfind', args: [recv, args[0]] };
     /* 下面这几格**现场发一趟循环**（`builtins.js`）—— 方言的串那一族只有五格算子，
        python 的这几个方法是它自己的规矩（空段算一格、去哪几个空白字符）。 */
     if (name === 'join' && args.length === 1) return joinOf(recv, args[0], C);
@@ -3873,7 +3873,7 @@ function methodOf(recvTok, name, args, C) {
     /* `.index()` / `.rindex()` —— 与 find / rfind 只差"找不到就报"（python 是 ValueError）。 */
     if ((name === 'index' || name === 'rindex') && args.length === 1) {
       const at = name === 'index'
-        ? { kind: 'builtin', name: 'sfind', args: [recv, args[0]] }
+        ? { kind: 'builtin', name: 'scpfind', args: [recv, args[0]] }
         : rfindOf(recv, args[0], C);
       const n = C.fresh('si_at');
       C.bind(n, INT);
@@ -3895,11 +3895,11 @@ function methodOf(recvTok, name, args, C) {
     /* `removeprefix` / `removesuffix` —— 有那一段就切掉，没有就原样。 */
     if ((name === 'removeprefix' || name === 'removesuffix') && args.length === 1) {
       const head = name === 'removeprefix';
-      const lp = { kind: 'builtin', name: 'slen', args: [args[0]] };
-      const ls = { kind: 'builtin', name: 'slen', args: [recv] };
+      const lp = { kind: 'builtin', name: 'scplen', args: [args[0]] };
+      const ls = { kind: 'builtin', name: 'scplen', args: [recv] };
       const cut = head
-        ? { kind: 'builtin', name: 'ssub', args: [recv, lp, { kind: 'binop', op: '-', left: ls, right: lp }] }
-        : { kind: 'builtin', name: 'ssub', args: [recv, { kind: 'int', value: 0 }, { kind: 'binop', op: '-', left: ls, right: lp }] };
+        ? { kind: 'builtin', name: 'scpsub', args: [recv, lp, { kind: 'binop', op: '-', left: ls, right: lp }] }
+        : { kind: 'builtin', name: 'scpsub', args: [recv, { kind: 'int', value: 0 }, { kind: 'binop', op: '-', left: ls, right: lp }] };
       return {
         kind: 'ternary', type: STR,
         cond: startsEndsOf(recv, args[0], head, C),

@@ -181,7 +181,7 @@ export function dynTruthy(v, C) {
           kind: 'ternary', type: BOOL, cond: tagIs(src, 'string'),
           then: {
             kind: 'binop', op: '!=',
-            left: { kind: 'builtin', name: 'slen', args: [{ kind: 'builtin', name: 'asstr', args: [src] }] },
+            left: { kind: 'builtin', name: 'scplen', args: [{ kind: 'builtin', name: 'asstr', args: [src] }] },
             right: { kind: 'int', value: 0 },
           },
           /* 别的（函数、字典、null）：`null` 是假，别的是真 —— python 里对象默认为真。 */

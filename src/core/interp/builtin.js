@@ -334,6 +334,21 @@ function cpOff(b, i) {
   return b.length;
 }
 
+/** `(scpfind S T)` —— 回**码点下标**（找不到 -1）。 */
+function cpFind(s, needle) {
+  const b = bytesOf(s);
+  const nb = bytesOf(needle);
+  for (let i = 0; i + nb.length <= b.length; i += 1) {
+    let hit = true;
+    for (let j = 0; j < nb.length; j += 1) if (b[i + j] !== nb[j]) { hit = false; break; }
+    if (!hit) continue;
+    let n = 0;
+    for (let k = 0; k < i; k += 1) if ((b[k] & 0xC0) !== 0x80) n += 1;
+    return BigInt(n);
+  }
+  return -1n;
+}
+
 function cpSub(s, start, len) {
   const b = bytesOf(s);
   const st = Number(start);
@@ -1377,6 +1392,7 @@ export function applyBuiltin(I, e, a) {
     /* UTF-8 算术那两格（`(scplen S)` / `(scpsub S I N)`）—— python 的 len / 下标 / 切片。 */
     case 'cplen': return BigInt(cpLen(a[0]));
     case 'cpsub': return cpSub(a[0], a[1], a[2]);
+    case 'cpfind': return cpFind(a[0], a[1]);
 
     case 'indexOf': return indexOfStr(a[0], a[1]);
     case 'join': return a[0].join(a[1]);

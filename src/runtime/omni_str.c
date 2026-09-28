@@ -120,6 +120,19 @@ static int64_t omni_cp_off(omni_str s, int64_t i) {
   return s.len;
 }
 
+/** `(scpfind S T)` —— 在 S 里找 T，回的是**码点下标**（找不到 -1）。
+    字节那一格（`omni_index_of`）先找到位置，再数一遍前面有几个码点 —— UTF-8 自同步，
+    所以字节命中点一定落在码点边界上。 */
+int64_t omni_str_cpfind(omni_str s, omni_str needle) {
+  int64_t at = omni_index_of(s, needle);
+  if (at < 0) return -1;
+  int64_t n = 0;
+  for (int64_t i = 0; i < at; i++) {
+    if (((unsigned char)s.p[i] & 0xC0) != 0x80) n++;
+  }
+  return n;
+}
+
 omni_str omni_str_cpsub(omni_str s, int64_t start, int64_t len) {
   int64_t n = omni_str_cplen(s);
   if (start < 0 || len < 0 || start + len > n) {

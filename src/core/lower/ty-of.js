@@ -100,10 +100,6 @@ export function typeOf(e, ctx) {
     case 'rmath': return REAL;
     /* `(ipow A B)` 交的一律是 int（两边都要 int、指数非负 —— 方言那一层查）。 */
     case 'ipow': return INT;
-    /* UTF-8 算术：码点个数是 int、按码点切片还是串。 */
-    case 'scplen': return INT;
-    case 'scpsub': return STR;
-
     case 'field': {
       const t = typeOf(e.obj, ctx);
       const fs = t.kind === 'named' ? ctx.fields.get(t.name) : undefined;
@@ -135,9 +131,12 @@ function builtinType(e, ctx) {
       return arrOf(t.kind === 'map' ? t.key : INT);
     }
     case 'alen': case 'dlen': case 'slen': case 'toint': case 'sfind': return INT;
+    /* UTF-8 算术那一族（按**码点**）：`scplen` 数长度、`scpfind` 找位置，都是 int。 */
+    case 'scplen': case 'scpfind': return INT;
     case 'toreal': case 'torealu': return REAL;
     /* 串那一族交出来的都是串（漏了 `ssub` 的症状是 `(let c int (ssub …))` —— 声明说 int，
        装进去的是串，方言当场报"未声明的变量"那一串连锁错）。 */
+    case 'scpsub':   /* 按码点切片，交的还是串 */
     case 'tostr': case 'ssub': case 'srep': case 'supper': case 'slower':
     case 'sfix': case 'ssci': case 'sgen': case 'sgenk': case 'sbase': case 'srepr': return STR;
     /* `(chr 码位)` 交的是**一个字符的串**（`printf("%c")` 走它）。 */

@@ -120,6 +120,7 @@ const RT_OPS = new Map([
   /* UTF-8 算术那两格（`(scplen S)` / `(scpsub S I N)`）：串是 `[2 x i64]`（指针 + 长度）。 */
   ['cplen.string', { sym: 'omni_str_cplen', ret: 'i64', params: ['[2 x i64]'] }],
   ['cpsub.string', { sym: 'omni_str_cpsub', ret: '[2 x i64]', params: ['[2 x i64]', 'i64', 'i64'] }],
+  ['cpfind.string', { sym: 'omni_str_cpfind', ret: 'i64', params: ['[2 x i64]', '[2 x i64]'] }],
 
 
   ['repr.real', { sym: 'omni_repr_real', ret: '[2 x i64]', params: ['double'] }],

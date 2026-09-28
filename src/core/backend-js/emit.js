@@ -1070,6 +1070,7 @@ class JsEmitter {
       /* UTF-8 算术（`(scplen S)` / `(scpsub S I N)`）—— python 的 len / 下标 / 切片按码点。 */
       case 'cplen': return `$cplen(${a[0]})`;
       case 'cpsub': return `$cpsub(${a[0]}, ${a[1]}, ${a[2]})`;
+      case 'cpfind': return `$cpfind(${a[0]}, ${a[1]})`;
 
 
       case 'int_of_string': return `$int_of_string(${a[0]})`;

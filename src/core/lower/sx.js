@@ -109,6 +109,7 @@ export const SX_ARITY = {
   /* UTF-8 算术：按码点数长度 / 按码点切片（python 的 len / 下标 / 切片要它）。 */
   scplen: 1,
   scpsub: 3,
+  scpfind: 2,
 
   /* 截到 N 位（ADR-0031 §8.2）：`(trunc N E)` = asUintN、`(sext N E)` = asIntN、
      `(zext N E)` 与 trunc 同值（分开写只为让读的人看出意图）。N 是 1..64 的字面量。 */
@@ -241,6 +242,7 @@ export const ipow = (a, b) => op('ipow', a, b);
 /** `(scplen S)` / `(scpsub S I N)` —— 按**码点**（不是字节）。 */
 export const scplen = (v) => op('scplen', v);
 export const scpsub = (v, a, b) => op('scpsub', v, a, b);
+export const scpfind = (v, t) => op('scpfind', v, t);
 
 export const slen = (v) => op('slen', v);
 export const sfind = (v, x) => op('sfind', v, x);

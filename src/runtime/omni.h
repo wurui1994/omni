@@ -373,6 +373,7 @@ omni_str omni_str_sub(omni_str s, int64_t start, int64_t len);
    越界的话报的与 `omni_substr` **同一句**，只是"string length"数的是码点。 */
 int64_t omni_str_cplen(omni_str s);
 omni_str omni_str_cpsub(omni_str s, int64_t start, int64_t len);
+int64_t omni_str_cpfind(omni_str s, omni_str needle);
 
 int64_t omni_str_length(omni_str s);
 omni_str omni_chr(int64_t cp);

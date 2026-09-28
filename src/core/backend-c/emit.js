@@ -2957,6 +2957,7 @@ class CEmitter {
       /* UTF-8 算术（`(scplen S)` / `(scpsub S I N)`）—— python 的 len / 下标 / 切片按码点。 */
       case 'cplen': return `omni_str_cplen(${a[0]})`;
       case 'cpsub': return `omni_str_cpsub(${a[0]}, ${a[1]}, ${a[2]})`;
+      case 'cpfind': return `omni_str_cpfind(${a[0]}, ${a[1]})`;
 
 
       case 'int_of_string': return `omni_int_of_string(${a[0]})`;

@@ -1037,10 +1037,22 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     三字节与四字节那两档、空串与整串、"一格一格取再拼回去与原串相同"——
     四条腿（run / run-c / interp / interp --mir）与 `.expected` 逐字节相同，
     **期望值是本机 python3 算的**。
-    **第二半（python 那一层怎么接）还没落**：`len` / 下标 / 切片要换成这两格，而
-    `ext/python/adapter/builtins.js` 里 `slen` / `ssub` 有三十来处（`strip` / `split` /
-    `replace` / `find` 那一族内部用字节偏移是**对的**，只有"用户看得见的下标与长度"
-    该按码点）—— 那是下一刀，得一处一处过，不能一把替换。
+    **第二半也落了（python 那一层）**：`adapter/*.js` 里那 86 处 `slen` / `ssub` / `sfind`
+    **整族换成** `scplen` / `scpsub` / `scpfind`（另加一格 `(scpfind S T)`：字节找到之后
+    数一遍前面有几个码点 —— UTF-8 自同步，命中点一定落在码点边界上）。
+    为什么可以"整族换"而不是一处一处挑：adapter 里那些循环本来就是**照"串是一串字符"写的**
+    （`for i in 0..len(s)` 里 `ssub(s, i, 1)`），换成码点那一套之后它们就都对了 ——
+    前提是"位置与长度"这件事**全族同一个单位**，所以 `find` 也得回码点下标。
+    路上踩到两格：新算子要用**方言的形式名**（`scplen` 而不是内部那个 `cplen`），
+    以及类型表在 `lower/ty-of.js` 的 `builtinType`（不是那个按 kind 分的 switch）。
+    判据：新例子 `ext/python/examples/unicode.py`（19 行：长度 / 下标 / 负下标 / 切片夹边 /
+    find·index·rfind·count·in / split·join·replace / center·ljust·rjust 的宽度 /
+    "一格一格取再拼回去" / 比较与排序）—— 三条腿 interp·js·c 与 python3 逐字节相同；
+    `tests/python` 全套 **87 过 0 败**、`tests/sexpr` 112 过、`check:self` 绿。
+
+    **还剩两格**（这一条的收口）：`.upper()` / `.lower()` 对非 ASCII 不动（要 unicode 的表
+    —— 借 `unicodeobject.c`），`ord()` / `chr()` 对非 ASCII 报话（那是 UTF-8 的编解码，
+    **该我们做**，下一刀）。
 
 ## 二、进度
 

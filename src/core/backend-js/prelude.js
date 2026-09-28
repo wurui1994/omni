@@ -940,6 +940,16 @@ function $cpoff(b, i) {
   }
   return b.length;
 }
+function $cpfind(s, needle) {
+  const b = $bytes(s), nb = $bytes(needle);
+  outer: for (let i = 0; i + nb.length <= b.length; i++) {
+    for (let j = 0; j < nb.length; j++) if (b[i + j] !== nb[j]) continue outer;
+    let n = 0;
+    for (let k = 0; k < i; k++) if ((b[k] & 0xC0) !== 0x80) n++;
+    return n;
+  }
+  return -1;
+}
 function $cpsub(s, start, len) {
   const b = $bytes(s), st = Number(start), ln = Number(len);
   let n = 0;
