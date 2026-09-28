@@ -32,10 +32,9 @@ import {
   joinOf, splitOf, rsplitOf, splitWsOf, countOf, stripOf, replaceOf, startsEndsOf,
   containsList, indexOfList, countList, valuesList, dictPopOf, dictSetDefaultOf, dropAtStmts,
   concatList, repeatList, reversedList, stepSlice, bankRound,
-  caseMapOf, charClassOf, rfindOf, copyList, copyDict, charsOf, dictOfPairs,
+  rfindOf, copyList, copyDict, charsOf, dictOfPairs,
   sortByKeyStmts, pickByKeyOf,
   listEqOf, listCmpOf, dictEqOf, intOfStr, ordOf, expandTabsOf, splitLinesOf,
-  asciiCaseOf,
 } from './builtins.js';
 
 /** 这一格 IR 里是不是夹着几句话（`block-expr`）—— 摆在条件位上就要当心。 */
@@ -3781,29 +3780,16 @@ function methodOf(recvTok, name, args, C) {
   }
   if (t.kind === 'string') {
     /**
-     * `.upper()` / `.lower()` —— 方言的 `supper` / `slower` 是**只动 ASCII** 的
-     * （那是它们四条腿能是同一个函数的前提：`toupper` 看 locale，JS 的 `toUpperCase()`
-     * 是 Unicode 的、长度都会变）。
+     * **大小写与分类那一族不在这儿** —— 它们走 `ext/python/lib/ucase.py`
+     * （表在 `ext/python/rt/ucase.tab`），由上面那格 `libMethodFor` 认
+     * （`pylib.js` 的 `LIB_METHODS`：upper / lower / casefold / title / capitalize /
+     * swapcase + isalpha 那八格）。
      *
-     * **从"静静答错"改成"当场报还没接"**（第一百五十一片）：python 的这两个是 Unicode 的
-     * —— 量出来 `"äöü".upper()` 我们交 `äöü`（python 交 `ÄÖÜ`）、
-     * `"Straße".upper()` 我们交 `STRAßE`（python 交 `STRASSE`，长度还变了）。
-     * 真要对得上得借 `Objects/unicodeobject.c` 的大小写映射表（SPEC §一 的借用名单里
-     * 本来就有它）。在那之前 **ASCII 那一档照旧走，非 ASCII 报"还没接"** ——
-     * 判"有没有非 ASCII"就是"字节数 != 码点数"（`asciiCaseOf` 里那一格）。
+     * 这儿从前有一套旁路：**ASCII 那一档走方言的 `supper` / `slower`、非 ASCII 当场报
+     * "还没接"**（`asciiCaseOf`，判据是"字节数 != 码点数"）。表那一刀落地之后它是死代码，
+     * 删掉 —— 一件事只有一份实现，留着两份就会分岔。方言的 `supper` / `slower`
+     * 本身没动（只动 A-Z，那是它们四条腿能是同一个函数的前提，别的语言照旧用）。
      */
-    if (name === 'upper' && args.length === 0) {
-      return asciiCaseOf(recv, '.upper()', (t) => ({ kind: 'builtin', name: 'supper', args: [t] }), C);
-    }
-    if (name === 'lower' && args.length === 0) {
-      return asciiCaseOf(recv, '.lower()', (t) => ({ kind: 'builtin', name: 'slower', args: [t] }), C);
-    }
-    /* `.casefold()` —— **ASCII 那一档就是 `.lower()`**。真正的 casefold 与 lower 只在
-       非 ASCII 上分家（`ß` → `ss`、`İ` 那一族），而非 ASCII 的大小写这一层本来就明说
-       没接（要借 `unicodeobject.c`）。所以这儿走同一格，不另编一套半对的规矩。 */
-    if (name === 'casefold' && args.length === 0) {
-      return asciiCaseOf(recv, '.casefold()', (t) => ({ kind: 'builtin', name: 'slower', args: [t] }), C);
-    }
     if (name === 'find' && args.length === 1) return { kind: 'builtin', name: 'scpfind', args: [recv, args[0]] };
     /* 下面这几格**现场发一趟循环**（`builtins.js`）—— 方言的串那一族只有五格算子，
        python 的这几个方法是它自己的规矩（空段算一格、去哪几个空白字符）。 */
@@ -3879,15 +3865,9 @@ function methodOf(recvTok, name, args, C) {
     }
     if (name === 'startswith' && args.length === 1) return startsEndsOf(recv, args[0], true, C);
     if (name === 'endswith' && args.length === 1) return startsEndsOf(recv, args[0], false, C);
-    /* 大小写那三格与 upper / lower 同一条口径（**只动 ASCII**，见上面那段话）。 */
-    if (['title', 'capitalize', 'swapcase'].includes(name) && args.length === 0) {
-      return caseMapOf(recv, name, C);
-    }
-    /* 判类别那几格 —— 逐格走，只认 ASCII。两套规矩别混（见 `charClassOf`）。 */
-    if (['isspace', 'isdigit', 'isalpha', 'isalnum', 'isupper', 'islower'].includes(name)
-      && args.length === 0) {
-      return charClassOf(recv, name, C);
-    }
+    /* `title` / `capitalize` / `swapcase` 与 `isalpha` 那八格也走 `lib/ucase.py`
+       （见这一段开头那条注）—— 从前这儿各有一份**只认 ASCII** 的实现
+       （`caseMapOf` / `charClassOf`），表那一刀落地之后是死代码，删了。 */
     /* `rfind` / `rindex` —— 从后往前找（方言的 `sfind` 只从前往后）。 */
     if (name === 'rfind' && args.length === 1) return rfindOf(recv, args[0], C);
     /* `.index()` / `.rindex()` —— 与 find / rfind 只差"找不到就报"（python 是 ValueError）。 */
