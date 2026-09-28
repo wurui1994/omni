@@ -795,6 +795,54 @@ function renderNode(n, depth) {
   return box;
 }
 
+/**
+ * **新建文件：树里就地一行输入**（VS Code 的行为，2026-09-28 改）。
+ *
+ * 从前是 `prompt()` —— 那一格在移动端会被系统弹窗接管、在桌面端也不像 IDE，
+ * 而且没法边看树边填。现在照 VS Code：树顶上长出一行 `input`，自动聚焦，
+ * **Enter 建、Esc 取消、失焦也取消**（VS Code 就是失焦即弃）。
+ *
+ * 目录怎么办：这一侧的"文件系统"是**虚拟的**（`serve.js` 的 `putEdit`，仓库里一个
+ * 字节不动），目录是从路径推出来的 ⇒ 填 `docs/notes/my.md` 就同时"建"了两层目录，
+ * 不需要第二个按钮。所以提示语直接把这件事说出来，而不是给一个建不出空目录的
+ * "新建目录"按钮（那会撒谎）。
+ */
+function startNewEntry() {
+  const body = $('#tree-body');
+  const old = body.querySelector('.row.newrow');
+  if (old !== null) { old.querySelector('input').focus(); return; }
+  const row = document.createElement('div');
+  row.className = 'row newrow';
+  const inp = document.createElement('input');
+  inp.type = 'text';
+  inp.spellcheck = false;
+  inp.autocapitalize = 'off';
+  inp.placeholder = '名字或路径，如 my.go / docs/notes/my.md';
+  row.append(inp);
+  body.prepend(row);
+  inp.focus();
+  let done = false;
+  const close = () => { if (!done) { done = true; row.remove(); } };
+  const submit = async () => {
+    const v = inp.value.trim();
+    if (done) return;
+    if (v === '' || v.startsWith('/') || v.includes('..')) { close(); return; }
+    done = true;
+    row.remove();
+    try {
+      await put('/api/file', { path: v, text: '' });
+      await loadTree();
+      await openFile(v);
+      $('#edit').focus();
+    } catch (e) { setStatus(`新建失败：${e.message ?? e}`, 'bad'); }
+  };
+  inp.onkeydown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); submit(); return; }
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+  };
+  inp.onblur = close;
+}
+
 async function loadTree() {
   S.tree = await api('/api/tree');
   const body = $('#tree-body');
@@ -1866,18 +1914,7 @@ async function main() {
     mask.style.display = open ? 'block' : 'none';
   };
   $('#filter').oninput = (e) => applyFilter(e.target.value);
-  /* **新建文件**：原生 prompt 就够（modal 会带来一堆状态）。填相对仓库根的路径，
-     写进虚拟文件系统（仓库里一个字节不动），树重建，打开它。 */
-  $('#btn-new').onclick = async () => {
-    const p = prompt('新文件路径（相对仓库根，如 docs/notes/my.md 或 my.go）');
-    if (!p || p.startsWith('/') || p.includes('..')) return;
-    try {
-      await put('/api/file', { path: p, text: '' });
-      await loadTree();
-      await openFile(p);
-      $('#edit').focus();
-    } catch (e) { setStatus(`新建失败：${e.message ?? e}`, 'bad'); }
-  };
+  $('#btn-new').onclick = () => startNewEntry();
   $('#sh').addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
     const v = e.target.value;
