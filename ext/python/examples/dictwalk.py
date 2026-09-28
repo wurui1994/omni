@@ -237,6 +237,12 @@ def main():
     cp = dict(src)
     cp["a"] = 9
     print(src, cp, len(cp), dict([("k", 1)]))
+    # **`dict.fromkeys(ks, v)`** —— `dict` 这个名字本身不是一格值（类对象没接），所以它是
+    # 一格"特殊形式"。只接键写成**非空的表/元组字面量**那一档：格数在编译期，逐格 `dset`
+    # 就完了（键是运行期长度的要铺一趟循环，还没接）。每格键共用同一个值。
+    fk = dict.fromkeys(["a", "b"], 0)
+    fk["a"] = 3
+    print(fk, dict.fromkeys(["x"], 5), dict.fromkeys((1, 2), "v"), len(fk), sorted(fk))
 
 
 main()

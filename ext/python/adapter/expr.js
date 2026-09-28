@@ -988,6 +988,16 @@ function tyOfCall(x, C) {
       return MATH_INT.has(f) ? INT : (MATH.has(f) ? REAL : null);
     }
     const recvTy = tyOfCst(kids(fn)[0], C);
+    /* `dict.fromkeys(ks, v)` —— `dict` 也不是一格值（问它装什么回 null），所以在这儿答：
+       键按那张表/元组字面量合成一格，值就是第二格实参的类型。 */
+    if (tag(kids(fn)[0]) === 'n' && String(nameOf(kids(fn)[0])) === 'dict'
+      && String(leaf(kids(fn)[1])) === 'fromkeys') {
+      if (args.length !== 2 || !['list', 'tuple'].includes(tag(args[0]))) return null;
+      const kt = unify(kids(args[0]).map((k) => tyOfCst(k, C)));
+      const vt = tyOfCst(args[1], C);
+      if (kt === null || vt === null || vt === undefined) return null;
+      return dictOf(vt, kt);
+    }
     /* 方法：接收者装的是一格记录。 */
     const rec = C.recOf(recvTy);
     if (rec !== null) {
@@ -4001,6 +4011,39 @@ export function callOf(x, C) {
     throw new Error('python->IR: `tuple(x)` 只在 x 是一格**非空的表/元组字面量**时接了'
       + ' —— 这一层的元组是编译期定长的记录（每一格各有自己的类型），'
       + '长度要到运行期才知道的那一档还没接');
+  }
+  /* **`dict.fromkeys(ks, v)`** —— `dict` 这个名字本身不是一格值（类对象没接），所以这一格
+     得当"特殊形式"拦下来。**只接键写成表/元组字面量**那一档：那时格数在编译期，逐格
+     `dset` 就完了（键是运行期长度的要铺一趟循环，还没接；不给值那一档要 None，也没接）。 */
+  if (tag(fn) === 'attr' && tag(kids(fn)[0]) === 'n'
+    && String(nameOf(kids(fn)[0])) === 'dict' && String(leaf(kids(fn)[1])) === 'fromkeys') {
+    if (argToks.length !== 2 || !['list', 'tuple'].includes(tag(argToks[0]))
+      || kids(argToks[0]).length === 0) {
+      throw new Error('python->IR: `dict.fromkeys(ks, v)` 只接"键写成非空的表/元组字面量、'
+        + '值给一格"那一档（键是运行期长度的、以及不给值那一档还没接）');
+    }
+    const keys = kids(argToks[0]).map((k) => exprOf(k, C));
+    const val = exprOf(argToks[1], C);
+    const keyT = unify(keys.map((k) => ty(k, C)));
+    if (keyT === null || (keyT.kind !== 'int' && keyT.kind !== 'string')) {
+      throw new Error('python->IR: `dict.fromkeys()` 的键要合成一格 int 或 str'
+        + '（方言的字典键只有这两档）');
+    }
+    const valT = ty(val, C);
+    const dt = dictOf(valT, keyT);
+    const nmd = C.fresh('fk_d');
+    C.bind(nmd, dt);
+    const stmts = [{
+      kind: 'let', name: nmd, type: dt, init: { kind: 'builtin', name: 'dnew', args: [tyArg(dt)] },
+    }];
+    /* python 的 `fromkeys` 里**每一格键共用同一个值**（可变的值共享是它有名的坑），
+       这一层的值都是不可变的或者一格句柄，所以直接把同一段表达式摆几遍就对。 */
+    for (const k of keys) {
+      stmts.push({
+        kind: 'builtin-stmt', name: 'dset', args: [{ kind: 'name', name: nmd }, k, val],
+      });
+    }
+    return { kind: 'block-expr', stmts, value: { kind: 'name', name: nmd } };
   }
   /* **就地调用的 lambda**（`(lambda v: v + 1)(5)`）—— 把实参钉成一格临时量，再把 lambda
      的形参名指到它上头就地展开（`applyPer` 那条路，`map` / `filter` / `key=` 共用的那一格）。 */
