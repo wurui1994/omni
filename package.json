@@ -62,6 +62,7 @@
     "py:link": "node ext/python/rt/link.js",
     "py:freeze": "node ext/python/rt/freeze.js",
     "py:embed": "node ext/python/rt/embed.js",
+    "py:selflink": "node ext/python/rt/selflink.js",
     "build:python-rt": "node ext/python/build.js",
     "bench:go": "node bench/go/run.js"
   },

@@ -24,8 +24,9 @@ import { readFileSync, existsSync, readdirSync, mkdirSync, writeFileSync } from 
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { readArchive, alacarte } from '../../src/core/link/ar.js';
+import { readArchive, alacarte, writeArchive } from '../../src/core/link/ar.js';
 import { readObject } from '../../src/core/link/elf.js';
+import { readSymbols } from '../../src/core/link/pe_load.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
@@ -210,9 +211,78 @@ if (bMade) {
   }
 }
 
+/* ---- C 段：**我们自己打的那份**（`writeArchive`）—— 写出去再读回来 ---- */
+
+if (bMade && made.length === 2) {
+  const bytesOf = (p) => {
+    const b = readFileSync(p);
+    return new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+  };
+  /* 这一段要 **ELF 那种 `.o`**（符号表得我们自己读得懂），所以同两份源再编一遍
+   * （`--format elf --os osx` —— mac 上 `c obj` 默认出 Mach-O）。这也正是"全自己那条链"
+   * 用的格式：我们自己的链接器吃的就是 ELF 的 `.o`。 */
+  const elfObjs = [];
+  for (const o of made) {
+    const src = `${o.slice(0, -2)}.c`;
+    const out = `${o.slice(0, -2)}-elf.o`;
+    const r = spawnSync(process.execPath, [cli, 'c', 'obj', '--format', 'elf', '--os', 'osx',
+      src, '-o', out], { encoding: 'utf8' });
+    if (r.status !== 0 || !existsSync(out)) {
+      process.stdout.write(`  skip C 段（ELF 那一格编不出：${(r.stderr ?? '').trim().split('\n')[0]}）\n`);
+      break;
+    }
+    elfObjs.push(out);
+  }
+  /* 成员名字故意超过 16 字节 —— 走的是 GNU 的 `//` 长名字表那一路。
+   * 符号由 ELF 的 `.symtab` 说（GLOBAL 且 shndx 不为 0 = 这个成员定义了它）。 */
+  const mem = elfObjs.map((o) => {
+    const bytes = bytesOf(o);
+    const syms = readSymbols(readObject(bytes))
+      .filter((s) => s.name !== '' && s.bind === 1 && s.shndx !== 0).map((s) => s.name);
+    return { name: o.slice(o.lastIndexOf('/') + 1), bytes, syms };
+  });
+  if (mem.length !== 2) { /* 上面已经说过为什么跳过 */ } else {
+  const a = writeArchive(mem);
+  const back = readArchive(a);
+  const names = back.members.map((m) => m.name);
+  const sameNames = names.length === mem.length && names.every((n, i) => n === mem[i].name);
+  const sameBytes = back.members.every((m, i) => m.bytes.length === mem[i].bytes.length
+    && m.bytes.every((b, k) => b === mem[i].bytes[k]));
+  const heads = new Set(back.members.map((m) => m.at));
+  const stray = back.index === null ? null : back.index.syms.find((s) => !heads.has(s.at));
+  const want2 = mem[1].syms.find((s) => /ar_probe_two/.test(s));
+  const want1 = mem[0].syms.find((s) => /ar_probe_one/.test(s));
+  const need = new Set([want2]);
+  const pulled = back.index === null ? [] : alacarte(back, (n) => need.has(n), () => {
+    need.delete(want2);
+    need.add(want1);
+  });
+  if (!sameNames) {
+    failed++;
+    process.stdout.write(`  FAIL C 段：名字读不回来\n    打进去 ${mem.map((m) => m.name).join(' ')}\n    读回来 ${names.join(' ')}\n`);
+  } else if (!sameBytes) {
+    failed++;
+    process.stdout.write('  FAIL C 段：成员的字节读不回来（偏移或补齐错了）\n');
+  } else if (back.index === null || (stray !== undefined && stray !== null)) {
+    failed++;
+    process.stdout.write(`  FAIL C 段：符号索引不对（${back.index === null ? '没有' : `'${stray.name}' 指到非成员头`}）\n`);
+  } else if (pulled.length !== 2) {
+    failed++;
+    process.stdout.write(`  FAIL C 段：按需取用该转一圈拉两个成员，拉到 ${pulled.length} 个\n`);
+  } else {
+    ok++;
+    members += back.members.length;
+    syms += back.index.syms.length;
+    process.stdout.write(`  ok   我们自己打的那份（GNU 那一套：\`/\` 索引 + \`//\` 长名字表）：`
+      + `${back.members.length} 份成员、${back.index.syms.length} 条索引，字节与名字都读得回来\n`);
+  }
+  }
+}
+
 process.stdout.write(`\n${ok} 个库读对了, ${failed} 个不对（共 ${members} 个成员、${syms} 条索引）\n`);
 if (failed !== 0 || ok === 0) {
   process.stdout.write('c/ar-read: 静态库读得不对 —— 与系统 ar 差了一格\n');
   process.exitCode = 1;
 }
+
 
