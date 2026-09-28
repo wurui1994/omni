@@ -215,3 +215,51 @@ ps.sort()
 print([str(p) for p in ps], len(ps))
 
 
+# **另一批双下划线**：算术、`__repr__`、真值、下标、`in`、`-x`、调用。
+# 两处从前是**静静答错**：定义了 `__repr__` 的类上 `repr(r)` 答的是 `__str__` 那一份；
+# `bool(R(0))` / `if r:` 一律答 True（这一层从前把"一格对象"当恒真）。
+# `__contains__` / `__getitem__` 的第二格形参没人标注，而 `3 in r` / `r[2]` 又不是方法
+# 调用的形状 —— 收实例那趟看不见它，所以按用到的实参类型**现造一格**。
+class R:
+    def __init__(self, k: int):
+        self.k = k
+
+    def __str__(self):
+        return "R(" + str(self.k) + ")"
+
+    def __repr__(self):
+        return "R!" + str(self.k)
+
+    def __add__(self, o):
+        return R(self.k + o.k)
+
+    def __mul__(self, o):
+        return R(self.k * o.k)
+
+    def __neg__(self):
+        return R(-self.k)
+
+    def __bool__(self) -> bool:
+        return self.k != 0
+
+    def __contains__(self, v) -> bool:
+        return v == self.k
+
+    def __getitem__(self, i):
+        return self.k + i
+
+    def __call__(self, x):
+        return self.k + x
+
+
+r = R(3)
+print(str(r), repr(r), r)
+print([R(1), R(2)], f"{r} {r!r}", "%s %r" % (r, r), "{} {!r}".format(r, r))
+print(str(r + R(4)), str(r * R(2)), str(-r))
+print(bool(r), bool(R(0)), 3 in r, 4 in r, r[2], r(10))
+if R(0):
+    print("never")
+if r:
+    print("truthy")
+
+

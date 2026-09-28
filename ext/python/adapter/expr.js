@@ -1134,7 +1134,57 @@ export function pyStr(e, C) {
   if (t.kind === 'string') return e;
   /* 箱子在 `str()` 这一侧不给串加引号（`print(x)` 里 x 装着 `"a"` 印的是 `a`）。 */
   if (t.kind === 'dyn') return dynText(e, C, false);
+  /* 类：`__str__` 先问，没有才退到 `__repr__` —— **python 的规矩正是这一条**
+     （`str(x)` 找不到 `__str__` 就用 `repr(x)`）。 */
+  const recS = C.recOf(t);
+  if (recS !== null && recS.methods !== undefined && tupleOf(recS) === null) {
+    return objText(e, t, recS, C, false);
+  }
   return pyRepr(e, C);
+}
+
+/**
+ * **类上的一格双下划线方法，按实参挑实例再落成一句调用**。
+ * 找不着（没定义 / 形参对不上）就回 `null` —— 调用方自己决定报什么话。
+ */
+function callDunder(t, m, args, C) {
+  const rec = C.recOf(t);
+  if (rec === null || rec.methods === undefined || tupleOf(rec) !== null) return null;
+  if (!rec.methods.has(m)) return null;
+  const argTys = args.map((a) => ty(a, C));
+  let inst = C.resolveMethod(rec.name, m, argTys);
+  /* **`__contains__` / `__getitem__` 那一族的实例收不到** —— 调用点是 `3 in p` / `p[2]`，
+     不是 `p.__contains__(3)` 那种写法，而收实例那一趟只认调用的形状。第二格形参又
+     没标注（谁都不写），所以这儿**按用到的实参类型现造一格**（与库函数那一处同一个
+     机制，见 `C.requireFn`）；`drainLib` 那一趟把它发出来。 */
+  if (inst === null && C.requireFn !== undefined && argTys.every((a) => a !== null)) {
+    inst = C.requireFn(`${rec.name}.${m}`, argTys);
+  }
+  if (inst === null) return null;
+  return {
+    kind: 'call', fn: { kind: 'name', name: inst.mangled }, args, type: inst.ret ?? undefined,
+  };
+}
+
+/**
+ * 一格类实例的文本 —— `str()` 那一侧先问 `__str__`、`repr()` 那一侧先问 `__repr__`。
+ *
+ * **两边都退到另一格**：python 的 `str()` 退到 `repr()` 是正规规矩；反过来
+ * （`repr()` 退到 `__str__`）是这一层的**近似** —— python 那时印
+ * `<__main__.P object at 0x…>`，里头有地址，判据逐字节比不了，所以不装作有。
+ * 两格都没有就当场报（别静静印出个不一样的东西）。
+ */
+function objText(e, t, rec, C, wantRepr) {
+  for (const m of (wantRepr ? ['__repr__', '__str__'] : ['__str__', '__repr__'])) {
+    if (!rec.methods.has(m)) continue;
+    const inst = C.resolveMethod(rec.name, m, [t]);
+    if (inst === null) {
+      throw new Error(`python->IR: \`${rec.name}.${m}\` 对不上那一格的形参（只该有 self）`);
+    }
+    return { kind: 'call', fn: { kind: 'name', name: inst.mangled }, args: [e] };
+  }
+  throw new Error(`python->IR: \`class ${rec.name}\` 既没有 \`__str__\` 也没有 \`__repr__\`，`
+    + '转串还没接（python 那时印的是 `<__main__.X object at 0x…>` —— 里头有地址，逐字节比不了）');
 }
 
 /**
@@ -1197,21 +1247,11 @@ export function pyRepr(e, C) {
     const value = cat(out, { kind: 'string', value: ')' });
     return pre.length === 0 ? value : { kind: 'block-expr', stmts: pre, value };
   }
-  /* **类上的 `__str__`** —— `str(p)` 与 `print(p)` 都走这儿（python 就是这条规矩）。
-     没定义 `__str__` 的类当场报：python 那时印 `<__main__.P object at 0x…>`，那串里有
-     地址，**逐字节比不了**，所以不装作有。 */
+  /* **类上的 `__repr__` / `__str__`** —— `repr(p)` 与容器里的元素先问 `__repr__`
+     （从前这一处只问 `__str__`：定义了两格的类上 `repr(p)` 会**静静答出 `__str__`
+     那一份**，与 python 不一样）。见 `objText`。 */
   const rec = C.recOf(t);
-  if (rec !== null && rec.methods.has('__str__')) {
-    const inst = C.resolveMethod(rec.name, '__str__', [t]);
-    if (inst === null) {
-      throw new Error(`python->IR: \`${rec.name}.__str__\` 对不上那一格的形参（只该有 self）`);
-    }
-    return { kind: 'call', fn: { kind: 'name', name: inst.mangled }, args: [e] };
-  }
-  if (rec !== null) {
-    throw new Error(`python->IR: \`class ${rec.name}\` 没有 \`__str__\`，转串还没接`
-      + '（python 那时印的是 `<__main__.X object at 0x…>` —— 里头有地址，逐字节比不了）');
-  }
+  if (rec !== null && rec.methods !== undefined) return objText(e, t, rec, C, true);
   throw new Error(`python->IR: ${t.kind} 转串还没接`);
 
 }
@@ -1450,6 +1490,9 @@ export function exprOf(x, C) {
       }
       if (o === '-') {
         const v0 = exprOf(kids(x)[1], C);
+        /* **类上的 `__neg__`**（`-p`）—— python 就是这么找的。 */
+        const neg = callDunder(ty(v0, C), '__neg__', [v0], C);
+        if (neg !== null) return neg;
         return { kind: 'unop', op: '-', operand: intOfPy(v0, ty(v0, C)) };
       }
       /* `~x` —— 方言里没有按位取反，照它的定义落成 `-x - 1`（两个补码上逐位相同）。 */
@@ -1584,6 +1627,16 @@ export function exprOf(x, C) {
 const CMP_METHOD = new Map([
   ['==', '__eq__'], ['!=', '__ne__'], ['<', '__lt__'],
   ['<=', '__le__'], ['>', '__gt__'], ['>=', '__ge__'],
+]);
+
+/**
+ * **类上的算术双下划线** —— python 的 `a + b` 先问 `type(a).__add__`。
+ * 不接的话落到"两边装的是 named / named —— 还没接"那句话上（明着报，不是静静答错）。
+ * 只接**两边同型**那一档（`P(1) + P(2)`）：跨类型要 `__radd__` 那一套。
+ */
+const ARI_METHOD = new Map([
+  ['+', '__add__'], ['-', '__sub__'], ['*', '__mul__'], ['/', '__truediv__'],
+  ['//', '__floordiv__'], ['%', '__mod__'], ['**', '__pow__'],
 ]);
 
 /** 比较。`in` / `not in` / `is` 各有自己的规矩；链式比较（`a < b < c`）在这儿摊开。 */
@@ -2121,6 +2174,9 @@ function containsOf(box, needle, C) {
   }
   /* 表：方言里没有这一格，所以走一遍（比法与 `==` 同一条 —— 元素是箱子时按标签分派）。 */
   if (t.kind === 'arr') return containsList(box, needle, C, (l, r) => cmpOne('==', l, r, C));
+  /* **类上的 `__contains__`**（`3 in p`）—— python 就是这么找的。 */
+  const has = callDunder(t, '__contains__', [box, needle], C);
+  if (has !== null) return has;
   /* 箱子那一档多说一句：走到这儿多半是**形参退到了 dyn**（没标注、调用点又推不出来），
      而不是真想在箱子上问 `in` —— 提一句标注比只报个 kind 有用。 */
   throw new Error(`python->IR: \`in\` 作用在 ${t.kind} 上还没接（表 / 字典 / 串接了）`
@@ -2401,6 +2457,20 @@ function binOf(x, C) {
     throw new Error(`python->IR: 布尔当数用（\`True + 1\`）还没接`);
   }
   if (!isNum(ta) || !isNum(tb)) {
+    /* **类上的算术双下划线**（`__add__` / `__sub__` / …）：python 的 `a + b` 先问
+       `type(a).__add__`。两边同型那一档接了；跨类型要 `__radd__` 那一套，还没接。 */
+    const recAri = C.recOf(ta);
+    const dunder = ARI_METHOD.get(o);
+    if (recAri !== null && recAri.methods !== undefined && tupleOf(recAri) === null
+      && dunder !== undefined && recAri.methods.has(dunder) && sameType(ta, tb)) {
+      const inst = C.resolveMethod(recAri.name, dunder, [ta, tb]);
+      if (inst !== null) {
+        return {
+          kind: 'call', fn: { kind: 'name', name: inst.mangled }, args: [a, b],
+          type: inst.ret ?? ta,
+        };
+      }
+    }
     throw new Error(`python->IR: '${o}' 的两边装的是 ${ta.kind} / ${tb.kind} —— 还没接`);
   }
   /* 混着来的先提到 real（方言那一层不提升）。 */
@@ -3250,7 +3320,13 @@ function indexOf(x, C) {
     /* `(ssub E I N)` 是"从 I 起、取 N 个"（**不是** I..J）—— 方言那一侧的口径。 */
     return { kind: 'builtin', name: 'scpsub', args: [box, i, { kind: 'int', value: 1 }] };
   }
-  if (t.kind !== 'arr') throw new Error(`python->IR: 下标作用在 ${t.kind} 上还没接`);
+  if (t.kind !== 'arr') {
+    /* **类上的 `__getitem__`**（`p[2]`）—— python 就是这么找的。切片那一档要造一格
+       `slice` 对象递进去，还没接。 */
+    const got = callDunder(t, '__getitem__', [box, key], C);
+    if (got !== null) return got;
+    throw new Error(`python->IR: 下标作用在 ${t.kind} 上还没接`);
+  }
   return { kind: 'index', obj: box, index: wrapIndex(box, key, C) };
 }
 
@@ -3925,6 +4001,21 @@ export function callOf(x, C) {
     throw new Error('python->IR: `tuple(x)` 只在 x 是一格**非空的表/元组字面量**时接了'
       + ' —— 这一层的元组是编译期定长的记录（每一格各有自己的类型），'
       + '长度要到运行期才知道的那一档还没接');
+  }
+  /* **类上的 `__call__`**（`p(10)`）—— 那个名字装的是一格实例，不是函数。要在下面
+     "按名字找函数"之前拦：不拦的话报的是"不认识 `p()`"，与真正的原因不相干。 */
+  if (tag(fn) === 'n' && C.lookup !== undefined) {
+    const vt = C.lookup(String(nameOf(fn)));
+    if (vt !== null && vt !== undefined && vt.kind === 'named') {
+      const recC = C.recOf(vt);
+      if (recC !== null && recC.methods !== undefined && recC.methods.has('__call__')) {
+        const self = exprOf(fn, C);
+        const vals = [self, ...argToks.map((a) => exprOf(a, C))];
+        const call = callDunder(vt, '__call__', vals, C);
+        if (call !== null) return call;
+        throw new Error(`python->IR: \`${recC.name}.__call__\` 对不上这几格实参`);
+      }
+    }
   }
   /* **吃序列的那几个内建：实参位置上的 `range(…)` 现场铺成一张表**。
      `range` 当值用本身没接（python 印 `range(0, 3)`，铺成表就印错了），可
@@ -4891,9 +4982,17 @@ export function condOfExpr(e, C) {
   if (t.kind === 'arr' || t.kind === 'string' || t.kind === 'map') {
     return { kind: 'binop', op: '!=', left: lenOf(e, C), right: { kind: 'int', value: 0 } };
   }
-  /* 一格对象默认是真（python 的规矩：没有 `__bool__` / `__len__` 就真）。
-     元组也落这一格：非空的元组恒真，而空元组 `()` 这一层压根不收。 */
-  if (t.kind === 'named') return { kind: 'bool', value: true };
+  /* 一格对象：**先问 `__bool__`，没有再问 `__len__`，两格都没有才是真**（python 的
+     真值测试就是这个次序）。从前这一处一律答"真" —— 定义了 `__bool__` 的类上
+     `bool(P(0))` / `if p:` 会**静静答 True**。元组也落这一格：非空的元组恒真，
+     而空元组 `()` 这一层压根不收。 */
+  if (t.kind === 'named') {
+    const b = callDunder(t, '__bool__', [e], C);
+    if (b !== null) return b;
+    const n = callDunder(t, '__len__', [e], C);
+    if (n !== null) return { kind: 'binop', op: '!=', left: n, right: { kind: 'int', value: 0 } };
+    return { kind: 'bool', value: true };
+  }
   /* 一格箱子：按标签分派（`dyn.js` 的 `dynTruthy`）。 */
   if (t.kind === 'dyn') return dynTruthy(e, C);
   throw new Error(`python->IR: ${t.kind} 当条件用还没接`);

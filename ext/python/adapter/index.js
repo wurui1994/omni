@@ -49,7 +49,12 @@ const typeOfIR = (e, C) => typeOf(e, C.tyCtx());
  * **比较那几格双下划线方法** —— 它们的第二格形参（`other`）在 python 里几乎不写标注，
  * 而这一层要个类型；口径是"同一个类"（见 `infer` 里那一处）。
  */
-const CMP_DUNDER = new Set(['__eq__', '__ne__', '__lt__', '__le__', '__gt__', '__ge__']);
+const CMP_DUNDER = new Set(['__eq__', '__ne__', '__lt__', '__le__', '__gt__', '__ge__',
+  /* **二元算术那一族同一条**：`def __add__(self, o)` 里的 `o` 谁都不写标注，而体里
+     要 `o.k` —— 退到 dyn 那一档当场报"`.k` 的接收者装的是 dyn"，于是**光是定义了
+     `__add__` 就编不过**（与比较那几格一个病）。python 的惯例是同型相加，所以把
+     第二格形参标成类本身。真要跨类型的（`P + int`）那一档还没接，报得清楚。 */
+  '__add__', '__sub__', '__mul__', '__truediv__', '__floordiv__', '__mod__', '__pow__']);
 
 /** 一棵 python 的树（`(module …)`）→ 标准 IR 的模块。 */
 export function pyToIR(tree, ctx = {}) {
