@@ -22,3 +22,10 @@ for y in ys:
         print("真", y)
     else:
         print("假", y)
+
+# 箱子里装着串、又在 repr 那一侧时，引号与转义**与静态那条同一份实现**
+# （`lib/str.py` 的 `_str_repr`）。从前这儿只加一对单引号，`"a'b"` 印出来是三个单引号，
+# `"t\n"` 里那一格换行原样印出去（把一行折成两行）。
+zs = [1, "a'b", "t\n", 2.5, True]
+print(zs)
+print(repr(zs[1]), str(zs[1]), repr(zs[2]))

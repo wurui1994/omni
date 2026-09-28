@@ -92,6 +92,10 @@ export const LIB_METHODS = new Map([
  */
 export const LIB_BUILTINS = new Map([
   ['float.string', '_float_of_str'],
+  /* `repr(串)` 的引号挑选与转义（`lib/str.py` 的 `_str_repr`）。这一格与上面那格不同：
+     它还会被 **adapter 自己**要 —— `print(['a'])` 里那一格元素、f-string 的 `!r`、
+     字典的键，源码里一句 `repr` 都没有也得发一格实例（靠 `C.requireFn`，见 `index.js`）。 */
+  ['repr.string', '_str_repr'],
 ]);
 
 /** 内建名 + 实参类型 → 库函数名（没有就答 null）。只看头一格实参。 */
@@ -100,6 +104,22 @@ export function libBuiltinFor(name, argTys) {
   const t = argTys[0];
   if (t === null || t === undefined) return null;
   return LIB_BUILTINS.get(`${name}.${t.kind}`) ?? null;
+}
+
+/**
+ * **一格串的 `repr()` 落成一次调用**（`_str_repr`）—— 两处都用这一格：静态是串的那条
+ * （`pyRepr`）与箱子里装着串的那条（`dynText`）。库里没那格 / 现要不出来时答 null，
+ * 调用方各自退回它那条老路（加一对单引号）。
+ */
+export function libReprCall(strExpr, strTy, C) {
+  const nm = libBuiltinFor('repr', [strTy]);
+  if (nm === null) return null;
+  const want = C.requireFn ?? C.resolveFn;
+  const inst = want(nm, [strTy]);
+  if (inst === null || inst === undefined || inst.mangled === null) return null;
+  return {
+    kind: 'call', fn: { kind: 'name', name: inst.mangled }, args: [strExpr], type: strTy,
+  };
 }
 
 /**

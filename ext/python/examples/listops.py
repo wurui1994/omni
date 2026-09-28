@@ -25,10 +25,18 @@ def main():
 
     # 拼接：新造一张表，两边都不动
     print(xs + ys, xs, ys)
-    # 与空表拼：**空表字面量要先有一格标注**（`[]` 自己的元素类型推不出来 ——
-    # 这一条是既有的那一格口径，不是拼接这一刀新欠的）
+    # 与空表拼：**空表字面量自己答不出元素类型**，有标注的按标注（下面这一格），
+    # 谁都没说的退到 `(arr dyn)`（`xs + []` 那一格）—— 不再是"当场报要标注"。
     none: list[int] = []
     print(xs + none, none + xs)
+    print(xs + [], [] + xs, len([]), [])
+    # 空表上那几格**跑起来才撞的**墙（从前四处都报 array index out of range）：
+    empty: list[int] = []
+    empty.sort()
+    empty.reverse()
+    print(sorted(empty), sorted([]), empty)
+    print(sum([]), sum([1, 2]), sum([1.5, 2]), any([]), all([]), bool([]))
+    print(",".join([]), "".join([]))
 
     # 重复：n <= 0 给空表
     print(xs * 2, 2 * xs, xs * 0, xs * -1)

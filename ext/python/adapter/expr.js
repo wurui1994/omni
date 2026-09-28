@@ -25,7 +25,9 @@ import {
 } from './dyn.js';
 import { splitFString } from './fstring.js';
 import { splitPercent, percentArity } from './percent.js';
-import { libMethodFor, libFillToks, libBuiltinFor, LIB_METHODS } from './pylib.js';
+import {
+  libMethodFor, libFillToks, libBuiltinFor, libReprCall, LIB_METHODS,
+} from './pylib.js';
 import { ucaseIntrinsic, UCASE_INTRIN } from './ucase.js';
 import {
   sumOf, pickList, anyAllOf, sortedOf, rangeList,
@@ -882,8 +884,9 @@ export function pyStr(e, C) {
  * **`repr()` 那一侧**。与 `str()` 只差一处：串带引号（`['a']` 里那个 `'a'`）。
  * 容器的 `str()` 用的是元素的 `repr()` —— 所以 `print([1.0])` 是 `[1.0]`。
  *
- * **明说的不足**：串的 repr 只加一对单引号，里头的 `'` / `\n` / `\\` 没转义
- * （方言里没有"替换一段"那一格算子，转义只能在运行期做）。
+ * 串那一格落到库里那格 python（`lib/str.py` 的 `_str_repr`）：引号按"里头有没有 `'`／`"`"
+ * 挑，`\\` / `\n` / `\r` / `\t` 与 ASCII 控制字符转义。**还差**非 ASCII 的不可打印字符
+ * （要 `isprintable` 那张表）。
  */
 export function pyRepr(e, C) {
   const t = ty(e, C);
@@ -900,6 +903,12 @@ export function pyRepr(e, C) {
   if (t.kind === 'real') return { kind: 'builtin', name: 'srepr', args: [e] };
   if (t.kind === 'int') return { kind: 'builtin', name: 'tostr', args: [e] };
   if (t.kind === 'string') {
+    /* 引号是**挑出来的**，里头还要转义 —— 那是一段循环，写在库里那格 python
+       （`lib/str.py` 的 `_str_repr`，口径照 CPython 的 `unicode_repr`）。
+       源码里一句 `repr` 都没有时（`print(['a'])` / f-string 的 `!r`）单态化那趟收不到
+       实例，所以那一格是 `C.requireFn` 现要的（见 `libReprCall`）。 */
+    const call = libReprCall(e, t, C);
+    if (call !== null) return call;
     return {
       kind: 'binop', op: '+',
       left: { kind: 'binop', op: '+', left: { kind: 'string', value: "'" }, right: e },
@@ -1401,11 +1410,16 @@ export const cmpLt = (a, b, C) => cmpOne('<', a, b, C);
 
 /**
  * "这一格类型有没有比法" —— 排序、挑大小之前先问一声。
- * 有比法的就三类标量加**同形状的元组**；别的当场报，不然落到方言里会去比句柄，
+ * 有比法的就三类标量、**箱子**加**同形状的元组**；别的当场报，不然落到方言里会去比句柄，
  * 静默答错（`min([(2,'b'), (1,'a')])` 从前就答 `(2, 'b')` —— 量到过）。
+ *
+ * **箱子这一档**（`(arr dyn)`）走 `dynBin`：两边都是数按数比、都是串按串比。
+ * python 在"数与串比大小"那一处是 TypeError，而方言里没有异常 —— 那一档答的是 False
+ * （与 `dyn.js` 里六个比较同一条口径，写在那份文件头）。挡着不让比的代价更大：
+ * `sorted([])` / `min([])` 这些**空表**在 python 里有定义，而空表字面量正是 `(arr dyn)`。
  */
 export function needOrd(t, C, what) {
-  if (['int', 'real', 'string'].includes(t.kind)) return;
+  if (['int', 'real', 'string', 'dyn'].includes(t.kind)) return;
   if (tupleOf(C.recOf(t)) !== null) return;
   throw new Error(`python->IR: \`${what}\` 的元素是 ${t.kind} —— 还没接（要有"怎么比"）`);
 }
@@ -2345,11 +2359,15 @@ function compOf(x, C, kind) {
  *
  * **异质的表退到 `(arr dyn)`**（`[1, "a", 2.5]` 在 python 里天经地义）：表本身还是静态的
  * 一格数组，动态的是元素。装不进箱子的那几档（表里套表、记录）才报 —— 见 `dyn.js` 文件头。
+ *
+ * **空表也退到 `(arr dyn)`**：`sum([])` / `any([])` / `bool([])` 在 python 里都有定义，
+ * 从前这一格当场报"给它一格标注"，可那几处**压根没处写标注**。有地方说元素类型的
+ * （`xs: list[int] = []`、实参位置上的形参、`d[k] = []`）走不到这儿 —— 那几条路在
+ * 调用方就把类型定了（`emptyOf`）。所以这一格只管"谁都没说"那一档。
  */
 function listOf(items, C) {
   const vs = items.map((k) => exprOf(k, C));
-  if (vs.length === 0) throw new Error('python->IR: 空表 `[]` 的元素类型推不出来 —— 给它一格标注（`xs: list[int] = []`）');
-  const elem = unify(vs.map((v) => ty(v, C)));
+  const elem = vs.length === 0 ? DYN : unify(vs.map((v) => ty(v, C)));
   if (elem === null) {
     const ks = vs.map((v) => ty(v, C).kind).join(' / ');
     throw new Error(`python->IR: 这张表里装着 ${ks} —— 合不成一格`
@@ -3587,13 +3605,19 @@ function builtinOf(nm, args, argToks, C) {
       return best;
     }
     case 'sum': {
-      if (args.length === 1) return sumOf(args[0], C);
+      /* 箱子的表那一档（`[1.5, 2]` 与 `[]`）：累加量也是箱子，加法按标签分派。 */
+      const dynOps = {
+        boxInt: (v) => boxOf({ kind: 'int', value: v }, C),
+        addDyn: (a, b) => dynBin('+', a, b, C),
+      };
+      if (args.length === 1) return sumOf(args[0], C, dynOps);
       if (args.length !== 2) throw new Error('python->IR: `sum()` 收一格表或者表加一格起点');
       /* `sum(xs, start)` —— 起点加上去就是（合型那一下交给 `+`，与源码里写
          `start + sum(xs)` 逐字同一条）。 */
-      const s = sumOf(args[0], C);
+      const s = sumOf(args[0], C, dynOps);
       const st = ty(args[1], C);
       const acc = ty(s, C);
+      if (isDyn(st) || isDyn(acc)) return dynBin('+', args[1], s, C);
       if (st.kind === 'real' && acc.kind === 'int') {
         return { kind: 'binop', op: '+', left: args[1], right: toReal(s, C) };
       }

@@ -23,6 +23,8 @@
 import {
   REAL, STR, BOOL, DYN, typeOf, sameType,
 } from '../../../src/core/lower/ty-of.js';
+/* 箱子里装着串、又在 `repr()` 那一侧时，引号与转义走库里那一格（与静态那条同一份实现）。 */
+import { libReprCall } from './pylib.js';
 
 /** 一格已经建好的 IR 表达式装的是什么。 */
 const ty = (e, C) => typeOf(e, C.tyCtx());
@@ -130,13 +132,11 @@ export function dynText(v, C, quote = false) {
         },
         else_: {
           kind: 'ternary', type: STR, cond: tagIs(src, 'string'),
-          then: quote
-            ? {
-              kind: 'binop', op: '+',
-              left: { kind: 'binop', op: '+', left: strLit("'"), right: sv },
-              right: strLit("'"),
-            }
-            : sv,
+          then: quote ? (libReprCall(sv, STR, C) ?? {
+            kind: 'binop', op: '+',
+            left: { kind: 'binop', op: '+', left: strLit("'"), right: sv },
+            right: strLit("'"),
+          }) : sv,
           /* 剩下那几档（函数 / 字典 / null）：`None` 印 `None`，别的印标签，见上面那段话。 */
           else_: {
             kind: 'ternary', type: STR, cond: tagIs(src, 'null'),

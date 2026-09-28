@@ -86,9 +86,16 @@ export function pyToIR(tree, ctx = {}) {
      `tupleRec` 那一下），排在前面的声明表就看不见它们。
      摆的时候记录要在函数前面 —— 方言那一层先收类型再收签名。 */
   const fns = [];
+  /* 一格实例只发一遍（`requireFn` 现造的那几格可能与下面这趟撞上）。 */
+  const emit = (nm, inst) => {
+    if (inst.done === true) return;
+    inst.done = true;
+    fns.push(fnDecl(nm, inst, C));
+  };
   for (const [nm, insts] of C.insts) {
-    for (const inst of insts) fns.push(fnDecl(nm, inst, C));
+    for (const inst of insts) emit(nm, inst);
   }
+  drainLib(emit, C);
 
   C.push();
   const body = [
@@ -96,6 +103,9 @@ export function pyToIR(tree, ctx = {}) {
     ...scriptStmts.flatMap((s) => stmtsOf(s, C)),
   ];
   C.pop();
+  /* 顶层那一段里要出来的库函数（`print(['a'])` 那一格 `_str_repr`）—— body 建完才知道。
+     `decls` 还没摆，所以这一趟发出来的照旧摆在 `main` 前头。 */
+  drainLib(emit, C);
 
   const decls = [];
   /* **大小写那张表**（`rt/ucase.tab`）—— 一段静态数据，摆在别的声明之前（方言要
@@ -108,6 +118,19 @@ export function pyToIR(tree, ctx = {}) {
   decls.push(...fns);
   decls.push({ kind: 'main', body });
   return { kind: 'module', decls };
+}
+
+/**
+ * **把 `requireFn` 现要的那几格发出来**（排到不再长为止）。
+ *
+ * 发一格库函数的**体**时它自己又可能要下一格（链能有几层），所以是一趟一趟排空的。
+ * 上限 8 趟：与推断那边同一个数，超了就是有环，那时宁可少发一格也不空转。
+ */
+function drainLib(emit, C) {
+  for (let g = 0; g < 8 && C.pendingLib.length > 0; g += 1) {
+    const q = C.pendingLib.splice(0);
+    for (const [nm, inst] of q) emit(nm, inst);
+  }
 }
 
 /** `(line a b)` 那一层摊掉 —— 顶层与块体里都是这个形状。 */
@@ -333,6 +356,46 @@ function makeCtx() {
         && i.params.every((p, k) => p.type !== null
           && (sameType(p.type, argTys[k]) || (p.type.kind === 'real' && argTys[k].kind === 'int'))));
       return up ?? null;
+    },
+    /**
+     * **每格函数的骨架**（形参名字与标注）—— `infer` 那一趟摆好，留着给 `requireFn`。
+     */
+    shells: null,
+    /** `requireFn` 现要出来、还没发的那几格：`[[函数名, 实例], …]`（见 `pyToIR` 的排空）。 */
+    pendingLib: [],
+    /**
+     * **adapter 主动要一格库函数实例**（`ext/python/lib/*.py` 里那些）。
+     *
+     * 单态化那一趟是从**源码里的调用点**收实例的。可 adapter 自己也会要库函数 ——
+     * `repr(串)` 落到 `_str_repr` 上，而 `print(['a'])` / f-string 的 `!r` / 字典的键
+     * 那几处**源码里一个 `repr` 字都没有**，那趟一格实例都收不到。
+     *
+     * 这一格就是那条道：现造一格实例（类型直接给）、把名字与签名登记上、排进
+     * `pendingLib` 等着发。已经有对得上的那一格就直接用（不重复发）。
+     * 库里没这一格（或者形参个数对不上）答 null —— 调用方退回它自己那条老路。
+     */
+    requireFn: (nm, argTys) => {
+      const got = C.resolveFn(nm, argTys);
+      if (got !== null) return got;
+      if (C.shells === null || !C.shells.has(nm)) return null;
+      if (argTys.some((t) => t === null || t === undefined)) return null;
+      const sh = C.shells.get(nm);
+      if (sh.names.length !== argTys.length) return null;
+      const list = C.insts.get(nm) ?? [];
+      const inst = mkInst(nm, sh, argTys);
+      const base = nm.indexOf('.') < 0 ? C.ref(nm) : C.ref(nm.replace('.', '_'));
+      inst.mangled = list.length === 0
+        ? base
+        : `${base}__${inst.key.replace(/[^A-Za-z0-9_]/g, '_')}`;
+      /* **先摆进表再算返回类型**：算返回类型要扫它的体，那一趟里可能又绕回这儿要同一格
+         （`repr` 那一族就会）—— 没先摆进去的话第二趟找不着，于是一格一格造下去不回头。 */
+      list.push(inst);
+      C.insts.set(nm, list);
+      inst.ret = sh.retAnnot !== null ? sh.retAnnot : inferRet(nm, inst, C);
+      if (inst.ret === null) inst.ret = { kind: 'void' };
+      C.fns.set(inst.mangled, { params: inst.params, ret: inst.ret });
+      C.pendingLib.push([nm, inst]);
+      return inst;
     },
     /** 函数名 → 那棵 `(def …)`。 */
     fnNodes: new Map(),
@@ -606,6 +669,8 @@ function infer(C, tree, scriptStmts) {
 
   /* 每个函数先摆一格骨架（标注读出来、形参的名字定下来）。 */
   const shells = new Map();
+  /* 发射那一趟还要照着骨架现造实例（`C.requireFn`：adapter 自己要的那几格库函数）。 */
+  C.shells = shells;
   for (const [nm, f] of C.fnNodes) {
     const ps = paramsOf(f);
     for (const p of ps) {
@@ -665,6 +730,8 @@ function infer(C, tree, scriptStmts) {
     if (round >= 2 && n === seenN) break;        // 不再长了，收工
     seenN = n;
   }
+  /* 顶层那一段里"谁都没说元素装什么"的空表 —— 最后再退到 `(arr dyn)`（见 `bindEmptyList`）。 */
+  for (const s of scriptStmts) bindEmptyList(s, C);
 
   /* 名字：只有一格实例时不加后缀（多数函数是这一档），多格时加类型后缀。
      方法的名字是 `<类名>_<方法名>`（mojo 那一门同一个落点）。 */
@@ -1309,6 +1376,9 @@ function pairFor(x, pair, once, pre, C) {
 function elemOf(it, node, C) {
   if (node !== undefined && tag(node) === 'call' && tag(kids(node)[0]) === 'n'
     && String(nameOf(kids(node)[0])) === 'range') return INT;
+  /* **`for v in []:`** —— 走零趟，可那格循环变量照旧要有个类型（不然报"用到了没赋过值
+     的名字 'v'"）。空表字面量落成 `(arr dyn)`，所以这儿也是箱子。 */
+  if (node !== undefined && tag(node) === 'list' && kids(node).length === 0) return DYN;
   if (it === null) return null;
   if (it.kind === 'arr') return it.elem;
   if (it.kind === 'string') return STR;
@@ -1344,6 +1414,33 @@ function looseTy(v, C) {
   const [opTok, aTok, bTok] = kids(v);
   if (!['+', '-'].includes(String(leaf(opTok)))) return null;
   return looseTy(aTok, C) ?? looseTy(bTok, C) ?? null;
+}
+
+/**
+ * **`xs = []` 里那格名字谁都没说装什么** —— 退到 `(arr dyn)`。
+ *
+ * 这一趟**排在 `scanBinds` 之后**跑：绑定那一趟里，答案常常在**再下一句**
+ * （`xs = []` 之后 `xs.append(1)`、或者形参那一侧）—— 那几条道答得更准，要让它们先说。
+ * 都没说的才落这儿。不这么办的后果是：`(set xs …)` 发得出来而 `(let xs …)` 没有
+ * （局部量那张表是在 `scanBinds` 之后就定下来的），到方言那侧报"未声明的变量 'xs'"。
+ *
+ * 只管**表**那一档。空字典的键与值是两格（`(dict K V)`），键退到哪一档没有"天经地义"
+ * 的答案 —— 那一格照旧走 `bindEmptyDict`（从 `d[k] = v` 那一句认）。
+ */
+function bindEmptyList(node, C) {
+  for (const s of allNodes(node)) {
+    if (tag(s) !== 'assign') continue;
+    const v = kids(s)[kids(s).length - 1];
+    if (tag(v) !== 'list' || kids(v).length !== 0) continue;
+    for (const g of kids(part(s, 'lhs') ?? { kind: 'list', items: [] })) {
+      const one = kids(g)[0];
+      if (tag(one) !== 'n') continue;
+      const n = String(nameOf(one));
+      const local = C.inScope() && !C.isDeclGlobal(n);
+      if ((local ? C.lookupHere(n) : C.lookup(n)) !== null) continue;
+      C.bind(C.ref(n), arrOf(DYN));
+    }
+  }
 }
 
 function bindEmptyDict(target, vt, C) {
@@ -1424,6 +1521,7 @@ function fnDecl(nm, inst, C) {
   for (const p of inst.params) C.bind(p.name, p.type);
   /* 先只走一趟"绑定"（不建 IR）—— 于是局部量的名字与类型在发第一句之前就全知道了。 */
   scanBinds(bodyNode, C);
+  bindEmptyList(bodyNode, C);
   const pnames = new Set(inst.params.map((p) => p.name));
   const locals = C.localsHere().filter(([n]) => !pnames.has(n));
   const stmts = flatten(kids(bodyNode)).flatMap((s) => stmtsOf(s, C));

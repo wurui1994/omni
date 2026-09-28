@@ -47,11 +47,34 @@ const inc = (i) => ({ kind: 'assign', target: i, value: bin('+', i, int(1)) });
 
 /* ─── 表上那几个 ─────────────────────────────────────────────────────────── */
 
-/** `sum(xs)` —— python 里空表交 `0`（int），所以累加量的类型跟着元素。 */
-export function sumOf(xs0, C) {
+/**
+ * `sum(xs)` —— python 里空表交 `0`（int），所以累加量的类型跟着元素。
+ *
+ * **箱子的表也接**（`[1.5, 2]` 落成 `(arr dyn)`，`[]` 也是）：那一档累加量也是一格箱子，
+ * 加法按标签分派 —— 那笔账在 `dyn.js` 的 `dynBin` 里，由 `expr.js` 把 `addDyn`
+ * （加法）与 `boxInt`（把 `0` 装箱）两格递进来，这一份照旧不 import dyn 那一族。
+ */
+export function sumOf(xs0, C, dynOps = null) {
   const h = holder(C);
   const xs = h.keep(xs0, 'sum_xs');
   const t = C.tyOfIR(xs);
+  if (t.kind === 'arr' && t.elem.kind === 'dyn' && dynOps !== null) {
+    const acc = h.decl('sum_a', t.elem, dynOps.boxInt(0));
+    const i = h.decl('sum_i', INT, int(0));
+    h.pre.push({
+      kind: 'while',
+      cond: bin('<', i, call1('alen', [xs])),
+      body: [
+        {
+          kind: 'assign',
+          target: acc,
+          value: dynOps.addDyn(acc, { kind: 'index', obj: xs, index: i }),
+        },
+        inc(i),
+      ],
+    });
+    return h.wrap(acc);
+  }
   if (t.kind !== 'arr' || !['int', 'real'].includes(t.elem.kind)) {
     throw new Error(`python->IR: \`sum()\` 只接数的表（这里是 ${t.kind === 'arr' ? `arr<${t.elem.kind}>` : t.kind}）`);
   }
@@ -160,7 +183,12 @@ export function sortedOf(xs0, C, desc = false, less = null) {
   /* 插入排序：j 从 1 起，往前挪到位。 */
   const j = h.decl('st_j', INT, int(1));
   const k = h.decl('st_k', INT, int(0));
-  const cur = h.decl('st_c', t.elem, { kind: 'index', obj: out, index: int(0) });
+  /* **初值摆成"没有"**（方言的 `(let n T)` 不带初值 = 那一格类型的零值）。
+     从前这儿写的是 `out[0]` —— 空表上那一句在**跑起来**的时候就撞墙：
+     `sorted([])` / `[].sort()` / `[].reverse()` / `.sort(key=…)` 四处都报
+     "array index out of range: 0 (length 0)"（量出来的原话）。循环第一句就给它赋值，
+     所以初值本来就没人读。 */
+  const cur = h.decl('st_c', t.elem, null);
   /* **"还往前挪吗"那一格标记** —— 见下面那段账：比较不许摆进 while 的条件里。 */
   const go = h.decl('st_g', BOOL, { kind: 'bool', value: true });
   h.pre.push({
@@ -482,7 +510,7 @@ export function sortStmts(xs, C, desc = false, less = null) {
   const lt = (x, y) => (less === null ? bin('<', x, y) : less(x, y));
   const j = h.decl('so_j', INT, int(1));
   const k = h.decl('so_k', INT, int(0));
-  const cur = h.decl('so_c', t.elem, { kind: 'index', obj: xs, index: int(0) });
+  const cur = h.decl('so_c', t.elem, null);
   /* **"还往前挪吗"那一格标记** —— 见下面那段账：比较不许摆进 while 的条件里。 */
   const go = h.decl('so_g', BOOL, { kind: 'bool', value: true });
   h.pre.push({
@@ -768,7 +796,7 @@ export function reverseStmts(xs, C) {
   const a = h.decl('rv_a', INT, int(0));
   const b = h.decl('rv_b', INT, bin('-', call1('alen', [xs]), int(1)));
   const t = C.tyOfIR(xs).elem;
-  const tmp = h.decl('rv_t', t, { kind: 'index', obj: xs, index: int(0) });
+  const tmp = h.decl('rv_t', t, null);
   h.pre.push({
     kind: 'while',
     cond: bin('<', a, b),
@@ -881,9 +909,15 @@ export function joinOf(sep0, xs0, C) {
   const sep = h.keep(sep0, 'jn_s');
   const xs = h.keep(xs0, 'jn_xs');
   const t = C.tyOfIR(xs);
-  if (t.kind !== 'arr' || t.elem.kind !== 'string') {
+  if (t.kind !== 'arr' || !['string', 'dyn'].includes(t.elem.kind)) {
     throw new Error(`python->IR: \`.join()\` 收一格串的表（这里是 ${t.kind === 'arr' ? `arr<${t.elem.kind}>` : t.kind}）`);
   }
+  /* **箱子的表**（`",".join([])` 那一档 —— 空表字面量就是 `(arr dyn)`）：一格一格
+     拆箱当串用。装的不是串时 `(asstr …)` 在运行期报，与 python 那边 TypeError 同一档
+     （方言里没有异常）。 */
+  const at = (idx) => (t.elem.kind === 'dyn'
+    ? call1('asstr', [{ kind: 'index', obj: xs, index: idx }])
+    : { kind: 'index', obj: xs, index: idx });
   const out = h.decl('jn_o', STR, str(''));
   const i = h.decl('jn_i', INT, int(0));
   h.pre.push({
@@ -896,7 +930,7 @@ export function joinOf(sep0, xs0, C) {
         then: [{ kind: 'assign', target: out, value: bin('+', out, sep) }],
         else_: null,
       },
-      { kind: 'assign', target: out, value: bin('+', out, { kind: 'index', obj: xs, index: i }) },
+      { kind: 'assign', target: out, value: bin('+', out, at(i)) },
       inc(i),
     ],
   });
@@ -1465,8 +1499,8 @@ export function sortByKeyStmts(xs, keys, C, desc = false, less = null) {
   const kt = C.tyOfIR(keys);
   const j = h.decl('sk_j', INT, int(1));
   const k = h.decl('sk_k', INT, int(0));
-  const cur = h.decl('sk_c', t.elem, { kind: 'index', obj: xs, index: int(0) });
-  const ck = h.decl('sk_ck', kt.elem, { kind: 'index', obj: keys, index: int(0) });
+  const cur = h.decl('sk_c', t.elem, null);
+  const ck = h.decl('sk_ck', kt.elem, null);
   const move = (dst, src0) => [
     {
       kind: 'assign',

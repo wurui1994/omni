@@ -136,3 +136,17 @@ print("abc".replace("", "-"), "".replace("", "-"), "abc".replace("", "-", 2), "a
 # f-string 的 `#`（前缀，负数时符号在前缀之前）、`e` / `E`、`g` / `G`。
 print(f"{255:#x} {255:#X} {8:#o} {5:#b} {-255:#x}")
 print(f"{12345.6789:e} {12345.6789:E} {0.00001234:g} {0.00001234:G} {1.5:.2e}")
+
+# ---- 串的 repr：引号是挑出来的，里头要转义 ------------------------------------
+# 量出来的原话：`repr("a'b")` 从前答 `'a'b'`（三个单引号，连 python 自己都读不回来）。
+# 规矩照 CPython 的 `unicode_repr`：里头有 `'` 而没有 `"` 时用双引号包（那时 `'` 不转义），
+# 别的一律单引号，里头的 `'` 写成 `\'`。这一格在 `lib/str.py` 的 `_str_repr` 里。
+print(repr("a'b"), repr('x"y'), repr("q'\"w"), repr("ab"), repr(""))
+# `\\` 与三格有名字的控制字符；别的 ASCII 控制字符是 `\xHH`（小写、补到两位）。
+print(repr("a\\b"), repr("t\n"), repr("r\r"), repr("t\tb"), repr(chr(7)), repr(chr(127)))
+# **容器里的元素走 repr** —— 源码里一个 `repr` 字都没有，那一格库函数是 adapter
+# 自己要出来的（`C.requireFn`）。
+print(["a'b", 'x"y', "t\n"], {"k'": "v\n"}, ("a'b", 1))
+# f-string 的 `!r` 与 `.format()` 的 `{!r}` 走同一条路。
+s = "a'b"
+print(f"{s!r}", "{!r}".format(s))

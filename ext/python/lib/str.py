@@ -44,3 +44,40 @@ def _str_center(s, w, fill=" "):
         if w % 2 == 1:
             left = left + 1
     return fill * left + s + fill * (marg - left)
+
+
+def _str_repr(s):
+    # 串的 `repr()` —— 照 CPython 的 `unicode_repr`。两条容易写错的：
+    #   * **引号是挑出来的**：里头有 `'` 而没有 `"` 时用双引号包（那时 `'` 不转义），
+    #     别的一律单引号。`repr("a'b")` 是 `"a'b"`，这一层从前答的是 `'a'b'`。
+    #   * `\\` 与"包它那一格引号"要转义；`\n` / `\r` / `\t` 有自己的写法，别的 ASCII
+    #     控制字符走 `\xHH`（小写十六进制、补到两位）。
+    #
+    # **明说的不足**：非 ASCII 的不可打印字符（`\u200b` 那一族）这一层照原样放过 ——
+    # python 那边转成 `\u200b`。要接得先有 `isprintable` 那张表（见 SPEC）。
+    q = "'"
+    if "'" in s and '"' not in s:
+        q = '"'
+    out = q
+    i = 0
+    n = len(s)
+    while i < n:
+        c = s[i]
+        o = ord(c)
+        if c == "\\":
+            out = out + "\\\\"
+        elif c == q:
+            out = out + "\\" + c
+        elif c == "\n":
+            out = out + "\\n"
+        elif c == "\r":
+            out = out + "\\r"
+        elif c == "\t":
+            out = out + "\\t"
+        elif o < 32 or o == 127:
+            d = "0123456789abcdef"
+            out = out + "\\x" + d[o // 16] + d[o % 16]
+        else:
+            out = out + c
+        i = i + 1
+    return out + q
