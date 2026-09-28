@@ -533,8 +533,11 @@ if (want('jsrun')) {
   const stampOf = (p) => { const s = statSync(p); return `${s.mtimeMs}:${s.size}`; };
   const key = [
     ...units.map((u) => `${u.path}=${stampOf(u.path)}`),
+    /* **`js_rt.js` 不在这张单子里**：它是**运行期**那一份（模块只 `import` 它的路径，
+       内容一个字都不进发出来的文本）。把它算进 key 的代价是"改一行运行时就重发 251 份、
+       白等 45 秒" —— 而那 45 秒里没有一个字节会变。改编译器（下面这几份）才要重发。 */
     ...['src/core/frontend-c/tccgen.js', 'src/core/frontend-c/tccpp.js', 'src/core/mir/emit_js.js',
-      'src/core/mir/ir.js', 'src/core/mir/js_rt.js', 'src/core/lang/c.js']
+      'src/core/mir/ir.js', 'src/core/lang/c.js']
       .map((f) => `${f}=${stampOf(join(ROOT, f))}`),
   ].join('\n');
   let linked = null;
@@ -575,52 +578,37 @@ if (want('jsrun')) {
       ok('全部运行时发成 JS 模块', `${linked.units.length} 份 .mjs、${bytes} 字节、`
         + `对外符号 ${linked.syms.size} 个${hit ? '（命中缓存，没重编）' : ''}`);
     }
-    /* **只装用得着的那些**（第一百五十二片的速度那一格）：251 份全装一趟 30 秒，
-       而判据只叫得出那几十个符号。根 = 提供这些符号的那几份 `.mjs`，再按 `deps`
-       求传递闭包 —— ESM 本来就只装这个闭包，我们要的是"该给谁叫 $init"这张名单。 */
-    const byOut = new Map(linked.units.map((u) => [u.out, u]));
-    const wanted = [...INIT_SEQ, 'Rf_type2char', 'Rf_str2type', 'Rf_asReal', 'Rf_ScalarReal',
-      'Rf_asInteger', 'Rf_ScalarInteger', 'Rf_xlength', 'Rf_allocVector', 'R_gc',
-      'omni_src_ptr', 'omni_eval_buf', ...JSRUN.map(([, sym]) => sym)];
-    const need = new Set();
-    const walk = (f) => {
-      if (f === undefined || need.has(f)) return;
-      need.add(f);
-      for (const d of byOut.get(f)?.deps ?? []) walk(d);
-    };
-    for (const nm of wanted) walk(linked.syms.get(nm));
-    const loadList = linked.units.filter((u) => need.has(u.out));
-    /* 装载 + 真调。入口自己写（`cJsEntry` 要一份有 `main` 的，libR 没有）。 */
+    /* **按需装载**（第二十五格）：一份模块都不静态 `import` —— 判据只交给运行时一张
+       **链接图**（名字 -> 文件，就是 `.syms.json`），谁被真调到才装谁。
+       装载那一下用 `createRequire`（Node 23 起 `require` 能同步吃 ESM）；
+       浏览器那一侧是同一张图，只是预热要 `await import`。 */
     const L = [];
     const logFile = join(dir, '$judge.log');
     writeFileSync(logFile, '');
     L.push("import { appendFileSync } from 'node:fs';");
+    L.push("import { createRequire } from 'node:module';");
     L.push(`import { RT as $RT } from ${JSON.stringify(join(ROOT, 'src/core/mir/js_rt.js'))};`);
     L.push(`const LOG = ${JSON.stringify(logFile)};`);
-    let k = 0;
-    for (const u of loadList) L.push(`import { $init as $i${k++} } from ${JSON.stringify(u.out)};`);
-    const MAIN = JSON.stringify(join(dir, 'main__arithmetic.mjs'));
-    void MAIN;
-    /* 初始化那一串 + SEXP 那几格都从符号表里现找（名字在别的模块里） */
-    L.push(`const $M = [${loadList.map((u) => JSON.stringify(u.out)).join(', ')}];`);
-    k = 0;
-    for (const [mod, sym] of JSRUN) {
-      L.push(`import { $fn_${sym} as $c${k++} } from ${JSON.stringify(join(dir, `${mod}.mjs`))};`);
-    }
-    L.push(`const INITS = [${loadList.map((_, i) => `$i${i}`).join(', ')}];`);
-    L.push('let n = 0;');
-    L.push('for (const f of INITS) { f(); n += 1; }');
-    L.push("process.stdout.write('$init\\t' + n + '\\n');");
-    /* 初始化那一串：照 R 自己的次序，一步一格印 */
-    L.push('const $ns = {};');
-    L.push('for (const p of $M) { const m = await import(p); for (const kk of Object.keys(m)) if (kk.startsWith("$fn_") && $ns[kk] === undefined) $ns[kk] = m[kk]; }');
-    L.push(`const $F = (s) => $ns['$fn_' + s] ?? null;`);
+    L.push('const say = (s) => appendFileSync(LOG, s + "\\n");');
+    L.push('const $req = createRequire(import.meta.url);');
+    L.push(`const SYMS = ${JSON.stringify(Object.fromEntries(linked.syms))};`);
+    L.push(`const $loaded = new Set();
+const $load = (file) => {
+  const m = $req(file);
+  if (m.$init !== undefined) m.$init();
+  $loaded.add(file);
+};
+$RT.setLinkMap(new Map(Object.entries(SYMS)), $load);
+const $F = (s) => {
+  try { return $RT.needFn(s); }
+  catch (e) { say('needFn\\t' + s + '\\t' + String(e && e.message).slice(0, 160)); return null; }
+};`);
     L.push(`for (const s of ${JSON.stringify(INIT_SEQ)}) {
   const f = $F(s);
-  if (f === null) { appendFileSync(LOG, 'init\\t' + s + '\\t没这个符号\\n'); continue; }
+  if (f === null) { say('init\\t' + s + '\\t没这个符号'); continue; }
   const t1 = Date.now();
-  try { const rv = f(); appendFileSync(LOG, 'init\\t' + s + '\\tok\\t' + (Date.now() - t1) + 'ms rv=' + rv + '\\n'); }
-  catch (e) { appendFileSync(LOG, 'init\\t' + s + '\\t炸了：' + String(e && e.message).slice(0, 100) + '\\n'); }
+  try { const rv = f(); say('init\\t' + s + '\\tok\\t' + (Date.now() - t1) + 'ms rv=' + rv); }
+  catch (e) { say('init\\t' + s + '\\t炸了：' + String(e && e.message).slice(0, 100)); }
 }`);
     L.push(`{
   const t2c = $F('Rf_type2char'); const s2t = $F('Rf_str2type');
@@ -643,11 +631,16 @@ if (want('jsrun')) {
   for (const src of ${JSON.stringify(EVAL_CHECKS)}) T('eval:' + src, () => { $put(src); return $ev(); });
   T('R_gc', () => { $F('R_gc')(); return 1; });
 }`);
-    k = 0;
-    for (const [, sym, args] of JSRUN) {
-      L.push(`process.stdout.write(${JSON.stringify(sym)} + '\\t' + $c${k}(${args}).toPrecision(17) + '\\n');`);
-      k += 1;
+    /* nmath 那十个也走同一条门 */
+    for (const [, sym] of JSRUN) {
+      L.push(`try { appendFileSync(LOG, ${JSON.stringify(sym)} + '\\t' + $F(${JSON.stringify(sym)})(`
+        + `${JSRUN.find((x) => x[1] === sym)[2]}).toPrecision(17) + '\\n'); }`
+        + ` catch (e) { appendFileSync(LOG, ${JSON.stringify(sym)} + '\\t炸了\\n'); }`);
     }
+    L.push("appendFileSync(LOG, '$loaded\\t' + $loaded.size + '\\n');");
+    /* **真的起来了几份**：`$loaded` 只数"我亲手 require 的"，被别人静态 `import`
+       进来的那几份也解析了、也 `$init` 了 —— 那才是装载成本。 */
+    L.push("appendFileSync(LOG, '$mods\\t' + $RT.linkStats().mods + '\\n');");
     const entry = join(dir, '$judge.mjs');
     writeFileSync(entry, `${L.join('\n')}\n`);
     /* **V8 的编译缓存**（`NODE_COMPILE_CACHE`）：55 MB 的 JS 解析一趟要 30 秒，
@@ -680,8 +673,15 @@ if (want('jsrun')) {
       ? (rs.stdout ?? '').trim().split('\n').map((s) => Number(s))
       : JSRUN.map(([, , , , c]) => c);
     const bad = [];
-    if (got.get('$init') !== String(loadList.length)) {
-      bad.push(`只有 ${got.get('$init')} 份的 $init 跑过（要 ${loadList.length}）`);
+    const nLoaded = Number(got.get('$loaded'));
+    if (!Number.isFinite(nLoaded) || nLoaded < 1) bad.push('一份模块都没装载？');
+    const nMods = Number(got.get('$mods'));
+    if (!Number.isFinite(nMods) || nMods < nLoaded) {
+      bad.push(`起来的份数说不清（$mods=${got.get('$mods')}、$loaded=${nLoaded}）`);
+    }
+    /* **按需**这件事本身也是判据：装满 251 份就等于没按需（那一档已经量过 30 秒）。 */
+    if (Number.isFinite(nMods) && nMods >= linked.units.length) {
+      bad.push(`${nMods} 份全起来了 —— 那不叫按需`);
     }
     /* 初始化那一串：该过的必须过，记着的那两笔账（缺 stat / getpid）允许炸 */
     for (const s of INIT_SEQ) {
@@ -725,7 +725,8 @@ if (want('jsrun')) {
       no('装起来真调 R 的运行时', bad.slice(0, 8).join('\n       '));
     } else {
       const skipped = INIT_SEQ.filter((s) => initOut.get(s) !== 'ok');
-      ok('装起来真调 R 的运行时', `装了 ${loadList.length}/${linked.units.length} 份（按根集合的闭包），`
+      ok('装起来真调 R 的运行时', `**按需**装了 ${nLoaded}/${linked.units.length} 份`
+        + `（连带静态 import 拉进来的一共起来 ${got.get('$mods')} 份），`
         + `R 自己那 ${INIT_SEQ.length} 步初始化过了 ${INIT_SEQ.length - skipped.length} 步`
         + `（欠的：${skipped.join('、') || '无'}），SEXP 那 ${SEXP_CHECKS.length} 格 + R_gc 都对，`
         + `R 的 ${EVAL_CHECKS.length} 句都与 Rscript 对得上，`

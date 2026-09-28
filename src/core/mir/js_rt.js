@@ -14,7 +14,7 @@
 import {
   memInit, memData, memSize, memGrow, memLoadFn, memStoreFn, memLoadFnN, memStoreFnN,
   flushOut, failRt, InterpFail, InterpUncaught, memImage, memImagePut } from '../interp/builtin.js';
-import { callLibc, hasLibc, ExitCall, setFnPtrCaller, libcAtExit } from '../interp/libc.js';
+import { callLibc, hasLibc, ExitCall, setFnPtrCaller, libcAtExit, setHeapInit } from '../interp/libc.js';
 import { evalJs, stderr } from '../host/native.js';
 
 /* ---- `setjmp` / `longjmp` 那一格（ADR-0047） --------------------------------
@@ -89,6 +89,15 @@ let memBump = 0;
  * 这是装载期，装不下就是这份程序在这个宿主上跑不起来）。
  */
 function memAlloc(bytes, align) {
+  /* **堆已经在内存尾上了**：这时晚来的模块（按需装载那条路）不能再从 bump 拿 ——
+   * 堆要连续、靠 brk 往内存尾上长，bump 在它后头切一块就把它堵死了。
+   * 所以这一刻起模块的 data 段**从堆里要**（那也只是内存，谁给的不重要）。 */
+  if (heapDone) {
+    const p = Number(callLibc('malloc', [BigInt(bytes + align)]));
+    if (p === 0) failRt('memAlloc: 堆里要不到 ' + bytes + ' 字节');
+    return (p + align - 1) & ~(align - 1);
+  }
+
   if (memBump === 0) {
     const pages = Number(memSize());
     if (pages === 0) memInit(1, 0);
@@ -140,12 +149,29 @@ function memPut(off, bytes, relocs, delta, fixes) {
  * 那一刻所有模块的 `memAlloc` 都走完了，这一块一定在最后。
  */
 let heapDone = false;
+/* 第一次 `malloc` 就把堆立起来（按需装载那条路上没有"入口"替它发 CCALL）。 */
+setHeapInit(() => { memHeap(); });
+
 function memHeap() {
   if (heapDone) return;
-  heapDone = true;
+  /* **先要那一页，再挂牌**：反过来的话 `memAlloc` 会看见 `heapDone` 就去找 `malloc`，
+   * 而 `malloc` 正是叫我们来立堆的那个人 —— 堆底那一页只能从 bump 上拿。 */
   const base = memAlloc(MEM_PAGE, MEM_PAGE);
+  heapDone = true;
   callLibc('__omni_heap_init', [BigInt(base)]);
 }
+
+/**
+ * **真的装起来跑了几份**（按需装载那条路上唯一能信的数）。
+ *
+ * `$load` 那一侧只数得到"我亲手 require 的文件"，而一份模块还可能因为别人要它的
+ * **数据符号**被静态 `import` 进来 —— 那一份也解析了、也 `$init` 了，只是没人数它。
+ * 每份模块的 `$init` 都恰好叫一次 `setFnPtrCaller`（幂等那道闸在它前头），
+ * 所以数它就是数"起来了几份"。
+ */
+let modsUp = 0;
+function rtSetFnPtrCaller(fn) { modsUp += 1; setFnPtrCaller(fn); }
+function linkStats() { return { mods: modsUp, files: linkLoaded.size }; }
 
 /**
  * **整个程序共用的那张函数表**（一个 .c 一个 .js 那条路上的"跨模块函数指针"）。
@@ -183,14 +209,72 @@ function fnBind(name, fn, pt, rt) {
   FN_TAB[i] = { fn, pt, rt };
 }
 
+/**
+ * **按需装载**（一个 .c 一个 .js 那条路的第二半）。
+ *
+ * 从前一份模块要用别人的函数，发的是一句静态 `import` —— ESM 于是把**整张传递闭包**
+ * 都装起来：R 那一套 251 份、55 MB，光装载就 30 秒（量出来的）。
+ * 而真正会被调到的只是其中一部分。
+ *
+ * 所以跨模块的函数引用改成**惰性**的：发一个小桩，第一次真被调的时候才问
+ * `needFn(名字)` —— 那一格要是还没人绑（`fnBind`），就按**链接图**（`setLinkMap` 交过来的
+ * 名字 -> 文件）把提供方那一份装进来，它顶层会把自己的函数绑好。
+ *
+ * 装载那一下由宿主给：node 上 `require`（Node 23 起 `require` 能同步吃 ESM）、
+ * 浏览器上先按同一张图把要用的几份 `await import` 进来（异步预热，同一张图）。
+ */
+let linkMap = null;
+let linkLoad = null;
+const linkLoaded = new Set();
+
+function setLinkMap(map, loader) {
+  linkMap = map;
+  linkLoad = loader;
+}
+
+/** 名字 -> 已经绑好的那一格（没绑回 null）。 */
+function fnByName(name) {
+  const i = FN_SLOT.get(name);
+  if (i === undefined) return null;
+  return FN_TAB[i] === undefined ? null : FN_TAB[i];
+}
+
+/** 装提供 `name` 的那一份模块（幂等）。回 true = 装了或本来就有。 */
+function linkEnsure(name) {
+  if (linkMap === null) return false;
+  const file = linkMap.get(name);
+  if (file === undefined) return false;
+  if (linkLoaded.has(file)) return false;
+  linkLoaded.add(file);
+  linkLoad(file);
+  return true;
+}
+
+/** 惰性桩问的就是这一格：拿到身子（要么已经绑好，要么现装那一份）。 */
+function needFn(name) {
+  const hit = fnByName(name);
+  if (hit !== null) return hit.fn;
+  if (linkEnsure(name)) {
+    const again = fnByName(name);
+    if (again !== null) return again.fn;
+  }
+  failRt("需要 '" + name + "' 但没人提供它（链接图里没有，或那一份没绑）");
+  return undefined;
+}
+
 function fnEntry(fp) {
   const no = Number(fp) - 1;
   if (no < 0) failRt('call of a null function pointer');
   const e = FN_TAB[no];
   if (e === undefined) failRt('function pointer index ' + no + ' out of range');
   if (e === null) {
+    /* 槽位开了但身子还没绑：按链接图把提供方装进来（函数指针也走按需装载）。 */
     let nm = '?';
     for (const [k, v] of FN_SLOT) if (v === no) nm = k;
+    if (linkEnsure(nm)) {
+      const again = FN_TAB[no];
+      if (again !== null && again !== undefined) return again;
+    }
     failRt("call of an unbound function pointer '" + nm + "'（那一份模块没装载？）");
   }
   return e;
@@ -254,6 +338,8 @@ function memImageLoad(img) {
 export const RT = {
   memInit,
   b64,
+  setLinkMap,
+  needFn,
   memImageSave,
   memImageLoad,
   memData,
@@ -279,7 +365,8 @@ export const RT = {
   failRt,
   flushOut,
   libcAtExit,
-  setFnPtrCaller,
+  setFnPtrCaller: rtSetFnPtrCaller,
+  linkStats,
   sjTok,
   sjSet,
   sjThrow,

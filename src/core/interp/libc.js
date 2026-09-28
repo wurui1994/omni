@@ -471,6 +471,13 @@ export function cFormat(fmt, va) {
 
 const HEAP_HDR = 16n;    // 块头字节数（也是对齐粒度）
 let heapBase = 0n;       // 0 = 还没初始化（也就是这个模块没用到堆）
+/** **堆自己起来**那一格（按需装载那条路，第一百五十二片）：
+ *  从前堆底是入口那条 `__omni_heap_init` 交过来的，而按需装载时"入口"可能压根没用到堆
+ *  —— 先被装进来的那份模块里第一次 `malloc` 就没有堆。所以留一个钩子：
+ *  `js_rt` 把"在内存尾上要一页"那件事交给我们，第一次 malloc 自己叫它。 */
+let heapInitHook = null;
+
+export function setHeapInit(fn) { heapInitHook = fn; }
 
 function heapNeed(n) {
   /* `malloc(0)` 也给一块真地址（C11 7.22.3 允许两种，glibc 与 tcc 的 libc 都给地址）——
@@ -500,6 +507,7 @@ function heapCoalesce() {
 }
 
 function heapAlloc(bytes) {
+  if (heapBase === 0n && heapInitHook !== null) heapInitHook();
   if (heapBase === 0n) {
     throw new Error('libc: malloc 之前堆没有初始化（入口那条 __omni_heap_init 没发？）');
   }

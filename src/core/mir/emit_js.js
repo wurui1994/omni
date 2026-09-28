@@ -167,7 +167,7 @@ function b64Encode(bytes) {
 const JS_PROLOGUE = `'use strict';
 const { memInit, memData, memAlloc, memPut, memHeap, memSize, memGrow,
   memLoadFn, memStoreFn, memLoadFnN, memStoreFnN,
-  b64, fnSlot, fnBind, fnCall, fnCallLibc,
+  b64, setLinkMap, needFn, fnSlot, fnBind, fnCall, fnCallLibc,
   callLibc, hasLibc, isExitCall, failRt, flushOut, libcAtExit, setFnPtrCaller,
   sjTok, sjSet, sjThrow, sjCatch } = $rt;
 const $W = (x) => BigInt.asIntN(64, x);
@@ -734,7 +734,17 @@ class JsFromMir {
          表里没有的名字照旧留桩 —— 那是 libc，宿主提供。 */
       const f = mir.funcs[no];
       if (this.modular && f.thunk !== null && f.thunk !== undefined && this.syms.has(f.thunk)) {
-        this.needImport(this.syms.get(f.thunk), `$fn_${f.thunk} as $f${no}`);
+        /* **别的模块提供的函数：发一个惰性桩，不发静态 import**（第一百五十二片）。
+         *
+         * 静态 `import` 会把整张传递闭包拽起来 —— R 那一套 251 份、55 MB，装载 30 秒，
+         * 而真被调到的只是一部分。桩第一次被调时才问 `needFn(名字)`：那一格没人绑，
+         * 运行时按**链接图**把提供方那一份装进来（`setLinkMap`）。
+         * 拿到的身子记在桩自己那一格里，所以只有第一次过那张表。 */
+        bodies.push(`let $c${no} = null;`);
+        bodies.push(`function $f${no}(...a) {`);
+        bodies.push(`  if ($c${no} === null) $c${no} = needFn(${JSON.stringify(f.thunk)});`);
+        bodies.push(`  return $c${no}(...a);`);
+        bodies.push('}');
         continue;
       }
       /* **没有身子的桩**（`tu` 档里按值收发 struct 的那几种，见 `externThunk`）：
@@ -943,7 +953,14 @@ const $callFromLibc = (fp, args) => {
      */
     const lib = this.modular && !mir.funcIndex.has('main');
     this.hasRun = lib ? 'init' : true;
-    const L = [lib ? 'function $init() {' : 'function $run() {'];
+    /* **被 import 进来就算装载**（按需装载那条路）：`$init` 幂等，而且模块末尾自己叫一遍
+       —— 从前是"入口那一层把每一份的 `$init()` 叫一遍"，按需装载时压根没有那一层：
+       一份模块可能只是因为别人要它的**数据符号**才被 `import` 进来的，那样它的
+       `$g0`（影子栈顶）就还是 `undefined`，头一次进它的函数就是
+       `Cannot mix BigInt and other types`。 */
+    const L = lib
+      ? ['let $inited = false;', 'function $init() {', '  if ($inited) return;', '  $inited = true;']
+      : ['function $run() {'];
     if (mir.mem !== null && !this.modular) {
       L.push(`  memInit(${mir.mem.min}, ${mir.mem.max});`);
       /* data 段就是一串数字字面量。不走 base64/`Buffer`：**这一份自己也要能被 omni
@@ -961,6 +978,7 @@ const $callFromLibc = (fp, args) => {
     if (lib) {
       L.push(`  $f${no}();`);
       L.push('}');
+      L.push('$init();');
       return L;
     }
     L.push('  let code = 0;');
