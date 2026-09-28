@@ -84,6 +84,15 @@ def main():
     print("ß".title(), "ﬃ".title(), "σΣ".title(), "ʲΣ".title())
     print("ß".capitalize(), "abc def".capitalize(), "ǅ".capitalize(), "σΣ".capitalize())
     print("ΣΣ".swapcase(), "ǅa".swapcase(), "İ".swapcase(), "Groß".swapcase())
+
+    # 十二、分类那一族也走同一张表。两条容易写错的口径：
+    #   * `isupper()` 不是"每一格都大写"，是"**有至少一格 cased，而且没有反过来的那一档**"
+    #     —— 所以 `"A1"` 是 True、`"1"` 是 False、`"ǅA"` 是 False（ǅ 是首字母大写那一档）；
+    #   * `isdigit` / `isdecimal` / `isnumeric` **是三张不同的表**：`½` 只有 isnumeric、
+    #     `Ⅻ`（罗马数字）也只有 isnumeric 而且还是大写的。
+    print("äöü".isalpha(), "½".isnumeric(), "½".isdigit(), "٣".isdigit(), "１２３".isdecimal())
+    print("Ⅻ".isnumeric(), "Ⅻ".isupper(), "ǅA".isupper(), "A1".isupper(), "1".isupper())
+    print("ß".islower(), "ʲ".islower(), "\u00a0".isspace(), "".isalpha(), "aA".islower())
     print("abc".upper(), "ABC".lower(), "".upper(), "".lower(), "".casefold())
     print("héllo wörld".upper(), "HÉLLO WÖRLD".lower())
 

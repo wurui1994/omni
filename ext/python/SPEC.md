@@ -1333,13 +1333,13 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
       **偏移量只在 adapter 里**，python 源码那一侧只说"查第 i 格"。
     - **没人用就一格字节都不进产物**：`print("hi")` 那种 `emit sx` 里一条 `(memory …)`
       都没有；用到的那一份原生产物 618K（里头含 101344 字节的表）。
-    - **总判据 `npm run py:ucase-sweep`（三趟，各约 111 万个码点，全绿）**：
-      一趟是**四个映射**（upper / lower / casefold，4.9s），二趟是**尾位 sigma 的前位与
-      后位**（`("αΣ"+c).lower()` 与 `("α"+c+"Σ").lower()`，26.0s），
-      三趟是 **title / capitalize / swapcase**（外加 `("a"+c).title()` —— 词边界那条规矩
-      单独一格字符量不到，16.7s）。写成一格 while 循环 —— 一百万条语句那种写法编译期就
-      撑不住（量过：3365 条就被 30s 看门狗掐了）。`examples/unicode.py` 第十、十一段是
-      常驻的那两格（三条腿）。
+    - **总判据 `npm run py:ucase-sweep`（四趟，各约 111 万个码点，全绿）**：
+      一趟**四个映射**（upper / lower / casefold，7.0s）、二趟**尾位 sigma 的前位与后位**
+      （43.2s）、三趟 **title / capitalize / swapcase**（外加 `("a"+c).title()`，19.8s）、
+      四趟**分类那一族**（8 个谓词 + `("A"+c).isupper()` / `("a"+c).islower()`，24.5s）。
+      每一趟都有"单独一格字符量不到"的那一格搭在里头 —— 上下文那几条规矩只有多字符才现形。
+      写成一格 while 循环 —— 一百万条语句那种写法编译期就撑不住（量过：3365 条就被
+      30s 看门狗掐了）。`examples/unicode.py` 第十～十二段是常驻的那三格（三条腿）。
     - **那两位上下文标志的探针写错过两回，两回都是判据抓出来的**：
       一、`(SIG + c).lower()[0]` —— Σ 在**开头**、前面一格都没有，而尾位 sigma 要求
       "前面有 cased"，于是它恒等于 σ：两位一位恒 1、一位恒 0。**单字符那一趟
@@ -1361,14 +1361,19 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
       要先绑上**（`[w.upper() for w in words]` 从前收不到实例）；实例收集**跑到不再长
       为止**（从前钉死三轮，而 `.lower()` -> `_str_lower` -> `_ucase_final_sigma` ->
       `_ucase_ignorable` -> `_ucase_rec` 是四层）。
-    - 还没接到这条路上的：`isalpha` 那一族的非 ASCII（表里那几位标志已经有了，缺的是接线
-      与"至少一格 cased"那几条口径）。**`.title()` / `.capitalize()` / `.swapcase()` 接上了**
-      （2026-09-29）：多加一位标志（第 10 位 = Cased 本身，`.title()` 记"上一格算不算
-      cased"要它 —— 与第 8 位"cased 而且不可忽略"只在 ʲ 那一族上不同），
+    - 还没接到这条路上的：`.istitle()`（词边界那条规矩的谓词版）、`isidentifier` /
+      `isprintable`（那是另外两张表）。**大小写与分类那一族收完了**（2026-09-29）：
+      `.title()` / `.capitalize()` / `.swapcase()` 那三格加**一位新标志**
+      （第 10 位 = Cased 本身，`.title()` 记"上一格算不算 cased"要它 —— 与第 8 位
+      "cased 而且不可忽略"只在 ʲ 那一族上不同）；`isalpha` / `isdigit` / `isdecimal` /
+      `isnumeric` / `isalnum` / `isspace` / `isupper` / `islower` 八格直接读标志位。
       三格的口径都是**先拿 python3 量出来的**：`.capitalize()` 头一格走**首字母大写映射**
-      （`ß` -> `Ss`、`ǅ` -> `ǅ`，不是 upper）、其余小写；`.swapcase()` 大写换小写、
-      小写换大写、**首字母大写那一档两边都不是**（`ǅa` -> `ǅA`）；三格里换出来的小写
-      **照旧走尾位 sigma**（`"ΣΣ".swapcase()` 是 `σς`、`"σΣ".title()` 是 `Σς`）。
+      （`ß` -> `Ss`、`ǅ` -> `ǅ`，不是 upper）、其余小写；`.swapcase()` 的**首字母大写那一档
+      两边都不是**（`ǅa` -> `ǅA`）；三格里换出来的小写**照旧走尾位 sigma**
+      （`"ΣΣ".swapcase()` 是 `σς`、`"σΣ".title()` 是 `Σς`）；
+      `isupper` / `islower` **不是"每一格都大写"**，是"有至少一格 cased、而且没有反过来的
+      那一档"（`"A1"` True / `"1"` False / `"ǅA"` False）；`isdigit` / `isdecimal` /
+      `isnumeric` 是**三张不同的表**（`½` 只有 isnumeric、`Ⅻ` 只有 isnumeric 且还是大写）。
     **那一件先量的事已经量了**（2026-09-28，拿本机 python3 遍历 0..0x10FFFF 全部 1114112 个
     码点，逐格算 upper/lower/title/casefold 与 9 个分类谓词，再去重）：
     - **去重之后只有 294 份记录** —— 整个 Unicode 的"大小写 + 分类"行为就这 294 种。

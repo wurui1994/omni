@@ -151,6 +151,81 @@ def _str_capitalize(s):
     return out
 
 
+def _ucase_all(s, bit):
+    # `isalpha` 那一族的共同形状：**空串是 False**，非空要求每一格都带那一位。
+    n = len(s)
+    if n == 0:
+        return False
+    i = 0
+    while i < n:
+        if (_urecf(_ucase_rec(ord(s[i]))) >> bit) & 1 == 0:
+            return False
+        i = i + 1
+    return True
+
+
+def _str_isalpha(s):
+    return _ucase_all(s, 0)
+
+
+def _str_isdigit(s):
+    return _ucase_all(s, 1)
+
+
+def _str_isdecimal(s):
+    return _ucase_all(s, 2)
+
+
+def _str_isnumeric(s):
+    return _ucase_all(s, 3)
+
+
+def _str_isalnum(s):
+    return _ucase_all(s, 4)
+
+
+def _str_isspace(s):
+    return _ucase_all(s, 5)
+
+
+def _str_isupper(s):
+    # **不是"每一格都大写"**：口径是"有至少一格 cased，而且没有小写、没有首字母大写那一档"
+    # （CPython 的 `unicode_isupper`）。所以 `"A1".isupper()` 是 True、`"1"` 是 False、
+    # `"ǅA"` 是 False（ǅ 是首字母大写那一档）。
+    # 首字母大写那一档 = cased 而且既不大写也不小写（Cased = Lower + Upper + Lt）。
+    n = len(s)
+    i = 0
+    cased = False
+    while i < n:
+        f = _urecf(_ucase_rec(ord(s[i])))
+        up = (f >> 6) & 1 == 1
+        lo = (f >> 7) & 1 == 1
+        ti = (not up) and (not lo) and ((f >> 10) & 1 == 1)
+        if lo or ti:
+            return False
+        if up:
+            cased = True
+        i = i + 1
+    return cased
+
+
+def _str_islower(s):
+    # 与 `_str_isupper` 对称。
+    n = len(s)
+    i = 0
+    cased = False
+    while i < n:
+        f = _urecf(_ucase_rec(ord(s[i])))
+        up = (f >> 6) & 1 == 1
+        lo = (f >> 7) & 1 == 1
+        ti = (not up) and (not lo) and ((f >> 10) & 1 == 1)
+        if up or ti:
+            return False
+        if lo:
+            cased = True
+        i = i + 1
+    return cased
+
 def _str_swapcase(s):
     # 大写的换小写、小写的换大写，**别的一格不动**（`ǅ` 是首字母大写那一档，两边都不是，
     # 所以 `"ǅa".swapcase()` 是 `ǅA`）。

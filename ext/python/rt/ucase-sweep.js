@@ -51,6 +51,11 @@ const PASSES = [
      （上一格 `a` 是 cased，所以这一格该走小写而不是首字母大写）—— 单独一格字符量不到它。 */
   ['title / capitalize / swapcase',
     `${HEAD}            print(cp, c.title(), c.capitalize(), c.swapcase(), ("a" + c).title())\n${TAIL}`],
+  /* 四：**分类那一族**。`("A"+c).isupper()` / `("a"+c).islower()` 那两格是"有至少一格
+     cased、而且没有反过来的那一档"那条口径 —— 单独一格字符量不到它
+     （`"ǅA".isupper()` 是 False，而 `"ǅ"` 与 `"A"` 单独看都不红）。 */
+  ['分类那一族（isalpha / isdigit / … / isupper / islower）',
+    `${HEAD}            print(cp, c.isalpha(), c.isdigit(), c.isdecimal(), c.isnumeric(), c.isalnum(), c.isspace(), c.isupper(), c.islower(), ("A" + c).isupper(), ("a" + c).islower())\n${TAIL}`],
 ];
 
 const dir = mkdtempSync(join(tmpdir(), 'omni-ucase-sweep-'));

@@ -56,6 +56,16 @@ export const LIB_METHODS = new Map([
   ['string.title', '_str_title'],
   ['string.capitalize', '_str_capitalize'],
   ['string.swapcase', '_str_swapcase'],
+  /* 分类那一族（同一张表的标志位）：`isupper` / `islower` **不是"每一格都大写"**，
+     口径是"有至少一格 cased、而且没有反过来的那一档"（见 `lib/ucase.py` 里那两格）。 */
+  ['string.isalpha', '_str_isalpha'],
+  ['string.isdigit', '_str_isdigit'],
+  ['string.isdecimal', '_str_isdecimal'],
+  ['string.isnumeric', '_str_isnumeric'],
+  ['string.isalnum', '_str_isalnum'],
+  ['string.isspace', '_str_isspace'],
+  ['string.isupper', '_str_isupper'],
+  ['string.islower', '_str_islower'],
 ]);
 
 /** 接收者装的东西 + 方法名 → 库函数名（没有就答 null）。 */
