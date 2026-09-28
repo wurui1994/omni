@@ -591,6 +591,31 @@ for (const [name, minFill, minColors] of [['04-shader.pss', 0.9, 1000],
   }
 }
 
+/* ── `glgettex` 碰上 3D 槽：回 -1，**不许把进程带走** ─────────────────────────────
+   参考那一行把 `tex[itex].tar` 直接递给 `glGetTexImage`，缓冲只按 `xs*ys` 开 ——
+   3D 那一格照整卷写（溢出）、立方图那一格是 `GL_INVALID_ENUM`。我们照抄过这一行，
+   于是下面这几句**段错误**（exit 139、什么都没印）。现在三台宿主对齐在 -1 上
+   （WebGL2 那一档本来就回 -1）。判的是两件事：回值是 -1、**那块数组没被动过**。 */
+{
+  const src = join(out, 'gettex3d.pss');
+  writeFileSync(src, '()\n{\n   enum {N=4};\n   static vol[N*N*N], buf[N*N];\n'
+    + '   for(i=0;i<N*N*N;i++) vol[i] = i;\n   glsettex(3,vol,N,N,N,KGL_FLOAT);\n'
+    + '   for(i=0;i<N*N;i++) buf[i] = -7;\n   r = glgettex(3,buf,N,N,KGL_FLOAT);\n'
+    + '   printf("gettex3d %g %g %g\\n",r,buf[0],buf[N*N-1]);\n}\n');
+  const rp = spawnSync(process.execPath,
+    [join(ROOT, 'src/cli.js'), 'run', src, '--gfx', 'gl', '--frames', '1'],
+    { encoding: 'utf8', cwd: ROOT, timeout: 180000,
+      env: { ...process.env, OMNI_GFX_MODE: 'render' } });
+  const got = ((rp.stdout ?? '').split('\n').find((l) => l.startsWith('gettex3d')) ?? '').trim();
+  if (got === 'gettex3d -1 -7 -7') {
+    ok('`glgettex` 碰上 3D 槽：回 -1、数组不动（参考那一行是溢出）', got);
+  } else {
+    no('`glgettex` 碰上 3D 槽：回 -1、数组不动',
+      `印的是 ${JSON.stringify(got)}（该是 "gettex3d -1 -7 -7"；`
+      + `退出码 ${rp.status}${rp.status === 139 ? ' —— 139 就是那个溢出' : ''}）`);
+  }
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed（本机 OpenGL 设备）\n`);
 process.exit(fail === 0 ? 0 : 1);
 

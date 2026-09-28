@@ -1001,6 +1001,9 @@ int omni_ev_gl_univ(double h, int comps, int isint, long n, const double *v) {
  *    出来的就是一像素一格 —— 跟着纹理走，不跟着实参走。
  * 2. **写回几格由这一层算**（回值就是它，出错回 -1）：宿主那一侧（N-API / omni_fmt）
  *    只有数组长度，算不出这个数。
+ *
+ * 一处**有意不照抄**：非 2D 的槽回 -1（见函数里那一段）—— 参考那一行在 3D 上溢出、
+ * 在立方图上是 `GL_INVALID_ENUM`。
  */
 int omni_ev_gl_gettex(int slot, int w, int h, long cap, double *out) {
   if (!g_on || out == NULL || w < 1 || h < 1) return -1;
@@ -1008,6 +1011,18 @@ int omni_ev_gl_gettex(int slot, int w, int h, long cap, double *out) {
   int i = -1;
   for (int k = 0; k < g_ntex; k++) if (g_tex[k].slot == slot) i = k;
   if (i < 0) return -1;
+  /* **只读 2D 那一档**（三台宿主同一句话：非 2D 回 -1）。
+     参考那一侧是把 `tex[itex].tar` 直接递给 `glGetTexImage`（`polydraw.c:1382`），
+     缓冲只按 `xs*ys` 开 —— 3D 那一格于是**照整卷写**（溢出）、立方图那一格
+     `glGetTexImage(GL_TEXTURE_CUBE_MAP,…)` 干脆是 `GL_INVALID_ENUM`（什么都没写、
+     照着未初始化的内存往回填）。我们从前照抄了这一行，探针
+     `glsettex(3,src,4,4,4,KGL_FLOAT)` 接 `glgettex(3,buf,4,4,…)` **当场段错误**。
+     这一格学不了，而语料里 `glgettex` 只用在 2D 槽上（`ken/gpgpu.pss`、
+     `ken/gspiral.pss`）；WebGL2 那一档本来就回 -1，于是三台对齐在 -1 上。 */
+  if (g_tex[i].tar != GL_TEXTURE_2D) {
+    ev_err("glgettex：这一档只读 2D 纹理（3D / 立方图读不回来）", NULL);
+    return -1;
+  }
   long n = (long)w * (long)h;
   if (n > (long)g_tex[i].w * (long)g_tex[i].h) return -1;
   int kind = g_tex[i].fmt & 15;

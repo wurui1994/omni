@@ -4184,3 +4184,49 @@ GPGPU 那一族非它不可：零参那条路只有 8 位、而且尺寸只能�
 页面那一档本来就有**自己**的一条按单元产物的路（`emit js --units` 之后由页面 `import(URL)` 装），
 `/api/run` 那条是"整份程序"的路，让它照旧。加上这道闸之后 `tests/studio` 回到 **74 / 0**，
 而 node 那一侧照旧走单元（`eval units 复用 2 份`）。
+
+## 39. `glgettex` 碰上 3D / 立方图：参考那一行是溢出，我们照抄了（2026-09-29）
+
+任务 #26 的下一格本来记的是"3D 与立方体的 `glgettex` 读回（本机 GL 已经能读，WebGL2
+那一档非 2D 目标直接回 -1）"。**"本机 GL 已经能读"是错的** —— 立起探针三句就把进程带走了：
+
+```
+()
+{
+   enum {N=4};
+   static vol[N*N*N], buf[N*N];
+   for(i=0;i<N*N*N;i++) vol[i] = i;
+   glsettex(3,vol,N,N,N,KGL_FLOAT);          // 这一槽的 tar 变成 GL_TEXTURE_3D
+   for(i=0;i<N*N;i++) buf[i] = -7;
+   r = glgettex(3,buf,N,N,KGL_FLOAT);
+   printf("gettex3d %g %g %g\n",r,buf[0],buf[N*N-1]);
+}
+```
+
+`exit=139`（Segmentation fault），什么都没印 —— 而 `--frames 1` 那一趟连 `#gfx png`
+那行都没有，**只看 stdout 会以为它"静静地什么都没发生"**（要 `echo $?` 才看见 139）。
+
+根因在参考自己那一行（`polydraw.c:1382`）：
+
+```c
+i = xs*ys*glbyteperpix;                      // 缓冲只按一层开
+if (i > gbmpmal) { gbmpmal = i; gbmp = (char *)realloc(gbmp,gbmpmal); }
+glBindTexture(tex[itex].tar,itex);
+glGetTexImage(tex[itex].tar,0,format,type,gbmp);   // tar 可能是 3D / CUBE_MAP
+```
+
+* `tar == GL_TEXTURE_3D`：`glGetTexImage` 按**整卷**写（`xs*ys*zs`）⇒ 越过缓冲尾巴；
+* `tar == GL_TEXTURE_CUBE_MAP`：这个枚举对 `glGetTexImage` 是非法的（要给某一面），
+  GL 什么都不写 ⇒ 参考照着 `gbmp` 里的旧内容往回填。
+
+所以这一格**不是"参考能读、我们还没接"，而是参考自己就是坏的**（第 36 节那条口径：
+归因到某一格之前先量参考到底做了什么 —— 这次量的是它的源码）。学不了，于是：
+
+**三台宿主对齐在 -1 上**。WebGL2 那一档本来就回 -1（`gfx-gl.js` 的 `texGet`：
+`t.tar !== TEXTURE_2D` ⇒ `miss('glgettex:3d'|'glgettex:cube') - 1`），本机那一档现在也回 -1
+并且**不动那块数组**。语料这一侧没有损失：`glgettex` 只出现在两份里
+（`ken/gpgpu.pss`、`ken/gspiral.pss`），两份都是 2D 槽。
+
+判据（`tests/gl/run.js`，26 -> **27**）把上面那份探针写进 `.omni-cache/test-gl/` 跑一趟，
+判 `gettex3d -1 -7 -7` 两件事：回值是 -1、**`buf` 一格都没被动过**。红那一边的信息里带上
+退出码，139 就点明是那个溢出。
