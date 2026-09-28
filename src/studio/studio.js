@@ -1686,7 +1686,9 @@ function labScheduleRefresh() {
 /** 一次性初始化（懒：第一次进 Lab 模式才调）。 */
 async function initLab() {
   if (LAB.inited) {
-    $('#lab-grammar').focus();
+    /* 再进来一次**不许把视口拖到末尾**：`textarea.value = …` 之后光标停在末尾，
+       这时 `focus()` 会把光标滚进视野 ⇒ 看见的是语法的尾巴。手机上还会顺手弹键盘。 */
+    if (wideEnoughToFocus()) $('#lab-grammar').focus();
     return;
   }
   LAB.inited = true;
@@ -1771,6 +1773,7 @@ async function initLab() {
     }
     LAB.grammarText = gta.value;
     labPaintGrammar(gta.value);
+    labTop(gta, $('#lab-gview'));
     labScheduleRefresh();
   };
 
@@ -1778,11 +1781,22 @@ async function initLab() {
   gta.value = LAB_TEMPLATES.expr;
   LAB.grammarText = gta.value;
   labPaintGrammar(gta.value);
+  labTop(gta, $('#lab-gview'));
   sta.value = '1 + 2 * 3';
   LAB.sampleText = sta.value;
   labPaintSample(sta.value);
-  gta.focus();
+  if (wideEnoughToFocus()) gta.focus();
   labRefresh();
+}
+
+/** 换了一份内容之后回到**开头**（光标也回去）—— 高亮那一层要跟着，不然两层错位。 */
+function labTop(ta, view) {
+  ta.selectionStart = 0;
+  ta.selectionEnd = 0;
+  ta.scrollTop = 0;
+  ta.scrollLeft = 0;
+  view.scrollTop = 0;
+  view.scrollLeft = 0;
 }
 
 function labInsert(ta, s) {
@@ -1977,6 +1991,14 @@ function initTabs() {
 }
 
 /**
+ * 自动聚焦只在**宽屏**上做。
+ *
+ * 手机上"进了这个模式就把光标放进输入框"等于**立刻弹出软键盘**，它盖掉小半屏，
+ * 而用户进来第一件事多半是看，不是打字。桌面上反过来 —— 少这一下每次都要先点一次。
+ */
+const wideEnoughToFocus = () => window.matchMedia('(min-width: 801px)').matches;
+
+/**
  * 切模式。**展示 = 首页**（一屏卡片），IDE = 编辑与运行。
  *
  * 首页那一屏只在第一次进去时铺（`renderGallery` 自己看 `childElementCount`）——
@@ -1987,9 +2009,12 @@ function setMode(m) {
   for (const o of seg.children) o.classList.toggle('on', o.dataset.mode === m);
   document.body.dataset.mode = m;
   localStorage.setItem('omni.mode', m);
+  /* 换版面先把抽屉收了 —— 另外三套里 `.tree` 是 `display:none` 的，
+     开着切走的话那层遮罩会留在屏上盖住一整页（点一下才消）。 */
+  closeDrawer();
   if (m === 'show') renderGallery();
-  if (m === 'ide') $('#edit').focus();
-  if (m === 'console') $('#con-in').focus();
+  if (m === 'ide' && wideEnoughToFocus()) $('#edit').focus();
+  if (m === 'console' && wideEnoughToFocus()) $('#con-in').focus();
   if (m === 'lab') initLab();
 }
 

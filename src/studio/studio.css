@@ -581,7 +581,10 @@ body {
     box-shadow: 8px 0 24px rgba(0,0,0,.14);
   }
   .tree.open { transform: translateX(0); }
-  .only-narrow { display: grid; }
+  /* 抽屉那颗按钮**只在 IDE 那一套里有用** —— 另外三套版面把 `.tree` 整个
+     `display:none` 掉了（见 `[data-mode=…] .shell > .pane`）。从前它在四个模式上
+     都摆着：在展示/控制台/实验室里按下去只盖出一层灰遮罩，抽屉一个像素都不动。 */
+  [data-mode="ide"] .only-narrow { display: grid; }
   .out { grid-row: 2; }
   /* 首页那一套在窄屏上是**一整块**（上面那两行是给 IDE 那一套排的）。 */
   [data-mode="show"] .shell { grid-template-rows: minmax(0, 1fr); padding: 8px; }
@@ -589,7 +592,8 @@ body {
   [data-mode="console"] .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
   [data-mode="console"] .console {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1.3fr) minmax(0, .8fr) minmax(0, .8fr);
+    /* 命令行那一格拿大头：摞成三段之后它只剩两百来像素，而它是这一套的主角。 */
+    grid-template-rows: minmax(0, 1.6fr) minmax(0, .7fr) minmax(0, .7fr);
   }
   .con-main { grid-row: 1; }
   /* 实验室那一套在窄屏上也摞成一列 —— **那一格在文件末尾**（`[data-mode="lab"] .lab`
@@ -725,6 +729,12 @@ body {
  * （量出来 `#lab-status` 的右边界在 435px 处，而屏只有 390px）。
  */
 @media (max-width: 800px) {
+  /* 两件事，缺一不可：
+     ① `.shell` 在窄屏上是**两行**（那是给 IDE 那一套排的）⇒ 实验室这一整块只占了
+        第一行，下半屏整个空着（量出来内容到 430px 就没了，而屏有 844px）。
+        展示与控制台那两套早就各自把行数改回一行了，实验室这一格漏了。
+     ② 自己内部也从两列摞成两行。 */
+  [data-mode="lab"] .shell { grid-template-rows: minmax(0, 1fr); }
   [data-mode="lab"] .lab {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
