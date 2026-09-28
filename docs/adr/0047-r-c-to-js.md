@@ -1300,6 +1300,22 @@ strsplit/vapply）都与 Rscript 对得上，**铺完到答完 3.8 秒**（整�
 还没映射的那一层是 **LAPACK**（`solve`/`det`/`qr` 那一族，R 里是 `lapack.so` 那个模块）
 与 **PCRE2**（`trimws`/正则那一路）—— 各是一个库，不是一个函数，各记一刀。
 
+### 下一刀的量：PCRE2 那一面只有 14 个函数
+
+顺手量了一下（`grep -o 'pcre2_[a-z_0-9]*' r-source/src/main/*.c | sort -u`）：R 一共用到
+**30 个名字，其中真的是函数的 14 个** —— `compile` / `match` / `code_free` /
+`get_ovector_pointer` / `match_data_create_from_pattern` / `substitute` /
+`get_error_message` / `config` / `maketables`(+free) / 两对 context 的 create+free，
+再加 `jit_compile` / `jit_stack_*`（这几个**可以是空操作**：JIT 只影响快慢）。
+而 r-source 里**没有**捎带 PCRE2 的源码（`src/extra/` 里只有 tre / trio / xdr 那几样），
+所以这一格只能做**功能映射**（映到 JS 的 `RegExp`）而不是"编进来"。
+
+好消息是**默认那条正则路不欠**：R 的 `grepl`/`regexpr`(不带 `perl=TRUE`) 走的是
+`src/extra/tre`，那一份是 C，已经编进来了 —— 判据里 `grepl("^a", …)` 与
+`regmatches(regexpr(…))` 两句就是它，早就绿着。欠的只有 `perl=TRUE` 那一半
+（`trimws` 是其中一个）。
+
+
 
 
 
