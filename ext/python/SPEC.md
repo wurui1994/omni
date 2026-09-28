@@ -1290,6 +1290,21 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
        表是**数据**，不是算法：搬它不违反"库函数不自己写"（我们不重写 `To*Full` 的逻辑，
        只是不再每次去参考树里现编）。三条腿共用同一份数据，逻辑各写一遍、逐字节相同。
        这与第 3 刀"数据表挪进自述 + 产物腿走插件"是同一个方向。
+       **这条路上缺的那一格补上了**（2026-09-28）：查清了"一张几万格的常量表"在这门语言里
+       **压根没有落点** —— 列表字面量落成 `anew` + 一格一条 `aset`
+       （`adapter/expr.js:2302`），写在函数体里每次调用重建一遍；GLR 攒列表是
+       "每次 reduce 抄一遍已攒的元素"（`glr/driver.js:156`），几万格是 O(n²) 次拷贝；
+       `(global …)` 按设计**不收初值**。仓库里唯一"编译期定下来、三条腿都 O(1)、
+       只搬一次"的机制是方言的 `(memory MIN MAX)` + `(data OFF 字节…)` + `(mload KIND ADDR)`,
+       而**标准 IR 这一层从前没有这三格**（`lower/sx.js` 的 `SX_ARITY` 里一个都没有），
+       所以借来的那几门语言（python 在内）表达不出来。现在补上了：`SX_ARITY` 加三格、
+       `lower.js` 收 `{kind:'memory'}` / `{kind:'data'}` 两种模块声明、
+       `lower-expr.js` 加 `{kind:'mem-kind'}`（种类词是**符号**不是串）、
+       `ty-of.js` 说 `mload` 的结果类型。判据 `tests/lower/staticdata.js`（7 格）：
+       直接拿标准 IR 造一张 256 格 `i16u` 的表，**解释器 / JS / 原生三条腿**读出来的
+       单格与总和都与手算相同。剩下的是"谁来生成那张表 + 逻辑写在哪儿"
+       （倾向：表由 `ext/python/rt/gen-ucase.js` 从本机 python3 生成、逻辑写在
+       `ext/python/lib/ucase.py`，那一层用一格内建 `_utbl(i)` 落到 `mload`）。
     **倾向 3** —— 它是唯一能同时满足"三条腿都对"与"产物不依赖参考树"的。
     **那一件先量的事已经量了**（2026-09-28，拿本机 python3 遍历 0..0x10FFFF 全部 1114112 个
     码点，逐格算 upper/lower/title/casefold 与 9 个分类谓词，再去重）：

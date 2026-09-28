@@ -125,6 +125,15 @@ export const SX_ARITY = {
   /* 数组那一族：`(anew (arr T) N)` 造、`aget` / `aset` 取写、`apush` 追加、`alen` 长度、
      `apop` 弹出。**下标从 0 起、上界不含**（各语言的差别由它自己的 adapter 摆平）。 */
   anew: 2, aget: 2, aset: 3, apush: 2, alen: 1, apop: 1,
+  /* **线性内存那三格**（方言的 `(memory MIN MAX)` / `(data OFF 字节…)` / `(mload KIND ADDR [OFF])`）
+     —— 这一层从前没有它们，于是"一张编译期就定下来的表"在借来的那几门里根本表达不出来：
+     `T = [1, 2, …]` 只能落成 `anew` + 一条 `aset` 一格（`adapter/expr.js` 的列表字面量），
+     几万格就是几万条语句，而且写在函数体里**每次调用重建一遍**。
+     `(data …)` 的字节要在**编译期**算好（与 wasm 的 data 段同一条），装载时一次搬进去；
+     四条腿都认（C 是 `static const unsigned char` + `omni_lin_data`、JS 是 `$lin_data`、
+     解释器是 ArrayBuffer）。KIND 是 `i8s/i8u/i16s/i16u/i32s/i32u/i64/f32/f64` 之一。
+     只加"读"这一格：静态常量表用不着 `mstore`，而写要牵动"谁拥有这块内存"那笔账。 */
+  memory: 2, data: [2, Infinity], mload: [2, 3],
   /* 记录那一族：`new` 造**值**（struct）、`cnew` 造**引用**（class），
      `fld` / `fldset` 按名字取写一格字段（字段名是**名字**，不是值 —— 与字典正相反）。 */
   new: 1, cnew: 1, fld: 2, fldset: 3,
@@ -150,8 +159,17 @@ export const SX_ARITY = {
   dnull: 0,
 };
 
-/** 一格算子发出来的文字。元数不对、操作数不是一段代码，**当场炸** —— 那是这一层的全部价值。 */
-export function op(name, ...args) {
+/**
+ * `(mload KIND …)` 认得的种类词。与 `src/core/sexpr/lower.js` 的 `MEM_LOAD_KINDS`
+ * **逐字相同**（那一层是正本，这一层不 import 它 —— 公共降级器不依赖方言的实现）。
+ * 值是"读出来的是 int 还是 real"，`typeOf` 那一侧要它。
+ */
+export const MEM_KINDS = new Map([
+  ['i8s', 'int'], ['i8u', 'int'], ['i16s', 'int'], ['i16u', 'int'],
+  ['i32s', 'int'], ['i32u', 'int'], ['i64', 'int'], ['f32', 'real'], ['f64', 'real'],
+]);
+
+/** 一格算子发出来的文字。元数不对、操作数不是一段代码，**当场炸** —— 那是这一层的全部价值。 */export function op(name, ...args) {
   const a = SX_ARITY[name];
   if (a === undefined) throw new Error(`方言里没有这一格算子：'${name}'（要先在 SX_ARITY 里写下它）`);
   const [lo, hi] = Array.isArray(a) ? a : [a, a];

@@ -109,6 +109,10 @@ const SUITES = [
   /* 同一条路上的**多文件**那一轴：`import util` 里的 util 就在旁边（`drive.js` 读、
      adapter 收 `opts.also`）。这一轴在图那条路上是红的（`unbound name`），这儿是绿的。 */
   { s: 'lower/modules.js' },
+  /* 同一条路上的**静态数据**那一格（`memory` / `data` / `mload` 三格算子）：拿标准 IR
+     直接造一张 256 格的表，三条腿（解释器 / JS / 原生）读出来的值与手算的相同。
+     从前这一层没有它，于是"一张几万格的常量表"只能落成 `anew` + 一格一条 `aset`。 */
+  { s: 'lower/staticdata.js' },
   /* go 这条腿的**端到端**判据：源码 → 公共 lower → MIR 管线 → 原生，stdout 与 `go run`
      逐字节相同（46 份）。参考是别人的实现，不是我们自己的复述。 */
   { s: 'go/run.js' },

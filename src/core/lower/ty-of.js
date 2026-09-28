@@ -131,6 +131,13 @@ function builtinType(e, ctx) {
       return arrOf(t.kind === 'map' ? t.key : INT);
     }
     case 'alen': case 'dlen': case 'slen': case 'toint': case 'sfind': return INT;
+    /* `(mload KIND ADDR)` —— 种类词说读出来是 int 还是 real（`f32`/`f64` 那两格是 real）。
+       第一格是 `{ kind: 'mem-kind', name }`，不是值。 */
+    case 'mload': {
+      const k = e.args[0];
+      return (k !== undefined && k.name === 'f32') || (k !== undefined && k.name === 'f64')
+        ? REAL : INT;
+    }
     /* UTF-8 算术那一族（按**码点**）：`scplen` 数长度、`scpfind` 找位置，都是 int。 */
     case 'scplen': case 'scpfind': case 'scpord': return INT;
     case 'toreal': case 'torealu': return REAL;

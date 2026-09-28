@@ -3,6 +3,7 @@
 // 标准 IR 的表达式描述 → .sx text。所有语言共用。
 
 import * as sx from './sx.js';
+import { MEM_KINDS } from './sx.js';
 import { typeToSx, zeroOf } from './ty.js';
 
 /**
@@ -43,6 +44,18 @@ export function lowerExpr(expr, ctx) {
     case 'builtin': return sx.op(expr.name, ...expr.args.map((a) => lowerExpr(a, ctx)));
     /* 类型当实参那一格（`(anew (arr int) N)` 的第一格、`(dnew …)`、`(new T)`）。 */
     case 'type': return typeToSx(expr.type, ctx.hooks);
+    /**
+     * **线性内存的种类词**（`(mload i16u ADDR)` 的第一格）：方言读它是**符号**，
+     * 不是串、也不是值 —— 所以不能借 `(rmath "sqrt" …)` 那格的写法。白名单与
+     * `src/core/sexpr/lower.js` 的 `MEM_LOAD_KINDS` 逐字相同（那一层是正本）。
+     */
+    case 'mem-kind': {
+      if (!MEM_KINDS.has(expr.name)) {
+        throw new Error(`lower: (mload …) 的种类词不认得：'${expr.name}'`
+          + `（认得的是 ${[...MEM_KINDS].join(' / ')}）`);
+      }
+      return expr.name;
+    }
     /**
      * **编译期的串当实参那一格**（`{ kind: 'strlit', value: 'floor' }` → `"floor"`）。
      *

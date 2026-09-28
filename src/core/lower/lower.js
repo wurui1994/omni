@@ -83,6 +83,25 @@ export function lower(module, hooks = {}, opts = {}) {
     if (decl.kind === 'cabi') lines.push(`  ${sx.cabi(decl.sym, decl.ret, decl.params ?? [])}`);
   }
 
+  /**
+   * **线性内存与它的初始字节**（`(memory MIN MAX)` / `(data OFF 字节…)`）—— 也在函数之前。
+   *
+   * 这是"一张编译期就定下来的表"唯一的落点：装载时一次搬进去，三条腿都 O(1) 随机访问，
+   * 而且**不在任何函数体里** —— 写在函数里的列表字面量是每次调用重建一遍
+   * （`adapter/expr.js` 的 `anew` + 一格一条 `aset`）。
+   *
+   * 字节发成十进制整数而不是串：方言收串是**按 UTF-8 展开**的，0x80 以上一格会变两字节 ——
+   * 一张按字节摆的表当场错位。代价是 `.sx` 文本大（一字节约 4 个字符）。
+   */
+  for (const decl of module.decls) {
+    if (decl.kind === 'memory') lines.push(`  (memory ${decl.min} ${decl.max})`);
+    if (decl.kind === 'data') {
+      const bs = [];
+      for (const b of decl.bytes) bs.push(String(b & 0xff));
+      lines.push(`  (data ${decl.off} ${bs.join(' ')})`);
+    }
+  }
+
   // 第一遍：收集类型和函数签名
   for (const decl of module.decls) {
     if (decl.kind === 'struct' || decl.kind === 'class') {
