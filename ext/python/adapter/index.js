@@ -759,7 +759,7 @@ function collectInsts(nm, sh, tree, C) {
          */
         if (C.libFns.has(nm) && tag(fn) === 'attr') {
           const rt = tyOfCst(kids(fn)[0], C);
-          if (libMethodFor(rt, String(leaf(kids(fn)[1]))) === nm) {
+          if (libMethodFor(rt, String(leaf(kids(fn)[1])), args.length) === nm) {
             const fill = libFillToks(nm, args.length + 1, C);
             if (fill !== null) {
               const types = [rt, ...args.map((a) => tyOfCst(a, C)), ...fill.map((d) => tyOfCst(d, C))];

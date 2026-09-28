@@ -256,6 +256,74 @@ def _str_istitle(s):
     return cased
 
 
+def _ucase_isspace_cp(cp):
+    # 表里那一位空白（python 的空白是 Unicode 的：NBSP / EM SPACE / 全角空格都算）。
+    return (_urecf(_ucase_rec(cp)) >> 5) & 1 == 1
+
+
+def _ucase_in_chars(chars, ch):
+    i = 0
+    n = len(chars)
+    while i < n:
+        if chars[i] == ch:
+            return True
+        i = i + 1
+    return False
+
+
+def _str_lstrip(s):
+    # **不带 chars 那一档**：按表里的空白位剥。带 chars 的是另一格函数
+    # （`_str_lstrip_chars`）—— 不合成一格的理由：合起来那格的 chars 形参在"没给"那一档
+    # 是 dyn，而体里要 `len(chars)` / `chars[i]`，那一档当场报"len 作用在 dyn 上"。
+    n = len(s)
+    a = 0
+    while a < n:
+        if _ucase_isspace_cp(ord(s[a])):
+            a = a + 1
+        else:
+            break
+    return s[a:]
+
+
+def _str_rstrip(s):
+    b = len(s)
+    while b > 0:
+        if _ucase_isspace_cp(ord(s[b - 1])):
+            b = b - 1
+        else:
+            break
+    return s[:b]
+
+
+def _str_strip(s):
+    return _str_rstrip(_str_lstrip(s))
+
+
+def _str_lstrip_chars(s, chars):
+    n = len(s)
+    a = 0
+    while a < n:
+        if _ucase_in_chars(chars, s[a]):
+            a = a + 1
+        else:
+            break
+    return s[a:]
+
+
+def _str_rstrip_chars(s, chars):
+    b = len(s)
+    while b > 0:
+        if _ucase_in_chars(chars, s[b - 1]):
+            b = b - 1
+        else:
+            break
+    return s[:b]
+
+
+def _str_strip_chars(s, chars):
+    return _str_rstrip_chars(_str_lstrip_chars(s, chars), chars)
+
+
 def _str_swapcase(s):
     # 大写的换小写、小写的换大写，**别的一格不动**（`ǅ` 是首字母大写那一档，两边都不是，
     # 所以 `"ǅa".swapcase()` 是 `ǅA`）。
@@ -272,4 +340,26 @@ def _str_swapcase(s):
         else:
             out = out + s[i]
         i = i + 1
+    return out
+
+def _str_split_ws(s):
+    # `.split()` **不带分隔符**那一档：按连续空白切、两头的空段不算
+    # （python 的空白是 Unicode 的 —— 从前只认 ASCII 那六个，静静少切）。
+    # 带分隔符的 `.split(sep)` 是另一条规矩（空段算一格），照旧在 adapter 里。
+    out = []
+    n = len(s)
+    i = 0
+    while i < n:
+        if _ucase_isspace_cp(ord(s[i])):
+            i = i + 1
+        else:
+            j = i
+            go = True
+            while go and j < n:
+                if _ucase_isspace_cp(ord(s[j])):
+                    go = False
+                else:
+                    j = j + 1
+            out.append(s[i:j])
+            i = j
     return out

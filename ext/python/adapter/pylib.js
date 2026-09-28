@@ -67,11 +67,35 @@ export const LIB_METHODS = new Map([
   ['string.isupper', '_str_isupper'],
   ['string.islower', '_str_islower'],
   ['string.istitle', '_str_istitle'],
+  /* `strip` 那三格：**不给 chars 时按表里的空白位**（python 的空白是 Unicode 的 ——
+     NBSP / EM SPACE / 全角空格都算；从前只认 ASCII 那六个，静静少剥）。
+     **按实参个数分两格函数**（键上带 `/0` 与 `/1`）：合成一格的话 chars 形参在"没给"
+     那一档是 dyn，而体里要 `len(chars)` / `chars[i]` —— 那一档当场报"len 作用在 dyn 上"。 */
+  ['string.strip/0', '_str_strip'],
+  ['string.lstrip/0', '_str_lstrip'],
+  ['string.rstrip/0', '_str_rstrip'],
+  ['string.strip/1', '_str_strip_chars'],
+  ['string.lstrip/1', '_str_lstrip_chars'],
+  ['string.rstrip/1', '_str_rstrip_chars'],
+  /* `.split()` **不带分隔符**那一档同理（按连续空白切，两头空段不算）；
+     带分隔符的是另一条规矩（空段算一格），照旧在 adapter 里那趟循环。 */
+  ['string.split/0', '_str_split_ws'],
 ]);
 
-/** 接收者装的东西 + 方法名 → 库函数名（没有就答 null）。 */
-export function libMethodFor(recvTy, name) {
+/**
+ * 接收者装的东西 + 方法名 → 库函数名（没有就答 null）。
+ *
+ * **先按"名字 + 实参个数"找，再退回只按名字**（`string.strip/0` 与 `string.strip`）：
+ * 有一族方法的两档实参走的是两格不同的函数 —— 不给 chars 的 `.strip()` 按表里的空白位，
+ * 给了的按那一串字符。合成一格不行：没给的那一档 chars 是 dyn，而体里要 `len(chars)`。
+ * `argc` 不给（有的调用点问不到）就只按名字找。
+ */
+export function libMethodFor(recvTy, name, argc) {
   if (recvTy === null || recvTy === undefined) return null;
+  if (argc !== undefined && argc !== null) {
+    const byArgc = LIB_METHODS.get(`${recvTy.kind}.${name}/${argc}`);
+    if (byArgc !== undefined) return byArgc;
+  }
   return LIB_METHODS.get(`${recvTy.kind}.${name}`) ?? null;
 }
 

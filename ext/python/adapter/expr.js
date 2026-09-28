@@ -467,7 +467,7 @@ function libArgTys(lib, recvTy, argTys, C) {
 
 /** 库里那格函数交什么（还没收到实例就答 null —— 推断跑三轮，下一轮再来）。 */
 function libRetTy(recvTy, name, argTys, C) {
-  const lib = libMethodFor(recvTy, name);
+  const lib = libMethodFor(recvTy, name, argTys.length);
   if (lib === null) return null;
   const all = libArgTys(lib, recvTy, argTys, C);
   if (all === null) return null;
@@ -3726,7 +3726,7 @@ function methodOf(recvTok, name, args, C) {
    * **库里有这一格就调库那一份**（`ext/python/lib/*.py`）—— 落成一次真的函数调用，
    * 不在这儿铺 IR。实例按实参类型挑（与用户函数同一格 `resolveFn`）。
    */
-  const lib = libMethodFor(t, name);
+  const lib = libMethodFor(t, name, args.length);
   if (lib !== null) {
     const fill = libFillToks(lib, args.length + 1, C);
     if (fill === null) {

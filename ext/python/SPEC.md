@@ -1362,6 +1362,15 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
       要先绑上**（`[w.upper() for w in words]` 从前收不到实例）；实例收集**跑到不再长
       为止**（从前钉死三轮，而 `.lower()` -> `_str_lower` -> `_ucase_final_sigma` ->
       `_ucase_ignorable` -> `_ucase_rec` 是四层）。
+    - **空白那一族也接上了**（2026-09-29，同一位标志）：`.strip()` / `.lstrip()` /
+      `.rstrip()`（不给 chars 那一档）与**不带分隔符的 `.split()`` —— 从前只认 ASCII 那
+      六个空白，`"\u00a0\u2003a b\u3000".strip()` 静静少剥、`"a\u00a0b".split()` 静静少切。
+      顺带给 `LIB_METHODS` 加了一格机制：**键上可以带实参个数**（`string.strip/0` 与
+      `string.strip/1` 是两格不同的库函数）。为什么不合成一格带默认值的：没给 chars 那一档
+      它是 dyn，而体里要 `len(chars)` / `chars[i]` —— 当场报"len 作用在 dyn 上"。
+    - **量出来的另一笔账（还没接）**：`repr()` 不escape 不可打印的字符 ——
+      python 的 `repr("\u00a0")` 是 `'\xa0'`，我们原样印出来。那要 `isprintable` 那张表
+      （与这一张不同），记在这儿。
     - 还没接到这条路上的：`isidentifier` / `isprintable`（那是另外两张表）、
       **dyn 接收者上的方法**（那一格明着报"还没接"，不是静静答错）。
       `.istitle()` 也接上了（2026-09-29）：口径是"大写那一档前面不许也是 cased、

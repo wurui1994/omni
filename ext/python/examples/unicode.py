@@ -97,6 +97,13 @@ def main():
     # （`"AB"` False）、小写那一档前面必须是 cased（`"aA"` False）、一格 cased 都没有
     # 也是 False（`"123"`）。`ǅ` 是首字母大写那一档，所以 `"ǅa"` 是 True。
     print("Abc Def".istitle(), "Abc def".istitle(), "AB".istitle(), "ǅa".istitle(), "123".istitle())
+
+    # 十三、**空白也是 Unicode 的**：`.strip()` 那三格与不带分隔符的 `.split()` 认的是
+    # 表里那一位（NBSP / EM SPACE / 全角空格都算）。从前只认 ASCII 那六个，静静少剥、少切。
+    w = "\u00a0\u2003a b\u3000c"
+    print(len(w.strip()), len(w.lstrip()), len(w.rstrip()), w.strip() == "a b\u3000c")
+    print(w.split(), "a\u00a0b".split(), "   ".split(), "a-b".split("-"))
+    print("xxaybxx".strip("x") + "|", " a ".lstrip() + "|", " a ".rstrip() + "|")
     print("abc".upper(), "ABC".lower(), "".upper(), "".lower(), "".casefold())
     print("héllo wörld".upper(), "HÉLLO WÖRLD".lower())
 
