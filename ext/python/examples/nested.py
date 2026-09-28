@@ -56,5 +56,18 @@ def main():
 
     print(twice(3), twice("ab"))
 
+    # **就地调用的 lambda**：把实参钉成一格临时量，再把形参名指到它上头就地展开
+    # （`map` / `filter` / `key=` 用的是同一格 `applyPer`）。体里**调库方法**那一档
+    # 还没接（`(lambda s: s.upper())("ab")` —— 现造的库实例少了局部变量的 `let`）。
+    print((lambda v: v + 1)(5), (lambda v: v * 2)(3), (lambda v: v[0])([7, 8]))
+
+
+# **一个调用点都没有的函数**（形参没标注 —— 那几格退到箱子）：从前它的返回类型一律
+# 当 void，而体里 `return a + b` 交的是箱子，于是**漏到方言那一层**才报"要返回 void，
+# 给的是 dynamic"。现在"体里有带值的 return"就退到箱子。这一格判据只要**编得出来**
+# （python 那边没调用就不跑，印不出东西来）。
+def never_called(a, b=10):
+    return a + b
+
 
 main()

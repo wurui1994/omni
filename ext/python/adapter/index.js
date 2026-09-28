@@ -774,7 +774,13 @@ function infer(C, tree, scriptStmts) {
       inst.mangled = list.length === 1
         ? base
         : `${base}__${inst.key.replace(/[^A-Za-z0-9_]/g, '_')}`;
-      if (inst.ret === null) inst.ret = { kind: 'void' };
+      if (inst.ret === null) {
+        /* 返回类型推不出来：**体里有带值的 `return` 就退到箱子**，一格都没有才是 void。
+           从前一律当 void —— 那时体里 `return a + b`（形参退了 dyn、`a + b` 也就是 dyn）
+           会漏到方言那一层才报"要返回 void，给的是 dynamic"。**一个调用点都没有的函数
+           最容易撞上**（形参退 dyn，`inferRet` 也就答不出来）。 */
+        inst.ret = hasValueReturn(C.fnNodes.get(nm)) ? DYN : { kind: 'void' };
+      }
       C.fns.set(inst.mangled, { params: inst.params, ret: inst.ret });
     }
   }
@@ -793,6 +799,21 @@ function mkInst(nm, sh, types) {
     params: sh.names.map((n, i) => ({ name: n, type: types[i] })),
     ret: null,
   };
+}
+
+/**
+ * 这一格 `def` 的体里有没有**带值的 `return`**（嵌套的 `def` 不算 —— 那是另一格函数）。
+ * 只给"返回类型推不出来"那一处用：有带值的 return 就退到箱子，没有才是 void。
+ */
+function hasValueReturn(node) {
+  if (node === undefined || node === null) return false;
+  const walk = (n, top) => {
+    if (n === null || typeof n !== 'object') return false;
+    if (!top && tag(n) === 'def') return false;
+    if (tag(n) === 'return') return kids(n).length > 0;
+    return kids(n).some((k) => walk(k, false));
+  };
+  return walk(node, true);
 }
 
 /**

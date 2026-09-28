@@ -4002,6 +4002,23 @@ export function callOf(x, C) {
       + ' —— 这一层的元组是编译期定长的记录（每一格各有自己的类型），'
       + '长度要到运行期才知道的那一档还没接');
   }
+  /* **就地调用的 lambda**（`(lambda v: v + 1)(5)`）—— 把实参钉成一格临时量，再把 lambda
+     的形参名指到它上头就地展开（`applyPer` 那条路，`map` / `filter` / `key=` 共用的那一格）。 */
+  if (tag(fn) === 'paren' && kids(fn).length === 1 && tag(kids(fn)[0]) === 'lambda') {
+    if (argToks.length !== 1) {
+      throw new Error('python->IR: 就地调用的 lambda 收一格实参（多格的还没接）');
+    }
+    const v = exprOf(argToks[0], C);
+    const tv = ty(v, C);
+    const nmv = C.fresh('lm_a');
+    C.bind(nmv, tv);
+    const value = applyPer(kids(fn)[0], { kind: 'name', name: nmv }, tv, C);
+    return {
+      kind: 'block-expr',
+      stmts: [{ kind: 'let', name: nmv, type: tv, init: v }],
+      value,
+    };
+  }
   /* **类上的 `__call__`**（`p(10)`）—— 那个名字装的是一格实例，不是函数。要在下面
      "按名字找函数"之前拦：不拦的话报的是"不认识 `p()`"，与真正的原因不相干。 */
   if (tag(fn) === 'n' && C.lookup !== undefined) {
@@ -4655,6 +4672,10 @@ function methodOf(recvTok, name, args, C) {
     }
     const all = [recv, ...args, ...fill.map((x) => exprOf(x, C))];
     const inst = C.resolveFn(lib, all.map((a) => ty(a, C)));
+    /* **这儿不现造实例**（试过，量出来的）：`C.requireFn` 造出来的那一格，体里的局部
+       变量少了 `let`（`(set r …)` 报"未声明的变量 'r'"）—— 现造那条路只补了"实例表"，
+       没走推断那一趟给每格实例收局部。所以就地展开的 lambda 体里**调库方法**
+       （`(lambda s: s.upper())("ab")`）照旧当场报，那是另一刀的事。 */
     if (inst === null) {
       throw new Error(`python->IR: \`.${name}(…)\` 在库里那格 \`${lib}\` 上没有对得上的实例`
         + `（实参是 ${all.map((a) => ty(a, C).kind).join(', ')}）`);
