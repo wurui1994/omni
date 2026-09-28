@@ -408,3 +408,74 @@ QuickJS 的引用计数 + 循环检测是为长驻进程准备的，我们只在
 **小表那一档（`icap == 0`，n ≤ `OMNI_DICT_SMALL`）是线性扫 + 逐格 EQ**，所以短键比较
 在属性密集的负载上是直接命中榜首的一格。剩下的两行还差 1.3x / 2.2x，那才是真的
 shape + IC（每个调用点缓存 `(dict, ver, slot)`，命中就是两次比较 + 一次定偏移读）。
+
+## 14. J4 的具体形状（属性读的单态 IC）—— 设计，下一轮照这个做
+
+这一节写在**机器忙的时候**（load 8.51，同一对二进制 A/B 连跑三趟给 1.127 / 1.209 / 0.875
+—— 仪器 ±20%，量不了 10% 量级的刀）。所以这一轮不改性能代码，把下一刀的形状定死。
+
+### 14.1 为什么是它
+
+`method-call` 与 `prop-mono` 的采样（memcmp 那一刀之后）：
+
+    omni_js_obj_getk                自用 44.33%（含子 69.46%）
+    omni_dict_string_dynamic_find_h 自用 27.09%
+    _platform_memmove               自用  7.88%
+    omni_js_call_this               自用  <3%     <- 调用本身不是问题
+
+`a.dot(b)` 每次是**两趟 dict find**：自己那格 miss（线性扫 2 个键）、原型那格 hit。
+IC 命中之后这两趟都不做 —— 这是这两行剩下的 1.3x / 2.2x 的主体。
+
+### 14.2 IC 那一格存什么
+
+**按调用点一格**（`static` 变量，emitter 发），只做单态：
+
+```c
+struct omni_js_ic_s {
+  void *own;        /* 当时那个对象的 dict 指针（不是对象本身：dict 才是键住的地方） */
+  int64_t own_n;    /* 当时 own->n（条目数，含墓碑） */
+  void *hold;       /* 真正找着的那格 dict（可能就是 own，也可能是原型链上的某一格） */
+  int64_t hold_n;   /* 当时 hold->n */
+  int64_t slot;     /* hold->keys[slot] / hold->vals[slot] */
+};
+```
+
+命中的判据（**全是整数/指针比较，一个哈希与 memcmp 都不做**）：
+
+```c
+d == ic->own && d->n == ic->own_n
+  && H->n == ic->hold_n && H->live[ic->slot]
+  && H->keys[ic->slot].p == key.p          /* 常量键：同一格静态串，指针相等 */
+```
+
+### 14.3 为什么 `n` 够用（不必给 dict 加版本号）
+
+* `n` 只在**插入**时涨（删除只把 `live[i]` 置假、`n` 不动）⇒ `n` 不变 ⇒ 没插过新键
+  ⇒ `keys[i]` 的身份没变（rehash 只重建 `idx[]`，不动 `keys[]`）；
+* 删除用 `live[slot]` 那一格挡住；
+* 键的身份用**指针相等**挡住（常量键来自同一格静态串池，见 `s16PoolLines`）。
+  指针不等就当没命中、走慢路 —— 那是保守的方向，不会答错。
+
+⇒ **不动 `omni_container.h` 的结构**（那是十一门语言共用的），风险只在 `omni_js_obj.h`
+与发射层。这一条是选这个形状的主要理由。
+
+### 14.4 发射层那一半
+
+`backend-c/emit.js` 里 `js_obj_get` 的常量键那一支（`constKey(e.args[1])` 那格，现在发
+`omni_js_obj_getk(o, "k")`）改发：
+
+```c
+static struct omni_js_ic_s ic_37;      /* 文件作用域，一个调用点一格 */
+... omni_js_obj_getk_ic(o, "k", &ic_37) ...
+```
+
+`this.x` / `o.x` / `a.dot` 全走这一支。**非常量键不给 IC**（那一格本来就要先把键算出来）。
+
+### 14.5 判据
+
+* 正确性：`tests/js-exec/cases/61-prop-key-shapes.js` 之外再加一份**打 IC 的**：
+  同一处代码先读 A 形状、再读 B 形状（多态 ⇒ IC 每次失效、答案必须照旧）、
+  中间 `delete` 一个键、中间给对象**加**一个键（`n` 变 ⇒ 必须失效）、原型上改一格方法。
+  少任何一格，IC 都可能"答旧值"，而那是最难查的一类错。
+* 性能：`bench/lua/ab.js` 交错比两份二进制，**等 load < 2 再量**。
+  目标：`prop-mono` 1.3x -> ≈1.0x、`method-call` 2.2x -> ≤1.5x。
