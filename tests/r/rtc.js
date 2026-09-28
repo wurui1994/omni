@@ -184,7 +184,7 @@ const groups = [
   ['tzone', 'src/extra/tzone', mkVar(join(RSRC, 'src/extra/tzone/Makefile.in'), 'SOURCES'), false],
 ];
 /** 我们自己那两份也进符号表 —— 复数那 20 个桩与 `div` 就是它们来接的。 */
-const OURS = [['omni', join(ROOT, 'ext/r/rt'), ['omni_complex.c', 'omni_libc.c'], false]];
+const OURS = [['omni', join(ROOT, 'ext/r/rt'), ['omni_complex.c', 'omni_libc.c', 'omni_rhost.c'], false]];
 
 const fails = [];
 /** 编出来的留着 —— 下面那一节要拿它们建符号表（"链接"就是这一步）。 */
@@ -248,8 +248,8 @@ if (kinds.size > 0) {
  *
  * 天花板只许降、地板只许涨。这两条合起来就是"这一套离链得起还差多少"的唯一口径。
  */
-const CEIL = { dup: 0, data: 0, thunk: 0, libc: 205 };
-const SYMS_FLOOR = 2555;
+const CEIL = { dup: 0, data: 0, thunk: 0, libc: 203 };
+const SYMS_FLOOR = 2562;
 if (want('rt')) {
   const provide = new Map();
   const dups = [];
@@ -469,8 +469,9 @@ const JSRUN = [
  * 所以那两步明着炸（`ALLOW_FAIL`），不静默跳过。
  */
 const INIT_SEQ = ['Rf_InitArithmetic', 'Rf_InitTempDir', 'Rf_InitMemory', 'Rf_InitStringHash',
-  'Rf_InitBaseEnv', 'Rf_InitNames', 'Rf_InitGlobalEnv', 'Rf_InitOptions', 'Rf_InitGraphics',
-  'Rf_InitTypeTables', 'Rf_InitS3DefaultTypes', 'R_InitConditions'];
+  'Rf_InitBaseEnv', 'Rf_InitNames', 'InitParser', 'Rf_InitGlobalEnv', 'Rf_InitOptions', 'Rf_InitGraphics',
+  'Rf_InitTypeTables', 'Rf_InitS3DefaultTypes', 'R_InitConditions', 'Rf_InitConnections',
+  'omni_console_init', 'omni_toplevel_init'];
 /** 这两步现在过不去（缺 `stat` / `getpid`），是记着的账不是惊喜。 */
 const INIT_ALLOW_FAIL = new Set(['Rf_InitTempDir', 'Rf_InitEd']);
 /** SEXP 那一层：全用 R 自己的 API 兜回来，不读内存（读内存那一路是另一格）。 */
@@ -480,6 +481,12 @@ const SEXP_CHECKS = [
   ['asReal(ScalarReal(3.5))', 3.5],
   ['asInteger(ScalarInteger(7))', 7],
   ['xlength(allocVector(REALSXP,5))', 5],
+];
+/** **真跑 R**（第二十一格）：一句 R 进去、一个数出来，与 Rscript 比。
+ *  `sd(...)` 那一句要 base 那个包的 R 代码（还没装），所以它现在该回 -3（R 里报了错）。 */
+const EVAL_CHECKS = [
+  ['omni_eval_1p1', '1+1', 2],
+  ['omni_eval_sum', 'sum(1:10)', 55],
 ];
 if (want('jsrun')) {
   const dir = join(ROOT, '.omni-cache', 'r-rt', 'jsall');
@@ -535,6 +542,10 @@ if (want('jsrun')) {
     }
     /* 装载 + 真调。入口自己写（`cJsEntry` 要一份有 `main` 的，libR 没有）。 */
     const L = [];
+    const logFile = join(dir, '$judge.log');
+    writeFileSync(logFile, '');
+    L.push("import { appendFileSync } from 'node:fs';");
+    L.push(`const LOG = ${JSON.stringify(logFile)};`);
     let k = 0;
     for (const u of linked.units) L.push(`import { $init as $i${k++} } from ${JSON.stringify(u.out)};`);
     const MAIN = JSON.stringify(join(dir, 'main__arithmetic.mjs'));
@@ -555,20 +566,21 @@ if (want('jsrun')) {
     L.push(`const $F = (s) => $ns['$fn_' + s] ?? null;`);
     L.push(`for (const s of ${JSON.stringify(INIT_SEQ)}) {
   const f = $F(s);
-  if (f === null) { process.stdout.write('init\\t' + s + '\\t没这个符号\\n'); continue; }
-  try { f(); process.stdout.write('init\\t' + s + '\\tok\\n'); }
-  catch (e) { process.stdout.write('init\\t' + s + '\\t炸了：' + String(e && e.message).slice(0, 100) + '\\n'); }
+  if (f === null) { appendFileSync(LOG, 'init\\t' + s + '\\t没这个符号\\n'); continue; }
+  try { f(); appendFileSync(LOG, 'init\\t' + s + '\\tok\\n'); }
+  catch (e) { appendFileSync(LOG, 'init\\t' + s + '\\t炸了：' + String(e && e.message).slice(0, 100) + '\\n'); }
 }`);
     L.push(`{
   const t2c = $F('Rf_type2char'); const s2t = $F('Rf_str2type');
-  const P = (nm, v) => process.stdout.write('sexp\\t' + nm + '\\t' + v + '\\n');
-  P('str2type(type2char(REALSXP))', s2t(t2c(14)));
-  P('str2type(type2char(VECSXP))', s2t(t2c(19)));
-  P('asReal(ScalarReal(3.5))', $F('Rf_asReal')($F('Rf_ScalarReal')(3.5)));
-  P('asInteger(ScalarInteger(7))', $F('Rf_asInteger')($F('Rf_ScalarInteger')(7)));
-  P('xlength(allocVector(REALSXP,5))', $F('Rf_xlength')($F('Rf_allocVector')(14, 5n)));
-  $F('R_gc')();
-  process.stdout.write('sexp\\tR_gc\\t1\\n');
+  const P = (nm, v) => appendFileSync(LOG, 'sexp\\t' + nm + '\\t' + v + '\\n');
+  const T = (nm, f) => { try { P(nm, f()); } catch (e) { P(nm, '炸了：' + String(e && e.message).slice(0, 120)); } };
+  T('str2type(type2char(REALSXP))', () => s2t(t2c(14)));
+  T('str2type(type2char(VECSXP))', () => s2t(t2c(19)));
+  T('asReal(ScalarReal(3.5))', () => $F('Rf_asReal')($F('Rf_ScalarReal')(3.5)));
+  T('asInteger(ScalarInteger(7))', () => $F('Rf_asInteger')($F('Rf_ScalarInteger')(7)));
+  T('xlength(allocVector(REALSXP,5))', () => $F('Rf_xlength')($F('Rf_allocVector')(14, 5n)));
+  for (const nm of ${JSON.stringify(EVAL_CHECKS.map((c) => c[0]))}) T(nm, () => $F(nm)());
+  T('R_gc', () => { $F('R_gc')(); return 1; });
 }`);
     k = 0;
     for (const [, sym, args] of JSRUN) {
@@ -582,9 +594,14 @@ if (want('jsrun')) {
     const r = spawnSync(process.execPath, [entry], {
       encoding: 'utf8',
       maxBuffer: 1 << 26,
+      /* 子进程自己也要有上限：R 的出错那条路要是转起圈来（少了顶层上下文就会），
+         这儿一等就是几分钟。30 秒够装载 + 初始化 + 那几格。 */
+      timeout: 45000,
+      killSignal: 'SIGKILL',
       env: { ...process.env, NODE_COMPILE_CACHE: join(dir, '.v8cache') },
     });
-    const lines = (r.stdout ?? '').trim().split('\n').map((s) => s.split('\t'));
+    const logText = existsSync(logFile) ? readFileSync(logFile, 'utf8') : '';
+    const lines = `${r.stdout ?? ''}${logText}`.trim().split('\n').map((s) => s.split('\t'));
     const got = new Map(lines.filter((a) => a[0] !== 'init' && a[0] !== 'sexp').map((a) => [a[0], a[1]]));
     const initOut = new Map(lines.filter((a) => a[0] === 'init').map((a) => [a[1], a[2]]));
     const sexpOut = new Map(lines.filter((a) => a[0] === 'sexp').map((a) => [a[1], a[2]]));
@@ -613,6 +630,17 @@ if (want('jsrun')) {
       if (v !== wantV) bad.push(`${nm}: 我们 ${sexpOut.get(nm)}、要 ${wantV}`);
     }
     if (sexpOut.get('R_gc') !== '1') bad.push('R_gc 没跑过');
+    /* 真求值那两格：尺子还是 Rscript */
+    const rs2 = spawnSync('Rscript', ['-e',
+      EVAL_CHECKS.map(([, expr]) => `cat(sprintf("%.17g", ${expr}), "\\n")`).join(';')],
+    { encoding: 'utf8' });
+    const refs2 = rs2.status === 0
+      ? (rs2.stdout ?? '').trim().split('\n').map((x) => Number(x))
+      : EVAL_CHECKS.map(([, , c]) => c);
+    EVAL_CHECKS.forEach(([nm, expr], i) => {
+      const v = Number(sexpOut.get(nm));
+      if (v !== refs2[i]) bad.push(`${nm}（${expr}）: 我们 ${sexpOut.get(nm)}、R ${refs2[i]}`);
+    });
     JSRUN.forEach(([, sym], i) => {
       const v = Number(got.get(sym));
       const w = refs[i];
@@ -627,6 +655,7 @@ if (want('jsrun')) {
       ok('装起来真调 R 的运行时', `${linked.units.length} 份的 $init 全跑过，`
         + `R 自己那 ${INIT_SEQ.length} 步初始化过了 ${INIT_SEQ.length - skipped.length} 步`
         + `（欠的：${skipped.join('、') || '无'}），SEXP 那 ${SEXP_CHECKS.length} 格 + R_gc 都对，`
+        + `R 真跑起来了（${EVAL_CHECKS.map(([, e]) => e).join('、')}），`
         + `${JSRUN.length} 个函数与 ${rs.status === 0 ? 'Rscript' : '记死的常数'} 的相对差都 <= 1e-12`);
     }
   }

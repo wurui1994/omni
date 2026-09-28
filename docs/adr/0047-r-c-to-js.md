@@ -929,3 +929,53 @@ R 自己的 `Rf_initialize_R` 也是这个次序。
 `strcmp` 上转圈。查法也记下来：`node --prof` 跑一趟被 `timeout` 砍掉的进程，
 `--prof-process` 的 bottom-up 里 `strcmp` 占 43%，往上三层就是
 `type2char -> warning -> warningcall -> install`。
+
+## 第二十一格：R 在 JS 上**真跑起来了**（已落，2026-09-28）
+
+`tests/r/rtc.js jsrun`：251 份 `.mjs` 装上、照 R 自己的次序初始化、然后
+
+```
+omni_eval1("1+1")        -> 2
+omni_eval1("sum(1:10)")  -> 55        （两格都与 Rscript 一致）
+```
+
+也就是说 **R 的分析器 + 求值器 + 内置函数表 + 垃圾回收，在 JS 上都在转**。
+路上四个真错，都不是"再补一个函数"那种，值得各记一笔。
+
+### 1. 跨模块的函数指针（前一个提交）
+
+R 的 `R_FunTab`：表在 `names.c`、`do_*` 在几十份别的 `.c`、读表并调的是 `eval.c`。
+函数指针的值从前是"本模块函数号 + 1"，跨模块就是**静默调错函数**。
+现在值是全程序那张表的槽位（`js_rt.js` 的 `fnSlot`/`fnBind`/`fnCall`）。
+
+### 2. 宿主那一层：`ext/r/rt/omni_rhost.c`（新）
+
+两样东西不是编译器的事，是**宿主**的事，`Rf_initialize_R` 本来管它们：
+
+* **控制台那几格**（`ptr_R_WriteConsole` 一族）：不摆就是
+  `call of a null function pointer`（printutils -> system 那一跳）。现在打到 stdout。
+* **顶层上下文**（`R_Toplevel` + `R_GlobalContext`，照 `main.c` 984-999 抄）：
+  R 出错要沿上下文链往上跳，没有它**在空链上转圈**（量出来：`eval` 一去不回）。
+
+求值走 `R_tryEval` 而不是 `Rf_eval`：它自己摆 `SETJMP` 的上下文，R 里的错误回到我们
+手上。不这么做那一格量出来是 `longjmp: 这个 jmp_buf 没有被 setjmp 装过`。
+
+### 3. `InitParser` 也在次序里
+
+少了它，`R_ParseVector` 会在 `SET_VECTOR_ELT() ... not a 'NULL'` 上报错 ——
+这句话是**R 自己印出来的**（控制台那几格一摆好就看见了）。
+`setup_Rmainloop` 里它紧跟在 `InitNames` 后头，名字没有 `Rf_` 前缀。
+
+### 4. 两个 libc 的缺口：`strcasecmp` / `strncasecmp`
+
+R 的语法分析器认关键字要它们。补在 `src/core/interp/libc.js`（只折 ASCII 的 A-Z ——
+这条腿上 locale 是 C）。软缺那张表于是 205 变 **203**。
+
+### 账与速度
+
+* 判据现在 **39 秒**一趟（曾经 62 秒）：发射那一半**按 key 缓存**（源 + 编译器那几份源的
+  mtime/size），符号表落 `.syms.json`（探针只编自己那一份胶水、1 秒），
+  子进程带 `NODE_COMPILE_CACHE`（55 MB 的解析省一半），子进程自己有 45 秒上限。
+* `sd(c(1,2,3,4))` 还回 -3（R 里报错）：`sd` 是 **base 包的 R 代码**，那要
+  `R_LoadProfile` + 序列化过的 base ——下一刀。
+* 欠的一步仍是 `InitTempDir`（要 `stat`）。

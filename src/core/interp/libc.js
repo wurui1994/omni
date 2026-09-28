@@ -2056,6 +2056,28 @@ const LIBC = {
     return BigInt(x.length - y.length);
   },
   strcpy: (a) => { writeCStr(a[0], readCStr(a[1])); return BigInt(a[0]); },
+  /* POSIX 的那两个不分大小写的（R 的语法分析器里 `strncasecmp` 认关键字要它）。
+     只折 ASCII 的 A-Z —— locale 那一层我们这条腿上是 C，`tolower` 也只折这一段。 */
+  strcasecmp: (a) => {
+    const lo = (c) => (c >= 65 && c <= 90 ? c + 32 : c);
+    for (let i = 0; ; i++) {
+      const x = lo(Number(memLoad('i8u', BigInt(a[0]) + BigInt(i), 0)));
+      const y = lo(Number(memLoad('i8u', BigInt(a[1]) + BigInt(i), 0)));
+      if (x !== y) return BigInt(x - y);
+      if (x === 0) return 0n;
+    }
+  },
+  strncasecmp: (a) => {
+    const lo = (c) => (c >= 65 && c <= 90 ? c + 32 : c);
+    const n = Number(BigInt(a[2]));
+    for (let i = 0; i < n; i++) {
+      const x = lo(Number(memLoad('i8u', BigInt(a[0]) + BigInt(i), 0)));
+      const y = lo(Number(memLoad('i8u', BigInt(a[1]) + BigInt(i), 0)));
+      if (x !== y) return BigInt(x - y);
+      if (x === 0) return 0n;
+    }
+    return 0n;
+  },
   strncpy: (a) => {
     /* 两处边角：源短了要**用 0 填满 n 个字节**，源长了**不补终止的 0**
      * （C11 7.24.2.4）。所以它不是「安全的 strcpy」，写错的人比写对的多。 */
