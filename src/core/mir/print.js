@@ -28,6 +28,19 @@ function pad(s, n) {
   return r;
 }
 
+/**
+ * 缩进**封顶**（与 `mir/emit_js.js` 的 `IND_CAP` 同一格口径，只改可读性、不改语义）。
+ *
+ * 为什么要封：C 前端降 `switch` 是"一个 case 一层 block"（`frontend-c/tccgen.js` 的
+ * `switchStmt`），一个几千格的 switch 就是几千层嵌套 —— 一层两个空格照加下去，
+ * 行首的空白自己成了大头，而每行还要 `replace(/\s+$/, '')` 去尾空白，
+ * 在上千字符的空白上是正则回溯。量过（`unicodetype_db.h` 里那个 2348 格的 switch）：
+ * 800 个 case 时 printMir 就要 **23.7s**（同一份 MIR 降级 0.13s、验证 4ms），
+ * 真表上 `omni c mir` 直接撞超时。封顶之后是毫秒级。
+ * 现有快照里最深的一份是 10 层（`tests/mir/snapshots/`），所以一个字节都不动。
+ */
+const IND_CAP = 40;
+
 /** 一条指令的操作数部分。角色表决定怎么印，所以 op 表加一行这里自动跟上。 */
 function operands(mod, f, i) {
   const op = f.op[i];
@@ -157,7 +170,8 @@ export function printFunc(mod, f) {
     if (op === OP.END || op === OP.ELSE) depth--;
     const head = pad(refText(i + REF_BIAS), 7);
     const body = `${pad(OP_NAMES[op], 8)} ${pad(typeText(f.t[i]), 7)} ${operands(mod, f, i)}`;
-    L.push(`  ${head}${'  '.repeat(depth < 0 ? 0 : depth)}${body}`.replace(/\s+$/, ''));
+    const d = depth < 0 ? 0 : (depth < IND_CAP ? depth : IND_CAP);
+    L.push(`  ${head}${'  '.repeat(d)}${body}`.replace(/\s+$/, ''));
     if (op === OP.IF || op === OP.LOOP || op === OP.BLOCK || op === OP.ELSE) depth++;
   }
   if (depth !== 0) L.push(`  ;; !! 区域不配对：结束时深度 ${depth}`);

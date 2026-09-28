@@ -1094,6 +1094,13 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     `ǅungla` / `ﬁn` / `ΣΣΣ` / `ΌΣΟΣ` / `ΑΣ.` / 西里尔 / `ǰ` / `ΐ` / CJK / `🐍a` / 空串）
     × 4 个映射（upper / lower / casefold / title），与**本机 python3 逐字节相同**
     —— 含一对多（`Straße` -> `STRASSE`、`İ` -> `i̇`、`ﬁ`.casefold -> `fi`）与 `ǅ` 三档。
+    **还有一门更狠的（门一之二）：整张表 1112064 个码点 × 4 个映射全过一遍**，读数是
+    **0 格真差异**。它不比摘要 —— 两侧的 Unicode 版本本来就不一样（量到：参考树是
+    CPython **3.16.0a0 / Unicode 18**，本机 python3 是 **3.14.7 / Unicode 16**），
+    所以口径是"按 256 格一块比摘要找出对不上的块（6 个），在块里逐码点比，
+    **每条差异都必须是'python3 那侧回原样、我们这侧给出映射'**"（= 新版加的那种，97 格）。
+    反方向才是真 bug。28 个词那一门恰好落在两版共有的行为上，看不见这 97 格 ——
+    这就是"整张表"那一门的价值。
     **两条要照抄的上下文规矩**（不在表里，在 `Objects/unicodeobject.c`）：
     a. **尾位 sigma**：`handle_capital_sigma` —— 前面（跳过 case-ignorable）有一格 cased、
        后面（同样跳过）没有 cased，就出 `ς`，否则 `σ`。不抄这一条的读数是 3 个词差。
@@ -1141,8 +1148,36 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     **剩下的那格缺口（记下来，没修）**：嵌套深度本身没变，V8 **解析**时按深度递归，
     默认栈过不去（`RangeError: Maximum call stack size exceeded`，**还没跑起来就报**）。
     判据里挂的是 `node --stack-size=4000`（量过 4000 够、默认约 984KB 不够）。
-    真修法是换形状 —— 几千格的 switch 不该发成几千层嵌套块（发成 JS 的 `switch`，
-    或退回 pc 循环）。这一格在"整份运行时出 JS"那一刀上会再撞见，届时一起动。
+    **这个形状的来路查清了**（2026-09-28）：C 前端降 `switch` 是"**一个 case 一层 block**"
+    （`frontend-c/tccgen.js` 的 `switchStmt`：先开一层 `break` 的 block，再按标签数开 k 层，
+    一个 `case` 标签关掉一层 —— 贯穿因此白拿），所以**层数 = case 数 + 1，与密疏无关**。
+    `unicodetype_db.h` 里那个 switch 有 **2348 个 case**，而码点跨度 `0x30..0x109F5` 远超
+    "密"的判据（`span <= 1024 && span <= covered*8`），于是走**疏**那条路：2348 条 `BRIF`
+    比较链，**一条 `BRTABLE` 都没有**。2349 + 1 = 那 2350 层。
+    三条路里只有一条走得通：
+    - **二分查找树不解决深度**：它只省比较次数（2348 次 -> 约 12 次，native 腿也受益）。
+      深度是"每个 case 体要能被单独跳到、而且彼此按源码顺序贯穿"决定的，换分派方式不动它。
+      真要变浅得放弃"一个 case = 一层"，改成分组的两级分派 + 一个"是分派进来还是贯穿进来"
+      的标志位（2348 格按 √n 分组约 97 层、三级约 40 层）—— 现有 MIR 表达得下，
+      但要与 `goto` 状态机、`openSegs` 的段界、Duff's device 的蹦床三套机器合流，风险在
+      `tests/c` 那批与 tcc 逐字节对账的用例上。
+    - **`BRTABLE` 改成"跳块号"不走**：MIR 里 `BR`/`BRIF`/`BRTABLE` 的目标**一律是层数**
+      （wasm 语义，`mir/ir.js` 明写"与 wasm 逐条相同，因为仓库已经有 WAT 前端，
+      控制流那部分双向无损"）。加块号等于在 MIR 里同时养两套跳转模型，
+      牵动 verify / interp / emit_js / backend-llvm / x64 / arm64 / opt/cfg / print / bytes
+      与 `tests/mir/units/brtable.mjs` 整份。
+    - **`emit_js` 按深度阈值混合发法**（这是要走的那条）：浅函数照旧发嵌套，超阈值的
+      改发 `switch (pc)` 循环。两个前提**已经成立**：`mir/opt/cfg.js` 的 `buildCfg` 已经把
+      结构化标记摊成基本块、而且认 `BRTABLE`；`emit_js` 已经把所有 `v{i}`/`s{k}` 提到
+      函数顶上声明，摊平之后作用域不出问题。代价是要改 `emit_js` 文件头与
+      `docs/adr/0013-execution-engine.md` 里"不需要 relooper / 不需要 pc 循环"那句措辞。
+    **别的腿都不受这个形状影响**（同一份 2349 层的 MIR 实测）：解释器 2.8s、
+    `c obj`（arm64）1.9s 出 46KB、`emit llvm` 14ms 出平铺标签的 `.ll`。
+    但**clang 的括号嵌套硬限是 2048**（`fatal error: bracket nesting level exceeded`）——
+    比我们这 2350 还低一档，将来真加一条 MIR -> C 腿会直接被拒。
+    **顺手修了同一格的另一处**：`mir/print.js` 的缩进也没封顶 —— 800 个 case 时 `printMir`
+    就要 **23.7s**（同一份 MIR 降级 0.13s、验证 4ms），真表上 `omni c mir` 直接撞超时；
+    封顶 40 层之后 **1.9s**。现有快照最深 10 层，一个字节没动。
     **两门都挂进了轴表**：`tests/python/ucase.js`（薄封装）+ `tests/all.js` 的
     `{ s: 'python/ucase.js' }` + `tests/lib/incr.js` 的 `AXIS_EXTRA`（`ext/python` 动了就重跑）。
     改动过的核心（`mir/emit_js.js`）的判据：`tests/c` **339 过 0 败**（含第 4.6 组那条

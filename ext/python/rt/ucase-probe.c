@@ -108,8 +108,54 @@ static void mapstr(const char *s, int mode, char *out) {
   out[w] = 0;
 }
 
+/** FNV-1a（32 位）—— 整张表那一门要一个能对得上的摘要，两侧算法必须逐步相同。 */
+static unsigned int fnv(unsigned int h, const char *s) {
+  for (const unsigned char *p = (const unsigned char *)s; *p != 0; p++) {
+    h = (h ^ *p) * 16777619u;
+  }
+  return h;
+}
+
 int main(int argc, char **argv) {
   char buf[2048];
+  /* `--all`：**整张表**过一遍（0..0x10FFFF，跳开代理区 —— 那一段没有合法的 UTF-8），
+     四个映射按顺序喂进一个 FNV-1a，只印摘要。python3 那侧同一套算法，比一个数就行。 */
+  if (argc == 2 && strcmp(argv[1], "--all") == 0) {
+    unsigned int h = 2166136261u;
+    char one[8];
+    for (unsigned int cp = 0; cp < 0x110000u; cp++) {
+      if (cp >= 0xD800u && cp <= 0xDFFFu) continue;
+      int n = enc1(cp, one);
+      one[n] = 0;
+      for (int m = 0; m < 4; m++) {
+        mapstr(one, m, buf);
+        h = fnv(h, buf);
+        h = (h ^ (unsigned char)'|') * 16777619u;
+      }
+    }
+    printf("%u\n", h);
+    return 0;
+  }
+  /* `--blocks`：同一套摘要，但**每 256 个码点一行**（块号 摘要）—— 摘要对不上时
+     用它把差异夹到一个块里，再对那 256 格逐个比。 */
+  if (argc == 2 && strcmp(argv[1], "--blocks") == 0) {
+    char one[8];
+    for (unsigned int base = 0; base < 0x110000u; base += 256u) {
+      unsigned int h = 2166136261u;
+      for (unsigned int cp = base; cp < base + 256u; cp++) {
+        if (cp >= 0xD800u && cp <= 0xDFFFu) continue;
+        int n = enc1(cp, one);
+        one[n] = 0;
+        for (int m = 0; m < 4; m++) {
+          mapstr(one, m, buf);
+          h = fnv(h, buf);
+          h = (h ^ (unsigned char)'|') * 16777619u;
+        }
+      }
+      printf("%u %u\n", base, h);
+    }
+    return 0;
+  }
   for (int i = 1; i < argc; i++) {
     for (int m = 0; m < 4; m++) {
       mapstr(argv[i], m, buf);

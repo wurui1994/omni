@@ -125,6 +125,67 @@ let bad = compare(got.stdout ?? '');
 say(`门一（原生腿）：${WORDS.length} 个词 × 4 个映射（upper/lower/casefold/title）与本机 python3`
   + ` —— ${bad === 0 ? '逐字节相同' : `${bad} 个不同`}`);
 
+/* 四之二、**整张表**过一遍：0..0x10FFFF（跳开代理区）每个码点的四个映射。
+ *
+ * 28 个词照的是"那几条规矩"，这一门照的是"那张表一格都没错"。
+ * 但两侧的 **Unicode 版本未必一样**（量到：参考树是 CPython 3.16.0a0 / Unicode 18，
+ * 本机 python3 是 3.14.7 / Unicode 16）—— 新版加的大小写对，老 python3 上是"没有映射"。
+ * 所以这一门**不是比摘要**，而是：按 256 格一块比摘要找出有差异的块，再在块里逐码点比，
+ * **每一条差异都必须是"python3 那侧回原样、我们这侧给出了映射"**（= 新版加的那种）。
+ * 反方向（我们没映射而 python3 有）才是真 bug。 */
+const BLK = 256;
+const ourBlocks = (spawnSync(BIN, ['--blocks'], { encoding: 'utf8' }).stdout ?? '').trim().split('\n');
+const pyBlocks = (spawnSync('python3', ['-c',
+  'M = 0xFFFFFFFF\n'
+  + 'out = []\n'
+  + `for base in range(0, 0x110000, ${BLK}):\n`
+  + '    h = 2166136261\n'
+  + `    for cp in range(base, base + ${BLK}):\n`
+  + '        if 0xD800 <= cp <= 0xDFFF: continue\n'
+  + '        c = chr(cp)\n'
+  + '        for s in (c.upper(), c.lower(), c.casefold(), c.title()):\n'
+  + '            for b in s.encode():\n'
+  + '                h = ((h ^ b) * 16777619) & M\n'
+  + '            h = ((h ^ 0x7C) * 16777619) & M\n'
+  + '    out.append(f"{base} {h}")\n'
+  + 'print("\\n".join(out))\n'], { encoding: 'utf8' }).stdout ?? '').trim().split('\n');
+const hotBlocks = [];
+for (let i = 0; i < Math.max(ourBlocks.length, pyBlocks.length); i += 1) {
+  if (ourBlocks[i] !== pyBlocks[i]) hotBlocks.push(i * BLK);
+}
+let newerOnly = 0;
+let realDiff = 0;
+for (const base of hotBlocks) {
+  const cps = [];
+  for (let cp = base; cp < base + BLK; cp += 1) {
+    if (cp === 0 || (cp >= 0xD800 && cp <= 0xDFFF)) continue;   // NUL 当不了 argv
+    cps.push(cp);
+  }
+  const ws = cps.map((c) => String.fromCodePoint(c));
+  const g = (spawnSync(BIN, ws, { encoding: 'utf8' }).stdout ?? '').split('\n');
+  const p = (spawnSync('python3', ['-c',
+    'import sys\n'
+    + 'for w in sys.argv[1:]:\n'
+    + '    print("|".join([w.upper(), w.lower(), w.casefold(), w.title()]))\n', ...ws],
+  { encoding: 'utf8' }).stdout ?? '').split('\n');
+  for (let k = 0; k < cps.length; k += 1) {
+    if (g[k] === p[k]) continue;
+    /* python3 那侧四格全是原字符 = 它这一版**没有**这格的映射。 */
+    if (p[k] === [ws[k], ws[k], ws[k], ws[k]].join('|')) { newerOnly += 1; continue; }
+    realDiff += 1;
+    if (realDiff <= 6) {
+      say(`  真差异 U+${cps[k].toString(16).toUpperCase().padStart(4, '0')}`
+        + `  我们 ${JSON.stringify(g[k])}  py ${JSON.stringify(p[k])}`);
+    }
+  }
+}
+bad += realDiff;
+const uni = (spawnSync('python3', ['-c', 'import unicodedata; print(unicodedata.unidata_version)'],
+  { encoding: 'utf8' }).stdout ?? '').trim();
+say(`门一之二（整张表 1112064 个码点 × 4 个映射）：${realDiff === 0 ? '没有真差异' : `${realDiff} 格真差异`}`
+  + `（${hotBlocks.length} 个块对不上、${newerOnly} 格是**借来的表比本机 python3 新**`
+  + `${uni === '' ? '' : ` —— 本机 Unicode ${uni}`}）`);
+
 /* 五、**JS 那条腿**：同一份借来的 C 过我们的 C 前端 -> MIR -> JS（`c run-js`）。
  *
  * 一份翻译单元（那条路上没有链接器），所以走 `ucase-js-probe.c`（把表 include 进来）。
