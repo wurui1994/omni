@@ -1280,6 +1280,27 @@ strsplit/vapply）都与 Rscript 对得上，**铺完到答完 3.8 秒**（整�
 `nchar` 按字节数是**答错**，但它是**一致地错**（R 自己在 C locale 下也这么答），
 而 NA 那个是真错 —— 两害取轻。
 
+## 第三十格：BLAS 那三格做功能映射（已落，2026-09-28）
+
+`%*%` / `outer` / `crossprod` 走 BLAS，而 R 自带的那份 BLAS 是 **Fortran**
+（`src/extra/blas/blas.f`）—— 这条腿上没有 Fortran 前端，所以这不是"编不过"，是
+**根本没这份源码可编**。按路线里"非纯计算的部分做合理功能映射"那一条，落在宿主这一层
+（`interp/libc.js`）：`dgemm_`（矩阵×矩阵）、`dgemv_`（矩阵×向量）、`dsyrk_`
+（对称秩 k 更新，`crossprod` 走它）、`ddot_`。
+
+写它们要记住 Fortran 的三件事：**实参全是指针**、数组**按列存**、字符参数后头跟着
+隐藏的长度（只读第一个字节、多出来的实参不看）。还有一条 BLAS 明文：`beta == 0` 时
+**不许读 C** —— 那时 C 里允许是没初始化的垃圾（读了就把 NaN 传出去）。
+
+量出来（判据 `rtc.js img` 里钉住了 7 句，与 `Rscript` 逐位相同）：
+`matrix(1:4,2) %*% matrix(1:4,2)` 和为 54、`matrix(1:6,2) %*% matrix(1:6,3)` 为 163、
+矩阵×向量 17.5、`outer(1:3,1:3)` 为 36、`crossprod` 52、`tcrossprod` 179、
+`diag(crossprod(...))` 30。`img` 那一节现在 **65 句**、14 秒。
+
+还没映射的那一层是 **LAPACK**（`solve`/`det`/`qr` 那一族，R 里是 `lapack.so` 那个模块）
+与 **PCRE2**（`trimws`/正则那一路）—— 各是一个库，不是一个函数，各记一刀。
+
+
 
 
 

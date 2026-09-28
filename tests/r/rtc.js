@@ -864,6 +864,11 @@ const IMG_EVAL = [
   'sum(mapply(function(a, b) a * b, 1:3, 4:6))', 'sum(Reduce(`+`, 1:10))',
   'length(Filter(function(x) x > 2, 1:5))', 'sum(do.call(c, list(1, 2, 3)))',
   'sum(matrix(1:6, nrow = 2))', 'sum(t(matrix(1:6, nrow = 2)))', 'sum(diag(3))',
+  /* 矩阵乘那一族（BLAS 那几格在宿主这一层映射出来的：dgemm_/dgemv_/dsyrk_） */
+  'sum(matrix(1:4, 2) %*% matrix(1:4, 2))', 'sum(matrix(1:6, 2) %*% matrix(1:6, 3))',
+  'sum(matrix(c(1.5, 2, 3, 4), 2) %*% c(1, 2))', 'sum(outer(1:3, 1:3))',
+  'sum(crossprod(matrix(1:4, 2)))', 'sum(tcrossprod(matrix(1:6, 2)))',
+  'sum(diag(crossprod(matrix(c(1, 2, 3, 4), 2))))',
   'nrow(cbind(1:3, 4:6))', 'sum(apply(matrix(1:6, 2), 1, sum))',
   'sort(c(3, 1, 2))[1]', 'order(c(3, 1, 2))[1]', 'which.max(c(1, 9, 3))',
   'length(union(1:3, 2:5))', 'length(intersect(1:5, 3:8))', 'length(setdiff(1:5, 3:8))',

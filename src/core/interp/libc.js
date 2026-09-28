@@ -2369,6 +2369,130 @@ const LIBC = {
     if (pwc !== 0n) memStore('i32', pwc, 0, BigInt(cp));
     return cp === 0 ? 0n : BigInt(need);
   },
+  /* ---------------------------------------------------------------- BLAS 那三格
+   *
+   * **为什么落在宿主这一层**（功能映射那条路，ADR-0047 第三十格）：R 的 `%*%` / `outer` /
+   * `crossprod` 走 BLAS，而 R 自带的那份 BLAS 是 **Fortran**（`src/extra/blas/blas.f`）——
+   * 这条腿上没有 Fortran 前端，所以不是"编不过"，是**根本没这份源码可编**。
+   * 少这一格的指纹是 `dgemm_: libc: 没有这个函数`（loud，不是静默答错）。
+   *
+   * Fortran 的调用约定：**实参全是指针**，数组**按列存**（column-major），
+   * 字符参数后头还跟着隐藏的长度 —— 我们只读第一个字节，多出来的实参不看。
+   * 名字带尾下划线是 f2c/gfortran 的惯例（R 的 C 代码里就是这么声明的）。
+   */
+  /** `y := alpha*op(A)*x + beta*y`（op 看 trans）。 */
+  dgemv_: (a) => {
+    const tr = Number(memLoad('i8u', BigInt(a[0]), 0)) !== 78    // 'N'
+      && Number(memLoad('i8u', BigInt(a[0]), 0)) !== 110;        // 'n'
+    const m = Number(memLoad('i32s', BigInt(a[1]), 0));
+    const n = Number(memLoad('i32s', BigInt(a[2]), 0));
+    const alpha = memLoad('f64', BigInt(a[3]), 0);
+    const A = BigInt(a[4]);
+    const lda = Number(memLoad('i32s', BigInt(a[5]), 0));
+    const x = BigInt(a[6]);
+    const incx = Number(memLoad('i32s', BigInt(a[7]), 0));
+    const beta = memLoad('f64', BigInt(a[8]), 0);
+    const y = BigInt(a[9]);
+    const incy = Number(memLoad('i32s', BigInt(a[10]), 0));
+    const rows = tr ? n : m;                 // op(A) 的行数 = y 的长度
+    const cols = tr ? m : n;                 // op(A) 的列数 = x 的长度
+    for (let i = 0; i < rows; i += 1) {
+      let s = 0;
+      for (let j = 0; j < cols; j += 1) {
+        const aij = tr ? memLoad('f64', A + BigInt((j + i * lda) * 8), 0)
+          : memLoad('f64', A + BigInt((i + j * lda) * 8), 0);
+        s += aij * memLoad('f64', x + BigInt(j * incx * 8), 0);
+      }
+      const at = y + BigInt(i * incy * 8);
+      const old = beta === 0 ? 0 : beta * memLoad('f64', at, 0);
+      memStore('f64', at, 0, alpha * s + old);
+    }
+    return undefined;
+  },
+  /** `C := alpha*op(A)*op(B) + beta*C`。op(A) 是 m×k、op(B) 是 k×n、C 是 m×n。 */
+  dgemm_: (a) => {
+    const isT = (p) => {
+      const c = Number(memLoad('i8u', BigInt(p), 0));
+      return c !== 78 && c !== 110;                              // 不是 'N'/'n' 就是转置
+    };
+    const ta = isT(a[0]);
+    const tb = isT(a[1]);
+    const m = Number(memLoad('i32s', BigInt(a[2]), 0));
+    const n = Number(memLoad('i32s', BigInt(a[3]), 0));
+    const k = Number(memLoad('i32s', BigInt(a[4]), 0));
+    const alpha = memLoad('f64', BigInt(a[5]), 0);
+    const A = BigInt(a[6]);
+    const lda = Number(memLoad('i32s', BigInt(a[7]), 0));
+    const B = BigInt(a[8]);
+    const ldb = Number(memLoad('i32s', BigInt(a[9]), 0));
+    const beta = memLoad('f64', BigInt(a[10]), 0);
+    const C = BigInt(a[11]);
+    const ldc = Number(memLoad('i32s', BigInt(a[12]), 0));
+    for (let j = 0; j < n; j += 1) {
+      for (let i = 0; i < m; i += 1) {
+        let s = 0;
+        for (let l = 0; l < k; l += 1) {
+          const ail = ta ? memLoad('f64', A + BigInt((l + i * lda) * 8), 0)
+            : memLoad('f64', A + BigInt((i + l * lda) * 8), 0);
+          const blj = tb ? memLoad('f64', B + BigInt((j + l * ldb) * 8), 0)
+            : memLoad('f64', B + BigInt((l + j * ldb) * 8), 0);
+          s += ail * blj;
+        }
+        const at = C + BigInt((i + j * ldc) * 8);
+        /* `beta == 0` 时不读 C —— BLAS 明说那时 C 里可以是没初始化的垃圾（NaN 也算）。 */
+        const old = beta === 0 ? 0 : beta * memLoad('f64', at, 0);
+        memStore('f64', at, 0, alpha * s + old);
+      }
+    }
+    return undefined;
+  },
+  /** `x·y`（两个步长各自算）。 */
+  ddot_: (a) => {
+    const n = Number(memLoad('i32s', BigInt(a[0]), 0));
+    const x = BigInt(a[1]);
+    const incx = Number(memLoad('i32s', BigInt(a[2]), 0));
+    const y = BigInt(a[3]);
+    const incy = Number(memLoad('i32s', BigInt(a[4]), 0));
+    let s = 0;
+    for (let i = 0; i < n; i += 1) {
+      s += memLoad('f64', x + BigInt(i * incx * 8), 0) * memLoad('f64', y + BigInt(i * incy * 8), 0);
+    }
+    return s;
+  },
+  /** `C := alpha*A*A' + beta*C`（trans='N'）或 `alpha*A'*A + beta*C`（'T'/'C'）——
+   *  只碰 `uplo` 那半个三角（R 的 `crossprod`/`tcrossprod` 走它，回来自己对称化）。 */
+  dsyrk_: (a) => {
+    const up = Number(memLoad('i8u', BigInt(a[0]), 0));
+    const upper = up === 85 || up === 117;                       // 'U'/'u'
+    const tc = Number(memLoad('i8u', BigInt(a[1]), 0));
+    const tr = tc !== 78 && tc !== 110;                          // 不是 'N'/'n'
+    const n = Number(memLoad('i32s', BigInt(a[2]), 0));
+    const k = Number(memLoad('i32s', BigInt(a[3]), 0));
+    const alpha = memLoad('f64', BigInt(a[4]), 0);
+    const A = BigInt(a[5]);
+    const lda = Number(memLoad('i32s', BigInt(a[6]), 0));
+    const beta = memLoad('f64', BigInt(a[7]), 0);
+    const C = BigInt(a[8]);
+    const ldc = Number(memLoad('i32s', BigInt(a[9]), 0));
+    for (let j = 0; j < n; j += 1) {
+      const lo = upper ? 0 : j;
+      const hi = upper ? j : n - 1;
+      for (let i = lo; i <= hi; i += 1) {
+        let s = 0;
+        for (let l = 0; l < k; l += 1) {
+          const ail = tr ? memLoad('f64', A + BigInt((l + i * lda) * 8), 0)
+            : memLoad('f64', A + BigInt((i + l * lda) * 8), 0);
+          const ajl = tr ? memLoad('f64', A + BigInt((l + j * lda) * 8), 0)
+            : memLoad('f64', A + BigInt((j + l * lda) * 8), 0);
+          s += ail * ajl;
+        }
+        const at = C + BigInt((i + j * ldc) * 8);
+        const old = beta === 0 ? 0 : beta * memLoad('f64', at, 0);
+        memStore('f64', at, 0, alpha * s + old);
+      }
+    }
+    return undefined;
+  },
   memcpy: (a) => {
     const n = Number(BigInt(a[2]));
     for (let i = 0; i < n; i++) {
