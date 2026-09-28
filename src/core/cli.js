@@ -4879,6 +4879,15 @@ function cJitRun(path, incs, defs, withRt) {
     vStep(`c-jit rt  ${rt.length} 份运行时 .o 一起铺`);
   }
   let mem = null;
+  /* 三维/着色器那一族要那份 GL 插件（`libomnigl`，运行时自己 `dlopen`，找的是
+     `OMNI_GL_LIB`）。与 `runNative` 那一格逐字同一手：已经给了就不动（标定时要能指别的
+     库），编不出来就什么都不设 —— 运行时找不到库自然退回 CPU 光栅器。
+     **少了这一句的症状离原因很远**：`04-shader.pss` 报的是"这格设备（CPU 备选）上没有
+     'glsetshader'"，看着像方言缺一格能力，其实是那份库没挂上。 */
+  if (env('OMNI_GL_LIB') === undefined || env('OMNI_GL_LIB') === '') {
+    const lib = glPlugin();
+    if (lib !== null) setEnv('OMNI_GL_LIB', lib);
+  }
   const img = flatImage({
     objs,
     page: h.page(),

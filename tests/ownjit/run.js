@@ -12,7 +12,7 @@
 //   calli(addr)         -> 把它当 `int64_t (*)(void)` 调一次
 // 判据自己编一次那份 addon（约 1s，内容哈希缓存），**不经 cli.js** —— 判据不该依赖被判的那条链。
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -279,6 +279,51 @@ if (process.arch === 'arm64') {
       got.stdout === want.stdout && want.stdout.length > 0,
       `想要 ${JSON.stringify(want.stdout.slice(0, 160))}，`
       + `量到 ${JSON.stringify(got.stdout.slice(0, 160))}`
+      + `${got.stderr ? ` err=${got.stderr.slice(0, 200)}` : ''}`);
+  }
+
+  /* ---- 出图那一族（`02-gl.pss` 立即模式 / `04-shader.pss` 可编程管线）----
+   *
+   * 这两份**不判 stdout**：那一行是 `#gfx png <路径> 320 240`，而路径按"程序叫什么"取名
+   * —— 被判的那一边跑的是生成出来的 `.c`（叫 `frame.png`），正路那一边跑的是 `.pss`
+   * （叫 `02-gl.png`）。**那是这一节自己的取名差，不是代码生成的差**，拿它当判据只会
+   * 逼着人去改一个与正确性无关的东西。
+   *
+   * 判的是**那张图的字节**（这一轴本来的口径）：从各自的 `#gfx png …` 那行里把路径读出来，
+   * 逐字节比。着色器那一份要 `OMNI_GFX=gl`（哪台设备是**跑的时候**定的），而那份
+   * `libomnigl` 由 `cJitRun` 自己顺手编好、路径放进 `OMNI_GL_LIB` —— 少了那一格，
+   * 报的是"这格设备（CPU 备选）上没有 'glsetshader'"，看着像方言缺能力。
+   */
+  for (const [prog, gfx] of [['02-gl.pss', null], ['04-shader.pss', 'gl']]) {
+    const src = join(ROOT, 'ext/polydraw/examples', prog);
+    const gen = spawnSync('node', [OMNI, 'emit', 'c', src], big);
+    if (gen.status !== 0) { okIf(`${prog} emit c 过得去`, false, gen.stderr.slice(0, 200)); continue; }
+    const cPath = join(dir, `${prog}.c`);
+    writeFileSync(cPath, gen.stdout);
+    const envp = gfx === null ? process.env : { ...process.env, OMNI_GFX: gfx };
+    const pngOf = (out) => {
+      const m = /#gfx png (\S+)/.exec(out);
+      return m === null ? null : join(ROOT, m[1]);
+    };
+    /* **上一份的图先删掉**：被判这一边的产物名是固定的 `.omni-cache/gfx/frame.png`
+       （名字从程序来，而这儿的程序都是同一个生成出来的 `.c`）⇒ 两份例子写同一个文件。
+       不删的话第二份要是压根没画，读到的是第一份那张 —— 一格白拿的绿。 */
+    const stale = join(ROOT, '.omni-cache', 'gfx', 'frame.png');
+    if (existsSync(stale)) unlinkSync(stale);
+    const got = spawnSync('node', [OMNI, 'c-jit', cPath, '--rt'], { ...big, env: envp });
+    const gp = pngOf(got.stdout);
+    /* 先把被判那一张收走 —— 正路那一趟写进同一个目录。 */
+    const mine = gp === null || !existsSync(gp) ? null : readFileSync(gp);
+    /* **正路那一边用默认环境**：哪台设备它自己会挑（量到的：给它 `OMNI_GFX=gl` 反而
+       一个 `#gfx png` 都不印）。这一节要的是"同一份源码两条路出的图一样"，
+       不是"两边吃同一串环境变量"。 */
+    const want = spawnSync('node', [OMNI, 'run', src], big);
+    const wp = pngOf(want.stdout);
+    const theirs = wp === null ? null : readFileSync(wp);
+    okIf(`${prog} 在本进程里出的那张 PNG 与正路逐字节相同`,
+      mine !== null && theirs !== null && mine.length > 1000 && mine.equals(theirs),
+      `我们 ${mine === null ? '没出图' : `${mine.length} 字节`}，`
+      + `正路 ${theirs === null ? '没出图' : `${theirs.length} 字节`}`
       + `${got.stderr ? ` err=${got.stderr.slice(0, 200)}` : ''}`);
   }
 }

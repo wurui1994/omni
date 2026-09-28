@@ -310,7 +310,11 @@ const C_GROUP = {  name: 'c',
 退出码按 \`& 0xff\` 收（与 \`exit\` 同口径）。
 
 \`--rt\` 把运行时那二十来份 \`.o\` 一起铺进来 —— \`omni emit c\` 出的那份 C 要它们
-（\`omni_print_int\` / \`omni_host_init\` / \`omni_run_entry\` 那一族）。纯 C 程序不用给。`,
+（\`omni_print_int\` / \`omni_host_init\` / \`omni_run_entry\` 那一族）。纯 C 程序不用给。
+
+出图那一族（\`.pss\` / \`.kc\` 生成出来的那份 C）也跑得动：GL 立即模式与着色器都过了，
+出的 PNG 与正路逐字节相同。**哪台设备是跑的时候定的** —— 着色器那一族要
+\`OMNI_GFX=gl\`（与 \`run --gfx gl\` 同一格）；那份 \`libomnigl\` 这一格自己会顺手编好。`,
       flags: [...C_CPP_FLAGS, { name: '--rt', arity: 0 }],
     },
     {
