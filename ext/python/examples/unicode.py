@@ -69,6 +69,10 @@ def main():
     print("ﬃ".upper(), "İ".lower(), "ǅ".upper(), "ǅ".lower())
     print("ΟΔΟΣ".lower(), "ΣΟΦΟΣ".lower(), "Σ".lower(), "ΑΣΒ".lower())
     print("Groß".casefold(), "ΣΟΦΟΣ".casefold(), "ﬃ".casefold())
+    # 尾位 sigma 那条规矩要**前后都看**：前面跳过可忽略的有没有 cased、后面有没有。
+    # `.Σ` 前面是个句点（既不 cased 也不可忽略）-> `σ`；`αΣʲ` 后面那个 ʲ **既 cased
+    # 又可忽略**，可忽略优先 -> 那个 Σ 算尾位 -> `ς`。这两格是探针写错时唯一会红的地方。
+    print(".Σ".lower(), "αΣ.".lower(), "αΣ".lower(), "αΣʲ".lower(), "αΣa".lower())
     print("abc".upper(), "ABC".lower(), "".upper(), "".lower(), "".casefold())
     print("héllo wörld".upper(), "HÉLLO WÖRLD".lower())
 

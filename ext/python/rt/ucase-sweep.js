@@ -27,56 +27,74 @@ const argv = process.argv.slice(2);
 const at = argv.indexOf('--step');
 const STEP = at < 0 ? 1 : Number(argv[at + 1]);
 
-const py = `def main():
+const HEAD = `def main():
     cp = 1
     while cp < 1114112:
         if cp < 55296 or cp > 57343:
             c = chr(cp)
-            print(cp, c.upper(), c.lower(), c.casefold())
-        cp = cp + ${STEP}
+`;
+const TAIL = `        cp = cp + ${STEP}
 main()
 `;
+/* 两趟。
+   一：**四个映射**（`.upper()` / `.lower()` / `.casefold()`，一格码点一行）。
+   二：**尾位 sigma 那两条上下文规矩**（`ucase.tab` 里那两位标志）—— 一格一格地把码点摆在
+   Σ 的后面与前面，看那个 Σ 小写成 σ 还是 ς。头一版的探针就是在这儿错的（写成"Σ 在开头"，
+   而那条规矩要求"前面有 cased"，于是那一位恒等）；**单字符那一趟量不到它**：
+   独一格 Σ 走的是"前面什么都没有"那条路，1112064 个码点照旧全绿。 */
+const PASSES = [
+  ['四个映射（upper / lower / casefold）',
+    `${HEAD}            print(cp, c.upper(), c.lower(), c.casefold())\n${TAIL}`],
+  ['尾位 sigma 的前位与后位',
+    `${HEAD}            print(cp, ("\\u03b1\\u03a3" + c).lower(), ("\\u03b1" + c + "\\u03a3").lower())\n${TAIL}`],
+];
+
 const dir = mkdtempSync(join(tmpdir(), 'omni-ucase-sweep-'));
-const file = join(dir, 'sweep.py');
-writeFileSync(file, py);
+let bad = 0;
+let rows = 0;
+for (let i = 0; i < PASSES.length; i++) {
+  const [what, src] = PASSES[i];
+  const file = join(dir, `sweep${i}.py`);
+  writeFileSync(file, src);
 
-const t0 = Date.now();
-const want = spawnSync('python3', [file], { encoding: 'utf8', maxBuffer: 1 << 30 });
-if (want.status !== 0) {
-  process.stderr.write(`python3 那一趟没过：${(want.stderr ?? '').slice(0, 300)}\n`);
-  process.exit(1);
-}
-const tPy = Date.now() - t0;
+  const t0 = Date.now();
+  const want = spawnSync('python3', [file], { encoding: 'utf8', maxBuffer: 1 << 30 });
+  if (want.status !== 0) {
+    process.stderr.write(`python3 那一趟没过：${(want.stderr ?? '').slice(0, 300)}\n`);
+    process.exit(1);
+  }
+  const tPy = Date.now() - t0;
 
-const t1 = Date.now();
-/* 看门狗关掉：这一趟本来就要几秒（`OMNI_TIMEOUT` 默认 30s 是给"一个程序"的预算）。 */
-const got = spawnSync(process.execPath, [CLI, 'run', '--mode', 'js', file], {
-  encoding: 'utf8', maxBuffer: 1 << 30, env: { ...process.env, OMNI_TIMEOUT: '0' },
-});
-const tUs = Date.now() - t1;
-if (got.status !== 0) {
-  process.stderr.write(`我们这一趟没过：${(got.stderr ?? '').slice(0, 400)}\n`);
-  process.exit(1);
-}
+  const t1 = Date.now();
+  /* 看门狗关掉：这一趟本来就要几秒（`OMNI_TIMEOUT` 默认 30s 是给"一个程序"的预算）。 */
+  const got = spawnSync(process.execPath, [CLI, 'run', '--mode', 'js', file], {
+    encoding: 'utf8', maxBuffer: 1 << 30, env: { ...process.env, OMNI_TIMEOUT: '0' },
+  });
+  const tUs = Date.now() - t1;
+  if (got.status !== 0) {
+    process.stderr.write(`我们这一趟没过（${what}）：${(got.stderr ?? '').slice(0, 400)}\n`);
+    process.exit(1);
+  }
 
-const a = want.stdout;
-const b = got.stdout;
-const rows = a.split('\n').length - 1;
-if (a === b) {
-  process.stdout.write(`ok   整张表过一遍：**${rows} 个码点** × upper / lower / casefold，`
-    + `与 python3 逐字节相同（步长 ${STEP}；python3 ${(tPy / 1000).toFixed(1)}s、`
-    + `我们 ${(tUs / 1000).toFixed(1)}s）\n`);
-  process.exit(0);
+  const a = want.stdout;
+  const b = got.stdout;
+  rows = a.split('\n').length - 1;
+  if (a === b) {
+    process.stdout.write(`ok   ${what}：**${rows} 个码点**与 python3 逐字节相同`
+      + `（步长 ${STEP}；python3 ${(tPy / 1000).toFixed(1)}s、我们 ${(tUs / 1000).toFixed(1)}s）\n`);
+    continue;
+  }
+  /* 不同就把**头三处**指出来（逐行比，不印整条河）。 */
+  const la = a.split('\n');
+  const lb = b.split('\n');
+  let shown = 0;
+  for (let k = 0; k < Math.max(la.length, lb.length) && shown < 3; k++) {
+    if (la[k] === lb[k]) continue;
+    process.stderr.write(`  ${what} 第 ${k + 1} 行：python3 是 ${JSON.stringify(la[k])}，`
+      + `我们是 ${JSON.stringify(lb[k])}\n`);
+    shown += 1;
+  }
+  process.stderr.write(`FAIL ${what}（${rows} 个码点里至少 ${shown} 处对不上）\n`);
+  bad += 1;
 }
-/* 不同就把**头三处**指出来（逐行比，不印整条河）。 */
-const la = a.split('\n');
-const lb = b.split('\n');
-let shown = 0;
-for (let i = 0; i < Math.max(la.length, lb.length) && shown < 3; i++) {
-  if (la[i] === lb[i]) continue;
-  process.stderr.write(`第 ${i + 1} 行：python3 是 ${JSON.stringify(la[i])}，`
-    + `我们是 ${JSON.stringify(lb[i])}\n`);
-  shown += 1;
-}
-process.stderr.write(`FAIL 整张表那一趟对不上（${rows} 个码点里至少 ${shown} 处）\n`);
-process.exit(1);
+process.exit(bad === 0 ? 0 : 1);
