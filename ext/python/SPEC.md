@@ -950,6 +950,34 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     "打进去的名字 = 读回来的名字"。判据是 `tests/c/ar-read.js` 的 C 段（写出去再读回来：
     名字、字节、索引、按需取用转圈）。
 
+27. **`**` 那一格从前静静答错 —— 整数次幂现在精确**（方言新增 `(ipow A B)`）。
+
+    量出来的（这一轮先量后改）：`3 ** 39` 我们印 `4052555153018976256`，python 印
+    `4052555153018976267`；`7 ** 22` 我们印 `…988288`、python 印 `…988049`。
+    **三条腿全错，而且不报话** —— 病根是 adapter 把整数那一支也发成
+    `pow(double, double)` 再 `toint`：double 只有 53 位有效位，而这些数落在 int64 里
+    却落不进 double。这是最坏的一类错（答案看着像个数）。
+
+    改法是方言加一格算子（`(ipow A B)`，五处 + 三份实现，与 `py_repr` 同一个形状）：
+      * `sexpr/lower.js` 收形式（两边都要 int、不收负指数字面量）、`lower/sx.js` +
+        `lower/ty-of.js` + `lower/lower-expr.js` 是标准 IR 那一层；
+      * 三份实现：`omni_int.c` 的 `omni_ipow`（平方-乘，每步查溢出）、prelude 的
+        `$ipow`（BigInt 算，末尾查范围）、`interp/builtin.js`（这条腿上 int 就是 BigInt）；
+        `backend-llvm` 那一行签名表也加了（这台机器上没 llvm-config，那条腿没量到）。
+      * **溢出 64 位报话而不回绕**：`2 ** 64` 报 `2 ** 64 溢出 64 位（无上界的整数还没接）`
+        —— 那正是借 `longobject.c` 那一刀的账，话里带着它（`tests/python/run.js` 认
+        "还没接"这三个字，于是这种例子算 skip 不算 FAIL）。
+
+    adapter 那一侧还改了一格**类型**：`b ** e`（两边 int、指数不是字面量）从前一律说 real，
+    于是印出来是 `4.05e+18`；现在**退到箱子**（dyn），运行期问一次"指数非负吗"——
+    非负走 `(ipow)` 交 int、负的走 real 交 float。这与 python 的行为一致
+    （`2 ** n` 的类型真的取决于 `n` 的符号），也是这门语言"推不出类型就退到 dyn"那条路。
+
+    判据：新例子 `ext/python/examples/pow.py`（26 行，三条腿 interp/js/c 与 python3
+    逐字节相同）、新方言判据 `tests/sexpr/cases/65-ipow.sx`（四条腿 run / run-c /
+    interp / interp --mir 与 `.expected` 逐字节相同，期望值是 python3 算的）；
+    `tests/python` 全套 81 过 0 败（三条腿 × 28 份例子）、`check:self` 绿。
+
 ## 二、进度
 
 ### 已落地

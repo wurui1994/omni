@@ -31,6 +31,7 @@
  *         | (dset E E E)
  *   E     = (int TEXT) | (real TEXT) | (bool TEXT) | (str "…") | (tostr E) | (tostr E N)
  *         | (rmath "NAME" A [B])
+ *         | (ipow A B)
  *         | (slen E) | (ssub E I N) | (sfind E T)
  *         | (toreal E) | (toint E)
  *         | (var NAME) | (bin "OP" E E) | (un "OP" E) | (call NAME E...)
@@ -2050,7 +2051,27 @@ class CoreLowerer {
       }
       return { kind: 'Builtin', name: 'py_repr', args: [v], type: STRING, argType: REAL };
     }
+    /* `(ipow A B)` —— **整数的整数次幂，精确**（第一百四十九片）。
+       为什么方言里要单独一格：`(rmath "pow" …)` 是 double 上的，只有 53 位有效位，
+       而 int 是 64 位 —— `3 ** 39`（= 4052555153018976267）落在 int64 里却落不进 double。
+       python 那条腿从前就是走 pow 再 toint，于是**静静答错**（我们印 …256、python 印 …267）。
+       口径三条：两边都要 int；**负指数不收**（`2 ** -1` 在 python 里是 0.5，那是 real 的事，
+       调用方自己分支）；溢出 64 位**报话**而不回绕 —— 那笔账叫"无上界的整数还没接"。 */
+    if (h === 'ipow') {
+      if (n.items.length !== 3) return this.err(n, '(ipow A B) 要 2 个参数');
+      const a = this.expr(n.items[1]);
+      const b = this.expr(n.items[2]);
+      if (a === null || b === null) return null;
+      if (a.type.k !== 'int' || b.type.k !== 'int') {
+        return this.err(n, `(ipow A B) 两边都要 int，这里是 ${coreTypeText(a.type)} 与 ${coreTypeText(b.type)}`);
+      }
+      if (b.kind === 'Const' && Number(b.value) < 0) {
+        return this.err(n.items[2], '(ipow A B) 的指数不收负数（python 的 `2 ** -1` 是 real，那一格由调用方分支）');
+      }
+      return { kind: 'Builtin', name: 'ipow', args: [a, b], type: INT, argType: INT };
+    }
     // `(rmath "NAME" A [B])`：real 上的数学函数。名单是**量出来的**（runtime/omni_math.c
+
     // 的头注里写着）：只有各家实现必然一致的那几个进得来 —— sqrt 是 IEEE-754 强制正确
     // 舍入，fabs/floor/ceil/round/fmod 是精确运算，pow 在 80 组随机输入上 libm 与 V8
     // 逐位相同。exp/log/tan/atan/cos 那一类刻意不收：它们在最后一位就分叉，收了

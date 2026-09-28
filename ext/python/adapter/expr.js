@@ -663,10 +663,14 @@ function tyOfBin(x, C) {
   if (o === '**') {
     if (ta === null || tb === null) return null;
     /* `2 ** 3` 是 int，`2 ** -1` 是 float，`2 ** 0.5` 是 float —— 指数是**非负整数字面量**
-       才敢说是 int，别的一律 float（跑起来才知道指数的符号）。 */
+       才敢说是 int。两边都是 int 而指数不是字面量时（`b ** e`），答案的**类型跟着运行期的
+       指数符号走** —— 那正是 dyn 那条道（退到箱子，运行期分支；从前这儿一律说 real，
+       于是 `b ** e` 印出来是 4.05e+18 而 python 印 4052555153018976267）。 */
     if (isInt(ta) && tag(b) === 'num' && numValue(leaf(kids(b)[0])).kind === 'int') return INT;
+    if (isInt(ta) && isInt(tb)) return DYN;
     return REAL;
   }
+
   if (ta === null || tb === null) return null;
   /* `"ab" * 3` / `3 * "ab"` 出串；`[1] * 3` 出表。 */
   if (o === '*') {
@@ -1632,9 +1636,13 @@ const DYN_ARITH = (C) => ({
   '//': (l, r, wantInt) => floorDiv(l, r, wantInt, C),
   '%': (l, r, wantInt) => pyMod(l, r, wantInt, C),
   '**': (l, r, wantInt) => {
-    const p = { kind: 'rmath', fn: 'pow', args: [toReal(l, C), toReal(r, C)] };
-    return wantInt ? { kind: 'builtin', name: 'toint', args: [p] } : p;
+    /* 整数那一支走 `(ipow)` —— 精确（见上面静态那一侧的注）。箱子这一侧"指数非负"
+       是在**运行期**问过的（`dyn.js` 那一格把 `>= 0` 并进了条件），所以这儿走得到的
+       一定是非负指数。 */
+    if (wantInt) return { kind: 'ipow', args: [l, r] };
+    return { kind: 'rmath', fn: 'pow', args: [toReal(l, C), toReal(r, C)] };
   },
+
 });
 
 /**
@@ -1810,15 +1818,24 @@ function binOf(x, C) {
     return pyMod(a, b, isInt(ta) && isInt(tb), C);
   }
   if (o === '**') {
-    const p = { kind: 'rmath', fn: 'pow', args: [toReal(a, C), toReal(b, C)] };
     /* 指数是**非负的整数字面量**时交 int（python 的 `2 ** 3` 是 3 而不是 3.0）。
        `True` / `False` 也算整数字面量 —— bool 就是 int 的一种，上面刚折成 0 / 1。 */
     const boolExp = tag(bTok) === 'true' || tag(bTok) === 'false';
     const wantInt = isInt(ta) && (boolExp || (tag(bTok) === 'num'
       && numValue(leaf(kids(bTok)[0])).kind === 'int'
       && numValue(leaf(kids(bTok)[0])).value >= 0n));
-    return wantInt ? { kind: 'builtin', name: 'toint', args: [p] } : p;
+    /* 整数那一支走 **`(ipow)`**，不是 `pow` 再 `toint`：double 只有 53 位有效位，
+       `3 ** 39`（= 4052555153018976267）落在 int64 里却落不进 double —— 从前这儿就是
+       这么静静答错的（我们印 …256、python 印 …267）。溢出 64 位由 `ipow` 报话
+       （"无上界的整数还没接"那笔账）。 */
+    if (wantInt) return { kind: 'ipow', args: [a, b] };
+    /* 两边都是 int 而指数不是字面量：**退到箱子**（`dynBin` 里那一支在运行期问"指数非负吗"，
+       非负走 `(ipow)`、负的走 real）—— 与 `tyOfCst` 里那一格说的 DYN 是同一件事。 */
+    if (isInt(ta) && isInt(tb)) return dynBin('**', a, b, C, DYN_ARITH(C));
+    return { kind: 'rmath', fn: 'pow', args: [toReal(a, C), toReal(b, C)] };
+
   }
+
   if (BITS.has(o)) {
     if (!isInt(ta) || !isInt(tb)) {
       throw new Error(`python->IR: 位运算 '${o}' 的两边要都是 int（这里是 ${ta.kind} / ${tb.kind}）`);

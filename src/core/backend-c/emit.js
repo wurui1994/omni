@@ -2951,6 +2951,10 @@ class CEmitter {
       case 'repr': return `omni_repr_real(${a[0]})`;
       /* python 的 repr(float)（方言的 `(srepr E)`）—— 排版门槛与上一条不同，见 omni_fmt.c */
       case 'py_repr': return `omni_pyrepr_real(${a[0]})`;
+      /* `(ipow A B)` —— 整数的整数次幂，精确（omni_int.c 的平方-乘，每步查溢出）。
+         `pow(double,double)` 凑不出来：double 只有 53 位有效位。 */
+      case 'ipow': return `omni_ipow(${a[0]}, ${a[1]})`;
+
       case 'int_of_string': return `omni_int_of_string(${a[0]})`;
       case 'real_of_string': return `omni_real_of_string(${a[0]})`;
       case 'read_text': return `omni_read_text(${a[0]})`;

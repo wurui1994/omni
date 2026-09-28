@@ -60,6 +60,28 @@ function $ineg(a) {
   if (typeof a === "number") return a === 0 ? 0 : -a;
   return $CN(BigInt.asIntN(64, -a));
 }
+// (ipow A B) —— 整数的整数次幂，**精确**（第一百四十九片）。不能拿 Math.pow 凑：
+// double 只有 53 位有效位，3 ** 39（= 4052555153018976267）落在 int64 里却落不进
+// double —— python 那条腿从前就是这么静静答错的（我们印 …256、python 印 …267）。
+// 这儿一律 BigInt 算，末尾查一次"装得进 int64 吗"；装不进就报话（与 C 那条腿同一句）。
+// 负指数不该走到这儿（方言那一层判过）：那是 real 的事。
+function $ipow(a, b) {
+  const e = $B(b);
+  if (e < 0n) $rt_error("ipow: 指数是负数（" + b + "）—— 负指数是 real 的事");
+  let r = 1n;
+  let base = $B(a);
+  let n = e;
+  while (n > 0n) {
+    if ((n & 1n) === 1n) r = r * base;
+    n = n >> 1n;
+    if (n > 0n) base = base * base;
+  }
+  if (r > 9223372036854775807n || r < -9223372036854775808n) {
+    $rt_error(a + " ** " + b + " 溢出 64 位（无上界的整数还没接）");
+  }
+  return $CN(r);
+}
+
 // 位运算一律走 BigInt：JS 的 & | ^ << >> 会把操作数截成 int32，number 那条路直接是错的。
 // asy 那边位运算是 nope（builtins.tab 里 AND/OR/XOR 都还没做），所以这一档不在热路上。
 function $ishl(a, b) { return $CN(BigInt.asIntN(64, $B(a) << ($B(b) & 63n))); }

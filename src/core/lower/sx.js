@@ -102,6 +102,11 @@ export const SX_ARITY = {
      这儿只管"几格操作数"，**每个名字到底收几格由方言那张 `RMATH` 把关**
      （`(rmath "fma") 要 3 个参数` 那句话是它报的），所以放宽这一格不会让错元数漏过去。 */
   rmath: [2, 4],
+  /* **整数的整数次幂**（`(ipow A B)`，精确）：`rmath "pow"` 是 double 上的，只有 53 位
+     有效位，而 int 是 64 位 —— python 的 `3 ** 39` 走 pow 就静静答错。两边都要 int、
+     不收负指数（那是 real 的事）、溢出 64 位报话。 */
+  ipow: 2,
+
   /* 截到 N 位（ADR-0031 §8.2）：`(trunc N E)` = asUintN、`(sext N E)` = asIntN、
      `(zext N E)` 与 trunc 同值（分开写只为让读的人看出意图）。N 是 1..64 的字面量。 */
   trunc: 2, sext: 2, zext: 2,
@@ -228,6 +233,9 @@ export const ret = (v = null) => (v === null ? op('ret') : op('ret', v));
 export const tostr = (v) => op('tostr', v);
 /** `(rmath "NAME" A [B])` —— 函数名是**字面的串**（不是一格 `(str …)` 值）。 */
 export const rmath = (fn, args = []) => op('rmath', JSON.stringify(String(fn)), ...args);
+/** `(ipow A B)` —— 整数的整数次幂（精确；两边都要 int，指数非负）。 */
+export const ipow = (a, b) => op('ipow', a, b);
+
 export const slen = (v) => op('slen', v);
 export const sfind = (v, x) => op('sfind', v, x);
 export const ssub = (v, a, b) => op('ssub', v, a, b);

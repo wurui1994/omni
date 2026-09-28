@@ -612,6 +612,15 @@ omni_str omni_str_base(int64_t v, int64_t base);
    答一个装不进 int64_t 的数（那会让六条腿对不上）。n 在方言那一层查过（1..64 的字面量）。 */
 int64_t omni_int_trunc(int64_t v, int64_t n);
 int64_t omni_int_sext(int64_t v, int64_t n);
+/* `(ipow A B)` —— **整数的整数次幂，精确**（第一百四十九片）。
+   为什么不能拿 `pow(double, double)` 凑：double 只有 53 位有效位，`3 ** 39`
+   （= 4052555153018976267）落在 int64 里却落不进 double —— 从前 python 那条腿就是
+   这么静静答错的（我们印 ...256、python 印 ...267）。
+   指数为负那一格**不在这儿**（python 里 `2 ** -1` 是 0.5，那是 real 的事，调用方自己分支）。
+   溢出 64 位**报错**而不回绕：回绕出来的数不表示任何东西（与 `omni_trunc` 同一条理由），
+   而那正是"无上界的整数还没接"这笔账 —— 报的话里带着它。 */
+int64_t omni_ipow(int64_t a, int64_t b);
+
 /* 只把 ASCII 的 a-z 换成大写（%X 要它）。不是 toupper（看 locale）、也不是 JS 的
    toUpperCase（Unicode 的，长度会变）—— ASCII-only 才让四条腿是同一个函数。 */
 omni_str omni_str_upper(omni_str s);

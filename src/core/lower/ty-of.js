@@ -98,6 +98,9 @@ export function typeOf(e, ctx) {
     case 'builtin': return builtinType(e, ctx);
     /* `(rmath …)` 交的一律是 real。 */
     case 'rmath': return REAL;
+    /* `(ipow A B)` 交的一律是 int（两边都要 int、指数非负 —— 方言那一层查）。 */
+    case 'ipow': return INT;
+
     case 'field': {
       const t = typeOf(e.obj, ctx);
       const fs = t.kind === 'named' ? ctx.fields.get(t.name) : undefined;

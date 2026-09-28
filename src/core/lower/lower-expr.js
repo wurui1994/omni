@@ -73,6 +73,12 @@ export function lowerExpr(expr, ctx) {
      */
     case 'rmath': return sx.rmath(expr.fn, expr.args.map((a) => lowerExpr(a, ctx)));
     /**
+     * **整数的整数次幂**（`(ipow A B)`，精确）：python 的 `a ** b` 在两边都是 int、
+     * 指数非负时落这一格 —— 走 `rmath "pow"` 会在 2^53 以上答错。
+     */
+    case 'ipow': return sx.ipow(lowerExpr(expr.args[0], ctx), lowerExpr(expr.args[1], ctx));
+
+    /**
      * **叫外头那份 C 里的一格符号**（`(ccall omni_go_chan_new …)`）。
      * 模块头上那两句（`(lib …)` / `(cabi …)`）由 adapter 发成 decl —— 见 `lower.js`。
      * go 的并发与宿主入口、cpp 的外部符号、jnc 的 ffi 走的是同一格。

@@ -42,3 +42,39 @@ int64_t omni_int_sext(int64_t v, int64_t n) {
   uint64_t m = s * 2 - 1;
   return (int64_t)((((uint64_t)v & m) ^ s) - s);
 }
+
+/* `(ipow A B)` —— 平方-乘，每一步自己查溢出（`__builtin_mul_overflow` 我们自己那台
+   C 前端还没有，所以用"除回去比一比"）。指数为负不该走到这儿（方言那一层与调用方
+   各判一次），走到了就报话、不猜。三条腿同一份语义：宿主那两条用 BigInt 算，超出
+   int64 就报**同一句话**。 */
+static int omni_mul_ovf(int64_t x, int64_t y) {
+  if (x == 0 || y == 0) return 0;
+  if (x == -1) return y == INT64_MIN;
+  if (y == -1) return x == INT64_MIN;
+  if (x > 0) return y > 0 ? x > INT64_MAX / y : y < INT64_MIN / x;
+  return y > 0 ? x < INT64_MIN / y : x < INT64_MAX / y;
+}
+
+int64_t omni_ipow(int64_t a, int64_t b) {
+  if (b < 0) omni_errorf("ipow: 指数是负数（%lld）—— 负指数是 real 的事", (long long)b);
+  int64_t r = 1;
+  int64_t base = a;
+  int64_t e = b;
+  while (e > 0) {
+    if ((e & 1) == 1) {
+      if (omni_mul_ovf(r, base)) {
+        omni_errorf("%lld ** %lld 溢出 64 位（无上界的整数还没接）", (long long)a, (long long)b);
+      }
+      r = r * base;
+    }
+    e = e >> 1;
+    if (e > 0) {
+      if (omni_mul_ovf(base, base)) {
+        omni_errorf("%lld ** %lld 溢出 64 位（无上界的整数还没接）", (long long)a, (long long)b);
+      }
+      base = base * base;
+    }
+  }
+  return r;
+}
+

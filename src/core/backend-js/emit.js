@@ -1064,6 +1064,10 @@ class JsEmitter {
       case 'repr': return `$repr_real(${a[0]})`;
       /* python 的 repr(float)（方言的 `(srepr E)`）—— 排版门槛与上一条不同，见 prelude.js */
       case 'py_repr': return `$pyrepr_real(${a[0]})`;
+      /* `(ipow A B)` —— 整数的整数次幂，精确（prelude 的 $ipow 一律 BigInt 算）。
+         拿 Math.pow 凑是错的：double 只有 53 位，`3 ** 39` 落在 int64 里却落不进 double。 */
+      case 'ipow': return `$ipow(${a[0]}, ${a[1]})`;
+
       case 'int_of_string': return `$int_of_string(${a[0]})`;
       case 'real_of_string': return `$real_of_string(${a[0]})`;
       case 'read_text': return `$read_text(${a[0]})`;

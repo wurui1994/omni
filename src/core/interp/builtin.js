@@ -1215,6 +1215,25 @@ export function applyBuiltin(I, e, a) {
     /* python 的 repr(float)（方言的 `(srepr E)`）。inf / nan 在这一格是**合法的**
        （python 印 inf / nan），所以不走 reprOf 那道非有限就报错的门。 */
     case 'py_repr': return pyReprReal(a[0]);
+    /* `(ipow A B)` —— 整数的整数次幂，**精确**（第一百四十九片）。这条腿上 int 就是
+       BigInt，所以算起来天然精确；末尾查一次"装得进 int64 吗"——装不进就报话，
+       与另两条腿**同一句**（回绕出来的数不表示任何东西）。负指数是 real 的事。 */
+    case 'ipow': {
+      if (a[1] < 0n) rtError(`ipow: 指数是负数（${a[1]}）—— 负指数是 real 的事`);
+      let r = 1n;
+      let base = a[0];
+      let n = a[1];
+      while (n > 0n) {
+        if ((n & 1n) === 1n) r *= base;
+        n >>= 1n;
+        if (n > 0n) base *= base;
+      }
+      if (r > 9223372036854775807n || r < -9223372036854775808n) {
+        rtError(`${a[0]} ** ${a[1]} 溢出 64 位（无上界的整数还没接）`);
+      }
+      return r;
+    }
+
     case 'int_of_string': return intOfString(a[0]);
     case 'real_of_string': return realOfString(a[0]);
     // `(readtext E)`：整份读一份文本文件。三条腿一份语义（JS 那边 $read_text、

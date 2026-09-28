@@ -1,0 +1,47 @@
+;; `(ipow A B)` —— **整数的整数次幂，精确**（第一百四十九片）。
+;;
+;; 为什么方言里要单独一格而不是 `(rmath "pow" …)`：那一格是 double 上的，只有 53 位
+;; 有效位，而方言的 int 是 64 位。`3 ** 39` = 4052555153018976267 落在 int64 里，
+;; 却**落不进 double**（最近的 double 是 …256）—— python 那条腿从前就是走 pow 再取整，
+;; 于是静静答错了最后三位。这一份挑的数刻意都贴在 2^53 与 2^63 之间：小的那些谁都对。
+;;
+;; 口径三条，五条腿都一样：
+;;   * 两边都要 int（方言那一层查，不推导）；
+;;   * **不收负指数**（python 的 `2 ** -1` 是 0.5 —— 那是 real 的事，调用方自己分支）；
+;;   * 溢出 64 位**报话**而不回绕（`tests/sexpr/rt/` 那一门管那句话）。
+(module
+  (fn powsum ((b int) (n int)) int
+    ;; 指数从变量来 —— 这一支在 C 那条腿上是真的函数调用（不是编译期折叠）
+    (let s int (int 0))
+    (let i int (int 0))
+    (while (bin "<=" (var i) (var n))
+      (do
+        (set s (bin "+" (var s) (ipow (var b) (var i))))
+        (set i (bin "+" (var i) (int 1)))))
+    (ret (var s)))
+
+  (main
+    ;; 一、贴着 2^53 往上：这几格 pow 一律答错最后几位
+    (print (ipow (int 3) (int 39)))
+    (print (ipow (int 7) (int 22)))
+    (print (ipow (int 5) (int 27)))
+    (print (ipow (int 6) (int 24)))
+    ;; 二、2 的幂（double 也精确，所以这几格是"别把对的弄坏"）
+    (print (ipow (int 2) (int 62)))
+    (print (ipow (int 10) (int 18)))
+    ;; 三、负底数：奇数次幂是负的，偶数次幂是正的
+    (print (ipow (int -3) (int 39)))
+    (print (ipow (int -2) (int 62)))
+    (print (ipow (int -1) (int 63)))
+    ;; 四、边界的几格
+    (print (ipow (int 0) (int 0)))
+    (print (ipow (int 0) (int 5)))
+    (print (ipow (int 1) (int 62)))
+    (print (ipow (int 123) (int 1)))
+    (print (ipow (int 123) (int 0)))
+    ;; 五、指数从变量来（函数里那一条路）
+    (print (call powsum (int 2) (int 10)))
+    (print (call powsum (int 3) (int 20)))
+    ;; 六、与手写的乘法逐位相同 —— 这一条把"精确"钉死在别的算子上
+    (print (bin "==" (ipow (int 3) (int 5))
+      (bin "*" (bin "*" (bin "*" (bin "*" (int 3) (int 3)) (int 3)) (int 3)) (int 3))))))
