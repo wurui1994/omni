@@ -81,3 +81,26 @@ def _str_repr(s):
             out = out + c
         i = i + 1
     return out + q
+
+
+def _str_group3(s, sep):
+    # 千分位（格式说明里的 `,` 与 `_`）—— **只动整数那一段**：符号留在最前头，
+    # 小数点及其后面原样。收的是**已经排好的那串文本**，所以这一格与数的类型无关。
+    i = 0
+    if len(s) > 0:
+        if s[0] == "-" or s[0] == "+" or s[0] == " ":
+            i = 1
+    j = i
+    n = len(s)
+    while j < n:
+        c = s[j]
+        if c < "0" or c > "9":
+            break
+        j = j + 1
+    digits = s[i:j]
+    out = ""
+    k = len(digits)
+    while k > 3:
+        out = sep + digits[k - 3:k] + out
+        k = k - 3
+    return s[:i] + digits[:k] + out + s[j:]

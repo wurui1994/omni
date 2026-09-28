@@ -121,3 +121,12 @@ print(float("1.5") + float("2.5"), float(str(0.1)) == 0.1, float("3") == 3.0)
 print(round(2.675, 2), round(1.005, 2), round(0.125, 2), round(-2.675, 2))
 print(round(5, 2), round(-3, 1), round(2.5, 0), round(3.14159, 3), round(0.0, 5))
 print(round(1e300, 2), round(0.5), round(1.5), round(2.5), round(-1.5))
+
+# **负的 n**：舍的位落在小数点左边，`sfix` 那条路用不上（它的精度只能 >= 0）。两档各一套：
+# int 走整数算术（半数取偶看商的奇偶）—— **不许提到 double**，int64 超过 2^53 那一段会
+# 静静答错；real 先按 10^k 缩小、走同一条十进制的路、再乘回来。
+print(round(123.456, -1), round(123.456, -2), round(1250.0, -2), round(15.0, -1))
+print(round(25.0, -1), round(-125.0, -1), round(0.4, -1), round(-0.4, -1))
+print(round(125, -1), round(135, -1), round(-125, -1), round(-135, -1))
+print(round(1234, -2), round(1250, -2), round(1350, -2), round(5, -1))
+print(round(1234567890123456789, -1), round(999, -1), round(0, -3))

@@ -1248,13 +1248,19 @@ function pairIter(target, iterTok, C) {
   }
   if (tag(callee) !== 'n') return null;
   const fn = String(nameOf(callee));
-  if (fn === 'enumerate' && (as.length === 1 || as.length === 2)) {
-    const et = elemOf(tyOfCst(as[0], C), as[0]);
-    return { fn, args: as, t0: INT, t1: et };
+  /* **`strict=True` 那一档不走这条快路**：这条路是"两张表同一个下标、走到最短为止"，
+     查不了长度。交给上头那条"一串两格的元组"的路（`zip(…, strict=True)` 当值用时
+     自带那句长度检查）—— 所以这儿答 null。 */
+  const kws = as.filter((a) => tag(a) === 'kw');
+  const pos = as.filter((a) => tag(a) !== 'kw');
+  if (fn === 'zip' && kws.length > 0) return null;
+  if (fn === 'enumerate' && (pos.length === 1 || pos.length === 2) && kws.length === 0) {
+    const et = elemOf(tyOfCst(pos[0], C), pos[0]);
+    return { fn, args: pos, t0: INT, t1: et };
   }
-  if (fn === 'zip' && as.length === 2) {
+  if (fn === 'zip' && pos.length === 2) {
     return {
-      fn, args: as, t0: elemOf(tyOfCst(as[0], C), as[0]), t1: elemOf(tyOfCst(as[1], C), as[1]),
+      fn, args: pos, t0: elemOf(tyOfCst(pos[0], C), pos[0]), t1: elemOf(tyOfCst(pos[1], C), pos[1]),
     };
   }
   return null;

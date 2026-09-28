@@ -289,15 +289,16 @@ function fstringOf(x, C) {
  * **这一趟补了三格**（2026-09-29，都是量出来的缺口）：`e` / `E`（科学计数，走 `ssci`）、
  * `g` / `G`（走 `sgen`）、`#`（`0x` / `0o` / `0b` 前缀 —— 负数时符号在前缀之前，
  * 与 python 一致）。
- * 明说没收的：`,`（千分位）、`=`（符号后填充）、`%` / `n`、宽度或精度写成 `{}`
- * （从实参来）、`#` 与零填充**同时**给（python 是"前缀之后再补零"，这一层的补宽度在最外层）。
+ * 明说没收的：`=`（符号后填充）、`%` / `n`、宽度或精度写成 `{}`
+ * （从实参来）、`#` 与零填充**同时**给、`,` / `_` 与零填充**同时**给
+ * （python 那时"补的零也要分组"，这一层的补宽度在最外层）。
  */
-const SPEC_RE = /^(?:(.)?([<>^]))?([+ -])?(#)?(0)?(\d+)?(?:\.(\d+))?([a-zA-Z%])?$/;
+const SPEC_RE = /^(?:(.)?([<>^]))?([+ -])?(#)?(0)?(\d+)?([,_])?(?:\.(\d+))?([a-zA-Z%])?$/;
 
 function fmtSpec(e0, spec, C) {
   const m = SPEC_RE.exec(spec);
   if (m === null) throw new Error(`python->IR: f-string 的格式说明 \`:${spec}\` 读不下来`);
-  const [, fill0, align, sign, alt, zero, widthS, precS, type] = m;
+  const [, fill0, align, sign, alt, zero, widthS, group, precS, type] = m;
   if (type !== undefined && !'dfsxXobeEgG'.includes(type)) {
     throw new Error(`python->IR: f-string 的格式类型 \`${type}\` 还没接`
       + '（接了的是 d / f / s / x / X / o / b / e / E / g / G）');
@@ -373,6 +374,29 @@ function fmtSpec(e0, spec, C) {
         }],
       };
     }
+  }
+
+  /* 一点五、千分位（`,` 与 `_`）—— 排好的文本上插分隔符，那一趟循环在
+     `lib/str.py` 的 `_str_group3` 里（adapter 自己要一格实例，见 `C.requireFn`）。
+     只对数；与**零填充同时给**还没接（python 那时是"补的零也要分组"）。 */
+  if (group !== undefined) {
+    if (!numeric) {
+      throw new Error(`python->IR: f-string 的 \`${group}\`（千分位）只对数（这里是 ${t.kind}）`);
+    }
+    if (zero !== undefined && width > 0) {
+      throw new Error(`python->IR: f-string 的 \`${group}\` 与零填充同时给还没接`
+        + '（python 那时补的零也要分组）');
+    }
+    const inst = C.requireFn === undefined ? null : C.requireFn('_str_group3', [STR, STR]);
+    if (inst === null || inst === undefined) {
+      throw new Error('python->IR: 千分位那一格库函数（`_str_group3`）没有对得上的实例');
+    }
+    s = {
+      kind: 'call',
+      fn: { kind: 'name', name: inst.mangled },
+      args: [s, { kind: 'string', value: group }],
+      type: STR,
+    };
   }
 
   /* 二、符号（只对数；`-` 就是默认的那一档，不用做）。 */
@@ -717,11 +741,21 @@ function tyOfBin(x, C) {
   return ta.kind === 'bool' && tb.kind === 'bool' ? INT : ta;   // `True + True` 是 2
 }
 
+/** **收"选项"那一族命名实参的内建** —— 那几格不算实参（见 `tyOfCall`）。 */
+const KW_OPTS = new Set(['zip', 'sorted', 'min', 'max', 'print']);
+
 /** 一格调用装的是什么。 */
 function tyOfCall(x, C) {
   const [fn, argsTok] = kids(x);
   /* 命名实参先排回位置上（不然单态化那一趟按次序挑实例会挑错 —— 量出来的）。 */
-  const args = kwOrder(fn, argsTok === undefined ? [] : kids(argsTok), C);
+  const args0 = kwOrder(fn, argsTok === undefined ? [] : kids(argsTok), C);
+  /* **内建的"选项"那一族命名实参不算一格实参**（`zip(strict=)` / `sorted(reverse=, key=)`
+     / `print(sep=, end=)`）—— 它们只管怎么走，不换交出来的类型。不筛掉的症状：
+     `tyOfCst` 对 `kw` 那一格答 null，于是整格调用的类型也成了 null，而
+     `for a, b in zip(xs, ys, strict=True)` 那两格名字就绑不上。 */
+  const args = tag(fn) === 'n' && KW_OPTS.has(String(nameOf(fn)))
+    ? args0.filter((a) => tag(a) !== 'kw')
+    : args0;
   /* 实参位置上的 `range(…)` 按一张 int 表算（发射那一侧也是铺成表，见 `callOf` 里
      那格"吃序列的那几个内建"）。 */
   const argTys = args.map((a) => (tag(a) === 'call' && tag(kids(a)[0]) === 'n'
@@ -3411,6 +3445,44 @@ export function callOf(x, C) {
     }
     return formatOf(String(recvF.value), pos, C, named);
   }
+  /* **`zip(a, b, strict=True)`** —— python 3.10 那一格：长度不一样就 ValueError。
+     `strict` 只收布尔字面量（两种走法是两条代码，得在编译期定）。 */
+  if (tag(fn) === 'n' && String(nameOf(fn)) === 'zip'
+    && argToks.some((a) => tag(a) === 'kw')) {
+    const pos = argToks.filter((a) => tag(a) !== 'kw');
+    if (pos.length < 2) throw new Error('python->IR: `zip()` 至少收两格实参');
+    let strict = false;
+    for (const a of argToks.filter((y) => tag(y) === 'kw')) {
+      const k = String(leaf(kids(a)[0]));
+      if (k !== 'strict') throw new Error(`python->IR: \`zip(${k}=…)\` 还没接（只有 strict=）`);
+      const v = kids(a)[1];
+      if (tag(v) !== 'true' && tag(v) !== 'false') {
+        throw new Error('python->IR: `zip(strict=…)` 要写成 True / False 字面量'
+          + '（查不查长度是两条代码，得在编译期定）');
+      }
+      strict = tag(v) === 'true';
+    }
+    const vals = pos.map((a) => exprOf(a, C));
+    if (!strict) return pairsList('zip', vals, C);
+    const preZ = [];
+    const pinned = vals.map((v, k) => holdTmp(v, `zs_${k}`, C, preZ));
+    const lens = pinned.map((v) => lenOf(v, C));
+    let bad = null;
+    for (let k = 1; k < lens.length; k += 1) {
+      const one = { kind: 'binop', op: '!=', left: lens[0], right: lens[k] };
+      bad = bad === null ? one : { kind: 'binop', op: '||', left: bad, right: one };
+    }
+    preZ.push({
+      kind: 'if',
+      cond: bad,
+      then: [{
+        kind: 'builtin-stmt', name: 'fail',
+        args: [{ kind: 'string', value: 'zip() argument 2 is shorter than argument 1' }],
+      }],
+      else_: null,
+    });
+    return { kind: 'block-expr', stmts: preZ, value: pairsList('zip', pinned, C) };
+  }
   for (const a of argToks) {
     if (['kw', 'star', 'starstar'].includes(tag(a))) {
       throw new Error(`python->IR: 实参里的 \`${tag(a)}\` 还没接（命名实参 / 展开）`);
@@ -3852,18 +3924,75 @@ function builtinOf(nm, args0, argToks, C) {
          现在两头都有了：`sfix` 就是 C 的 `%.*f`（对**精确的二进制值**做十进制舍入），
          新加的 `(sreal S)` 再把那串文本按正确取整解析回来。于是"格式化一趟再读回来"
          与 CPython 那条路逐位相同。
-         `n` 还是要字面量（判上下界要在编译期）；**负的 n 还没接**（python 的
-         `round(123.456, -1)` 是 120.0 —— 那要先缩放，与这条路拼起来另有一格账）。 */
+         `n` 还是要字面量（判上下界要在编译期）。 */
       const n = args[1];
       if (n.kind !== 'int') {
         throw new Error('python->IR: `round(x, n)` 的 n 要写成一格整数字面量');
       }
       const digits = Number(n.value);
+      if (digits < -30 || digits > 30) throw new Error('python->IR: `round(x, n)` 的 n 收 -30..30');
+      /* **负的 n**（`round(123.456, -1)` 是 120.0、`round(125, -1)` 是 120）——
+         舍的位落在小数点**左边**，所以 `sfix` 那条路用不上（它的精度只能 >= 0）。
+         两档各有各的算法，都不许借另一档的路：
+           * **int**：整数算术。q = floor(x / 10^k)、r = x - q*10^k，
+             `2r > 10^k` 进一、`2r == 10^k` 时**半数取偶**（看 q 的奇偶）。
+             不能提到 double 再算 —— int64 超过 2^53 那一段会静静答错。
+           * **real**：先按 10^k 缩小、走同一条十进制的路（`sfix` 0 位 + `(sreal …)`）、
+             再乘回来。`x / 10^k` 这一步在 `.5` 那一档是精确的（10^k 是整数），
+             所以半数取偶的判定不受它影响。 */
       if (digits < 0) {
-        throw new Error('python->IR: `round(x, n)` 的负 n 还没接'
-          + '（python 的 `round(123.456, -1)` 是 120.0 —— 要先缩放再走十进制那条路）');
+        const k = -digits;
+        let scaleN = 1n;
+        for (let i = 0; i < k; i += 1) scaleN *= 10n;
+        const t0x = ty(args[0], C);
+        if (isInt(t0x)) {
+          const preI = [];
+          const xv = holdTmp(args[0], 'rn_x', C, preI);
+          const scale = { kind: 'int', value: scaleN };
+          const q = holdTmp(floorDiv(xv, scale, true, C), 'rn_q', C, preI);
+          const r = holdTmp(pyMod(xv, scale, true, C), 'rn_r', C, preI);
+          const twice = { kind: 'binop', op: '*', left: r, right: { kind: 'int', value: 2 } };
+          const odd = {
+            kind: 'binop', op: '!=',
+            left: pyMod(q, { kind: 'int', value: 2 }, true, C),
+            right: { kind: 'int', value: 0 },
+          };
+          const up = {
+            kind: 'binop', op: '||',
+            left: { kind: 'binop', op: '>', left: twice, right: scale },
+            right: {
+              kind: 'binop', op: '&&',
+              left: { kind: 'binop', op: '==', left: twice, right: scale },
+              right: odd,
+            },
+          };
+          const qq = {
+            kind: 'ternary', type: INT, cond: up,
+            then: { kind: 'binop', op: '+', left: q, right: { kind: 'int', value: 1 } },
+            else_: q,
+          };
+          const value = { kind: 'binop', op: '*', left: qq, right: scale };
+          return preI.length === 0 ? value : { kind: 'block-expr', stmts: preI, value };
+        }
+        const preR = [];
+        const xr = holdTmp(toReal(args[0], C), 'rn_xr', C, preR);
+        const scaleR = { kind: 'real', value: Number(scaleN) };
+        const notFinN = {
+          kind: 'binop', op: '!=',
+          left: { kind: 'binop', op: '-', left: xr, right: xr },
+          right: { kind: 'real', value: 0 },
+        };
+        const shrunk = { kind: 'binop', op: '/', left: xr, right: scaleR };
+        const decN = {
+          kind: 'builtin', name: 'sreal',
+          args: [{ kind: 'builtin', name: 'sfix', args: [shrunk, { kind: 'int', value: 0 }] }],
+        };
+        const value = {
+          kind: 'ternary', type: REAL, cond: notFinN, then: xr,
+          else_: { kind: 'binop', op: '*', left: decN, right: scaleR },
+        };
+        return preR.length === 0 ? value : { kind: 'block-expr', stmts: preR, value };
       }
-      if (digits > 30) throw new Error('python->IR: `round(x, n)` 的 n 收 0..30');
       /* **x 是 int 就原样交回**（python 的 `round(5, 2)` 是 5，不是 5.0）。 */
       if (ty(args[0], C).kind === 'int') return args[0];
       const pre2 = [];

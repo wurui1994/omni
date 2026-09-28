@@ -99,6 +99,12 @@ def main():
     print(list(zip([1], [2], [3], [4])))
     for a3, b3, c3 in zip([1, 2], [3, 4], [5, 6]):
         print(a3, b3, c3)
+
+    # **`strict=`**（python 3.10）：长度不一样就 ValueError。`strict=True` 时**不走**
+    # "两张表同一个下标"那条快路（那条查不了长度），走"先算一串元组、开头查一句"那条。
+    print(list(zip([1, 2], "ab", strict=True)), list(zip([1, 2, 3], [4, 5], strict=False)))
+    for a4, b4 in zip([1, 2], [3, 4], strict=True):
+        print(a4, b4)
     # 一串 N 格元组直接拆开走（不必是 zip 交出来的）
     tri = [(1, "a", 2.5), (2, "b", 3.5)]
     for i3, s3, f3 in tri:
