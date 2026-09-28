@@ -284,18 +284,24 @@ function fstringOf(x, C) {
  * 这儿收的是其中一块：填充 + 对齐（`< > ^`）、符号（`+` / `-` / 空格）、`0`、
  * 宽度、`.精度`、类型（`d f s x X o b`）。收不下的**当场报** —— 猜一个出来就是印错。
  *
- * 明说没收的：`#`（`0x` 前缀）、`,`（千分位）、`=`（符号后填充）、`e` / `g` / `%` / `n`、
- * 宽度或精度写成 `{}`（从实参来）。
+ * **这一趟补了三格**（2026-09-29，都是量出来的缺口）：`e` / `E`（科学计数，走 `ssci`）、
+ * `g` / `G`（走 `sgen`）、`#`（`0x` / `0o` / `0b` 前缀 —— 负数时符号在前缀之前，
+ * 与 python 一致）。
+ * 明说没收的：`,`（千分位）、`=`（符号后填充）、`%` / `n`、宽度或精度写成 `{}`
+ * （从实参来）、`#` 与零填充**同时**给（python 是"前缀之后再补零"，这一层的补宽度在最外层）。
  */
-const SPEC_RE = /^(?:(.)?([<>^]))?([+ -])?(0)?(\d+)?(?:\.(\d+))?([a-zA-Z%])?$/;
+const SPEC_RE = /^(?:(.)?([<>^]))?([+ -])?(#)?(0)?(\d+)?(?:\.(\d+))?([a-zA-Z%])?$/;
 
 function fmtSpec(e0, spec, C) {
   const m = SPEC_RE.exec(spec);
   if (m === null) throw new Error(`python->IR: f-string 的格式说明 \`:${spec}\` 读不下来`);
-  const [, fill0, align, sign, zero, widthS, precS, type] = m;
-  if (type !== undefined && !'dfsxXob'.includes(type)) {
+  const [, fill0, align, sign, alt, zero, widthS, precS, type] = m;
+  if (type !== undefined && !'dfsxXobeEgG'.includes(type)) {
     throw new Error(`python->IR: f-string 的格式类型 \`${type}\` 还没接`
-      + '（接了的是 d / f / s / x / X / o / b）');
+      + '（接了的是 d / f / s / x / X / o / b / e / E / g / G）');
+  }
+  if (alt !== undefined && !'xXob'.includes(type ?? '')) {
+    throw new Error('python->IR: f-string 的 `#` 只跟 x / X / o / b（别的类型还没接）');
   }
   const width = widthS === undefined ? 0 : Number(widthS);
   const prec = precS === undefined ? null : Number(precS);
@@ -305,7 +311,7 @@ function fmtSpec(e0, spec, C) {
   /* 符号那一格要读两遍（判正负 + 印出来），所以先钉住。 */
   const pre = [];
   let e = e0;
-  if (!isPure(e0) && (sign === '+' || sign === ' ')) {
+  if (!isPure(e0) && (sign === '+' || sign === ' ' || alt !== undefined)) {
     const n = C.fresh('fs_v');
     C.bind(n, t);
     pre.push({ kind: 'let', name: n, type: t, init: e0 });
@@ -316,11 +322,35 @@ function fmtSpec(e0, spec, C) {
   let s;
   if (type === 'f') {
     s = { kind: 'builtin', name: 'sfix', args: [toReal(e, C), { kind: 'int', value: prec ?? 6 }] };
+  } else if (type === 'e' || type === 'E') {
+    /* `%e` 那一格（`ssci` = C 的 `%.*e`）；大写那一档整条裹一层 ASCII 大写。 */
+    s = { kind: 'builtin', name: 'ssci', args: [toReal(e, C), { kind: 'int', value: prec ?? 6 }] };
+    if (type === 'E') s = { kind: 'builtin', name: 'supper', args: [s] };
+  } else if (type === 'g' || type === 'G') {
+    s = { kind: 'builtin', name: 'sgen', args: [toReal(e, C), { kind: 'int', value: prec ?? 6 }] };
+    if (type === 'G') s = { kind: 'builtin', name: 'supper', args: [s] };
   } else if (type === 'x' || type === 'X' || type === 'o' || type === 'b') {
     if (t.kind !== 'int') throw new Error(`python->IR: \`:${type}\` 要整数，这里是 ${t.kind}`);
     const base = { x: 16, X: 16, o: 8, b: 2 }[type];
     s = { kind: 'builtin', name: 'sbase', args: [e, { kind: 'int', value: base }] };
     if (type === 'X') s = { kind: 'builtin', name: 'supper', args: [s] };
+    /* `#`：`0x` / `0X` / `0o` / `0b`。**负数时符号在前缀之前**（python 印 `-0xff`），
+       所以按正负分两支，不是一句拼接。 */
+    if (alt !== undefined) {
+      if (zero !== undefined && width > 0) {
+        throw new Error('python->IR: f-string 的 `#` 与零填充同时给还没接'
+          + '（python 是"前缀之后再补零"，这一层的补宽度在最外层）');
+      }
+      const px = { x: '0x', X: '0X', o: '0o', b: '0b' }[type];
+      const neg = { kind: 'binop', op: '<', left: e, right: { kind: 'int', value: 0 } };
+      const body = { kind: 'builtin', name: 'sbase', args: [{ kind: 'unop', op: '-', operand: e }, { kind: 'int', value: base }] };
+      const bodyU = type === 'X' ? { kind: 'builtin', name: 'supper', args: [body] } : body;
+      s = {
+        kind: 'ternary', type: STR, cond: neg,
+        then: { kind: 'binop', op: '+', left: { kind: 'string', value: `-${px}` }, right: bodyU },
+        else_: { kind: 'binop', op: '+', left: { kind: 'string', value: px }, right: s },
+      };
+    }
   } else if (type === 'd') {
     if (t.kind !== 'int') throw new Error(`python->IR: \`:d\` 要整数，这里是 ${t.kind}`);
     s = { kind: 'builtin', name: 'tostr', args: [e] };
@@ -746,7 +776,12 @@ function tyOfCall(x, C) {
     if (args.length >= 2) return unify([t.elem, argTys[1]]);
     return t.elem;
   }
-  if (nm === 'round') return args.length >= 2 ? REAL : INT;
+  /* `round(x)` 交 int；`round(x, n)` **跟着 x**（python 的 `round(5, 2)` 是 5，不是 5.0）。 */
+  if (nm === 'round') {
+    if (args.length < 2) return INT;
+    const t0r = tyOfCst(args[0], C);
+    return t0r !== null && t0r.kind === 'int' ? INT : REAL;
+  }
   /* `map(f, xs)` / `filter(f, xs)` 交的是一张**真表**（编译期铺开，见 `mapPy`）——
      `filter` 交的元素还是原来那一档，`map` 得问一声"应用一遍交什么"。 */
   if (nm === 'map' || nm === 'filter') {
@@ -3670,27 +3705,51 @@ function builtinOf(nm, args, argToks, C) {
       }
 
       if (args.length !== 2) throw new Error('python->IR: `round()` 收一格或两格实参');
-      /* `round(x, n)` —— 交的是 real（python 也是）。**n 要写成字面量**：10^n 要在
-         编译期算出来（而 n 在实际代码里几乎总是字面量）。先乘上去、半数取偶、再除回来。
-         **明说的不足**（量出来的）：CPython 的两参 `round` 走**十进制**那条路
-         （`_Py_dg_dtoa`），这儿是二进制的乘除 —— `round(2.675, 2)` python 交 2.67、
-         我们交 2.68。根子不在 `bankRound`（`2.675 * 100.0` 在双精度里**真是** 267.5，
-         两边的一参 round 都把它舍成 268），而在"该不该先转十进制"。
-         要对上得把借来的那份 dtoa 反过来用，那是接 `libomnipy` 那一刀的事。 */
+      /* `round(x, n)` —— **走十进制那条路**（2026-09-29 改对的）。
+         从前是二进制的乘除（`x * 10^n` 再半数取偶再除回来），于是 `round(2.675, 2)`
+         我们交 2.68、python 交 2.67 —— 根子不在半数取偶（`2.675 * 100.0` 在双精度里
+         **真是** 267.5），而在"该不该先转十进制"：CPython 的两参 `round` 走的是
+         `_Py_dg_dtoa`（十进制）。
+         现在两头都有了：`sfix` 就是 C 的 `%.*f`（对**精确的二进制值**做十进制舍入），
+         新加的 `(sreal S)` 再把那串文本按正确取整解析回来。于是"格式化一趟再读回来"
+         与 CPython 那条路逐位相同。
+         `n` 还是要字面量（判上下界要在编译期）；**负的 n 还没接**（python 的
+         `round(123.456, -1)` 是 120.0 —— 那要先缩放，与这条路拼起来另有一格账）。 */
       const n = args[1];
       if (n.kind !== 'int') {
-        throw new Error('python->IR: `round(x, n)` 的 n 要写成一格整数字面量'
-          + '（10^n 要在编译期算出来）');
+        throw new Error('python->IR: `round(x, n)` 的 n 要写成一格整数字面量');
       }
       const digits = Number(n.value);
-      if (digits < 0 || digits > 15) throw new Error('python->IR: `round(x, n)` 的 n 收 0..15');
-      const scale = { kind: 'real', value: 10 ** digits };
-      const x = toReal(args[0], C);
-      return {
-        kind: 'binop', op: '/',
-        left: bankRound({ kind: 'binop', op: '*', left: x, right: scale }, C),
-        right: scale,
+      if (digits < 0) {
+        throw new Error('python->IR: `round(x, n)` 的负 n 还没接'
+          + '（python 的 `round(123.456, -1)` 是 120.0 —— 要先缩放再走十进制那条路）');
+      }
+      if (digits > 30) throw new Error('python->IR: `round(x, n)` 的 n 收 0..30');
+      /* **x 是 int 就原样交回**（python 的 `round(5, 2)` 是 5，不是 5.0）。 */
+      if (ty(args[0], C).kind === 'int') return args[0];
+      const pre2 = [];
+      let x = toReal(args[0], C);
+      if (!isPure(x)) {
+        const nm2 = C.fresh('rd_x');
+        C.bind(nm2, REAL);
+        pre2.push({ kind: 'let', name: nm2, type: REAL, init: x });
+        x = { kind: 'name', name: nm2 };
+      }
+      /* inf / nan 原样交回（python 的 `round(inf, 2)` 是 inf）—— `x - x != 0` 只在
+         这两档为真，而 `sfix` 出来的 "inf" / "nan" 是 `(sreal …)` 不收的。 */
+      const notFin = {
+        kind: 'binop', op: '!=',
+        left: { kind: 'binop', op: '-', left: x, right: x },
+        right: { kind: 'real', value: 0 },
       };
+      const dec = {
+        kind: 'builtin', name: 'sreal',
+        args: [{ kind: 'builtin', name: 'sfix', args: [x, { kind: 'int', value: digits }] }],
+      };
+      const rounded = {
+        kind: 'ternary', type: REAL, cond: notFin, then: x, else_: dec,
+      };
+      return pre2.length === 0 ? rounded : { kind: 'block-expr', stmts: pre2, value: rounded };
     }
     case 'range':
       throw new Error('python->IR: `range()` 只在 `for … in range(…)` 里接了（当值用还没接）');

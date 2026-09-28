@@ -1651,13 +1651,44 @@ export function replaceOf(s0, a0, b0, C, count = null) {
   /* `count`：换够那么多处就把剩下的整段接上（与 `splitOf` 的 maxsplit 同一条办法）。
      负的是"不限"，与不给是一回事。 */
   const cap = count === null || count < 0 ? null : h.decl('rp_n', INT, int(0));
-  h.pre.push({
-    kind: 'if',
-    cond: bin('==', call1('scplen', [from]), int(0)),
-    then: [{ kind: 'builtin-stmt', name: 'fail', args: [str('empty pattern in replace()')] }],
-    else_: null,
-  });
-  h.pre.push({
+  /* **空模式那一档**（python 有定义，从前这儿是当场报）：`"abc".replace("", "-")`
+     是 `-a-b-c-` —— 每一格字符前面插一处、末尾再插一处（共 len+1 处）；
+     带 count 时只插前几处，剩下的原样接上（`"abc".replace("", "-", 2)` 是 `-a-bc`）；
+     `"".replace("", "-")` 是 `-`。 */
+  const nS = h.decl('rp_ln', INT, int(0));
+  const emptyPat = [
+    { kind: 'assign', target: nS, value: call1('scplen', [s]) },
+    {
+      kind: 'while',
+      cond: { kind: 'bool', value: true },
+      body: [
+        {
+          kind: 'if',
+          cond: bin('>', at, nS),
+          then: [{ kind: 'break', label: null }],
+          else_: null,
+        },
+        ...(cap === null ? [] : [{
+          kind: 'if',
+          cond: bin('>=', cap, int(count)),
+          then: [
+            { kind: 'assign', target: out, value: bin('+', out, call1('scpsub', [s, at, bin('-', nS, at)])) },
+            { kind: 'break', label: null },
+          ],
+          else_: [{ kind: 'assign', target: cap, value: bin('+', cap, int(1)) }],
+        }]),
+        { kind: 'assign', target: out, value: bin('+', out, to) },
+        {
+          kind: 'if',
+          cond: bin('<', at, nS),
+          then: [{ kind: 'assign', target: out, value: bin('+', out, call1('scpsub', [s, at, int(1)])) }],
+          else_: null,
+        },
+        { kind: 'assign', target: at, value: bin('+', at, int(1)) },
+      ],
+    },
+  ];
+  const mainLoop = {
     kind: 'while',
     cond: { kind: 'bool', value: true },
     body: [
@@ -1690,6 +1721,12 @@ export function replaceOf(s0, a0, b0, C, count = null) {
         ],
       },
     ],
+  };
+  h.pre.push({
+    kind: 'if',
+    cond: bin('==', call1('scplen', [from]), int(0)),
+    then: emptyPat,
+    else_: [mainLoop],
   });
   return h.wrap(out);
 }

@@ -112,3 +112,12 @@ print(float("9007199254740993"), float("1.7976931348623157e308"))
 print(float(" 2.5 "), float("1_000.5"), float("1_0e1_0"))
 print(float("inf"), float("-Infinity"), float("NaN"), float("+INF"))
 print(float("1.5") + float("2.5"), float(str(0.1)) == 0.1, float("3") == 3.0)
+
+# ---- round(x, n) 走十进制那条路 -----------------------------------------------
+# `round(2.675, 2)` 是 **2.67** 不是 2.68：2.675 在双精度里其实是 2.67499999999999982…，
+# CPython 的两参 round 走十进制（`_Py_dg_dtoa`）。我们现在也走十进制 —— `sfix` 是
+# C 的 `%.*f`（对精确的二进制值舍入）、新加的 `(sreal S)` 再按正确取整解析回来。
+# 两条边界：`round(int, n)` **还是 int**（`round(5, 2)` 是 5 不是 5.0）；inf / nan 原样回。
+print(round(2.675, 2), round(1.005, 2), round(0.125, 2), round(-2.675, 2))
+print(round(5, 2), round(-3, 1), round(2.5, 0), round(3.14159, 3), round(0.0, 5))
+print(round(1e300, 2), round(0.5), round(1.5), round(2.5), round(-1.5))

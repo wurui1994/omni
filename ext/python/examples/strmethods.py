@@ -129,3 +129,10 @@ print("a--b".rsplit("-", 1), "-a-".rsplit("-", 1), "  x y  ".rsplit())
 # `.casefold()` —— **ASCII 那一档就是 `.lower()`**（真正的 casefold 与 lower 只在
 # 非 ASCII 上分家，而非 ASCII 的大小写这一层本来就明说没接）。
 print("Hello".casefold(), "Hello".casefold() == "Hello".lower(), "".casefold())
+
+# ---- .replace("") 与格式说明的三格 -------------------------------------------
+# **空模式**在 python 里有定义：每一格字符前面插一处、末尾再插一处（从前我们当场报）。
+print("abc".replace("", "-"), "".replace("", "-"), "abc".replace("", "-", 2), "abc".replace("", "-", 0))
+# f-string 的 `#`（前缀，负数时符号在前缀之前）、`e` / `E`、`g` / `G`。
+print(f"{255:#x} {255:#X} {8:#o} {5:#b} {-255:#x}")
+print(f"{12345.6789:e} {12345.6789:E} {0.00001234:g} {0.00001234:G} {1.5:.2e}")
