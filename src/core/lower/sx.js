@@ -106,6 +106,9 @@ export const SX_ARITY = {
      有效位，而 int 是 64 位 —— python 的 `3 ** 39` 走 pow 就静静答错。两边都要 int、
      不收负指数（那是 real 的事）、溢出 64 位报话。 */
   ipow: 2,
+  /* UTF-8 算术：按码点数长度 / 按码点切片（python 的 len / 下标 / 切片要它）。 */
+  scplen: 1,
+  scpsub: 3,
 
   /* 截到 N 位（ADR-0031 §8.2）：`(trunc N E)` = asUintN、`(sext N E)` = asIntN、
      `(zext N E)` 与 trunc 同值（分开写只为让读的人看出意图）。N 是 1..64 的字面量。 */
@@ -235,6 +238,9 @@ export const tostr = (v) => op('tostr', v);
 export const rmath = (fn, args = []) => op('rmath', JSON.stringify(String(fn)), ...args);
 /** `(ipow A B)` —— 整数的整数次幂（精确；两边都要 int，指数非负）。 */
 export const ipow = (a, b) => op('ipow', a, b);
+/** `(scplen S)` / `(scpsub S I N)` —— 按**码点**（不是字节）。 */
+export const scplen = (v) => op('scplen', v);
+export const scpsub = (v, a, b) => op('scpsub', v, a, b);
 
 export const slen = (v) => op('slen', v);
 export const sfind = (v, x) => op('sfind', v, x);

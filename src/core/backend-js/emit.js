@@ -1067,6 +1067,10 @@ class JsEmitter {
       /* `(ipow A B)` —— 整数的整数次幂，精确（prelude 的 $ipow 一律 BigInt 算）。
          拿 Math.pow 凑是错的：double 只有 53 位，`3 ** 39` 落在 int64 里却落不进 double。 */
       case 'ipow': return `$ipow(${a[0]}, ${a[1]})`;
+      /* UTF-8 算术（`(scplen S)` / `(scpsub S I N)`）—— python 的 len / 下标 / 切片按码点。 */
+      case 'cplen': return `$cplen(${a[0]})`;
+      case 'cpsub': return `$cpsub(${a[0]}, ${a[1]}, ${a[2]})`;
+
 
       case 'int_of_string': return `$int_of_string(${a[0]})`;
       case 'real_of_string': return `$real_of_string(${a[0]})`;

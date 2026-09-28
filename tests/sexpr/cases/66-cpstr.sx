@@ -1,0 +1,42 @@
+;; `(scplen S)` / `(scpsub S I N)` —— **UTF-8 算术**（第一百五十片）：按**码点**数长度、
+;; 按码点切片。与 `(slen)` / `(ssub)` 那两格（按**字节**）是两套下标，摆在一起量才看得清。
+;;
+;; 为什么方言里要有这一族：串在这一层是 UTF-8 字节，而 python 的 `len` / `s[i]` / `s[a:b]`
+;; 都按码点算 —— `len("héllo wörld")` 按字节是 13、按码点是 11，从前 python 那条腿答 13
+;; （量在 `ext/python/SPEC.md` §一 第 28 条：六格静静答错）。
+;;
+;; 这一族**不是 unicode 库**：没有大小写表、没有规范化、没有排序权重。那些要借
+;; `Objects/unicodeobject.c`。这儿只有两条 UTF-8 的性质：
+;;   * 续字节一律是 `10xxxxxx` —— 数掉它们就是码点个数；
+;;   * 码点的边界自同步 —— 第 i 个码点的字节偏移一遍扫描就得。
+;;
+;; 期望值是**本机 python3 算的**（`len(s)` / `s[a:b]`），不是我们自己复述的。
+(module
+  (main
+    (let s string (str "héllo wörld"))
+    ;; 同一个串：字节 13、码点 11
+    (print (slen (var s)))
+    (print (scplen (var s)))
+    ;; 切片：按码点切不会切在字符中间（按字节切 `(ssub s 1 4)` 出的是 `éll` 加半个字符）
+    (print (scpsub (var s) (int 1) (int 4)))
+    (print (scpsub (var s) (int 0) (int 3)))
+    (print (scpsub (var s) (int 7) (int 4)))
+    ;; 三字节那一档（CJK）
+    (print (scplen (str "中文字符串")))
+    (print (scpsub (str "中文字符串") (int 2) (int 2)))
+    ;; 四字节那一档（星际面上的表情）：`len` 是 1，不是 4
+    (print (scplen (str "🐍")))
+    (print (scpsub (str "a🐍b") (int 1) (int 1)))
+    ;; 边界：空串、空切片、整串
+    (print (scplen (str "")))
+    (print (scpsub (var s) (int 0) (int 0)))
+    (print (scpsub (var s) (int 0) (scplen (var s))))
+    ;; 一格一格取，拼回去要与原串逐字节相同
+    (let i int (int 0))
+    (let out string (str ""))
+    (while (bin "<" (var i) (scplen (var s)))
+      (do
+        (set out (bin "+" (var out) (scpsub (var s) (var i) (int 1))))
+        (set i (bin "+" (var i) (int 1)))))
+    (print (bin "==" (var out) (var s)))
+    (print (var out))))

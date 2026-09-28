@@ -999,6 +999,49 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     下标 / `sorted` / 字典的键 / `float()` / 奇偶判断 —— **18 行与 python3 逐字节相同**。
     落成例子 `ext/python/examples/bigint64.py`：**往后再加整数算子，先让它过这一份**。
 
+28. **量清了 str 那一格：我们的串是 UTF-8 字节，python 的是码点 —— 六格静静答错**
+    （2026-09-28，只量没改；这一条是"借 `unicodeobject.c`"那一刀的账本）。
+
+    探针（`héllo wörld` / `中文字符串` / `🐍`）与本机 python3 比，分三档：
+
+    **静静答错的六格**（都是"字节当码点"）：
+      * `len("héllo wörld")` —— 我们 **13**（字节），python **11**（码点）；`len("🐍")` 我们 4；
+      * `s[1]` —— 我们切出半个字符（印出来是 `�`）；
+      * `s[1:5]` / `s[:3]` —— 同上，切在字符中间（我们 `éll`，python `éllo`）；
+      * `s.upper()` / `s.lower()` —— 非 ASCII 原样不动（我们 `HéLLO WöRLD`，python `HÉLLO WÖRLD`）；
+      * `s.find("ö")` / `s.index(…)` —— 回的是**字节下标**（我们 8，python 7）；
+      * `.center(15,"*")` / `ljust` / `rjust` / `zfill` —— 宽度按字节算。
+
+    **本来就对的一档**（UTF-8 的两条性质救的，不是我们做对了什么）：
+      * 比较与排序 —— UTF-8 的字节序**就是**码点序（`"é" > "e"`、`sorted` 都对）；
+      * 子串查找 / `in` / `startswith` / `endswith` / `count("ö")` —— UTF-8 自同步，
+        整字符的针不会在字符中间命中；
+      * `%s` 那一族把字节原样穿过去。
+
+    **已经会报话的一格**：`ord("é")` 报 `ord() expected a character (one ASCII byte)`。
+
+    这一条把那条路劈成两半，往后照这个分：
+      * **UTF-8 算术**（码点个数、按码点取下标/切片）：这是"串怎么表示"的事，不是 unicode 库，
+        该我们自己做（方言里加一族按码点的算子，与 `(ipow)` 同一个形状）；
+      * **unicode 的表**（大小写映射、`isalpha` 那一族、规范化、排序权重）：**借**
+        （`Objects/unicodeobject.c` 已经编得出、链得上、跑得对，见第 24～26 条）。
+
+    **现在的状态是"静静答错"，比报话坏**：所以下一刀不是先借，是先让这六格**要么对、
+    要么报"还没接"**。判据现成：那份探针落在 `ext/python/examples/` 之前，得先有这一刀
+    —— 不然那份例子进去就是红的（而红的例子会让整条轴不可用）。
+
+    **第一半落了（方言这一层）**：`(scplen S)` / `(scpsub S I N)` —— 按码点数长度、
+    按码点切片（`omni_str.c` 的 `omni_str_cplen` / `omni_str_cpsub`、prelude 的
+    `$cplen` / `$cpsub`、`interp/builtin.js` 的 `cpLen` / `cpSub`，五处 + 三份实现，
+    形状与 `(ipow)` 一样）。判据 `tests/sexpr/cases/66-cpstr.sx`：字节 13 / 码点 11、
+    三字节与四字节那两档、空串与整串、"一格一格取再拼回去与原串相同"——
+    四条腿（run / run-c / interp / interp --mir）与 `.expected` 逐字节相同，
+    **期望值是本机 python3 算的**。
+    **第二半（python 那一层怎么接）还没落**：`len` / 下标 / 切片要换成这两格，而
+    `ext/python/adapter/builtins.js` 里 `slen` / `ssub` 有三十来处（`strip` / `split` /
+    `replace` / `find` 那一族内部用字节偏移是**对的**，只有"用户看得见的下标与长度"
+    该按码点）—— 那是下一刀，得一处一处过，不能一把替换。
+
 ## 二、进度
 
 ### 已落地

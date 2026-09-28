@@ -100,6 +100,9 @@ export function typeOf(e, ctx) {
     case 'rmath': return REAL;
     /* `(ipow A B)` 交的一律是 int（两边都要 int、指数非负 —— 方言那一层查）。 */
     case 'ipow': return INT;
+    /* UTF-8 算术：码点个数是 int、按码点切片还是串。 */
+    case 'scplen': return INT;
+    case 'scpsub': return STR;
 
     case 'field': {
       const t = typeOf(e.obj, ctx);

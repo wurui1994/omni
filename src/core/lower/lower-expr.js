@@ -77,6 +77,9 @@ export function lowerExpr(expr, ctx) {
      * 指数非负时落这一格 —— 走 `rmath "pow"` 会在 2^53 以上答错。
      */
     case 'ipow': return sx.ipow(lowerExpr(expr.args[0], ctx), lowerExpr(expr.args[1], ctx));
+    /** UTF-8 算术：python 的 `len(s)` / `s[i]` / `s[a:b]` 按**码点**走这两格。 */
+    case 'scplen': return sx.scplen(lowerExpr(expr.args[0], ctx));
+    case 'scpsub': return sx.scpsub(lowerExpr(expr.args[0], ctx), lowerExpr(expr.args[1], ctx), lowerExpr(expr.args[2], ctx));
 
     /**
      * **叫外头那份 C 里的一格符号**（`(ccall omni_go_chan_new …)`）。

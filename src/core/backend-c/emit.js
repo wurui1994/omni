@@ -2954,6 +2954,10 @@ class CEmitter {
       /* `(ipow A B)` —— 整数的整数次幂，精确（omni_int.c 的平方-乘，每步查溢出）。
          `pow(double,double)` 凑不出来：double 只有 53 位有效位。 */
       case 'ipow': return `omni_ipow(${a[0]}, ${a[1]})`;
+      /* UTF-8 算术（`(scplen S)` / `(scpsub S I N)`）—— python 的 len / 下标 / 切片按码点。 */
+      case 'cplen': return `omni_str_cplen(${a[0]})`;
+      case 'cpsub': return `omni_str_cpsub(${a[0]}, ${a[1]}, ${a[2]})`;
+
 
       case 'int_of_string': return `omni_int_of_string(${a[0]})`;
       case 'real_of_string': return `omni_real_of_string(${a[0]})`;

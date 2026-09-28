@@ -313,6 +313,40 @@ function substr(s, start, len) {
   return decodeUtf8(b.slice(st, st + ln));
 }
 
+/* UTF-8 算术（第一百五十片）：按**码点**数长度、按码点切片。不是 unicode 库
+   （没有大小写表、没有规范化）—— 续字节一律是 10xxxxxx，数掉它们就是码点个数。
+   python 的 `len` / `s[i]` / `s[a:b]` 要它；方言原本那两格按字节。 */
+function cpLen(s) {
+  const b = bytesOf(s);
+  let n = 0;
+  for (let i = 0; i < b.length; i += 1) if ((b[i] & 0xC0) !== 0x80) n += 1;
+  return n;
+}
+
+/** 第 i 个码点的字节偏移；i 等于码点个数时回字节长度（切片的右端要它）。 */
+function cpOff(b, i) {
+  let seen = 0;
+  for (let at = 0; at < b.length; at += 1) {
+    if ((b[at] & 0xC0) === 0x80) continue;
+    if (seen === i) return at;
+    seen += 1;
+  }
+  return b.length;
+}
+
+function cpSub(s, start, len) {
+  const b = bytesOf(s);
+  const st = Number(start);
+  const ln = Number(len);
+  const n = cpLen(s);
+  if (st < 0 || ln < 0 || st + ln > n) {
+    rtError('substring out of range: start ' + st + ', length ' + ln
+      + ' (string length ' + n + ')');
+  }
+  return decodeUtf8(b.slice(cpOff(b, st), cpOff(b, st + ln)));
+}
+
+
 function indexOfStr(s, needle) {
   const b = bytesOf(s);
   const nb = encodeUtf8(needle);
@@ -1340,6 +1374,10 @@ export function applyBuiltin(I, e, a) {
     case 'items': return [...a[0]];
     case 'byteAt': return byteAt(a[0], a[1]);
     case 'substr': return substr(a[0], a[1], a[2]);
+    /* UTF-8 算术那两格（`(scplen S)` / `(scpsub S I N)`）—— python 的 len / 下标 / 切片。 */
+    case 'cplen': return BigInt(cpLen(a[0]));
+    case 'cpsub': return cpSub(a[0], a[1], a[2]);
+
     case 'indexOf': return indexOfStr(a[0], a[1]);
     case 'join': return a[0].join(a[1]);
     case 'tag': return dynTag(a[0]);

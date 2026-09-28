@@ -117,6 +117,10 @@ const RT_OPS = new Map([
   /* `(ipow A B)`：整数的整数次幂（精确，溢出报话）。两个 i64 进、一个 i64 出 ——
      这一格没有类型后缀的花样，`argType` 就是 int。 */
   ['ipow.int', { sym: 'omni_ipow', ret: 'i64', params: ['i64', 'i64'] }],
+  /* UTF-8 算术那两格（`(scplen S)` / `(scpsub S I N)`）：串是 `[2 x i64]`（指针 + 长度）。 */
+  ['cplen.string', { sym: 'omni_str_cplen', ret: 'i64', params: ['[2 x i64]'] }],
+  ['cpsub.string', { sym: 'omni_str_cpsub', ret: '[2 x i64]', params: ['[2 x i64]', 'i64', 'i64'] }],
+
 
   ['repr.real', { sym: 'omni_repr_real', ret: '[2 x i64]', params: ['double'] }],
   // `(readtext E)`：整份读一份文本文件。omni_read_text 是 omni.h 里的真符号，

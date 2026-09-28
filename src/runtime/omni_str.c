@@ -92,6 +92,45 @@ int64_t omni_str_length(omni_str s) {
   return omni_str_len(s);
 }
 
+/* ---- UTF-8 算术那一族（第一百五十片）：**按码点**数长度、按码点切片 ----
+ *
+ * 为什么这一族该我们自己做：它不是 unicode 库（没有大小写表、没有规范化、没有排序权重）
+ * —— 只是"串怎么表示"的算术。UTF-8 里续字节一律是 `10xxxxxx`，数掉它们就是码点个数；
+ * 第 i 个码点的字节偏移同样是一遍扫描。
+ * 逼出这一族的是 python：它的 `len` / `s[i]` / `s[a:b]` 都按**码点**算，而方言的
+ * `slen` / `ssub` 按字节 —— `len("héllo wörld")` 我们从前答 13、python 答 11
+ * （量在 `ext/python/SPEC.md` §一 第 28 条）。
+ * 大小写映射那一族**不在这儿**：那要 unicode 的表，是借 `unicodeobject.c` 的事。 */
+int64_t omni_str_cplen(omni_str s) {
+  int64_t n = 0;
+  for (int64_t i = 0; i < s.len; i++) {
+    if (((unsigned char)s.p[i] & 0xC0) != 0x80) n++;
+  }
+  return n;
+}
+
+/** 第 `i` 个码点的字节偏移；`i` 正好等于码点个数时回 `s.len`（切片的右端要它）。 */
+static int64_t omni_cp_off(omni_str s, int64_t i) {
+  int64_t seen = 0;
+  for (int64_t at = 0; at < s.len; at++) {
+    if (((unsigned char)s.p[at] & 0xC0) == 0x80) continue;
+    if (seen == i) return at;
+    seen++;
+  }
+  return s.len;
+}
+
+omni_str omni_str_cpsub(omni_str s, int64_t start, int64_t len) {
+  int64_t n = omni_str_cplen(s);
+  if (start < 0 || len < 0 || start + len > n) {
+    omni_errorf("substring out of range: start %lld, length %lld (string length %lld)",
+                (long long)start, (long long)len, (long long)n);
+  }
+  int64_t a = omni_cp_off(s, start);
+  int64_t b = omni_cp_off(s, start + len);
+  return omni_str_new(s.p + a, b - a);
+}
+
 /* `(srep S N)` —— 把 S 重复 N 遍（ADR-0016 第五刀，printf 的宽度要它）。
    `n <= 0` 回空串，**不报错**：宽度就是"补到至少 N 个字符"，`max(0, N - 长度)` 常常
    是 0 或负数，那是正常情形而不是错误。JS 的 `String.repeat` 在负数上抛异常，所以

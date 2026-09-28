@@ -33,6 +33,7 @@
  *         | (rmath "NAME" A [B])
  *         | (ipow A B)
  *         | (slen E) | (ssub E I N) | (sfind E T)
+ *         | (scplen E) | (scpsub E I N)
  *         | (toreal E) | (toint E)
  *         | (var NAME) | (bin "OP" E E) | (un "OP" E) | (call NAME E...)
  *         | (splat TYPE E) | (vlit TYPE E...) | (lane E N) | (hsum E)
@@ -2220,7 +2221,30 @@ class CoreLowerer {
     // string 是 C++ 的 std::string，也是字节。所以两边的 length/substr 说的是同一件事。
     // 越界**报错**而不是截断（`(ssub …)` 用的就是 Omni 自己那份检查，消息也是同一句）——
     // 哪门语言要 clamp，clamp 就写在那门语言的前端里，不写进这一层。
+    /* `(scplen S)` / `(scpsub S I N)` —— **UTF-8 算术**（第一百五十片）：按**码点**数长度、
+       按码点切片。与上面那两格（`slen` / `ssub` 按字节）是两套下标，别混。
+       为什么方言里要有：python 的 `len` / `s[i]` / `s[a:b]` 都按码点算，而串在这一层
+       是 UTF-8 字节 —— `len("héllo wörld")` 按字节是 13、按码点是 11。
+       这一族**不是 unicode 库**（没有大小写表、没有规范化、没有排序权重）：那些要借
+       `Objects/unicodeobject.c`（见 `ext/python/SPEC.md` §一 第 28 条那张账）。 */
+    if (h === 'scplen' || h === 'scpsub') {
+      const s = this.expr(n.items[1]);
+      if (s === null) return null;
+      if (s.type.k !== 'string') return this.err(n, `(${h} …) 的第一个参数要是 string，这里是 ${coreTypeText(s.type)}`);
+      if (h === 'scplen') {
+        if (n.items.length !== 2) return this.err(n, '(scplen E) 要 1 个参数');
+        return { kind: 'Builtin', name: 'cplen', args: [s], recvType: STRING, type: INT };
+      }
+      if (n.items.length !== 4) return this.err(n, '(scpsub E I N) 要 3 个参数');
+      const at = this.expr(n.items[2]);
+      const len = this.expr(n.items[3]);
+      if (at === null || len === null) return null;
+      if (at.type.k !== 'int') return this.err(n.items[2], `(scpsub E I N) 的起点要是 int，这里是 ${coreTypeText(at.type)}`);
+      if (len.type.k !== 'int') return this.err(n.items[3], `(scpsub E I N) 的长度要是 int，这里是 ${coreTypeText(len.type)}`);
+      return { kind: 'Builtin', name: 'cpsub', args: [s, at, len], recvType: STRING, type: STRING };
+    }
     if (h === 'slen' || h === 'ssub' || h === 'sfind') {
+
       const s = this.expr(n.items[1]);
       if (s === null) return null;
       if (s.type.k !== 'string') return this.err(n, `(${h} …) 的第一个参数要是 string，这里是 ${coreTypeText(s.type)}`);

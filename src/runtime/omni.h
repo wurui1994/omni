@@ -366,6 +366,14 @@ omni_str omni_str_join(const omni_str *items, int64_t n, omni_str sep);
 omni_str omni_str_fmt(const char *fmt, ...);
 int64_t omni_index_of(omni_str s, omni_str needle);
 omni_str omni_str_sub(omni_str s, int64_t start, int64_t len);
+/* **UTF-8 算术**（第一百五十片）：`(scplen S)` 数码点、`(scpsub S I N)` 按码点切片。
+   不是 unicode 库（没有大小写表、没有规范化）—— 只是"串怎么表示"的算术：续字节是
+   `10xxxxxx`，数掉它们就是码点个数。python 的 `len` / `s[i]` / `s[a:b]` 要它
+   （方言原本那两格 `slen` / `ssub` 按字节，非 ASCII 上与 python 差着）。
+   越界的话报的与 `omni_substr` **同一句**，只是"string length"数的是码点。 */
+int64_t omni_str_cplen(omni_str s);
+omni_str omni_str_cpsub(omni_str s, int64_t start, int64_t len);
+
 int64_t omni_str_length(omni_str s);
 omni_str omni_chr(int64_t cp);
 char *omni_cstr(omni_str s);

@@ -922,6 +922,34 @@ function $substr(s, start, len) {
   }
   return $dec.decode(b.slice(st, st + ln));
 }
+// UTF-8 算术（第一百五十片）：按**码点**数长度、按码点切片。不是 unicode 库
+// （没有大小写表、没有规范化）—— 续字节一律是 10xxxxxx，数掉它们就是码点个数。
+// python 的 len / s[i] / s[a:b] 要它；方言原本那两格按字节。
+function $cplen(s) {
+  const b = $bytes(s);
+  let n = 0;
+  for (let i = 0; i < b.length; i++) if ((b[i] & 0xC0) !== 0x80) n++;
+  return n;
+}
+function $cpoff(b, i) {
+  let seen = 0;
+  for (let at = 0; at < b.length; at++) {
+    if ((b[at] & 0xC0) === 0x80) continue;
+    if (seen === i) return at;
+    seen++;
+  }
+  return b.length;
+}
+function $cpsub(s, start, len) {
+  const b = $bytes(s), st = Number(start), ln = Number(len);
+  let n = 0;
+  for (let i = 0; i < b.length; i++) if ((b[i] & 0xC0) !== 0x80) n++;
+  if (st < 0 || ln < 0 || st + ln > n) {
+    $rt_error("substring out of range: start " + st + ", length " + ln + " (string length " + n + ")");
+  }
+  return $dec.decode(b.slice($cpoff(b, st), $cpoff(b, st + ln)));
+}
+
 function $indexOf(s, needle) {
   const b = $bytes(s), nb = $enc.encode(needle);
   outer: for (let i = 0; i + nb.length <= b.length; i++) {
