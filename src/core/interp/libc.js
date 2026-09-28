@@ -1213,6 +1213,17 @@ function ctypeLoc(which) {
 let strerrAddr = 0n;
 /** @type {Map<string,bigint>} `getenv` 的答案：一个名字一格，回过的地址不再变。 */
 const envCache = new Map();
+/**
+ * 问宿主要一个环境变量 —— **答不上来就是"没设过"**。
+ *
+ * 为什么不直接用宿主面那一格：**页面上没有环境变量这回事**（宿主面那一格走
+ * `process.env`，浏览器里 `process` 压根不存在）。R 在 `strsplit` 一路上会问
+ * 好几个（locale、编码），一抛就是整句求值失败 —— 而"这个变量没设"是真话，
+ * 也正是页面上该给的答案。ADR-0047 第二十八格。
+ */
+function envAsk(name) {
+  try { return hostEnv(name); } catch { return undefined; }
+}
 
 /* 号到文字那张表（第八刀第十三片）。**整张表都是从 oracle 上量出来的**
  * （`tcc -run` 里一个 `for` 印 `strerror(0..110)`），不是自己编的 —— 这些串要与
@@ -1591,12 +1602,11 @@ const LIBC = {
     envCache.set(name, p2);
     return 0n;
   },
-  unsetenv: (a) => { envCache.set(readCStr(a[0]), 0n); return 0n; },
-  getenv: (a) => {
+  unsetenv: (a) => { envCache.set(readCStr(a[0]), 0n); return 0n; },  getenv: (a) => {
     const name = readCStr(a[0]);
     const hit = envCache.get(name);
     if (hit !== undefined) return hit;
-    const v = hostEnv(name);
+    const v = envAsk(name);
     if (v === undefined) {
       envCache.set(name, 0n);
       return 0n;
@@ -2724,9 +2734,13 @@ export function libcAtExit() {
  * 一个是 `2n**64n-1n`。第八刀第四片踩过这一格。
  */
 /** **点名册**（`OMNI_LIBC_COUNT=1` 才开）：哪个 libc 被调了多少次。
- *  查"时间花在哪"用得上 —— 缺省关着，一个判断的代价。 */
+ *  查"时间花在哪"用得上 —— 缺省关着，一个判断的代价。
+ *
+ *  这一句在**模块顶层**，所以问环境变量必须走 `envAsk`（答不上来就是"没设过"）——
+ *  页面上没有 `process`，直接问宿主面那一格会抛，整份 libc 装不上：白屏 +
+ *  `ReferenceError: process is not defined`。ADR-0047 第二十八格。 */
 const libcHits = new Map();
-const libcCounting = hostEnv('OMNI_LIBC_COUNT') !== undefined;
+const libcCounting = envAsk('OMNI_LIBC_COUNT') !== undefined;
 
 /** 点名册的快照（大到小），给探针用。 */
 export function libcCounts() {
