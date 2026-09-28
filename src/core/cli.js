@@ -7360,9 +7360,19 @@ function main(argv) {
     }
     /* `c-jit`：C -> 真机器码 -> **就在这个进程里跑**（ADR-0045 的 D2）。
      * 不写可执行文件、不起子进程、一个外部 cc / LLVM 都不借。
-     * `--rt` 把运行时那二十来份 `.o` 一起铺（`omni emit c` 出的那份 C 要它们）。 */
+     * `--rt` 把运行时那二十来份 `.o` 一起铺（`omni emit c` 出的那份 C 要它们）；
+     * `--gfx 哪一档` 与 `run --gfx` 同名同值（**哪台设备是跑的时候定的**，
+     * 着色器那一族要 `gl`）。 */
     case 'c-jit': {
       const { flags } = cSplitArgs(rest);
+      const gi = flags.indexOf('--gfx');
+      if (gi >= 0) {
+        const g = flags[gi + 1];
+        if (!['host', 'gl', 'ir', 'null'].includes(g)) {
+          throw new OmniError(`--gfx 只有 host|gl|ir|null 四档，拿到 ${g}`);
+        }
+        setEnv('OMNI_GFX', g);
+      }
       return cJitRun(path, incDirs(flags), defArgs(flags), flags.includes('--rt'));
     }
     /* `elf-r`：几个 `.o` 并成一个 `.o`，就是 `tcc -r`（第九刀第四十二片）。

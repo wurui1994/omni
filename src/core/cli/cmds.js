@@ -314,8 +314,9 @@ const C_GROUP = {  name: 'c',
 
 出图那一族（\`.pss\` / \`.kc\` 生成出来的那份 C）也跑得动：GL 立即模式与着色器都过了，
 出的 PNG 与正路逐字节相同。**哪台设备是跑的时候定的** —— 着色器那一族要
-\`OMNI_GFX=gl\`（与 \`run --gfx gl\` 同一格）；那份 \`libomnigl\` 这一格自己会顺手编好。`,
-      flags: [...C_CPP_FLAGS, { name: '--rt', arity: 0 }],
+\`OMNI_GFX=gl\`（\`--gfx host|gl|ir|null\`，与 \`run --gfx\` 同名同值）；那份 \`libomnigl\`
+这一格自己会顺手编好、路径放进 \`OMNI_GL_LIB\`。`,
+      flags: [...C_CPP_FLAGS, { name: '--rt', arity: 0 }, { name: '--gfx', arity: 1 }],
     },
     {
       name: 'obj', key: 'c-obj', usage: 'FILE.c -o NAME',
@@ -675,7 +676,7 @@ asy（5 分多钟），而 tests/asy/eps.js 默认不生成 —— 清掉之后�
     { name: 'c-run', key: 'c-run', hidden: true, flags: [...C_CPP_FLAGS] },
     { name: 'jit-selftest', key: 'jit-selftest', hidden: true, flags: [] },
     { name: 'c-obj', key: 'c-obj', hidden: true, flags: [F_OUT, ...C_CPP_FLAGS, ...C_TARGET_FLAGS] },
-    { name: 'c-jit', key: 'c-jit', hidden: true, flags: [...C_CPP_FLAGS, { name: '--rt', arity: 0 }] },
+    { name: 'c-jit', key: 'c-jit', hidden: true, flags: [...C_CPP_FLAGS, { name: '--rt', arity: 0 }, { name: '--gfx', arity: 1 }] },
     { name: 'elf-r', key: 'elf-r', hidden: true, flags: [...LINK_COMMON] },
     { name: 'elf-link', key: 'elf-link', hidden: true, flags: [...LINK_COMMON, ...LINK_ELF_ONLY] },
     { name: 'macho-link', key: 'macho-link', hidden: true, flags: [...LINK_COMMON, ...LINK_MACHO_ONLY] },

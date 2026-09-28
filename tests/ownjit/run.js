@@ -290,7 +290,7 @@ if (process.arch === 'arm64') {
    * 逼着人去改一个与正确性无关的东西。
    *
    * 判的是**那张图的字节**（这一轴本来的口径）：从各自的 `#gfx png …` 那行里把路径读出来，
-   * 逐字节比。着色器那一份要 `OMNI_GFX=gl`（哪台设备是**跑的时候**定的），而那份
+   * 逐字节比。着色器那一份要 `--gfx gl`（哪台设备是**跑的时候**定的），而那份
    * `libomnigl` 由 `cJitRun` 自己顺手编好、路径放进 `OMNI_GL_LIB` —— 少了那一格，
    * 报的是"这格设备（CPU 备选）上没有 'glsetshader'"，看着像方言缺能力。
    */
@@ -300,7 +300,6 @@ if (process.arch === 'arm64') {
     if (gen.status !== 0) { okIf(`${prog} emit c 过得去`, false, gen.stderr.slice(0, 200)); continue; }
     const cPath = join(dir, `${prog}.c`);
     writeFileSync(cPath, gen.stdout);
-    const envp = gfx === null ? process.env : { ...process.env, OMNI_GFX: gfx };
     const pngOf = (out) => {
       const m = /#gfx png (\S+)/.exec(out);
       return m === null ? null : join(ROOT, m[1]);
@@ -310,7 +309,8 @@ if (process.arch === 'arm64') {
        不删的话第二份要是压根没画，读到的是第一份那张 —— 一格白拿的绿。 */
     const stale = join(ROOT, '.omni-cache', 'gfx', 'frame.png');
     if (existsSync(stale)) unlinkSync(stale);
-    const got = spawnSync('node', [OMNI, 'c-jit', cPath, '--rt'], { ...big, env: envp });
+    const got = spawnSync('node',
+      [OMNI, 'c-jit', cPath, '--rt', ...(gfx === null ? [] : ['--gfx', gfx])], big);
     const gp = pngOf(got.stdout);
     /* 先把被判那一张收走 —— 正路那一趟写进同一个目录。 */
     const mine = gp === null || !existsSync(gp) ? null : readFileSync(gp);
