@@ -659,8 +659,36 @@ static int32_t to_int32(double d) {
 /* 进来那一格也要走 ToInt32，**不能直接 `(int32_t)double`**：C 的这个转换在超出 i32
  * 范围时是未定义行为（这台机器上是饱和），而 JS 的 `a >>> b`、`a | b` 一律先按
  * 2^32 取模。分叉的指纹很具体：`2147483648 >>> 0` 在 JS 上是 2147483648，
- * 饱和那一版会给 2147483647 —— `>>>` 接进前端那天就是这么露出来的。 */
-static int32_t dyn_i32(omni_dyn v) { return to_int32(omni_dyn_as_real(v)); }
+ * 饱和那一版会给 2147483647 —— `>>>` 接进前端那天就是这么露出来的。
+ *
+ * **而且第一步是 ToNumber，不是"当它已经是 real"**（2026-09-28 修）：从前这儿写的是
+ * `to_int32(omni_dyn_as_real(v))`，那是个**检查过的**取值 ⇒ 操作数不是 real 就当场死在
+ * `dynamic value is bool, expected real`。量到的三个（node 的答案在后面）：
+ * `true >>> 2` = 0 · `"3" >>> 2` = 0 · `null >>> 2` = 0 —— 三个都是直接崩。
+ * 规范 7.1.6 的第一步就是 ToNumber，所以这儿照它补上：
+ * 对象先 ToPrimitive（`[7] >>> 2` 在 node 上是 1），别的交给 `omni_js_num_of`。
+ *
+ * BigInt 那一支是 **TypeError**（`1n >>> 2` 在 node 上就是），而方言里 int 就是 bigint ——
+ * 所以这一格必须显式挡住，不能悄悄当整数算。 */
+static int32_t dyn_i32(omni_dyn v) {
+  if (v.tag == OMNI_DYN_REAL) return to_int32(v.u.r);
+  if (v.tag == OMNI_DYN_INT || v.tag == OMNI_DYN_UINT) {
+    omni_errorf("Cannot mix BigInt and other types, use explicit conversions");
+  }
+  /* 容器与真对象那一族要先 ToPrimitive（与 omni_js.c 的 `js_objlike` 同一张名单 ——
+     那一份是 static，这儿是另一个编译单元，所以照抄那一行判据）。 */
+  if (v.tag == OMNI_DYN_OBJ || v.tag == OMNI_DYN_DICT || v.tag == OMNI_DYN_LIST
+      || v.tag == OMNI_DYN_MAP || v.tag == OMNI_DYN_SET || v.tag == OMNI_DYN_RE) {
+    v = omni_js_to_prim_c(v, 'n');
+  }
+  {
+    omni_dyn n = omni_js_num_of(v);
+    if (n.tag == OMNI_DYN_INT || n.tag == OMNI_DYN_UINT) {
+      omni_errorf("Cannot mix BigInt and other types, use explicit conversions");
+    }
+    return to_int32(omni_dyn_as_real(n));
+  }
+}
 
 omni_dyn omni_js_i32_op(omni_dyn op, omni_dyn a, omni_dyn b) {
   omni_s16 s = omni_js_as_s16(op);

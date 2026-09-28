@@ -585,6 +585,21 @@ static omni_dyn to_num1(omni_dyn v) {
   return omni_js_num_of(v);
 }
 
+/**
+ * **已经是数的那一格不许进 `to_num1`**（J1a，2026-09-28）。
+ *
+ * `to_num1` 的快路本身只有三次比较，可它**按值收、按值还一个 24 字节的 `omni_dyn`** ——
+ * 量出来（`bench/js/progs/int-loop.js` + `clang -O2` + `OMNI_PROF=sample:997`）
+ * 它自用 **39.68%**，是那份二进制里最大的一格。代价在 ABI 的搬运，不在判断本身。
+ *
+ * 所以把那个判断挪到**调用点**（宏，不是函数）：热路径上 clang 看得见
+ * "`a` 没变" ⇒ 整个赋值都能消掉；冷路径照旧调那个函数，语义**按构造相同**
+ * （`is_num` 就是 `to_num1` 快路那一句的前半，第二支 `OMNI_DYN_REAL` 也在 `is_num` 里）。
+ *
+ * 为什么是宏：写成 `static inline` 的话那一层还是按值收/还，24 字节的拷贝就还在。
+ */
+#define OMNI_JS_TO_NUM(v) (is_num(v) ? (v) : to_num1(v))
+
 omni_dyn omni_js_add(omni_dyn a, omni_dyn b) {
   /* 对象操作数先 ToPrimitive（规范 13.15.3 第 3 步）：`[1,2] + 1` 是 "1,21"、
      `{toString(){return 42}} + 1` 是 43（数，不是串）。次序也照规范：两边都先取到原始值，
@@ -594,8 +609,8 @@ omni_dyn omni_js_add(omni_dyn a, omni_dyn b) {
   if (a.tag == OMNI_DYN_STR16 || b.tag == OMNI_DYN_STR16) {
     return omni_dyn_of_s16(omni_s16_cat(to_s16(a), to_s16(b)));
   }
-  a = to_num1(a);
-  b = to_num1(b);
+  a = OMNI_JS_TO_NUM(a);
+  b = OMNI_JS_TO_NUM(b);
   want_num('+', a, b);
   if (is_int(a)) return omni_dyn_of_int(omni_add(a.u.i, b.u.i));
   return omni_dyn_of_real(a.u.r + b.u.r);
@@ -617,8 +632,8 @@ static int64_t js_ipow(int64_t a, int64_t b) {
 }
 
 omni_dyn omni_js_arith(int op, omni_dyn a, omni_dyn b) {
-  a = to_num1(a);
-  b = to_num1(b);
+  a = OMNI_JS_TO_NUM(a);
+  b = OMNI_JS_TO_NUM(b);
   want_num(op, a, b);
   if (is_int(a)) {
     /* 除与取余要看**符号性**：别的运算（- * p）都是回卷的，回卷是模 2^64 的环同态，
@@ -679,7 +694,7 @@ omni_dyn omni_js_dec(omni_dyn v) {
    标签，所以判据只能是"两边都 int 才按 64 位算"。判据与 prelude 的 $js_toi32 相同。 */
 static int32_t to_i32(omni_dyn v) {
   if (is_int(v)) return (int32_t)(uint32_t)(uint64_t)v.u.i;
-  double d = to_num1(v).u.r;
+  double d = OMNI_JS_TO_NUM(v).u.r;
   if (!isfinite(d)) return 0;
   double m = fmod(trunc(d), 4294967296.0);
   if (m < 0) m += 4294967296.0;

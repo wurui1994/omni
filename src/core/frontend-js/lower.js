@@ -53,8 +53,26 @@ const varRef = (name) => dyn('VarRef', { name });
 const globalRef = (name) => dyn('JsGlobal', { name });
 const assign = (target, value) => dyn('Assign', { target, value });
 const ternary = (cond, then, otherwise) => dyn('Ternary', { cond, then, otherwise });
-/** 真假判断的结果是 OIR 的 bool（不是 dynamic），Ternary/If 的条件要的就是它 */
-const truthy = (e) => ({ kind: 'Builtin', name: 'js_truthy', args: [e], type: BOOL });
+/**
+ * 真假判断的结果是 OIR 的 bool（不是 dynamic），Ternary/If 的条件要的就是它。
+ *
+ * **两格短路**（J1a，2026-09-28）：
+ *   · 已经是 bool 的直接还它；
+ *   · **刚被装箱的 bool 就地拆开**（`Box{from:bool}` -> 里头那个节点）。
+ *
+ * 第二格才是真正在热路径上的那一个：比较那一族（`op('js_cmp', …)`）在**表达式位置**
+ * 要装箱回 dynamic（见 `op` 里那一支），而条件位置紧接着又要拆 ⇒ 发出来是
+ * `omni_js_truthy(omni_dyn_of_bool(omni_js_cmp(…)))`，两个调用**正好互相抵消**，
+ * 而循环每一圈都付一次（量过：`omni_js_truthy` 自用 0.82% + `omni_dyn_of_bool` 0.80%）。
+ *
+ * 为什么修在这儿而不是发射层的峰孔：这一层看得见 `Box` 这个节点与它的 `from` 类型，
+ * 发射层只看得见一个 dynamic 表达式 —— 要还原成 bool 得反过来认 `omni_dyn_of_bool(` 这个串。
+ */
+const truthy = (e) => {
+  if (e.type !== undefined && e.type.k === 'bool') return e;
+  if (e.kind === 'Box' && e.from !== undefined && e.from.k === 'bool') return e.expr;
+  return { kind: 'Builtin', name: 'js_truthy', args: [e], type: BOOL };
+};
 const boolOp = (name, args, extra = {}) => ({ kind: 'Builtin', name, args, type: BOOL, ...extra });
 const notB = (e) => ({ kind: 'Un', op: '!', operand: e, type: BOOL });
 /**
