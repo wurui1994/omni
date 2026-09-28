@@ -758,15 +758,35 @@ export function containsList(xs0, v0, C, eq) {
 }
 
 /** `xs.index(v)` —— 找不到在 python 里是 ValueError，这儿 `(fail …)`。 */
-export function indexOfList(xs0, v0, C, eq) {
+export function indexOfList(xs0, v0, C, eq, from0 = null, to0 = null) {
   const h = holder(C);
   const xs = h.keep(xs0, 'ix_xs');
   const v = h.keep(v0, 'ix_v');
+  /* **`start` / `end` 那一档**（`xs.index(2, 2)`）—— 负下标加长度，两头夹到 `[0, len]`
+     （与切片同一套夹法）。python 的 `list.index` 收这两格，找不到照旧是 ValueError。 */
+  const len = call1('alen', [xs]);
+  const clamp = (e, p) => {
+    const raw = h.decl(p, INT, e);
+    const wrapped = {
+      kind: 'ternary', type: INT,
+      cond: bin('<', raw, int(0)),
+      then: bin('+', len, raw),
+      else_: raw,
+    };
+    const w = h.decl(`${p}w`, INT, wrapped);
+    return {
+      kind: 'ternary', type: INT,
+      cond: bin('<', w, int(0)),
+      then: int(0),
+      else_: { kind: 'ternary', type: INT, cond: bin('>', w, len), then: len, else_: w },
+    };
+  };
   const at = h.decl('ix_at', INT, int(-1));
-  const i = h.decl('ix_i', INT, int(0));
+  const i = h.decl('ix_i', INT, from0 === null ? int(0) : clamp(from0, 'ix_a'));
+  const stop = to0 === null ? len : h.decl('ix_b', INT, clamp(to0, 'ix_z'));
   h.pre.push({
     kind: 'while',
-    cond: bin('<', i, call1('alen', [xs])),
+    cond: bin('<', i, stop),
     body: [
       {
         kind: 'if',

@@ -154,3 +154,16 @@ print(f"{s!r}", "{!r}".format(s))
 # `.format()` 的**按名字取**（`{k}` + 命名实参）—— 名字在编译期就有，与 `{0}` 同一条路。
 print("{k}".format(k=3), "{a}{b}".format(a=1, b=2), "{0}{k}".format(9, k=8))
 print("{n:>5}|".format(n=42), "{s!r}".format(s="a'b"), "{x:.2f}".format(x=3.14159))
+
+# ---- 那对可选的 start / end ---------------------------------------------------
+# `find` / `rfind` / `index` / `rindex` / `startswith` / `endswith` / `count` 都收 ——
+# python 的口径是"在 `s[i:j]` 上做"（下标可以是负的、也可以越界，两头夹到 `[0, len]`）。
+# **交出来的下标是相对整串的**：`"aXbX".find("X", 2)` 是 3 不是 1（段里的下标要加回起点）。
+t = "hello world hello"
+print(t.find("hello", 1), t.find("l", 4, 6), t.rfind("hello"), t.index("world", 3))
+print(t.find("z", 2), t.find("hello", -5), t.rfind("l", 0, 5), t.find("", 3))
+print(t.startswith("world", 6), t.startswith("hello", 1), t.endswith("hello", 0, 5))
+print(t.count("l", 3), t.count("l", 3, 6), t.count("hello", 1), t.count("l", -4))
+# 表上的 `.index()` 也收（`xs.index(2, 2)`）
+xs = [1, 2, 3, 2]
+print(xs.index(2), xs.index(2, 2), xs.index(2, -2), xs.count(2))

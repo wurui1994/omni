@@ -180,3 +180,38 @@ for i, tn in enumerate(bd.order(), 1):
     print(i, bd.tasks[tn], bd.tasks[tn].pri)
 
 
+# ---- 双下划线那几格：`__len__` / `__eq__` / `__lt__` ---------------------------
+# 不接这几条的症状各不一样：`len(v)` 报"len 作用在 named 上没有这一格"；
+# `v == w` 落成"**比句柄**"，`P(1) == P(1)` 静默答 False（python 按 `__eq__` 答 True）；
+# `sorted(ps)` 报"要有怎么比"。现在三格都按 python 的规矩找方法。
+# **`__eq__` 的 `other` 谁都不写标注** —— 这一层把它当"同一个类"（不然它退到 dyn，
+# 而体里写的是 `other.k`，光是定义了 `__eq__` 就编不过）。
+class P:
+    def __init__(self, k: int):
+        self.k = k
+
+    def __str__(self):
+        return "P" + str(self.k)
+
+    def __len__(self) -> int:
+        return self.k
+
+    def __eq__(self, other) -> bool:
+        return self.k == other.k
+
+    def __lt__(self, other) -> bool:
+        return self.k < other.k
+
+
+ps = [P(3), P(1), P(2)]
+print(P(1) == P(1), P(1) != P(2), P(1) < P(2), P(2) < P(1), len(P(4)))
+# `in` / `.index()` / `.count()` 走的也是 `__eq__`（它们要的就是一格"怎么比相等"）
+print(P(1) in ps, P(9) in ps, ps.index(P(2)), ps.count(P(1)))
+print(min(ps), max(ps))
+# **不印整张表**：python 那边元素走的是 `__repr__`（没定义就印 `<…object at 0x…>`，
+# 那串里有地址、逐字节比不了），所以这儿逐格 `str()`
+print([str(p) for p in sorted(ps)], [str(p) for p in sorted(ps, reverse=True)])
+ps.sort()
+print([str(p) for p in ps], len(ps))
+
+

@@ -45,6 +45,12 @@ import { ucaseDecls } from './ucase.js';
 /** 一格已经建好的 IR 表达式装的是什么。 */
 const typeOfIR = (e, C) => typeOf(e, C.tyCtx());
 
+/**
+ * **比较那几格双下划线方法** —— 它们的第二格形参（`other`）在 python 里几乎不写标注，
+ * 而这一层要个类型；口径是"同一个类"（见 `infer` 里那一处）。
+ */
+const CMP_DUNDER = new Set(['__eq__', '__ne__', '__lt__', '__le__', '__gt__', '__ge__']);
+
 /** 一棵 python 的树（`(module …)`）→ 标准 IR 的模块。 */
 export function pyToIR(tree, ctx = {}) {
   if (tag(tree) !== 'module') throw new Error('python->IR: 这不是 (module …)');
@@ -697,6 +703,14 @@ function infer(C, tree, scriptStmts) {
     });
     /* 形参全带标注的那一档第一轮就定得下来；别的先摆一格空表，等调用点。 */
     const sh = shells.get(nm);
+    /* **比较那几格双下划线方法的 `other` 就是"同一个类"那一档**（`def __eq__(self, other)`
+       —— python 里几乎没人给它写标注）。不认这一条的话 `other` 退到 dyn，而体里写的是
+       `other.n` —— 当场报"`.n` 的接收者装的是 dyn"，于是**光是定义了 `__eq__` 就编不过**。
+       比较的两边不同型那一档照旧走不通（那时 python 自己也交 NotImplemented）。 */
+    if (rec !== null && CMP_DUNDER.has(nm.slice(nm.indexOf('.') + 1))
+      && sh.annots.length === 2 && sh.annots[1] === null) {
+      sh.annots[1] = rec.type;
+    }
     C.insts.set(nm, sh.annots.every((a) => a !== null) ? [mkInst(nm, sh, sh.annots)] : []);
   }
 

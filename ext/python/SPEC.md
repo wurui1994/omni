@@ -1405,6 +1405,26 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 
 ### 已落地
 
+- **串/表方法那对 start/end、类的 `__len__` / `__eq__` / `__lt__`（2026-09-29）** —— 第七趟扫
+  （方法上那几格可选实参与双下划线那一批）：
+  - **`s.find(sub, i, j)` / `startswith` / `endswith` / `index` / `rfind` / `rindex` 收 start/end**
+    （从前只收一格实参，多给就报）。口径是"**在 `s[i:j]` 上做**"：下标可负、可越界，
+    夹到 `[0, len]` 走的是 `sliceOf` 同一套。一处要小心：**find/rfind/index 交的下标是
+    相对整串的** —— 在段里算完要**加回段的起点**（`offsetFound`），不然 `"abcabc".find("b", 2)`
+    会答 1 而不是 4。表的 `.index` 同样放开到 1..3 格（`indexOfList` 加 clamp）。
+  - **`__len__`**：`len(p)` 从前在 `lenOf` 那儿只认串/表/字典，类落不下来；现在按方法分派。
+  - **`__eq__` / `__ne__` / `__lt__` / `__le__` / `__gt__` / `__ge__`**（`CMP_METHOD`）——
+    **不接的话是静静答错**：`P(1) == P(1)` 会落成"比两个句柄"，印 `False`（python 印 `True`）。
+    `!=` 只写了 `__eq__` 时取反。`__lt__` 接上以后 `min` / `max` / `sorted` / `.sort()`
+    对类的表也能用（`needOrd` 收有 `__lt__` 的类）。
+  - **`__eq__` 的 `other` 谁都不写标注** —— 退到 dyn 的话体里 `other.k` 当场报，
+    于是**光是定义了 `__eq__` 就编不过**。`CMP_DUNDER` 在 shells 那一趟把这几格方法的
+    第二格形参**标成类本身**。
+  判据：`examples/classes.py` 尾部一段（`P` 类：`len` / `==` / `<` / `in` / `index` / `count` /
+  `min` / `max` / `sorted` / `sort(reverse=True)`）、`examples/strmethods.py` 六行 ——
+  三条腿与 python3 逐字节相同。**判据的边界**：没有 `__repr__` 的类，python `print(表)`
+  印的是 `<…object at 0x…>`（带地址），逐字节比不了 —— 那几行判据逐格 `str()`。
+
 - **`math` 那一族补齐、三目真短路、负底数的非整数次幂（2026-09-29）** —— 第六趟扫
   （`math` 与数值边界那一批）：
   - **`math` 里那几格常量**（`pi` / `e` / `tau` / `inf` / `nan`）从前一格都没有 ——

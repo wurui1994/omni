@@ -739,6 +739,68 @@ function realPow(a, b, C) {
   return { kind: 'block-expr', stmts: pre, value: { kind: 'rmath', fn: 'pow', args: [x, y] } };
 }
 
+/**
+ * **串方法上那对可选的 `start` / `end`** —— `s.find(sub, i, j)` / `s.startswith(p, i)` /
+ * `s.index(sub, i)` 那一族。python 的口径就是"在 `s[i:j]` 上做"，而下标可以是负的、
+ * 也可以越界（两头夹到 `[0, len]`）—— 与切片同一套夹法（`sliceOf` 里那一份）。
+ *
+ * 交回 `{ pre, sub, from }`：`sub` 是夹好的那一段，`from` 是**夹过之后的起点** ——
+ * `find` / `rfind` 交的下标是相对整串的，所以要把段里的下标加回这一格。
+ */
+function strRange(recv, args, C) {
+  const pre = [];
+  const keep = (e, p, t = INT) => {
+    if (isPure(e)) return e;
+    const n = C.fresh(p);
+    C.bind(n, t);
+    pre.push({ kind: 'let', name: n, type: t, init: e });
+    return { kind: 'name', name: n };
+  };
+  const src = keep(recv, 'sr_s', STR);
+  const hi = keep(lenOf(src, C), 'sr_n');
+  const clamp = (e, p) => {
+    const v = keep(wrapIndex(src, e, C), p);
+    return {
+      kind: 'ternary', type: INT,
+      cond: { kind: 'binop', op: '<', left: v, right: { kind: 'int', value: 0 } },
+      then: { kind: 'int', value: 0 },
+      else_: {
+        kind: 'ternary', type: INT,
+        cond: { kind: 'binop', op: '>', left: v, right: hi },
+        then: hi,
+        else_: v,
+      },
+    };
+  };
+  const from = keep(args[1] === undefined ? { kind: 'int', value: 0 } : clamp(args[1], 'sr_a'), 'sr_from');
+  const to = keep(args[2] === undefined ? hi : clamp(args[2], 'sr_b'), 'sr_to');
+  const count = {
+    kind: 'ternary', type: INT,
+    cond: { kind: 'binop', op: '>', left: to, right: from },
+    then: { kind: 'binop', op: '-', left: to, right: from },
+    else_: { kind: 'int', value: 0 },
+  };
+  const sub = keep({ kind: 'builtin', name: 'scpsub', args: [src, from, count] }, 'sr_sub', STR);
+  return { pre, sub, from };
+}
+
+/** 段里的下标 + 段的起点（找不到照旧是 -1）。 */
+function offsetFound(at, from, C) {
+  const n = C.fresh('sr_at');
+  C.bind(n, INT);
+  const v = { kind: 'name', name: n };
+  return {
+    kind: 'block-expr',
+    stmts: [{ kind: 'let', name: n, type: INT, init: at }],
+    value: {
+      kind: 'ternary', type: INT,
+      cond: { kind: 'binop', op: '<', left: v, right: { kind: 'int', value: 0 } },
+      then: { kind: 'int', value: -1 },
+      else_: { kind: 'binop', op: '+', left: v, right: from },
+    },
+  };
+}
+
 /** 二元那一格装的是什么 —— **python 的规矩**（`/` 出浮点、`//` 跟着操作数、串 `*` 出串）。 */
 function tyOfBin(x, C) {
   const [opTok, a, b] = kids(x);
@@ -1404,6 +1466,12 @@ export function exprOf(x, C) {
   }
 }
 
+/** 比较算子 → 类上那格双下划线方法（`__eq__` 那一族）。 */
+const CMP_METHOD = new Map([
+  ['==', '__eq__'], ['!=', '__ne__'], ['<', '__lt__'],
+  ['<=', '__le__'], ['>', '__gt__'], ['>=', '__ge__'],
+]);
+
 /** 比较。`in` / `not in` / `is` 各有自己的规矩；链式比较（`a < b < c`）在这儿摊开。 */
 function cmpOf(x, C) {
   const [opTok, aTok, bTok] = kids(x);
@@ -1446,6 +1514,35 @@ function cmpOne(o, a, b, C) {
   const tb = ty(b, C);
   /* 有一边是箱子：标签一样才比值，不一样 `==` 是 False（python 的 `1 == "1"`）。 */
   if (isDyn(ta) || isDyn(tb)) return dynBin(op, a, b, C);
+  /* **类上的那几格比较方法**（`__eq__` / `__lt__` / …）—— python 就是这么找的。
+     不走这一条的话落成"是不是同一个句柄"：`V(3) == V(3)` 静默答 False，而 python
+     按 `__eq__` 答 True。两边要同型（不同型那一档 python 自己交 NotImplemented）。 */
+  const recCmp = C.recOf(ta);
+  if (recCmp !== null && recCmp.methods !== undefined && sameType(ta, tb)
+    && tupleOf(recCmp) === null) {
+    const dunder = CMP_METHOD.get(o);
+    if (dunder !== undefined && recCmp.methods.has(dunder)) {
+      const inst = C.resolveMethod(recCmp.name, dunder, [ta, tb]);
+      if (inst !== null) {
+        const call = {
+          kind: 'call', fn: { kind: 'name', name: inst.mangled }, args: [a, b], type: BOOL,
+        };
+        return call;
+      }
+    }
+    /* `!=` 上只定义了 `__eq__` 那一档：取反（python 的默认 `__ne__` 就是这么来的）。 */
+    if (o === '!=' && recCmp.methods.has('__eq__')) {
+      const inst = C.resolveMethod(recCmp.name, '__eq__', [ta, tb]);
+      if (inst !== null) {
+        return {
+          kind: 'unop', op: '!',
+          operand: {
+            kind: 'call', fn: { kind: 'name', name: inst.mangled }, args: [a, b], type: BOOL,
+          },
+        };
+      }
+    }
+  }
   /* **元组逐格比**（python 的元组比的是内容）。不这么办的话落成"是不是同一个句柄"，
      `(1, 2) == (1, 2)` 会静默答 False —— 量到过。 */
   const tupA = tupleOf(C.recOf(ta));
@@ -1584,7 +1681,13 @@ export const cmpLt = (a, b, C) => cmpOne('<', a, b, C);
 export function needOrd(t, C, what) {
   if (['int', 'real', 'string', 'dyn'].includes(t.kind)) return;
   if (tupleOf(C.recOf(t)) !== null) return;
-  throw new Error(`python->IR: \`${what}\` 的元素是 ${t.kind} —— 还没接（要有"怎么比"）`);
+  /* **类上定义了 `__lt__` 的那一档也有比法**（`sorted(ps)` / `min(ps)` / `ps.sort()`）——
+     `cmpOne` 那一侧按 `CMP_METHOD` 分派过去。没定义 `__lt__` 的照旧当场报：
+     python 那时是 TypeError（`'<' not supported between instances`），不是"比句柄"。 */
+  const rec = C.recOf(t);
+  if (rec !== null && rec.methods !== undefined && rec.methods.has('__lt__')) return;
+  throw new Error(`python->IR: \`${what}\` 的元素是 ${t.kind} —— 还没接（要有"怎么比"）`
+    + (rec === null ? '' : `（类 \`${rec.name}\` 上没有 \`__lt__\`）`));
 }
 
 /**
@@ -2616,7 +2719,18 @@ export function lenOf(box, C) {
   /* 元组：格数在**编译期**就定了（形状的一部分），所以这是一格常量。 */
   const tup = tupleOf(C.recOf(t));
   if (tup !== null) return { kind: 'int', value: tup.length };
-  throw new Error(`python->IR: \`len()\` 作用在 ${t.kind} 上没有这一格`);
+  /* **类上的 `__len__`** —— 与 `__str__` 那一格同一条路（python 就是这么找的）。 */
+  const rec = C.recOf(t);
+  if (rec !== null && rec.methods !== undefined && rec.methods.has('__len__')) {
+    const inst = C.resolveMethod(rec.name, '__len__', [t]);
+    if (inst !== null) {
+      return {
+        kind: 'call', fn: { kind: 'name', name: inst.mangled }, args: [box], type: INT,
+      };
+    }
+  }
+  throw new Error(`python->IR: \`len()\` 作用在 ${t.kind} 上没有这一格`
+    + (rec === null ? '' : `（类 \`${rec.name}\` 上没有 \`__len__\`）`));
 }
 
 /**
@@ -4309,7 +4423,11 @@ function methodOf(recvTok, name, args, C) {
       return { kind: 'block-expr', stmts: pre, value: { kind: 'name', name: vn } };
     }
 
-    if (name === 'index' && args.length === 1) return indexOfList(recv, args[0], C, (l, r) => cmpOne('==', l, r, C));
+    /* `.index(v)` —— **可以带 `start` / `end`**（`xs.index(2, 2)`），与串上那一族一条。 */
+    if (name === 'index' && args.length >= 1 && args.length <= 3) {
+      return indexOfList(recv, args[0], C, (l, r) => cmpOne('==', l, r, C),
+        args[1] ?? null, args[2] ?? null);
+    }
     if (name === 'count' && args.length === 1) return countList(recv, args[0], C, (l, r) => cmpOne('==', l, r, C));
     /* `.copy()` —— 抄一张新表（浅抄，与 python 同）。 */
     if (name === 'copy' && args.length === 0) return copyList(recv, C);
@@ -4404,24 +4522,45 @@ function methodOf(recvTok, name, args, C) {
       }
       return formatOf(String(recv.value), args, C);
     }
-    if (name === 'startswith' && args.length === 1) return startsEndsOf(recv, args[0], true, C);
-    if (name === 'endswith' && args.length === 1) return startsEndsOf(recv, args[0], false, C);
+    /* `.startswith(p)` / `.endswith(p)`，**可以带 `start` / `end`**（`s.startswith("x", 6)`）——
+       python 的口径就是"在 `s[i:j]` 上问"，所以夹好那一段再走同一格（见 `strRange`）。 */
+    if ((name === 'startswith' || name === 'endswith') && args.length >= 1 && args.length <= 3) {
+      const head = name === 'startswith';
+      if (args.length === 1) return startsEndsOf(recv, args[0], head, C);
+      const r = strRange(recv, args, C);
+      return { kind: 'block-expr', stmts: r.pre, value: startsEndsOf(r.sub, args[0], head, C) };
+    }
     /* `title` / `capitalize` / `swapcase` 与 `isalpha` 那八格也走 `lib/ucase.py`
        （见这一段开头那条注）—— 从前这儿各有一份**只认 ASCII** 的实现
        （`caseMapOf` / `charClassOf`），表那一刀落地之后是死代码，删了。 */
-    /* `rfind` / `rindex` —— 从后往前找（方言的 `sfind` 只从前往后）。 */
-    if (name === 'rfind' && args.length === 1) return rfindOf(recv, args[0], C);
-    /* `.index()` / `.rindex()` —— 与 find / rfind 只差"找不到就报"（python 是 ValueError）。 */
-    if ((name === 'index' || name === 'rindex') && args.length === 1) {
-      const at = name === 'index'
-        ? { kind: 'builtin', name: 'scpfind', args: [recv, args[0]] }
-        : rfindOf(recv, args[0], C);
+    /* `find` / `rfind` / `index` / `rindex`，**都可以带 `start` / `end`**
+       （`s.find(",", i)` 是扫串那种写法里最常用的一格）。段里的下标要**加回段的起点** ——
+       python 交的下标是相对整串的（`"aXbX".find("X", 2)` 是 3，不是 1）。 */
+    if ((name === 'find' || name === 'rfind' || name === 'index' || name === 'rindex')
+      && args.length >= 1 && args.length <= 3) {
+      const back = name === 'rfind' || name === 'rindex';
+      const bang = name === 'index' || name === 'rindex';
+      const pre = [];
+      let target = recv;
+      let at;
+      if (args.length === 1) {
+        at = back ? rfindOf(recv, args[0], C) : { kind: 'builtin', name: 'scpfind', args: [recv, args[0]] };
+      } else {
+        const r = strRange(recv, args, C);
+        pre.push(...r.pre);
+        target = r.sub;
+        const raw = back ? rfindOf(target, args[0], C) : { kind: 'builtin', name: 'scpfind', args: [target, args[0]] };
+        at = offsetFound(raw, r.from, C);
+      }
+      if (!bang) return pre.length === 0 ? at : { kind: 'block-expr', stmts: pre, value: at };
+      /* `.index()` / `.rindex()` —— 与 find / rfind 只差"找不到就报"（python 是 ValueError）。 */
       const n = C.fresh('si_at');
       C.bind(n, INT);
       const v = { kind: 'name', name: n };
       return {
         kind: 'block-expr',
         stmts: [
+          ...pre,
           { kind: 'let', name: n, type: INT, init: at },
           {
             kind: 'if',
