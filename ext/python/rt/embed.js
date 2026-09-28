@@ -17,7 +17,7 @@
 //   * 探针那一份**必须过我们自己的 C 前端**（这才是这一格的被试者）；链接器用 clang。
 //   * 期望值不写死：同一句话交给本机 python3，**逐字节相同**才算过。
 //   * 没有参考树 / 没 clang / 没 python3 / `.o` 不齐 —— 说清并跳过（exit 0），不假装绿。
-import { existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -193,7 +193,79 @@ if (!existsSync(FREEZER)) {
   }
 }
 
+/* ---- 门三：**产品那条路** —— `omni build` 一份方言，`(lib …)` 摞上借来的那份 `.a` ----
+ *
+ * 前两问的链接命令是这份脚本自己拼的；这一问走的是**语言层真正要走的那条路**：
+ *   一份 `.sx`（adapter 将来发的就是这个形状）→ `omni build` → 产物里带着借来的运行时。
+ * 方言那三格早就有（`(lib …)` / `(cabi …)` / `(ccall …)`，`sexpr/lower.js`），
+ * 这一问量的是它们与借来的那份 `.a` 接得上。
+ *
+ * 一处口径要讲清：`OMNI_CC=clang`。我们自己那台链接器（`macho_exe.js`）吃的是
+ * **ELF 那种 `.o`**（tcc 的老路：内部表示是 ELF，输出才是 Mach-O），而 `obj/` 里那 202 份
+ * 是 Mach-O 的 `.o` —— 所以自带链接器这一路要先有"借来的那些 `.c` 编成 ELF `.o`"那一刀。
+ * 这一格是真缺口，记在 SPEC 里，不在这儿假装。
+ */
+let bad3 = 0;
+if (!existsSync(FREEZER)) {
+  say('门三：跳过（要先 `npm run py:freeze`）');
+} else {
+  const A = join(OUT, 'libomnipython.a');
+  const bootO = join(OUT, 'embed-boot.o');
+  const bootBad = spawnSync(process.execPath, [CLI,
+    ...flagsFor(bootO, INC, SRC, perFileFlags('Programs/_freeze_module.c', SRC)),
+    join(here, 'embed-boot.c')], { encoding: 'utf8' });
+  if (bootBad.status !== 0 || !existsSync(bootO)) {
+    say(`py-rt/embed: 我们编不出那层薄皮（embed-boot.c）：\n${(bootBad.stderr ?? '').split('\n').filter((l) => /error:/.test(l)).slice(0, 4).join('\n')}`);
+    bad3 += 1;
+  } else {
+    rmSync(A, { force: true });
+    const ar = spawnSync('ar', ['rcs', A, ...objs, bootO], { encoding: 'utf8' });
+    if (ar.status !== 0) { say(`py-rt/embed: ar 打不出 ${A}：\n${ar.stderr}`); bad3 += 1; }
+  }
+  const SX = join(OUT, 'probe.sx');
+  const EXE = join(OUT, 'probe');
+  if (bad3 === 0) {
+    /* 这一份**自己一句都不印** —— 印的全是借来的运行时（`print`），于是可以与
+     * python3 的同一句话逐字节比（我们的 `print` 与 CPython 的 stdout 是两个缓冲区，
+     * 混在一起次序就不定了）。 */
+    writeFileSync(SX, `;; 生成的（ext/python/rt/embed.js 门三）—— adapter 将来发的就是这个形状
+(module
+  (lib "${A}")
+  (cabi omni_py_boot i32 (ptr))
+  (cabi PyRun_SimpleString i32 (ptr))
+  (cabi omni_py_fini i32 ())
+
+  (main
+    (let rc int (ccall omni_py_boot (str "${join(SRC, 'Lib')}")))
+    (expr (ccall PyRun_SimpleString (str "print('42'.zfill(5)); print(7**80); print(repr(0.1+0.2))")))
+    (expr (ccall omni_py_fini))))
+`);
+    const b = spawnSync(process.execPath, [CLI, 'build', SX, '-o', EXE],
+      { encoding: 'utf8', cwd: root, env: { ...process.env, OMNI_CC: CC } });
+    if (b.status !== 0 || !existsSync(EXE)) {
+      say(`py-rt/embed: omni build 没过：\n${((b.stderr ?? '') + (b.stdout ?? '')).split('\n').slice(-6).join('\n')}`);
+      bad3 += 1;
+    }
+  }
+  if (bad3 === 0) {
+    const g3 = spawnSync(EXE, [], { encoding: 'utf8', cwd: root });
+    const w3 = spawnSync('python3', ['-c',
+      "print('42'.zfill(5)); print(7**80); print(repr(0.1+0.2))"], { encoding: 'utf8' });
+    const a3 = (g3.stdout ?? '').trimEnd();
+    const b3 = (w3.stdout ?? '').trimEnd();
+    if (g3.status !== 0 || a3 !== b3) {
+      bad3 += 1;
+      say(`门三：没过（exit=${g3.status}）\n      我们：${JSON.stringify(a3.slice(0, 200))}`
+        + `\n      py  ：${JSON.stringify(b3)}`);
+    } else {
+      say(`门三：**\`omni build\` 出来的产物调借来的运行时** —— 三行与 python3 逐字节相同`
+        + `（${(statSync(EXE).size / 1048576).toFixed(1)}M；方言那三格 (lib)/(cabi)/(ccall)）`);
+    }
+  }
+}
+
 say('');
-say(`门：两问都过才算过 —— ${bad === 0 && bad2 === 0 ? '过' : '没过'}`
+const allOk = bad === 0 && bad2 === 0 && bad3 === 0;
+say(`门：三问都过才算过 —— ${allOk ? '过' : '没过'}`
   + `（${((Date.now() - t0) / 1000).toFixed(1)}s）`);
-process.exit(bad === 0 && bad2 === 0 ? 0 : 1);
+process.exit(allOk ? 0 : 1);

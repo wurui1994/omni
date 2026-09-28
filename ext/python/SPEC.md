@@ -888,6 +888,45 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     的指纹**一个字节都没变**，也就是"改了判据照旧跳过、报上一趟绿"。
     `tests/lib/incr.js` 现在有一张小表 `AXIS_EXTRA`（轴名 -> 还要哈希哪几棵树）。
 
+25. **门三：`omni build` 出来的产物调借来的运行时 —— 语言层那条路通了**（同一天）。
+
+    前两问的链接命令是尺子自己拼的；这一问走的是**adapter 将来真正要走的那条路**：
+    一份方言（`.sx`）→ `omni build` → 产物里带着借来的运行时。形状就三格，方言早就有：
+
+    ```lisp
+    (module
+      (lib "<…>/libomnipython.a")         ; 那 202 份 .o + 我们那层薄皮 打成的静态库
+      (cabi omni_py_boot i32 (ptr))        ; 薄皮：把 PyConfig 那一套收成一个 C ABI 函数
+      (cabi PyRun_SimpleString i32 (ptr))  ; 借来的运行时自己的门
+      (cabi omni_py_fini i32 ())
+      (main
+        (let rc int (ccall omni_py_boot (str "<…>/Lib")))
+        (expr (ccall PyRun_SimpleString (str "print('42'.zfill(5)); print(7**80); print(repr(0.1+0.2))")))
+        (expr (ccall omni_py_fini))))
+    ```
+
+    读数：**三行与本机 python3 逐字节相同**，产物 21.1M。所以 §二 第 0 刀 (c) 里
+    "adapter 发'调借来的那一格'"这件事**在方言与后端那一侧已经通了** —— 剩下的是
+    adapter 自己发这三格（`lower/sx.js` 的 `ccall/lib/cabi` 构造器都在），以及
+    出串那一格（`(cabi …)` 的类型词里没有串，所以"回一个 python 串"要么走薄皮
+    （像 `omni_pyfloat.c` 那样）、要么走 Builtin 那条路，像 `py_repr`）。
+
+    **薄皮那一份是必须的，不是绕路**：`(cabi …)` 只有 i32/i64/ptr/f64/bool/void
+    （`sexpr/lower.js` 的 `CABI_CORE`），`PyConfig` 那种结构过不去。
+    `ext/python/rt/embed-boot.c` 23 行，自己也过我们那台 C 前端。
+
+    **路上撞出两个真缺口，一个当场补了、一个记在这儿**：
+
+      * 补了：**我们自己的链接器读不懂 macOS 那一套静态库**（BSD：`#1/<n>` 长名字、
+        索引叫 `__.SYMDEF` 而且是小端）—— 原来只认 GNU/SysV，当场报"ar: 这个库没有
+        符号索引"。`src/core/link/ar.js` 现在两套都读，判据是 `tests/c/ar-read.js`
+        的 B 段（那一门**从前还不在轴表里**，现在进去了）。
+      * 没补：**自带链接器这一路还走不通** —— `macho_exe.js` 吃的是 **ELF 那种 `.o`**
+        （tcc 的老路：内部表示 ELF，输出才是 Mach-O），而 `obj/` 里那 202 份是 Mach-O
+        的 `.o`（`c obj` 在 mac 上的默认格式）。所以门三现在挂着 `OMNI_CC=clang`。
+        下一刀是让 `py:sweep` 能出一份 **ELF 格式**的 `.o`（`--format elf --os osx`），
+        那之后"我们自己的前端 + 我们自己的链接器 + 借来的运行时"就是全自己的一条链。
+
 ## 二、进度
 
 ### 已落地
@@ -1904,8 +1943,12 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
       这一格立住，剩下的就是按族替换（每族一刀，旧路那一族当场删掉）。
       **C 那一半立住了**（2026-09-28，§一 第 24 条）：手写的 C 过我们自己的 C 前端、与那 202 份
       `.o` 链一起，`zfill` / `center` / `7**80` / `repr(0.1+0.2)` 四格与 python3 逐字节相同
-      （`npm run py:embed`）。所以剩下的是**adapter 怎么发这样的调用**，以及 JS 腿那一半
-      （同一份 C 走 C 前端 → MIR → JS）。
+      （`npm run py:embed`）。**方言那一半也立住了**（§一 第 25 条，门三）：一份 `.sx` 走
+      `(lib …)`+`(cabi …)`+`(ccall …)` 过 `omni build`，产物里带着借来的运行时、答案与
+      python3 逐字节相同。所以剩下的是**adapter 自己发那三格**（`lower/sx.js` 里
+      `ccall/lib/cabi` 三个构造器都在）、**出串那一格**（薄皮或 Builtin，见第 25 条），
+      以及 JS 腿那一半（同一份 C 走 C 前端 → MIR → JS）。
+
 1. **箱子里的函数拆出来调**（`(asfn …)` 那一格 —— 于是 `f = g` 之后 `f()` 走得通，
    与 lua 的元表同一条路）。`asfn` 要多给一格签名（箱子里只记着"这是函数"），
    所以 adapter 得先知道那一格该是什么签名。
