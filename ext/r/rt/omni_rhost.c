@@ -226,8 +226,44 @@ int omni_base_step(long long from, int cap, long long *endpos, int *nerr) {
   return more;
 }
 
+/**
+ * **系统 Rprofile**（`R_HOME/library/base/R/Rprofile`，第三十六格）。
+ *
+ * R 自己在 `setup_Rmainloop` 里 `R_LoadProfile(R_OpenSysInitFile(), R_BaseEnv)` ——
+ * 我们不叫那一句，于是那份文件里的 `options(...)` 一条都没设上。
+ * 症状**不像话**：`table()` 报 `options(op): option 'warn' cannot be deleted` ——
+ * 因为 `warn` 从来没被设过（Rprofile 第 27 行就是 `options(warn = 0)`），
+ * 于是 `op <- options(warn = -1)` 存下来的旧值是 NULL，还原时 R 认为那是"要删掉它"。
+ * 而且它**看状态**：另一句 `table()` 先跑过就又对了 —— 时绿时红的那一类。
+ *
+ * 在 base 的 R 代码装完之后叫。回错误句数（0 = 一句都没错）。
+ */
+int omni_profile_init(void) {
+  FILE *fp;
+  int errs = 0;
+  if (R_Home == NULL) R_Home = getenv("R_HOME");
+  if (R_Home == NULL) return -2;
+  /* Rprofile 与 base 那份序列化的库在同一个目录，所以同一扇门打得开。 */
+  fp = R_OpenLibraryFile("Rprofile");
+  if (fp == NULL) return -1;
+  for (;;) {
+    ParseStatus st = PARSE_NULL;
+    SEXP e;
+    int err = 0;
+    e = R_Parse1File(fp, 1, &st);
+    if (st == PARSE_EOF) break;
+    if (st == PARSE_NULL) continue;
+    if (st != PARSE_OK) { errs += 1000; break; }
+    PROTECT(e);
+    R_tryEval(e, R_BaseEnv, &err);          /* R 自己也是在 baseenv 里跑它 */
+    UNPROTECT(1);
+    if (err) errs += 1;
+  }
+  fclose(fp);
+  return errs;
+}
+
 /* **任意一句 R 从 JS 递进来**：C 这边留一块固定的缓冲，JS 那边把字节写进去
- * （地址问 `omni_src_ptr()`），再叫 `omni_eval_buf()`。
  *
  * 为什么不在 JS 里直接造一个 C 串：那要在 JS 那侧管 malloc 与结尾的 0，两头都容易错；
  * 一块固定缓冲把"谁管这块内存"说得最清楚。4 KB 够判据用（一句一句地试）。 */

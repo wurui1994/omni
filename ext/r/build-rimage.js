@@ -112,6 +112,9 @@ while (more === 1 && n < ${CAP}) {
   if (more < 0) { say('base_step 回了 ' + more); break; }
 }
 stmts += n;
+/* base 装完那一轮顺手把系统 Rprofile 也跑一遍（第三十六格）：那份文件里的
+   options(warn = 0) 一族不设上，table() 一类就报 option 'warn' cannot be deleted。 */
+if (more === 0) say('Rprofile：错 ' + F('omni_profile_init')());
 say('这一轮装 base：' + n + ' 句、到字节 ' + pos + '、错 ' + errs + '、' + (Date.now() - t1)
   + 'ms、还有=' + more);
 const img = $RT.memImageSave();

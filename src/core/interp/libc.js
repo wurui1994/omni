@@ -1233,6 +1233,29 @@ function pcreBlock(name) {
   if (at === undefined) { at = heapAlloc(16n); pcreBlocks.set(name, at); }
   return at;
 }
+/** 那一格 `struct passwd`（见 `getpwuid` 头上的账）：造一次就记住。 */
+let pwAt = 0n;
+function pwEntry() {
+  if (pwAt !== 0n) return pwAt;
+  const str = (s) => {
+    const p = heapAlloc(BigInt(s.length + 1));
+    writeCStr(p, s);
+    return p;
+  };
+  const home = (() => { const v = envAsk('R_HOME'); return v === undefined ? '/' : v; })();
+  pwAt = heapAlloc(80n);
+  memStore('i64', pwAt, 0, str('omni'));          // pw_name
+  memStore('i64', pwAt, 8, str('*'));             // pw_passwd
+  memStore('i32', pwAt, 16, 0n);                  // pw_uid
+  memStore('i32', pwAt, 20, 0n);                  // pw_gid
+  memStore('i64', pwAt, 24, 0n);                  // pw_change
+  memStore('i64', pwAt, 32, str(''));             // pw_class
+  memStore('i64', pwAt, 40, str('omni'));         // pw_gecos
+  memStore('i64', pwAt, 48, str(home));           // pw_dir
+  memStore('i64', pwAt, 56, str('/bin/sh'));      // pw_shell
+  memStore('i64', pwAt, 64, 0n);                  // pw_expire
+  return pwAt;
+}
 /** 一段字节读成 JS 串（**latin1，一字节一字符**）：于是下标就是字节偏移。
  *  `len` 是 `PCRE2_ZERO_TERMINATED`（(size_t)-1）时读到 NUL 为止。 */
 function pcreStr(at, len) {
@@ -2976,6 +2999,108 @@ const LIBC = {
       || (c >= 0xfe30 && c <= 0xfe6f) || (c >= 0xff00 && c <= 0xff60)
       || (c >= 0xffe0 && c <= 0xffe6) || (c >= 0x20000 && c <= 0x3fffd);
     return wide ? 2n : 1n;
+  },
+  /** `wcsncpy`：最多 `n` 个宽字符，抄到 NUL 就用 0 补满（`strncpy` 的宽字符版）。
+   *  `tre`（R 自己那个正则引擎）在多字节 locale 下走它。 */
+  wcsncpy: (a) => {
+    const d = BigInt(a[0]);
+    const s = BigInt(a[1]);
+    const n = BigInt(a[2]);
+    let i = 0n;
+    for (; i < n; i += 1n) {
+      const c = memLoad('i32s', s + i * 4n, 0);
+      memStore('i32', d + i * 4n, 0, c);
+      if (c === 0n) break;
+    }
+    for (; i < n; i += 1n) memStore('i32', d + i * 4n, 0, 0n);
+    return d;
+  },
+  wcschr: (a) => {
+    const s = BigInt(a[0]);
+    const w = BigInt.asIntN(32, BigInt(a[1]));
+    for (let i = 0n; ; i += 1n) {
+      const c = memLoad('i32s', s + i * 4n, 0);
+      if (c === w) return s + i * 4n;
+      if (c === 0n) return 0n;
+    }
+  },
+  wmemcpy: (a) => {
+    const d = BigInt(a[0]);
+    const s = BigInt(a[1]);
+    const n = BigInt(a[2]);
+    for (let i = 0n; i < n; i += 1n) memStore('i32', d + i * 4n, 0, memLoad('i32s', s + i * 4n, 0));
+    return d;
+  },
+  wmemset: (a) => {
+    const d = BigInt(a[0]);
+    const w = BigInt.asIntN(32, BigInt(a[1]));
+    const n = BigInt(a[2]);
+    for (let i = 0n; i < n; i += 1n) memStore('i32', d + i * 4n, 0, w);
+    return d;
+  },
+  /** `uname`（POSIX）：`struct utsname` 是 5 个 `char[256]`（macOS 的 `_SYS_NAMELEN`）。
+   *  R 的 `Sys.info()` 走它。答的是**这台"机器"的真话** —— 我们这条腿就是线性内存 + JS，
+   *  不冒充 Darwin/Linux（冒充了以后按平台分叉的代码会走错路）。 */
+  uname: (a) => {
+    const at = BigInt(a[0]);
+    const put = (i, s) => {
+      const bs = new TextEncoder().encode(s);
+      for (let j = 0; j < 256; j += 1) {
+        memStore('i8', at + BigInt(i * 256 + j), 0, BigInt(j < bs.length ? bs[j] : 0));
+      }
+    };
+    put(0, 'Omni');                     // sysname
+    put(1, 'omni');                     // nodename
+    put(2, '1.0');                      // release
+    put(3, 'omni-js');                  // version
+    put(4, 'linear-memory');            // machine
+    return 0n;
+  },
+  /** `getlogin` / `getuid` 一族：`Sys.info()` 问"谁在跑"。这条腿上没有"用户"这回事 ——
+   *  回一个固定的名字与 0 号 uid（**不冒充本机的真用户**：那是把宿主的身份漏进沙箱）。 */
+  getlogin: () => {
+    const s = 'omni';
+    const p = heapAlloc(BigInt(s.length + 1));
+    writeCStr(p, s);
+    return p;
+  },
+  getuid: () => 0n,
+  geteuid: () => 0n,
+  getgid: () => 0n,
+  getegid: () => 0n,
+  /** `getpwuid` / `getpwnam`：`struct passwd`（macOS 那版的排布：name/passwd/uid/gid/
+   *  change/class/gecos/dir/shell/expire，72 字节）。造一次就记住。
+   *  这条腿上没有 /etc/passwd —— 名字是固定的 `omni`、家目录是 `R_HOME`（R 拿 `pw_dir`
+   *  展开 `~`，给个真能打开的地方比给 `/` 有用）。 */
+  getpwuid: () => pwEntry(),
+  getpwnam: () => pwEntry(),
+  /** `realpath`：**只做纯字符串的规整**（`.`/`..`/重复的 `/` 收掉），不解符号链接 ——
+   *  宿主面上没有"读链接"那一格，而扩面是要动自举腿契约的（见 `statInfo` 那一笔账）。
+   *  `resolved == NULL` 时按 POSIX.1-2008 自己 malloc 一块。 */
+  realpath: (a) => {
+    const p = readCStr(a[0]);
+    const abs = p.startsWith('/') ? p : `/${p}`;
+    const out = [];
+    for (const seg of abs.split('/')) {
+      if (seg === '' || seg === '.') continue;
+      if (seg === '..') { out.pop(); continue; }
+      out.push(seg);
+    }
+    const s = `/${out.join('/')}`;
+    const d = BigInt(a[1]) === 0n ? heapAlloc(BigInt(s.length + 1)) : BigInt(a[1]);
+    writeCStr(d, s);
+    return d;
+  },
+  /** `_NSGetEnviron`（macOS 取 `environ` 的那扇门）：R 的 `Sys.getenv()`（不带名字）
+   *  要"把环境**整张表**列出来"。这条腿上给一张**空表**（一个 NULL 结尾的指针数组）——
+   *  按名字问还是照旧走 `getenv`（那一条是真的），只是不给"全体列出来"。
+   *  这么选是因为把宿主的整张环境表倒进沙箱里，是把宿主的身份漏进去。 */
+  _NSGetEnviron: () => {
+    const cell = pcreBlock('environ');            // char ***：一格指针
+    const vec = pcreBlock('environvec');          // char **：第一格就是 NULL
+    memStore('i64', vec, 0, 0n);
+    memStore('i64', cell, 0, vec);
+    return cell;
   },
   memcpy: (a) => {
     const n = Number(BigInt(a[2]));

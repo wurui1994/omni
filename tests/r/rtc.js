@@ -899,6 +899,8 @@ const IMG_EVAL = [
   'length(union(1:3, 2:5))', 'length(intersect(1:5, 3:8))', 'length(setdiff(1:5, 3:8))',
   'sum(match(c("b", "c"), c("a", "b", "c")))', 'sum(rank(c(10, 30, 20)))',
   'sum(unlist(list(a = 1, b = 2)))', 'length(names(list(a = 1, b = 2)))',
+  /* table() 这两句要系统 Rprofile 先跑过（options(warn = 0) 那一条）—— 见第三十六格 */
+  'sum(table(c("a", "b", "a")))', 'length(table(c(1, 1, 2)))',
   /* `table()` 那一族**不进这儿**：量出来它**看状态**（单独跑回 -3，跟在另一句
      `table()` 后头又回对了 —— R 那边还伴着 `options(op): option 'warn' cannot be
      deleted`）。这种"时绿时红"的不许进判据，单独记一刀去追。
