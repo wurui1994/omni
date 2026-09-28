@@ -39,7 +39,7 @@ import {
   dictClearStmts, sortStmts, dictUpdateStmts, sliceAssignStmts, joinOf, charsOf,
 } from './builtins.js';
 import { boxOf, unifyPy } from './dyn.js';
-import { loadPyLib, libMethodFor, libFillToks } from './pylib.js';
+import { loadPyLib, libMethodFor, libFillToks, libBuiltinFor } from './pylib.js';
 import { ucaseDecls } from './ucase.js';
 
 /** 一格已经建好的 IR 表达式装的是什么。 */
@@ -767,6 +767,15 @@ function collectInsts(nm, sh, tree, C) {
             }
           }
           continue;
+        }
+        /* **内建落到库里那一格**（`float(串)` -> `_float_of_str`，`pylib.js` 的
+           `LIB_BUILTINS`）：调用点长的是内建的样子，所以按那张表认。 */
+        if (C.libFns.has(nm) && tag(fn) === 'n' && args.length === 1) {
+          const bt = tyOfCst(args[0], C);
+          if (bt !== null && libBuiltinFor(String(nameOf(fn)), [bt]) === nm) {
+            takeTys([bt]);
+            continue;
+          }
         }
         /* 普通函数：`f(…)`。 */
         if (tag(fn) === 'n' && String(nameOf(fn)) === nm && args.length === sh.names.length) {

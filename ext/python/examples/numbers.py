@@ -98,3 +98,17 @@ print(max(2, 2.0), min(2, 2.0), max(2.0, 2), min(2.0, 2))
 print(max(3, 2.5) + 1, str(max(3, 2.5)), max(3, 2.5) * 2)
 # 同型那几档照旧（不装箱）
 print(max(1, 2), min(1.5, 2.5), max("a", "b"), max([3, 1, 2]))
+
+# ---- float(串) ----------------------------------------------------------------
+# 取整交给宿主那份**正确取整**的解析器（方言新加的 `(sreal S)`：JS 的 `Number` /
+# C 的 `strtod`），python 自己的宽容度写在 `ext/python/lib/num.py` 里：两头的 **Unicode
+# 空白**、数字之间的**下划线**、`inf` / `infinity` / `nan` 那几种拼法（不分大小写、可带符号）。
+# 末位见真章的那几个（0.1 / 17 位有效数字 / 次正规数）是这一格值钱的地方 ——
+# 自己写十进制到二进制的取整会在那儿差一点。
+print(float("1.5"), float("-2.25"), float("+3"), float(".5"), float("5."))
+print(float("1e3"), float("1E-3"), float("-2.5e+2"), float("0.1"))
+print(float("0.30000000000000004"), float("2.2250738585072014e-308"))
+print(float("9007199254740993"), float("1.7976931348623157e308"))
+print(float(" 2.5 "), float("1_000.5"), float("1_0e1_0"))
+print(float("inf"), float("-Infinity"), float("NaN"), float("+INF"))
+print(float("1.5") + float("2.5"), float(str(0.1)) == 0.1, float("3") == 3.0)

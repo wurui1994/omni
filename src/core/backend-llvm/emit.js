@@ -114,6 +114,9 @@ const RT_OPS = new Map([
   /* `(srepr E)`：往返无损的 real 文本（Omni 那一层的 `repr(x)` 落的是同一格）。
      `omni_repr_real` 一直在 omni.h 里，缺的只是这一行 —— python 的 `str(float)` 要它。 */
   ['py_repr.real', { sym: 'omni_pyrepr_real', ret: '[2 x i64]', params: ['double'] }],
+  /* `(sreal S)`：串 -> real。`omni_real_of_string`（`omni_conv.c`）一直都在，
+     这张表里缺的就是这一行 —— 与当初 `repr.real` 那个洞同一类。 */
+  ['real_of_string.string', { sym: 'omni_real_of_string', ret: 'double', params: ['[2 x i64]'] }],
   /* `(ipow A B)`：整数的整数次幂（精确，溢出报话）。两个 i64 进、一个 i64 出 ——
      这一格没有类型后缀的花样，`argType` 就是 int。 */
   ['ipow.int', { sym: 'omni_ipow', ret: 'i64', params: ['i64', 'i64'] }],

@@ -93,6 +93,10 @@ export const SX_ARITY = {
   /* **往返无损的 real 文本**（`(srepr E)`）：与 `tostr` 的 %.6g 是两条不同规则。
      python 的 `str(float)` / `repr(float)` 要的正是这一格。 */
   srepr: 1,
+  /* `(sreal S)` —— 串 -> real（python 的 `float(s)`），与 `srepr` 互为反向。
+     三条腿的实现早就在（`real_of_string`：JS 的 `Number` / C 的 `strtod`），
+     缺的只是这一层的口。 */
+  sreal: 1,
   /* 整数与实数之间（**无符号 64 位要走 `torealu`**：那一格的位当有符号读是负数） */
   toreal: 1, torealu: 1, toint: 1,
   /* **实数上的数学函数**（`(rmath "sqrt" A [B [C]])`）：名单是 C99 math.h 与 ECMA-262 Math 的

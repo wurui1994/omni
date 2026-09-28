@@ -1,0 +1,39 @@
+;; `(sreal S)` —— **串 -> real**，与 `(srepr E)` 互为反向。
+;;
+;; 为什么方言里要有这一格：python 的 `float("1.5")` 从前是**当场报"还没接"** ——
+;; 理由写在那句话里："自己写的解析会在末位上差一点"。那条理由只挡住"自己写算法"，
+;; 挡不住"**借宿主那份正确取整的解析器**"：`real_of_string` 这一格 Builtin 三条腿早就有
+;; （JS 的 `Number` / C 的 `strtod`，都是正确取整的），缺的只是方言这个口。
+;;
+;; 这一格收的文法是 `[+-]?(D+.D* | .D+)([eE][+-]?D+)?`，**整条串都要吃掉**：
+;; 两头的空白、数字之间的下划线、`inf` / `nan` 的拼法都不收 —— 那些是 python 自己的宽容度，
+;; 归 `ext/python/lib/` 与 adapter 那一侧（方言不背别人语言的规矩）。
+;;
+;; 期望值是**本机 python3 算的**（`repr(float(s))`）：取最短往返的那一份文本，
+;; 所以往返一趟（`sreal` 再 `srepr`）能一眼看出解析有没有差在末位上。
+(module
+  (main
+    ;; 一、整数形与小数形
+    (print (srepr (sreal (str "0"))))
+    (print (srepr (sreal (str "1.5"))))
+    (print (srepr (sreal (str "-2.25"))))
+    (print (srepr (sreal (str "+3"))))
+    (print (srepr (sreal (str ".5"))))
+    (print (srepr (sreal (str "5."))))
+    ;; 二、指数形
+    (print (srepr (sreal (str "1e3"))))
+    (print (srepr (sreal (str "1E-3"))))
+    (print (srepr (sreal (str "-2.5e+2"))))
+    ;; 三、**末位见真章**：17 位有效数字的那几个，自己写的十进制解析最容易在这儿差一点
+    (print (srepr (sreal (str "0.1"))))
+    (print (srepr (sreal (str "0.30000000000000004"))))
+    (print (srepr (sreal (str "2.2250738585072014e-308"))))
+    (print (srepr (sreal (str "9007199254740993"))))
+    (print (srepr (sreal (str "1.7976931348623157e308"))))
+    ;; 四、往返：`srepr` 出来的文本再 `sreal` 回去，要是同一个数
+    (let x real (real 0.1))
+    (print (bin "==" (sreal (srepr (var x))) (var x)))
+    (let y real (bin "/" (real 1.0) (real 3.0)))
+    (print (bin "==" (sreal (srepr (var y))) (var y)))
+  )
+)

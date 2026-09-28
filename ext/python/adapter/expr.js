@@ -25,7 +25,7 @@ import {
 } from './dyn.js';
 import { splitFString } from './fstring.js';
 import { splitPercent, percentArity } from './percent.js';
-import { libMethodFor, libFillToks, LIB_METHODS } from './pylib.js';
+import { libMethodFor, libFillToks, libBuiltinFor, LIB_METHODS } from './pylib.js';
 import { ucaseIntrinsic, UCASE_INTRIN } from './ucase.js';
 import {
   sumOf, pickList, anyAllOf, sortedOf, rangeList,
@@ -711,6 +711,8 @@ function tyOfCall(x, C) {
   }
   if (tag(fn) !== 'n') return null;
   const nm = String(nameOf(fn));
+  /* `_sreal(s)` 交的是 real（串 -> real）。 */
+  if (nm === '_sreal') return REAL;
   /* 大小写那张表的五格内建 —— 都是查表读一格整数（发射那一侧落成 `(mload …)`）。
      不在这儿答的症状：`lib/ucase.py` 那几格函数的返回类型推成 void，
      于是 `out = out + _ucase_map(…)` 报"void 这一格还没有零值"。 */
@@ -3185,6 +3187,12 @@ export function callOf(x, C) {
     if (argToks.length !== 2) throw new Error('python->IR: `isinstance(x, T)` 收两格实参');
     return isinstanceOf(argToks[0], argToks[1], C);
   }
+  /* `_sreal(s)` —— `lib/num.py` 拿它直通方言的 `(sreal S)`（串 -> real，舍入由宿主那份
+     正确取整的解析器给）。与下面那五格同一条：这些不是函数，是算子。 */
+  if (tag(fn) === 'n' && String(nameOf(fn)) === '_sreal') {
+    if (argToks.length !== 1) throw new Error('python->IR: `_sreal(s)` 收一格串');
+    return { kind: 'builtin', name: 'sreal', args: [exprOf(argToks[0], C)] };
+  }
   /* **大小写那张表的五格内建**（`lib/ucase.py` 拿它们查表）—— 落成一条 `(mload …)`，
      地址由 `ucase.js` 按 `ucase.tab` 的布局折出来。不是函数，所以在这儿拦。 */
   if (tag(fn) === 'n' && UCASE_INTRIN.has(String(nameOf(fn)))) {
@@ -3443,13 +3451,21 @@ function builtinOf(nm, args, argToks, C) {
         return intOfStr(args[0], base, C, msg);
       }
       throw new Error(`python->IR: \`int(${t0.kind})\` 还没接（串与数接了）`);
-    case 'float':
-      if (t0 !== null && t0.kind === 'string') {
-        throw new Error('python->IR: `float(串)` 还没接 —— 串转浮点要"最短往返"那一档'
-          + '（借来的 CPython `pystrtod`，见 SPEC 的下一刀），自己写的解析会在末位上差一点，'
-          + '不装作有；`int(串)` 是另一回事（逐位乘加本来就精确）');
+    case 'float': {
+      /* `float(串)` —— 走库里那一格（`lib/num.py` 的 `_float_of_str`）：python 的宽容度
+         （两头的 Unicode 空白、数字间的下划线、inf/nan 的拼法）写在那一份 python 里，
+         真正的取整交给方言新加的 `(sreal S)` —— 三条腿分别落到 JS 的 `Number` 与
+         C 的 `strtod`，都是**正确取整**的。这一格从前是"当场报还没接"。 */
+      const libF = libBuiltinFor('float', [t0]);
+      if (libF !== null) {
+        const inst = C.resolveFn(libF, [t0]);
+        if (inst === null) {
+          throw new Error(`python->IR: \`float(串)\` 在库里那格 \`${libF}\` 上没有对得上的实例`);
+        }
+        return { kind: 'call', fn: { kind: 'name', name: inst.mangled }, args: [args[0]] };
       }
       return t0.kind === 'real' ? args[0] : toReal(args[0], C);
+    }
     case 'str':
       return pyStr(args[0], C);
     case 'bool':

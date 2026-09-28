@@ -2052,6 +2052,24 @@ class CoreLowerer {
       }
       return { kind: 'Builtin', name: 'py_repr', args: [v], type: STRING, argType: REAL };
     }
+    /* `(sreal S)` —— **串 -> real**（python 的 `float("1.5")`），与 `(srepr E)` 互为反向。
+       实现**一行都不自己写**：`real_of_string` 这一格 Builtin 早就在（Omni 那一层的
+       `real("1.5")` 走的就是它），三条腿分别是 `$real_of_string` / `omni_real_of_string` /
+       `realOfString` —— 舍入都**委托给宿主那份正确取整的解析器**（JS 的 `Number`、
+       C 的 `strtod`）。自己写十进制到二进制的取整会在末位上差一点，那正是"库函数不自己写"
+       这条路线要避开的。
+       收的文法是"[+-]?(D+.D* | .D+)([eE][+-]?D+)?"，**整条串都要吃掉**，别的当场报 ——
+       python 那一层的宽容度（两头的 Unicode 空白、数字之间的下划线、inf/nan 的拼法）
+       是它自己的规矩，归 adapter 与 `ext/python/lib/` 那一侧。 */
+    if (h === 'sreal') {
+      if (n.items.length !== 2) return this.err(n, '(sreal S) 要 1 个参数');
+      const s = this.expr(n.items[1]);
+      if (s === null) return null;
+      if (s.type.k !== 'string') {
+        return this.err(n, `(sreal S) 的 S 要是 string，这里是 ${coreTypeText(s.type)}`);
+      }
+      return { kind: 'Builtin', name: 'real_of_string', args: [s], type: REAL, argType: STRING };
+    }
     /* `(ipow A B)` —— **整数的整数次幂，精确**（第一百四十九片）。
        为什么方言里要单独一格：`(rmath "pow" …)` 是 double 上的，只有 53 位有效位，
        而 int 是 64 位 —— `3 ** 39`（= 4052555153018976267）落在 int64 里却落不进 double。

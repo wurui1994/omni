@@ -34,7 +34,7 @@ import {
 const topOf = (items) => items.flatMap((s) => (tag(s) === 'line' ? topOf(kids(s)) : [s]));
 
 /** 库源码，按文件。次序无所谓（这一层只收 `def`，不跑模块级语句）。 */
-const LIB_FILES = ['str.py', 'ucase.py'];
+const LIB_FILES = ['str.py', 'ucase.py', 'num.py'];
 
 /**
  * **方法名 → 库函数名**，按接收者装的东西分。
@@ -81,6 +81,26 @@ export const LIB_METHODS = new Map([
      带分隔符的是另一条规矩（空段算一格），照旧在 adapter 里那趟循环。 */
   ['string.split/0', '_str_split_ws'],
 ]);
+
+/**
+ * **内建函数也能落到库里那一格**（与上面那张"方法"表对称）。
+ *
+ * 键是 `<内建名>.<头一格实参装的类型词>`：`float(串)` 要走 `lib/num.py` 的 `_float_of_str`
+ * （python 的宽容度：两头的 Unicode 空白、数字间的下划线、inf/nan 的拼法），而
+ * `float(数)` 照旧是一格转换。这张表与方法那张一样是**唯一一处映射** —— 发射、问类型、
+ * 收单态化实例三处都查它。
+ */
+export const LIB_BUILTINS = new Map([
+  ['float.string', '_float_of_str'],
+]);
+
+/** 内建名 + 实参类型 → 库函数名（没有就答 null）。只看头一格实参。 */
+export function libBuiltinFor(name, argTys) {
+  if (!Array.isArray(argTys) || argTys.length !== 1) return null;
+  const t = argTys[0];
+  if (t === null || t === undefined) return null;
+  return LIB_BUILTINS.get(`${name}.${t.kind}`) ?? null;
+}
 
 /**
  * 接收者装的东西 + 方法名 → 库函数名（没有就答 null）。

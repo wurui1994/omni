@@ -140,7 +140,8 @@ function builtinType(e, ctx) {
     }
     /* UTF-8 算术那一族（按**码点**）：`scplen` 数长度、`scpfind` 找位置，都是 int。 */
     case 'scplen': case 'scpfind': case 'scpord': return INT;
-    case 'toreal': case 'torealu': return REAL;
+    /* `(sreal S)` 解析出来的是 real（串 -> real，与 `srepr` 反向）。 */
+    case 'toreal': case 'torealu': case 'sreal': return REAL;
     /* 串那一族交出来的都是串（漏了 `ssub` 的症状是 `(let c int (ssub …))` —— 声明说 int，
        装进去的是串，方言当场报"未声明的变量"那一串连锁错）。 */
     case 'scpsub':   /* 按码点切片，交的还是串 */

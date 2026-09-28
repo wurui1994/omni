@@ -1404,6 +1404,26 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 
 ### 已落地
 
+- **`float(串)`（2026-09-29）** —— 从前是"当场报还没接"，理由写着"自己写的解析会在末位上
+  差一点"。那条理由只挡住**自己写算法**，挡不住**借宿主那份正确取整的解析器**：
+  方言新加一格 `(sreal S)`（`tests/sexpr/cases/67-sreal.sx`），落到早就在的 Builtin
+  `real_of_string` —— 三条腿分别是 JS 的 `Number`、C 的 `strtod`、解释器那份 `Number`，
+  **都是正确取整的**。三条腿一行实现都没写，只补了方言那个口（`sexpr/lower.js`）、
+  标准 IR 那两格（`lower/sx.js` 的 `SX_ARITY` 与 `lower/ty-of.js`）、
+  以及 LLVM 那张符号表里缺的一行（`real_of_string.string`）。
+  python 自己的宽容度写在 **`ext/python/lib/num.py`**（两头的 Unicode 空白、数字之间的
+  下划线、`inf`/`infinity`/`nan` 的拼法），真正的取整交给 `(sreal …)`；
+  `inf` / `nan` 是拿 `1e308 * 10` 与 `inf - inf` 算出来的（方言里没有那两个字面量）。
+  顺带给 `pylib.js` 加了一格机制：**内建函数也能落到库里那一格**
+  （`LIB_BUILTINS`：`float.string` -> `_float_of_str`，与"方法"那张表对称，
+  发射 / 问类型 / 收实例三处共用）。
+  判据：`67-sreal.sx` 三条腿与 python3 的 `repr(float(s))` 逐字节相同（含 0.1 /
+  `0.30000000000000004` / 次正规数 `2.2250738585072014e-308` / `9007199254740993` /
+  最大有限值，外加两趟往返）；`examples/numbers.py` 末尾七行（三条腿）；
+  `NOCACHE=1 tests/sexpr` 113 过 0 败（真跑 114）。
+  **还没接的一格**（明说）：python 的 `float("１.５")` 收全角数字（Unicode 十进制数字都收），
+  我们只收 ASCII 那十个 —— 喂全角进来是当场报，不是静静答错。
+
 - **`python.grammar`** —— 照 `Grammar/python.gram`（PEG）+ `Grammar/Tokens` +
   `Parser/lexer/` 复刻。`cpython/Lib` 下 2063 份 .py **读下来 2054 份（99.6%）**。
   一路的账、每一处偏离 PEG 的理由、还欠的 9 份都写在那份语法的文件头与末尾。
