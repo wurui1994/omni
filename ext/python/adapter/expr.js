@@ -290,12 +290,13 @@ function fstringOf(x, C) {
  * `#` 与零填充同时给（零补在**前缀之后**，负号还在最前头）、`,` / `_` 与零填充同时给
  * （补的零也要分组 —— 那趟循环在 `lib/str.py` 的 `_str_zgroup` 里）。
  * 上一趟补的是 `e` / `E`（走 `ssci`）、`g` / `G`（走 `sgen`）、`#` 那几格前缀。
- * 明说没收的：`=`（符号后填充）、`n`、宽度或精度写成 `{}`（从实参来）、
- * `,` 与 `%` 同时给（`_str_group3` 按小数点切段，末尾那格 `%` 会把整数段认错）。
+ * **宽度与精度写成 `{}`**（从实参来）也接了 —— 那两格一律拿 IR 说话（见 `specSubs`）。
+ * 明说没收的：`=`（符号后填充）、`n`、`,` 与 `%` 同时给（`_str_group3` 按小数点切段，
+ * 末尾那格 `%` 会把整数段认错）、宽度写成 `{}` 再配 `#` / 千分位的零填充。
  */
 const SPEC_RE = /^(?:(.)?([<>^]))?([+ -])?(#)?(0)?(\d+)?([,_])?(?:\.(\d+))?([a-zA-Z%])?$/;
 
-function fmtSpec(e0, spec, C) {
+function fmtSpec(e0, spec, C, subs = null) {
   const m = SPEC_RE.exec(spec);
   if (m === null) throw new Error(`python->IR: f-string 的格式说明 \`:${spec}\` 读不下来`);
   const [, fill0, align, sign, alt, zero, widthS, group, precS, type] = m;
@@ -310,10 +311,22 @@ function fmtSpec(e0, spec, C) {
   const prec = precS === undefined ? null : Number(precS);
   const t = ty(e0, C);
   const numeric = ['int', 'real'].includes(t.kind);
+  /* **宽度或精度写成 `{}`**（`f"{s:{w}}"` / `f"{x:.{p}f}"`）—— 那一格是运行期的整数，
+     所以往下一律拿 IR 说话（`widthIR` / `precIR`）；上面那两个数只在"编译期定得下来"
+     那一档有效（`width > 0` 这种判断都换成 `hasWidth`）。 */
+  const dynW = subs === null ? null : subs.width;
+  const dynP = subs === null ? null : subs.prec;
+  const widthIR0 = dynW ?? (width > 0 ? { kind: 'int', value: width } : null);
+  const precIR0 = dynP ?? (prec === null ? null : { kind: 'int', value: prec });
+  const hasWidth = widthIR0 !== null;
   /* "零填充"这一档只在**没写填充字符、也没写别的对齐**时才算数
      （`f"{255:<#08x}"` 里那个 0 就是普通填充字符 —— 量出来是 `0xff0000`）。 */
-  const zeroGroup = zero !== undefined && width > 0 && fill0 === undefined
+  const zeroGroup = zero !== undefined && hasWidth && fill0 === undefined
     && (align === undefined || align === '>');
+  if (zeroGroup && dynW !== null && (alt !== undefined || group !== undefined)) {
+    throw new Error('python->IR: 宽度写成 `{}` 再配上 `#` 或千分位的零填充还没接'
+      + '（那两档要按编译期的宽度算"减掉前缀之后补几个零"）');
+  }
 
   /* 符号那一格要读两遍（判正负 + 印出来），所以先钉住。 */
   const pre = [];
@@ -324,18 +337,29 @@ function fmtSpec(e0, spec, C) {
     pre.push({ kind: 'let', name: n, type: t, init: e0 });
     e = { kind: 'name', name: n };
   }
+  /* `{}` 里那两格也要钉 —— 精度在截串那一档要读三遍。 */
+  const pinInt = (x) => {
+    if (x === null || x === undefined || isPure(x)) return x ?? null;
+    const n = C.fresh('fs_w');
+    C.bind(n, INT);
+    pre.push({ kind: 'let', name: n, type: INT, init: x });
+    return { kind: 'name', name: n };
+  };
+  const widthIR = pinInt(widthIR0);
+  const precIR = pinInt(precIR0);
 
   /* 一、正文。 */
   let s;
   let doneWidth = false;
+  const p6 = precIR ?? { kind: 'int', value: 6 };
   if (type === 'f') {
-    s = { kind: 'builtin', name: 'sfix', args: [toReal(e, C), { kind: 'int', value: prec ?? 6 }] };
+    s = { kind: 'builtin', name: 'sfix', args: [toReal(e, C), p6] };
   } else if (type === 'e' || type === 'E') {
     /* `%e` 那一格（`ssci` = C 的 `%.*e`）；大写那一档整条裹一层 ASCII 大写。 */
-    s = { kind: 'builtin', name: 'ssci', args: [toReal(e, C), { kind: 'int', value: prec ?? 6 }] };
+    s = { kind: 'builtin', name: 'ssci', args: [toReal(e, C), p6] };
     if (type === 'E') s = { kind: 'builtin', name: 'supper', args: [s] };
   } else if (type === 'g' || type === 'G') {
-    s = { kind: 'builtin', name: 'sgen', args: [toReal(e, C), { kind: 'int', value: prec ?? 6 }] };
+    s = { kind: 'builtin', name: 'sgen', args: [toReal(e, C), p6] };
     if (type === 'G') s = { kind: 'builtin', name: 'supper', args: [s] };
   } else if (type === 'x' || type === 'X' || type === 'o' || type === 'b') {
     if (t.kind !== 'int') throw new Error(`python->IR: \`:${type}\` 要整数，这里是 ${t.kind}`);
@@ -382,23 +406,23 @@ function fmtSpec(e0, spec, C) {
     };
     s = {
       kind: 'binop', op: '+',
-      left: { kind: 'builtin', name: 'sfix', args: [hundred, { kind: 'int', value: prec ?? 6 }] },
+      left: { kind: 'builtin', name: 'sfix', args: [hundred, p6] },
       right: { kind: 'string', value: '%' },
     };
-  } else if (prec !== null && t.kind === 'real') {
-    s = { kind: 'builtin', name: 'sfix', args: [e, { kind: 'int', value: prec }] };
+  } else if (precIR !== null && t.kind === 'real') {
+    s = { kind: 'builtin', name: 'sfix', args: [e, precIR] };
   } else {
     s = pyStr(e, C);
     /* `:.N` 作用在串上是**截到 N 个字符**（python 的规矩）。 */
-    if (prec !== null) {
+    if (precIR !== null) {
       const len = { kind: 'builtin', name: 'scplen', args: [s] };
       s = {
         kind: 'builtin', name: 'scpsub',
         args: [s, { kind: 'int', value: 0 }, {
           kind: 'ternary', type: INT,
-          cond: { kind: 'binop', op: '<', left: len, right: { kind: 'int', value: prec } },
+          cond: { kind: 'binop', op: '<', left: len, right: precIR },
           then: len,
-          else_: { kind: 'int', value: prec },
+          else_: precIR,
         }],
       };
     }
@@ -459,20 +483,25 @@ function fmtSpec(e0, spec, C) {
   }
 
   /* 三、补到宽度。**没写对齐时数右对齐、别的左对齐**（python 的规矩）。 */
-  if (width > 0 && !doneWidth) {
+  if (hasWidth && !doneWidth) {
     const fill = fill0 ?? (zero !== undefined ? '0' : ' ');
     const how = align ?? (numeric ? '>' : '<');
-    if (how === '^') s = centerTo(s, width, fill, C);
-    else if (fill === '0' && how === '>' && numeric) s = padTo(s, width, { left: false, zero: true }, C);
-    else s = padFill(s, width, fill, how === '<', C);
+    if (how === '^') s = centerTo(s, widthIR, fill, C);
+    else if (fill === '0' && how === '>' && numeric) s = padTo(s, widthIR, { left: false, zero: true }, C);
+    else s = padFill(s, widthIR, fill, how === '<', C);
   }
   return pre.length === 0 ? s : { kind: 'block-expr', stmts: pre, value: s };
+}
+
+/** 宽度那一格：编译期的数与运行期的 IR（`f"{s:{w}}"`）都收。 */
+function wNode(width) {
+  return typeof width === 'number' ? { kind: 'int', value: width } : width;
 }
 
 /** 补到宽度，填充字符自己给（`padTo` 只会补空格与零）。 */
 function padFill(s, width, ch, left, C) {
   const n = {
-    kind: 'binop', op: '-', left: { kind: 'int', value: width },
+    kind: 'binop', op: '-', left: wNode(width),
     right: { kind: 'builtin', name: 'scplen', args: [s] },
   };
   const pad = { kind: 'builtin', name: 'srep', args: [{ kind: 'string', value: ch }, n] };
@@ -496,7 +525,7 @@ function centerTo(s0, width, ch, C, leftHeavy = false) {
     s = { kind: 'name', name: n };
   }
   const gap = {
-    kind: 'binop', op: '-', left: { kind: 'int', value: width },
+    kind: 'binop', op: '-', left: wNode(width),
     right: { kind: 'builtin', name: 'scplen', args: [s] },
   };
   const rep = (cnt) => ({ kind: 'builtin', name: 'srep', args: [{ kind: 'string', value: ch }, cnt] });
@@ -516,13 +545,52 @@ function centerTo(s0, width, ch, C, leftHeavy = false) {
 }
 
 /** 一格替换字段算出来的值 → 串（按 `conv` 与 `spec`）。 */
+/**
+ * **格式说明里的 `{}`**（`f"{s:{w}}"` / `f"{x:.{p}f}"` / `"{:{}}".format(42, ">6")`）——
+ * 把那一格拆出来：交 `{ text, subs }`。`text` 是把每格 `{…}` 换成一位 `1` 之后的说明
+ * （换 `1` 不换 `0`：`0` 在这套微语言里是"零填充"那一档的标志），真正的值走 `subs`
+ * 里那两格 IR。**小数点之前的算宽度、之后的算精度**（python 那套微语言里这两格就是这么分的）。
+ */
+function specSubs(spec, C) {
+  let text = '';
+  let width = null;
+  let prec = null;
+  let seenDot = false;
+  for (let i = 0; i < spec.length; i += 1) {
+    const c = spec[i];
+    if (c !== '{') {
+      if (c === '.') seenDot = true;
+      text += c;
+      continue;
+    }
+    const close = spec.indexOf('}', i);
+    if (close < 0) throw new Error('python->IR: 格式说明里那个 `{` 没有配平的 `}`');
+    const src = spec.slice(i + 1, close).trim();
+    if (src === '') throw new Error('python->IR: 格式说明里有一格空的 `{}` —— 那一格要写表达式');
+    const v0 = exprOf(C.exprTreeOf(src, '格式说明'), C);
+    const t = ty(v0, C);
+    if (!['int', 'bool'].includes(t.kind)) {
+      throw new Error(`python->IR: 格式说明里的 \`{${src}}\` 要是整数（这里是 ${t.kind}）`);
+    }
+    const v = intOfPy(v0, t);
+    if (seenDot) {
+      if (prec !== null) throw new Error('python->IR: 格式说明里的精度写了两格 `{}`');
+      prec = v;
+    } else {
+      if (width !== null) throw new Error('python->IR: 格式说明里的宽度写了两格 `{}`');
+      width = v;
+    }
+    text += '1';
+    i = close;
+  }
+  return { text, subs: width === null && prec === null ? null : { width, prec } };
+}
+
 function fmtField(e, p, C) {
   if (p.spec !== null) {
     if (p.conv !== null) throw new Error('python->IR: f-string 里转换与格式说明一起用还没接');
-    if (/[{}]/.test(p.spec)) {
-      throw new Error('python->IR: f-string 的格式说明里带 `{}`（宽度/精度从实参来）还没接');
-    }
-    return fmtSpec(e, p.spec, C);
+    const { text, subs } = specSubs(p.spec, C);
+    return fmtSpec(e, text, C, subs);
   }
   if (p.conv === 'a') {
     throw new Error('python->IR: f-string 的 `!a`（ascii()）还没接 —— 它要按码位转义非 ASCII');
@@ -2178,7 +2246,7 @@ function rawConv(p, v, C) {
  */
 function padTo(s, width, flags, C) {
   const n = {
-    kind: 'binop', op: '-', left: { kind: 'int', value: width },
+    kind: 'binop', op: '-', left: wNode(width),
     right: { kind: 'builtin', name: 'scplen', args: [s] },
   };
   /* `(srep S N)` 在 N <= 0 时交空串 —— 正好是"不用补"那一档。 */
@@ -3019,6 +3087,11 @@ function formatOf(tmpl, args, C, named = null) {
       }
       /* `!r` 先转成串再按说明摆；没有转换时说明直接作用在值上（数要按数摆）。 */
       const base = conv === 'r' ? pyRepr(v, C) : v;
+      if (spec.includes('{')) {
+        throw new Error('python->IR: `.format()` 的格式说明里带 `{}`（从实参来）还没接'
+          + ' —— f-string 那一侧接了（`f"{s:{w}}"`）。这一侧那格 `{}` 指的是**另一格实参**，'
+          + '整段说明的文本要到运行期才凑得出来，是另一条路');
+      }
       out.push(spec === '' ? pyStr(base, C) : fmtSpec(base, spec, C));
     }
   }
