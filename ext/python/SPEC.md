@@ -1413,6 +1413,17 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 
 ### 已落地
 
+- **bool 与数混着挑、混着比（2026-09-29）** —— 第十一趟扫（`max(True, 2)` 那一格）：
+  - `max` / `min` 交的是**赢的那一格本身**（原样的型），所以混型那一档**全都装箱**
+    （从前只在 int 配 real 时装）。`min(False, 0)` 是 `False` 不是 `0` —— 平手留左边
+    那一格，而且 bool 就是 bool。判条件改成"每一格都是 int / real / bool，而且不止一种"。
+  - `needOrd` 收 bool（python 里 `False < True`）—— 从前 `max(True, False)` 也报。
+  - **顺手抓出一格"错漏到下一层"的**：`True < 2` / `True >= 1` / `True == 1` 在**比较**
+    那条路上没折 bool，落成方言的 `(bin "<" (bool true) (int 2))` —— 到那一层才报
+    "两边要同型"。（`+` / `-` 那一族早就折了，比较这一处漏了。）`cmpOne` 末尾补上：
+    一边 bool 一边数就把 bool 折成 int，然后才走 int/real 提升那两句。
+  判据：`examples/moreops.py` 六行（三条腿逐字节相同）。
+
 - **格式说明里的宽度/精度写成 `{}`（2026-09-29）** —— 第十趟扫（`f"{s:{w}}"` 那一格）：
   - 从前整套 `fmtSpec` 是**按编译期的数**铺 IR 的（`width > 0` 这种判断到处都是）。
     现在宽度与精度两格一律拿 IR 说话（`widthIR` / `precIR`，编译期那一档就是个字面量），

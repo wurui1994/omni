@@ -1720,8 +1720,15 @@ function cmpOne(o, a, b, C) {
   if (seq !== null) return seq;
   let l = a;
   let r = b;
-  if (ta.kind === 'real' && tb.kind === 'int') r = toReal(b, C);
-  if (ta.kind === 'int' && tb.kind === 'real') l = toReal(a, C);
+  /* **一边 bool 一边数：把 bool 折成 int** —— python 里 bool 就是 int 的一种
+     （`True == 1` 是 True、`True < 2` 是 True）。不折的话这一句落成方言的
+     `(bin "<" (bool true) (int 2))`，那一层才报"两边要同型" —— 错漏到了下一层。 */
+  if (ta.kind === 'bool' && numish(tb)) l = intOfPy(a, ta);
+  if (tb.kind === 'bool' && numish(ta)) r = intOfPy(b, tb);
+  const tl = ty(l, C);
+  const tr = ty(r, C);
+  if (tl.kind === 'real' && tr.kind === 'int') r = toReal(r, C);
+  if (tl.kind === 'int' && tr.kind === 'real') l = toReal(l, C);
   return { kind: 'binop', op, left: l, right: r };
 }
 
@@ -1793,7 +1800,9 @@ export const cmpLt = (a, b, C) => cmpOne('<', a, b, C);
  * `sorted([])` / `min([])` 这些**空表**在 python 里有定义，而空表字面量正是 `(arr dyn)`。
  */
 export function needOrd(t, C, what) {
-  if (['int', 'real', 'string', 'dyn'].includes(t.kind)) return;
+  /* bool 也有比法 —— python 里它就是 int 的一种（`False < True`、`max(True, False)`
+     是 `True`）。落到方言时 `cmpOne` 把它折成 int 再比。 */
+  if (['int', 'real', 'string', 'dyn', 'bool'].includes(t.kind)) return;
   if (tupleOf(C.recOf(t)) !== null) return;
   /* **类上定义了 `__lt__` 的那一档也有比法**（`sorted(ps)` / `min(ps)` / `ps.sort()`）——
      `cmpOne` 那一侧按 `CMP_METHOD` 分派过去。没定义 `__lt__` 的照旧当场报：
@@ -4183,14 +4192,16 @@ function builtinOf(nm, args0, argToks, C) {
         return pickList(one, op, nm, C, less);
       }
       args.forEach((a) => needOrd(ty(a, C), C, `${nm}()`));
-      /* **int 与 real 混着来：两边都装箱**（`max(1, 2.5)`）。
+      /* **数那几档混着来：全都装箱**（`max(1, 2.5)` / `max(True, 2)`）。
          方言的三目两支必须同型，不动就报"(sel …) 两支要同型：甲是 int，乙是 real"。
-         而**不能把 int 提到 real**：python 的 `max(3, 2.5)` 交的是 `3`（int），印出来是
-         `3` 不是 `3.0` —— 提上去就印错数。箱子那条道正是为这一格来的（印的时候按标签分派）。 */
+         而**不能把窄的提到宽的**：python 的 `max(3, 2.5)` 交的是 `3`（int），印出来是
+         `3` 不是 `3.0`；`min(False, 0)` 交的是 `False` 不是 `0`（平手留左边那一格，
+         而且 bool 就是 bool）。箱子那条道正是为这一格来的（印的时候按标签分派）。 */
       let vals = args;
       const tys = args.map((a) => ty(a, C));
-      if (tys.some((t) => t.kind === 'real') && tys.some((t) => t.kind === 'int')
-        && tys.every((t) => ['int', 'real'].includes(t.kind))) {
+      const NUMK = ['int', 'real', 'bool'];
+      if (tys.every((t) => NUMK.includes(t.kind))
+        && new Set(tys.map((t) => t.kind)).size > 1) {
         vals = args.map((a) => boxOf(a, C));
       }
       /* **平手时留左边那一格** —— python 的 `min` / `max` 交的是"第一个最小/最大的"

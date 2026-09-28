@@ -112,6 +112,15 @@ def main():
     # 一支是空容器字面量的三目：类型从**另一支**来
     ns = [1, 2]
     print(ns if len(ns) > 1 else [], [] if len(ns) > 1 else ns)
+    # **bool 与数混着挑**：`max` / `min` 交的是**赢的那一格本身**（原样的型），所以混型
+    # 那一档两边都装箱 —— `min(False, 0)` 是 `False`（平手留左边那一格），不是 `0`。
+    print(max(True, 2), min(False, 0), max(True, False), max(2, True), min(0, False))
+    print(max([True, 2, 0]), min([True, 2, 0]), max(True, 0.5), min(True, 2, 0.5))
+    # 比较那条路上 bool 也要折成 int —— 不折的话错漏到方言那一层才报"两边要同型"。
+    print(True < 2, False < True, True >= 1, True == 1, sorted([2, True, 0.5]))
+    bs = [True, False]
+    bs.sort()
+    print(bs, sorted([True, 2, 0]))
 
 
 main()
