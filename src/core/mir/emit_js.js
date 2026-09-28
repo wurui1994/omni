@@ -167,7 +167,7 @@ function b64Encode(bytes) {
 const JS_PROLOGUE = `'use strict';
 const { memInit, memData, memAlloc, memPut, memHeap, memSize, memGrow,
   memLoadFn, memStoreFn, memLoadFnN, memStoreFnN,
-  b64, setLinkMap, needFn, fnSlot, fnBind, fnCall, fnCallLibc,
+  b64, setLinkMap, needFn, symBind, needSym, fnSlot, fnBind, fnCall, fnCallLibc,
   callLibc, hasLibc, isExitCall, failRt, flushOut, libcAtExit, setFnPtrCaller,
   sjTok, sjSet, sjThrow, sjCatch } = $rt;
 const $W = (x) => BigInt.asIntN(64, x);
@@ -260,17 +260,30 @@ class JsFromMir {
     if (!l.includes(item)) l.push(item);
   }
 
+  /** 别人那个数据符号的**惰性取址器**：记下名字，回那个取址函数的名字。
+   *  一个名字一格、只问一次（`??=`）；发在顶层（见 `moduleBase`）。 */
+  lazySym(name) {
+    if (this.lazySyms === undefined) this.lazySyms = new Map();
+    let nm = this.lazySyms.get(name);
+    if (nm === undefined) {
+      nm = `$sy${this.lazySyms.size}`;
+      this.lazySyms.set(name, nm);
+    }
+    return nm;
+  }
+
   /** 一条 ref 的读文本。常量在**发代码期**就变成字面量，指令引用是一个局部变量。 */
   ref(f, r) {
     if (r === REF_NONE) return 'undefined';
     if (isConstRef(r)) {
       if (this.modular) {
-        /* 这一条其实是**别人**那个全局量的地址：发成 `import` 进来的那一格。
-           活绑定，所以有环也不怕 —— 用它的时候（函数体里）所有模块都装载完了。 */
+        /* 这一条其实是**别人**那个全局量的地址。**按需**（第三十三格）：不再
+           `import { $sym_x }`（那一句会把整份提供方拽进来），发成"用到才问地址"的
+           `$sy<名字>()` —— 第一次问的时候按链接图装那一份。函数那一格是同一个形状。 */
         const ext = this.extRef.get(r);
         if (ext !== undefined) {
-          this.needImport(this.syms.get(ext.name), `$sym_${ext.name}`);
-          return ext.add === 0 ? `$sym_${ext.name}` : `($sym_${ext.name} + ${ext.add}n)`;
+          const nm = this.lazySym(ext.name);
+          return ext.add === 0 ? `${nm}()` : `(${nm}() + ${ext.add}n)`;
         }
         /* 自己这张像里的地址：顶层算出来的 `$k<下标>`（= 基址 + 偏移）。
            哪几条是地址由前端记的 `addrConsts` 说 —— 漏一条就是静默错地址。 */
@@ -896,10 +909,24 @@ const $callFromLibc = (fp, args) => {
     for (const r of this.fnRefs) {
       L.push(`const $fp${r} = fnSlot(${JSON.stringify(this.linkKey(mir.funcRefs.get(r)))});`);
     }
-    /* 本模块定义的全局量：把**地址**导出去（C 那边它就是一块内存）。
-       别人那句 `import { $sym_base }` 接的就是这一格。 */
+    /* 本模块定义的全局量：把**地址**导出去（C 那边它就是一块内存），并且
+       **绑进那张数据符号表**（`symBind`）—— 别人按需问地址走的就是它（第三十三格）。
+       `export` 还留着：本模块自己与那些还写着 `import` 的老路都靠它。 */
     for (const [name, addr] of mir.dataSyms === undefined ? [] : mir.dataSyms) {
       L.push(`export const $sym_${name} = ${BigInt(addr)}n + $Dn;`);
+      L.push(`symBind(${JSON.stringify(name)}, $sym_${name});`);
+    }
+    /* 用到别人那几个数据符号的**惰性取址器**：一个名字一格、只问一次。
+       先把 data 段那几格 reloc 里要的名字**过一遍**再发声明 —— 不然下面那个循环
+       现要的名字就落在声明后头，`const` 的 TDZ 会当场炸（loud，但没必要踩）。 */
+    for (const d of mir.mem.data) {
+      for (const r of d.relocs === undefined ? [] : d.relocs) {
+        if (r.sym !== undefined && this.syms.has(r.sym)) this.lazySym(r.sym);
+      }
+    }
+    for (const [name, nm] of this.lazySyms === undefined ? [] : this.lazySyms) {
+      L.push(`let ${nm}$v = null;`);
+      L.push(`const ${nm} = () => (${nm}$v ??= needSym(${JSON.stringify(name)}));`);
     }
     /* data 段在**装载期**就铺好（不像烤死那一版是在 `$run()` 里）：一份 .c 一份 .js
        之后，别人的代码可能先跑起来，那时我这一段必须已经在内存里。
@@ -917,8 +944,9 @@ const $callFromLibc = (fp, args) => {
           if (!this.syms.has(r.sym)) {
             throw new OmniError(`mir.emit_js: data 段里指着外部符号 '${r.sym}'，但没人提供它`);
           }
-          this.needImport(this.syms.get(r.sym), `$sym_${r.sym}`);
-          fix.push(`[${r.at},$sym_${r.sym} + ${r.add === undefined ? 0 : r.add}n]`);
+          /* 按需那条路（第三十三格）：这一格在**装载期**就要写对，所以这儿的
+             `needSym` 会把提供那份**当场**装进来 —— 它是真的现在就要。 */
+          fix.push(`[${r.at},${this.lazySym(r.sym)}() + ${r.add === undefined ? 0 : r.add}n]`);
           continue;
         }
         rs.push(`[${r.at},${r.size}]`);

@@ -88,6 +88,24 @@ let memBump = 0;
  * 不够长就 `memGrow` —— 长不动是硬错（不像 wasm 那样回 -1 让调用方查：
  * 这是装载期，装不下就是这份程序在这个宿主上跑不起来）。
  */
+/** **数据符号那张表**（按需 import 的另一半，第三十三格）。
+ *
+ *  从前跨模块的**数据**符号走静态 `import { $sym_x }` —— 那一句把整份提供方拽进来，
+ *  于是"函数按需、数据整装"。现在与函数那一格对称：提供方在自己的模块体里
+ *  `symBind("x", 地址)`，用的人 `needSym("x")` —— 表里没有就按链接图装那一份、再查一遍，
+ *  还没有就 loud 喊（不许静默回 0，那是错地址）。 */
+const SYM_TAB = new Map();
+function symBind(name, at) { SYM_TAB.set(name, at); }
+function needSym(name) {
+  const hit = SYM_TAB.get(name);
+  if (hit !== undefined) return hit;
+  if (linkEnsure(name)) {
+    const again = SYM_TAB.get(name);
+    if (again !== undefined) return again;
+  }
+  return failRt("需要数据符号 '" + name + "' 的地址，但没人提供它（链接图里没有，或那一份没绑）");
+}
+
 /** **谁的数据段在哪儿**（开机镜像那条路）：镜像里的指针是绝对地址，所以重来一趟时
  *  每份模块必须落回同一个基址。存像那一趟把 `baseLog()` 一起存下来，
  *  铺像那一趟先 `setBaseMap(那张表)` 再按同样的次序装那几份 —— 基址就对得上。 */
@@ -374,6 +392,8 @@ export const RT = {
   b64,
   setLinkMap,
   needFn,
+  symBind,
+  needSym,
   memImageSave,
   memImageLoad,
   setBaseMap,
