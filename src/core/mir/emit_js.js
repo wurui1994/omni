@@ -15,7 +15,12 @@
  *     `BLOCK`/`LOOP`/`IF`/`ELSE`/`END` + 按层数的 `BR`），所以代码生成是一次
  *     递归下降：`LOOP` -> `L3: while (true) {…}`、`BLOCK` -> `L7: {…}`、
  *     `BR ^n` -> `break L{那一层}` 或 `continue L{那一层}`。
- *     **不需要 relooper、不需要 pc 循环、不需要状态机 switch。**
+ *     **人写的代码上不需要 relooper、不需要 pc 循环。**
+ *     唯一的例外是**嵌套深到 V8 解析不下去**的函数（`FLAT_AT`，默认 200 层）——
+ *     C 前端降 `switch` 是"一个 case 一层 block"，一个几千格的 switch 就是几千层嵌套，
+ *     V8 解析期按深度递归、默认栈过不去（量过：CPython 那张 unicode 表里的
+ *     `_PyUnicode_ToNumeric` 2348 个 case、2350 层）。那种函数改走 `funcFlat`
+ *     的平铺发法（`for (;;) switch ($pc)`），目标 pc 照的还是同一套层数规矩。
  *   - **语义不重新实现**：线性内存走 `interp/builtin.js` 的 `memLoadFn`/`memStoreFn`，
  *     libc 走 `interp/libc.js` 的 `callLibc`。字节序、越界消息、`printf` 的格式化
  *     全仓只有一份 —— 这条路与解释器分叉的话，「逐字节相同」那道门就成了摆设。
@@ -235,6 +240,18 @@ const JS_NUM_ST = new Set(['i8', 'i16', 'i32']);
  * 每段封顶 `CAP` 个字节：一个数组字面量太长，V8 解析也不痛快。
  */
 const DATA_CAP = 1 << 16;
+/**
+ * 嵌套深到这个数，那个函数就改走**平铺**那条发法（`funcFlat`：`for(;;) switch ($pc)`）。
+ *
+ * 为什么要这一格：C 前端降 `switch` 是"一个 case 一层 block"，一个几千格的 switch
+ * 就是几千层嵌套的 `L{i}: { … }` —— V8 **解析**时按嵌套深度递归，默认栈过不去
+ * （`Maximum call stack size exceeded`，还没跑起来就报）。量过一例：CPython 那张
+ * unicode 表里的 `_PyUnicode_ToNumeric` 有 2348 个 case、2350 层嵌套。
+ * 200 这个数远低于风险线（V8 约一千层、clang 的括号硬限 2048），也远高于人写的代码
+ * 会有的深度 —— 所以 99.9% 的函数照旧走嵌套那条（那条读起来像源码）。
+ * 判据里把它压到 0 就能让**所有**函数走平铺那条，再跑一遍 `tests/c` / `tests/mir`。
+ */
+const FLAT_AT = 200;
 function mergedData(data) {
   const out = [];
   for (const d of data) {
@@ -250,7 +267,7 @@ function mergedData(data) {
 }
 
 class JsFromMir {
-  constructor(mir, modular, syms) {
+  constructor(mir, modular, syms, flatAt) {
     this.mir = mir;
     /** module 档：地址不烤死，落成"模块基址 + 偏移"（见 `emitMirJs` 头注）。 */
     this.modular = modular === true;
@@ -271,6 +288,8 @@ class JsFromMir {
     /** specifier -> 这一句 import 里的那几格（`$fn_x as $f3` / `$sym_y`）。 */
     this.imports = new Map();
     this.out = [];
+    /** 嵌套深到这个数就改走平铺那条发法（`funcFlat`）。判据可以把它压到 0 全走新路。 */
+    this.flatAt = flatAt === undefined ? FLAT_AT : flatAt;
     /** 用到的内存访问器：kind -> 变量名（只发用到的那几个，一个 kind 一次查表）。 */
     this.ldFns = new Map();
     this.stFns = new Map();
@@ -589,9 +608,34 @@ class JsFromMir {
     return { sites, pathIdx, thenSites, maxSite: sites[sites.length - 1] };
   }
 
+  /** 这个函数里区域嵌套最深多少层（决定走嵌套那条发法还是平铺那条）。 */
+  maxDepth(f) {
+    let d = 0;
+    let most = 0;
+    for (let i = 0; i < f.count(); i++) {
+      const op = f.op[i];
+      if (op === OP.BLOCK || op === OP.LOOP || op === OP.IF) {
+        d += 1;
+        if (d > most) most = d;
+      } else if (op === OP.END) d -= 1;
+    }
+    return most;
+  }
+
   func(no) {
     const f = this.mir.funcs[no];
-    const { endOf, elseOf } = this.regions(f);
+    /* 嵌套太深的函数改走**平铺**那条（`funcFlat`）：C 前端降 `switch` 是"一个 case
+     * 一层 block"，一个几千格的 switch 就是几千层嵌套 `L{i}: { … }` —— V8 **解析**
+     * 时按嵌套深度递归，默认栈过不去（`Maximum call stack size exceeded`，还没跑起来
+     * 就报）。阈值远低于风险线（V8 约一千层、clang 的括号硬限 2048），
+     * 也远高于人写的代码会有的深度。 */
+    /* 有 `setjmp` 落点的函数只能走嵌套那条 —— sj 的导航是按"路上的块结构"发的，
+     * 平铺那条没有块结构可走（真有 setjmp 的函数嵌套都不深，两下撞不上）。 */
+    const rg = this.regions(f);
+    if (this.maxDepth(f) >= this.flatAt && this.sjPlan(f, rg.endOf, rg.elseOf) === null) {
+      return this.funcFlat(no);
+    }
+    const { endOf, elseOf } = rg;
     const used = this.usedRefs(f);
     const L = [];
     /* 形参就是前几个槽（降级器是这么分的）。缺席的实参在 interp 里补零值，
@@ -757,7 +801,143 @@ class JsFromMir {
     return L;
   }
 
-  /** 有副作用的 op：没人读它的值也得发出来。 */
+  /**
+   * 一条**非控制流**指令发什么（嵌套那条发法与平铺那条发法共用）。
+   * 回 `null` = 整条丢掉（没人读、又没有副作用的纯运算，降级器留下的死值不少）。
+   */
+  plain(f, i, used) {
+    const op = f.op[i];
+    const x = f.aux[i];
+    if (op === OP.STORE) return `s${x} = ${this.ref(f, f.a[i])};`;
+    if (op === OP.GSTORE) return `$g${x} = ${this.ref(f, f.a[i])};`;
+    if (op === OP.MSTORE) {
+      /* 值也是这条指令的结果（interp 一样），所以被人读时把赋值嵌在实参里 ——
+       * 两个操作数都是已经算好的局部量，求值次序无关。 */
+      const st = this.stName(MSTORE_KINDS[memKindNo(x)], f.t[i]);
+      const v = used.has(i) ? `v${i} = ${this.ref(f, f.b[i])}` : this.ref(f, f.b[i]);
+      return `${st}(${this.ref(f, f.a[i])}, ${memOff(x)}, ${v});`;
+    }
+    const e = this.expr(f, i);
+    if (used.has(i)) return `v${i} = ${e};`;
+    if (f.t[i] === T_VOID || this.effectful(op)) return `${e};`;
+    return null;
+  }
+
+  /**
+   * **平铺**那条发法：`let $pc; for (;;) switch ($pc) { case …: }`。
+   *
+   * 只给嵌套太深的函数用（见 `func` 里那句分派）。语义与嵌套那条**逐条对应**，
+   * 因为两条都照同一套层数规矩算目标 pc（`BR ^n` 往外数第 n 层：LOOP 回 `s+1`、
+   * BLOCK/IF 去 `endOf[s]+1`），那也是 `mir/interp.js` 装载期算的那张 pc 表。
+   *
+   * 三格要点：
+   *   * `BLOCK` / `LOOP` / `END` 在平铺之后**什么都不发** —— 它们只是区域标记；
+   *   * **顺序落下去靠 case 的贯穿**（JS 的 switch 不加 break 就往下走），
+   *     所以"LOOP 落到底退出循环"这条 wasm 语义白拿，不必补 break；
+   *   * 走完函数体（`$pc === n`）要 `return` —— 少这一格就是死循环（switch 出来
+   *     `$pc` 没变，for 再转一圈）。
+   */
+  funcFlat(no) {
+    const f = this.mir.funcs[no];
+    const { endOf, elseOf } = this.regions(f);
+    const used = this.usedRefs(f);
+    const n = f.count();
+
+    /* 一、每条指令的跳转目标，算成 **pc**（不是层数）。 */
+    const open = [];
+    const jmpA = new Array(n).fill(-1);      // 无条件 / 条件为真时去哪儿
+    const jmpB = new Array(n).fill(-1);      // 条件为假时去哪儿
+    const jmpT = new Array(n).fill(null);    // 跳表的全部目标（末一格是兜底）
+    const tgt = (lv) => {
+      const s = open[open.length - 1 - lv];
+      if (s === undefined) throw new OmniError(`mir.emit_js: ${f.name} 的 BR 跳出了函数`);
+      return f.op[s] === OP.LOOP ? s + 1 : endOf[s] + 1;
+    };
+    for (let i = 0; i < n; i++) {
+      const op = f.op[i];
+      if (op === OP.BLOCK || op === OP.LOOP || op === OP.IF) open.push(i);
+      else if (op === OP.END) open.pop();
+      if (op === OP.BR) jmpA[i] = tgt(f.aux[i]);
+      else if (op === OP.BRIF) { jmpA[i] = tgt(f.aux[i]); jmpB[i] = i + 1; }
+      else if (op === OP.IF) {
+        jmpA[i] = i + 1;
+        jmpB[i] = elseOf[i] >= 0 ? elseOf[i] + 1 : endOf[i] + 1;
+      } else if (op === OP.ELSE) {
+        jmpA[i] = endOf[open[open.length - 1]] + 1;   // then 段走到这儿就该出去
+      } else if (op === OP.BRTABLE) {
+        const outs = [];
+        for (const lv of f.levelsOf(f.b[i])) outs.push(tgt(lv));
+        outs.push(tgt(f.aux[i]));
+        jmpT[i] = outs;
+      }
+    }
+
+    /* 二、哪些 pc 要有 `case` 标签：入口、所有跳转目标、LOOP 自己（回头的落点）。 */
+    const isCase = new Array(n + 1).fill(false);
+    isCase[0] = true;
+    for (let i = 0; i < n; i++) {
+      for (const t of [jmpA[i], jmpB[i]]) if (t >= 0) isCase[t < n ? t : n] = true;
+      if (jmpT[i] !== null) for (const t of jmpT[i]) isCase[t < n ? t : n] = true;
+      if (f.op[i] === OP.LOOP) isCase[i] = true;
+    }
+    return this.flatBody(f, no, used, { jmpA, jmpB, jmpT, isCase, n });
+  }
+
+  /** `funcFlat` 的后半：把算好的目标发成 `for (;;) switch ($pc)`。 */
+  flatBody(f, no, used, g) {
+    const { jmpA, jmpB, jmpT, isCase, n } = g;
+    const L = [];
+    const ps = f.params.map((p, k) => `s${k} = ${jsZeroText(p.t)}`);
+    L.push(`function $f${no}(${ps.join(', ')}) {`);
+    for (let k = f.params.length; k < f.slots.length; k++) {
+      L.push(`  let s${k} = ${jsZeroText(f.slots[k].t)};`);
+    }
+    const vs = [];
+    for (const i of used) vs.push(`v${i}`);
+    if (vs.length > 0) L.push(`  let ${vs.join(', ')};`);
+    L.push('  let $pc = 0;');
+    L.push('  for (;;) switch ($pc) {');
+    for (let i = 0; i < n; i++) {
+      if (isCase[i]) L.push(`  case ${i}:`);
+      const op = f.op[i];
+      if (op === OP.BLOCK || op === OP.LOOP || op === OP.END) continue;  // 只是区域标记
+      if (op === OP.ELSE || op === OP.BR) { L.push(`    $pc = ${jmpA[i]}; continue;`); continue; }
+      if (op === OP.IF) {
+        L.push(`    $pc = ${this.ref(f, f.a[i])} === true ? ${jmpA[i]} : ${jmpB[i]}; continue;`);
+        continue;
+      }
+      if (op === OP.BRIF) {
+        L.push(`    if (${this.ref(f, f.a[i])} === true) { $pc = ${jmpA[i]}; continue; }`);
+        continue;
+      }
+      if (op === OP.BRTABLE) {
+        /* 下标是 i32 时它已经是 number；i64 那格要卸一次箱。负数与超界都落到兜底。
+         * 这儿的 `continue` 指的是外面那个 `for` —— switch 不是循环。 */
+        const idx = this.refType(f, f.a[i]) === T_I32
+          ? this.ref(f, f.a[i]) : `Number(${this.ref(f, f.a[i])})`;
+        L.push(`    switch (${idx}) {`);
+        for (let k = 0; k < jmpT[i].length - 1; k++) {
+          L.push(`      case ${k}: $pc = ${jmpT[i][k]}; continue;`);
+        }
+        L.push(`      default: $pc = ${jmpT[i][jmpT[i].length - 1]}; continue;`);
+        L.push('    }');
+        continue;
+      }
+      if (op === OP.RET) {
+        L.push(`    ${f.a[i] === REF_NONE ? 'return;' : `return ${this.ref(f, f.a[i])};`}`);
+        continue;
+      }
+      const one = this.plain(f, i, used);
+      if (one !== null) L.push(`    ${one}`);
+    }
+    /* 走完函数体 = 隐式返回（与嵌套那条发法走到 `}` 一样）。`default` 也收在这儿：
+     * 少这一格，switch 出来 `$pc` 没变、for 再转一圈就是死循环。 */
+    L.push(`  case ${n}:`);
+    L.push('  default: return;');
+    L.push('  }');
+    L.push('}');
+    return L;
+  }
   effectful(op) {
     return op === OP.CALL || op === OP.CALLI || op === OP.CCALL
       || op === OP.MSTORE || op === OP.MGROW;
@@ -1095,7 +1275,8 @@ const $callFromLibc = (fp, args) => {
 export function emitMirJs(mir, opts) {
   const modular = opts !== undefined && opts.module === true;
   const syms = opts === undefined ? undefined : opts.symbols;
-  const gen = new JsFromMir(mir, modular, syms);
+  const gen = new JsFromMir(mir, modular, syms,
+    opts === undefined ? undefined : opts.flatAt);
   /* **这份模块自己的标记**（第一百五十二片）：`static` 函数进那张全程序函数表时挂在
      名字后头。两份 `.c` 里各有一个 `static int cmp(...)` 是常事，共用一格就是静默调错。
      缺省用 MIR 的模块名（JS 腿上那一格可能没名字），成品那一层传 `modId`（落盘路径）。 */

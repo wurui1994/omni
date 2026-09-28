@@ -571,6 +571,32 @@ function jsLegCase(group, f, incDirs = []) {
 
 for (const f of pick('gen')) jsLegCase('gen', f);
 
+/* ------------------------------------------------ 4.6b 同一条腿的**平铺发法**
+ *
+ * `mir/emit_js.js` 对**嵌套太深**的函数改走平铺那条（`for (;;) switch ($pc)`，见那份
+ * 文件里的 `FLAT_AT`）—— 人写的代码碰不到那个阈值，于是那条路平时**一格判据都跑不到**。
+ * 这儿把 `OMNI_JS_FLAT_AT=0` 挂上，让**所有**函数走平铺那条，再挑控制流最重的几份
+ * （switch / goto / 函数指针 / 各种语句）与解释器比三项。
+ *
+ * 不走 `cliRun`：那一层的缓存键是命令行，看不见环境变量 —— 同一条命令行两种发法会互相
+ * 串味。这几份直接 spawn，不进缓存（六份，几秒）。
+ */
+const FLAT_PICK = ['02-stmt.c', '10-switch.c', '11-goto.c', '25-goto.c', '26-goto-switch.c', '14-funcptr.c'];
+const genHas = new Set(pick('gen'));
+for (const f of FLAT_PICK) {
+  if (!genHas.has(f)) continue;
+  const name = `gen/${basename(f, '.c')} [js leg 平铺发法 == interp]`;
+  const path = join(here, 'gen', f);
+  const want = cRun(path);
+  const r = spawnSync(process.execPath, [CLI, 'run', path, '--backend', 'js'],
+    { encoding: 'utf8', env: { ...process.env, OMNI_JS_FLAT_AT: '0' } });
+  const got = { code: r.status, out: r.stdout ?? '', err: r.stderr ?? '' };
+  if (got.code !== want.code) bad(name, `    退出码不同：interp=${want.code} js=${got.code}\n${got.err}`);
+  else if (got.out !== want.out) bad(name, `    stdout 不同：\n--- interp ---\n${want.out}--- js ---\n${got.out}`);
+  else if (got.err !== want.err) bad(name, `    stderr 不同：\n--- interp ---\n${want.err}--- js ---\n${got.err}`);
+  else ok(`${name} [exit ${want.code}${want.out.length > 0 ? ` + ${want.out.length}B stdout` : ''}]`);
+}
+
 /* `sys/` 也上这条腿（ADR-0047：`setjmp` / `longjmp` 现在发得出来了）。
  *
  * 为什么这一组值得单列：`04-setjmp.c` 是**唯一**要"同一条指令上再回一次"的用例，

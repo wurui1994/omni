@@ -3707,6 +3707,19 @@ function selfLibArgs(libs) {
   return out;
 }
 
+/**
+ * `OMNI_JS_FLAT_AT`：MIR -> JS 那条腿**改走平铺发法**的嵌套深度阈值
+ * （`mir/emit_js.js` 的 `FLAT_AT`，默认 200）。
+ *
+ * 只给判据留的一格：压到 0 就让**所有**函数走平铺那条（`for(;;) switch ($pc)`），
+ * 于是 `tests/c` 那批与解释器逐字节对账的用例就变成"平铺发法的判据"。
+ * 不设它的时候一个字节都不变。
+ */
+function jsFlatAt() {
+  const v = process.env.OMNI_JS_FLAT_AT;
+  return v === undefined || v === '' ? undefined : Number(v);
+}
+
 /** `Foo.framework` 在磁盘上的那个二进制（JIT 那侧 `dlopen` 要一个路径）。 */
 function frameworkPath(l) {
   const n = l.slice(0, l.length - '.framework'.length);
@@ -6453,7 +6466,7 @@ function main(argv) {
         const out = oi >= 0 ? rest[oi + 1] : `${basename(path, '.c')}.js`;
         const { flags, prog } = cSplitArgs(rest);
         const mir = cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags), cTgt(flags));
-        const text = coreMod('mir/emit_js.js').emitMirJs(mir, { rtImport: join(installDir(), '..', 'mir', 'js_rt.js') });
+        const text = coreMod('mir/emit_js.js').emitMirJs(mir, { rtImport: join(installDir(), '..', 'mir', 'js_rt.js'), flatAt: jsFlatAt() });
         writeText(out, text);
         stderr(`omni: built ${out} (${text.length} 字节，MIR -> JS；`
           + '运行时来自这棵树里的 mir/js_rt.js)\n');
@@ -7454,7 +7467,7 @@ function main(argv) {
     }
     case 'c-emit-js': {
       const { flags, prog } = cSplitArgs(rest);
-      stdout(coreMod('mir/emit_js.js').emitMirJs(cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags), cTgt(flags))));
+      stdout(coreMod('mir/emit_js.js').emitMirJs(cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags), cTgt(flags)), { flatAt: jsFlatAt() }));
       return 0;
     }
     /**
@@ -7496,7 +7509,7 @@ function main(argv) {
     case 'c-run-js': {
       const { flags, prog } = cSplitArgs(rest);
       const mir = cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags), cTgt(flags));
-      const js = coreMod('mir/emit_js.js').emitMirJs(mir);
+      const js = coreMod('mir/emit_js.js').emitMirJs(mir, { flatAt: jsFlatAt() });
       vStep(`backend js (from mir)  ${js.length} bytes`);
       return coreMod('mir/js_rt.js').runMirJs(js);
     }

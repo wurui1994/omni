@@ -1145,9 +1145,18 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     b. 缩进**没有封顶**。表里那个几千格的 switch 发出来是 **2350 层嵌套**的标号块，
        一层两个空格照加，行首就有 4700 个空格 —— 一份 292KB 的 C 发成 **34MB 的 JS**，
        绝大多数字节是空白。封顶 40 层之后是 **1.35MB**。
-    **剩下的那格缺口（记下来，没修）**：嵌套深度本身没变，V8 **解析**时按深度递归，
-    默认栈过不去（`RangeError: Maximum call stack size exceeded`，**还没跑起来就报**）。
-    判据里挂的是 `node --stack-size=4000`（量过 4000 够、默认约 984KB 不够）。
+    **那格缺口也修了（2026-09-28 当天）**：从前是"嵌套深度本身没变，V8 **解析**时按深度
+    递归、默认栈过不去（`RangeError: Maximum call stack size exceeded`，**还没跑起来就报**），
+    判据里挂 `node --stack-size=4000`"。现在 `mir/emit_js.js` 加了一格阈值
+    （`FLAT_AT = 200` 层）：**超过就改走平铺发法** `for (;;) switch ($pc)`（`funcFlat`）——
+    目标 pc 照的还是同一套层数规矩（`BR ^n`：LOOP 回 `s+1`、BLOCK/IF 去 `endOf[s]+1`，
+    与 `mir/interp.js` 装载期算的那张表一致）；`BLOCK`/`LOOP`/`END` 在平铺之后不发代码，
+    "顺序落下去"靠 JS 的 case 贯穿（于是"LOOP 落到底退出循环"那条 wasm 语义白拿），
+    走完函数体要 `return`（少这一格就是死循环）。读数：那张表的 JS 从 1.35MB 降到
+    **681KB**，`py:ucase` 的门二**不再要 `--stack-size`**。
+    判据两头都有：`OMNI_JS_FLAT_AT=0` 让**所有**函数走平铺那条，`tests/c` **339 过 0 败**；
+    新增一组 4.6b（六份控制流最重的 gen 用例常驻跑平铺那条，因为人写的代码碰不到
+    200 层这个阈值 —— 不挂这一组，那条路平时一格判据都跑不到）。
     **这个形状的来路查清了**（2026-09-28）：C 前端降 `switch` 是"**一个 case 一层 block**"
     （`frontend-c/tccgen.js` 的 `switchStmt`：先开一层 `break` 的 block，再按标签数开 k 层，
     一个 `case` 标签关掉一层 —— 贯穿因此白拿），所以**层数 = case 数 + 1，与密疏无关**。

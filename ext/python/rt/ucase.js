@@ -189,11 +189,11 @@ say(`门一之二（整张表 1112064 个码点 × 4 个映射）：${realDiff =
 /* 五、**JS 那条腿**：同一份借来的 C 过我们的 C 前端 -> MIR -> JS（`c run-js`）。
  *
  * 一份翻译单元（那条路上没有链接器），所以走 `ucase-js-probe.c`（把表 include 进来）。
- * `--stack-size`：那张表里有个几千格的 switch，发出来是**几千层嵌套**的标号块，
- * V8 **解析**时按嵌套深度递归 —— 默认栈不够（记在 SPEC 第 29 条，是 emit_js 的真缺口）。
- */
+ * 那张表里有个 2348 格的 switch，降下来是 2350 层嵌套 —— `emit_js` 现在对这种函数
+ * **改走平铺发法**（`for(;;) switch ($pc)`，`FLAT_AT`），所以这一门**不再要 `--stack-size`**
+ * （从前不加就是 V8 解析期爆栈，账在 SPEC 第 30 条）。 */
 const jsArgs = flagsFor(OBJ, INC, SRC, perFileFlags('Objects/unicodectype.c', SRC)).slice(2, -2);
-const js = spawnSync(process.execPath, ['--stack-size=4000', CLI, 'c', 'run-js',
+const js = spawnSync(process.execPath, [CLI, 'c', 'run-js',
   ...jsArgs, '-I', SRC, join(here, 'ucase-js-probe.c'), '--', ...WORDS], { encoding: 'utf8' });
 if (js.status !== 0) {
   say(`py-rt/ucase: JS 那条腿跑不起来（exit=${js.status}）：\n${(js.stderr ?? '').split('\n').slice(0, 6).join('\n')}`);

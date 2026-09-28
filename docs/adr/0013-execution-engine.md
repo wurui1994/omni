@@ -517,9 +517,20 @@ dispatch、类型判断、跳转目标都算完了）落在 10 倍上，而「�
 - **编成 JS：直接从 MIR 走，不经 s-expr。** MIR 的结构化控制流让代码生成是一次
   **递归下降的区域遍历**：`LOOP` -> `L0: while (true) {…}`、`BLOCK` -> `B1: {…}`、
   `IF/ELSE` -> `if/else`、`BR ^n` -> `break L{n}` / `continue L{n}`（往外数第 n 层的标签）。
-  **不需要 relooper，不需要 pc 循环，不需要 `switch` 状态机**。中间插一层 s-expr 只会
+  **人写的代码上不需要 relooper，不需要 pc 循环，不需要 `switch` 状态机**。中间插一层 s-expr 只会
   多一次序列化与一次解析，换不到任何东西——发 JS 需要的信息（类型码、槽、区域嵌套）
   MIR 里全有，而 s-expr 里得再编码一遍。
+
+  **一处例外（2026-09-28 补）：嵌套深到 V8 解析不下去的函数。** C 前端降 `switch` 是
+  "一个 case 一层 block"，所以一个几千格的 switch 就是几千层嵌套 `L{i}: { … }` ——
+  V8 在**解析**期按嵌套深度递归，默认栈就过不去（`Maximum call stack size exceeded`，
+  还没开始跑；量过：CPython 那张 unicode 表里的 `_PyUnicode_ToNumeric` 有 2348 个 case、
+  2350 层嵌套）。于是 `mir/emit_js.js` 加了一格阈值（`FLAT_AT`，默认 200 层）：
+  **超过就改走平铺发法** `for (;;) switch ($pc)` —— 目标 pc 照的还是同一套层数规矩
+  （`BR ^n`：LOOP 回 `s+1`、BLOCK/IF 去 `endOf[s]+1`，与 `mir/interp.js` 装载期
+  算的那张表一致），`BLOCK`/`LOOP`/`END` 在平铺之后不发代码，"顺序落下去"靠 JS 的
+  case 贯穿。判据：`OMNI_JS_FLAT_AT=0` 让**所有**函数走平铺那条，`tests/c` 那批与
+  解释器逐字节对账的用例照旧全过。
 - **IR 的持久化（`emit oir` / `.mir` 能回读）：那儿才需要 s-expr。** 现在
   `emit oir` 的 JSON 是有损的（`span`/`ast` 被 replacer 丢掉、BigInt 变 `"2n"`），
   `mir/bytes.js` 是摘要不是序列化器（ADR-0018 记着这个缺口）。要 `omni run x.mir`
