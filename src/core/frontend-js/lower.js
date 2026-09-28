@@ -769,12 +769,22 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
    * "共享同一个数组对象"就对上了，代价是这些变量多一层下标。不做赋值分析：只要有
    * 内层函数提到过这个名字就装 cell（宁可多装，不能少装）。
    */
+  /**
+   * 这个名字要不要装 **cell**（见 `capTight` 那段账）：既要在函数级那张保守表里，
+   * 又要在**当前子树**那张收紧表里（栈空时就是函数级那一张）。
+   */
+  isCell(name) {
+    if (!this.fn.captured.has(name)) return false;
+    const st = this.fn.capTight;
+    return st.length === 0 || st[st.length - 1].has(name);
+  }
+
   declare(name) {
     let uniq = cSafe(name);
     let i = 2;
     while (this.fn.locals.has(uniq)) uniq = `${cSafe(name)}__${i++}`;
     this.fn.locals.add(uniq);
-    const ent = { kind: this.fn.captured.has(name) ? 'cell' : 'local', name: uniq };
+    const ent = { kind: this.isCell(name) ? 'cell' : 'local', name: uniq };
     this.fn.scopes[this.fn.scopes.length - 1].set(name, ent);
     return ent;
   }
@@ -843,6 +853,18 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
       temps: 0, prelude: [], loops: 0, switches: 0,
       scopes: [new Map()], locals: new Set(['args']), sink: [], lazies: 0,
       captured: capturedNames(bodyStmts), uses: new Set(), isMain: !!opts.isMain,
+      /* **按子树收紧的捕获表**（第三刀，2026-09-28）：`captured` 是**函数级一张名字表**
+       * （所有嵌套函数的自由名并起来），于是循环体里同名的 `const` 每轮都要装一次盒
+       * （`for (const b of xs)` 的 `b`、`const value`、`const rule`）。量出来的：原生腿上
+       * `omni_list_dynamic_from` 自用 21.96%，1293/1296 帧的直接调用者就是 `u_lexText`
+       * 自己 —— 全是这些盒子。
+       *
+       * 收紧的依据与 `forStmt` 里那份 `capturedHere` 完全一样（那儿早就按子树算，注释写着
+       * "cell 是保守算出来的……保守分析不该接到硬拒绝上"）：在某个作用域里声明的 let/const
+       * **只可能被这棵子树里的嵌套函数**捕获，所以"不在这张表里 ⇒ 没人捕获 ⇒ 不必装盒"。
+       * `var` 不受影响：它由 `hoistVars` 在**函数入口**立（那时这个栈是空的），见
+       * `preDeclareCells` 里"只管 let / const"那一句。 */
+      capTight: [],
       // try 的嵌套深度，以及每层 try 进去时的循环层数（用来拦跨 try 的 break/continue）
       tries: 0, tryLoops: [],
       // 每层 try 进去时的 OIR 循环层数（带标签的跳转要用它拦"跳过 catch"）
@@ -1014,7 +1036,7 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
          走这条路：方法体里的 `new Point(…)` 捕获的就是这个名字，按值捕获会在类值还没装进去
          之前就取一次 —— 量出来的是 "Cannot access 'v_Point' before initialization"。 */
       if (s.type === 'ClassDecl' && typeof s.id === 'string') {
-        if (!this.fn.captured.has(s.id) || scope.has(s.id)) continue;
+        if (!this.isCell(s.id) || scope.has(s.id)) continue;
         const ent = this.declare(s.id);
         ent.pre = true;
         out.push(localStmt(ent.name, arrLit([undefExpr()])));
@@ -1024,7 +1046,7 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
       if (s.type !== 'VarDecl' || s.kind === 'var') continue;
       for (const d of s.decls) {
         for (const n of patternNames(d.id, sink, s.span)) {
-          if (!this.fn.captured.has(n) || scope.has(n)) continue;
+          if (!this.isCell(n) || scope.has(n)) continue;
           const ent = this.declare(n);
           ent.pre = true;
           out.push(localStmt(ent.name, arrLit([undefExpr()])));
@@ -2089,6 +2111,10 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
     for (const part of [s.body, s.test, s.update]) {
       for (const g of nestedFns(part)) freeNames(g, capturedHere);
     }
+    /* **这棵子树的收紧表**（第三刀，见 `capTight` 那段账）：`capturedHere` 已经是
+       "体 / test / update 里的嵌套函数自由引用了哪些名字"，正是"体里声明的 let/const
+       要不要装盒"的准确判据。压一层，`bodyBlock` 之后弹掉。 */
+    this.fn.capTight.push(capturedHere);
     const perIter = [];
     const letInit = s.init && s.init.type === 'VarDecl' && s.init.kind !== 'var';
     for (const [n, ent] of this.fn.scopes[this.fn.scopes.length - 1]) {
@@ -2118,6 +2144,7 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
       }
     }
     const body = this.bodyBlock(s.body);
+    this.fn.capTight.pop();
     if (perIter.length > 0) this.popScope();
     this.fn.targets.pop();
     this.fn.oloops--;
@@ -2168,6 +2195,12 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
     this.fn.oloops++;
     this.fn.targets.push({ ol: this.fn.oloops, cont: true });
     this.fn.iters.push({ name: it, ol: this.fn.oloops });
+    /* **这棵子树的收紧表**（第三刀，见 `capTight` 那段账）：for-of / for-in 的循环变量
+       与体里的 let/const 只可能被**体里的**嵌套函数捕获。`for (const b of spec.blocks)`
+       那种（`glr/lex.js` 的 skipTrivia，每跳一次空白跑一遍）从前每轮装一个盒。 */
+    const capHere = new Set();
+    for (const g of nestedFns(s.body)) freeNames(g, capHere);
+    this.fn.capTight.push(capHere);
     const elem = () => op('js_iter_cur', [varRef(it), varRef(i)]);
     let inner;
     if (s.declKind) {
@@ -2177,6 +2210,7 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
       inner = lv ? [exprStmt(lv.set(elem()))] : [];
     }
     const body = this.bodyBlock(s.body);
+    this.fn.capTight.pop();
     this.fn.iters.pop();
     this.fn.targets.pop();
     this.fn.oloops--;
