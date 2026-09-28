@@ -26,6 +26,7 @@ import {
 import { splitFString } from './fstring.js';
 import { splitPercent, percentArity } from './percent.js';
 import { libMethodFor, libFillToks, LIB_METHODS } from './pylib.js';
+import { ucaseIntrinsic, UCASE_INTRIN } from './ucase.js';
 import {
   sumOf, pickList, anyAllOf, sortedOf, rangeList,
   joinOf, splitOf, rsplitOf, splitWsOf, countOf, stripOf, replaceOf, startsEndsOf,
@@ -711,6 +712,10 @@ function tyOfCall(x, C) {
   }
   if (tag(fn) !== 'n') return null;
   const nm = String(nameOf(fn));
+  /* 大小写那张表的五格内建 —— 都是查表读一格整数（发射那一侧落成 `(mload …)`）。
+     不在这儿答的症状：`lib/ucase.py` 那几格函数的返回类型推成 void，
+     于是 `out = out + _ucase_map(…)` 报"void 这一格还没有零值"。 */
+  if (UCASE_INTRIN.has(nm)) return INT;
   /* `C(…)` —— 造一格记录，交的就是那个类。 */
   if (C.records.has(nm)) return C.records.get(nm).type;
   if (BUILTIN_RET.has(nm)) return BUILTIN_RET.get(nm);
@@ -1959,7 +1964,7 @@ function binOf(x, C) {
  * 推导式的从句拆成几组：每一格 `for` 带上**跟在它后头**的那几个 `if`。
  * `[e for x in xs if p for y in ys if q]` → `[{x, xs, [p]}, {y, ys, [q]}]`。
  */
-function compGroups(clauses) {
+export function compGroups(clauses) {
   if (clauses.length === 0 || tag(clauses[0]) !== 'for') {
     throw new Error('python->IR: 推导式的第一条从句要是 `for`');
   }
@@ -2028,7 +2033,7 @@ function compPair(it, C) {
  * 次序要紧：后一格 `for` 的可迭代可能用到前一格的目标（`for row in grid for c in row`），
  * 所以是"绑一格、再问下一格的类型"。
  */
-function compBind(gs, C) {
+export function compBind(gs, C) {
   const undo = [];
   const back = () => { for (let i = undo.length - 1; i >= 0; i -= 1) undo[i](); };
   const one = (tok, t) => {
@@ -3180,6 +3185,11 @@ export function callOf(x, C) {
   if (tag(fn) === 'n' && String(nameOf(fn)) === 'isinstance') {
     if (argToks.length !== 2) throw new Error('python->IR: `isinstance(x, T)` 收两格实参');
     return isinstanceOf(argToks[0], argToks[1], C);
+  }
+  /* **大小写那张表的五格内建**（`lib/ucase.py` 拿它们查表）—— 落成一条 `(mload …)`，
+     地址由 `ucase.js` 按 `ucase.tab` 的布局折出来。不是函数，所以在这儿拦。 */
+  if (tag(fn) === 'n' && UCASE_INTRIN.has(String(nameOf(fn)))) {
+    return ucaseIntrinsic(String(nameOf(fn)), argToks.map((a) => exprOf(a, C)), C);
   }
   /* `min(xs, key=…)` / `max(xs, key=…)` —— 与 `sorted(key=…)` 同一条：键表算一遍，
      挑键最小/最大的那一格，**交回去的是元素**。也要在算实参之前拦。 */

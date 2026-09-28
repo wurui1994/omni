@@ -34,7 +34,7 @@ import {
 const topOf = (items) => items.flatMap((s) => (tag(s) === 'line' ? topOf(kids(s)) : [s]));
 
 /** 库源码，按文件。次序无所谓（这一层只收 `def`，不跑模块级语句）。 */
-const LIB_FILES = ['str.py'];
+const LIB_FILES = ['str.py', 'ucase.py'];
 
 /**
  * **方法名 → 库函数名**，按接收者装的东西分。
@@ -48,6 +48,11 @@ export const LIB_METHODS = new Map([
   ['string.rjust', '_str_rjust'],
   ['string.zfill', '_str_zfill'],
   ['string.center', '_str_center'],
+  /* **大小写那一族**（`lib/ucase.py`，表在 `rt/ucase.tab`）：从前非 ASCII 是"当场报还没接"
+     （方言的 `supper` / `slower` 只动 A-Z），现在走查表那一份 —— 三条腿同一份 python 源码。 */
+  ['string.upper', '_str_upper'],
+  ['string.lower', '_str_lower'],
+  ['string.casefold', '_str_casefold'],
 ]);
 
 /** 接收者装的东西 + 方法名 → 库函数名（没有就答 null）。 */

@@ -1323,6 +1323,30 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
          逐格相同；`npm run py:ucase-tab` 是"仓库里那份与现生成的逐字节相同"
          （本机 python3 的 Unicode 版本变了它就会喊）。
     **倾向 3** —— 它是唯一能同时满足"三条腿都对"与"产物不依赖参考树"的。
+    **路 3 走完了（2026-09-28）**：`.upper()` / `.lower()` / `.casefold()` 三格现在
+    **非 ASCII 也答对**，走的是"表 + 一份 python 逻辑"：
+    - 逻辑 `ext/python/lib/ucase.py`（106 行，三条腿同一份源码）：两级索引查记录、
+      单格映射按差值、多格按绝对码点、尾位 sigma 那条上下文规矩（`casefold` 不走它）。
+    - 表 `ext/python/rt/ucase.tab` 经 `ext/python/adapter/ucase.js` 摆成一段**静态数据**
+      （标准 IR 的 `{kind:'memory'}` + `{kind:'data'}`），lib 那一份里五格内建
+      （`_uidx1` / `_uidx2` / `_urecf` / `_urecn` / `_urecv`）落成 `(mload …)` ——
+      **偏移量只在 adapter 里**，python 源码那一侧只说"查第 i 格"。
+    - **没人用就一格字节都不进产物**：`print("hi")` 那种 `emit sx` 里一条 `(memory …)`
+      都没有；用到的那一份原生产物 618K（里头含 101344 字节的表）。
+    - **总判据 `npm run py:ucase-sweep`**：**1112064 个码点 × upper / lower / casefold
+      与本机 python3 逐字节相同**（6.8s；写成一格 while 循环 —— 一百万条语句那种写法
+      编译期就撑不住）。`examples/unicode.py` 第十段是常驻的那一格（三条腿）。
+    - **顺手抓出并修掉一个真 bug**（这一趟整表扫出来的）：`chr(0xFEFF)` 切片出来是**空串**
+      —— `backend-js/prelude.js` 的 `new TextDecoder()` 默认把开头那一格 U+FEFF 当 BOM
+      剥掉，而我们的 string 是裸 UTF-8 字节，这一层只该编解码。改成
+      `new TextDecoder('utf-8', { ignoreBOM: true })`。症状很隐蔽：`len` 答 1、
+      切出来却是空的，非得整表扫才撞得到。
+    - **另两格顺手补的**（都是这一刀暴露的）：adapter 收单态化实例时**推导式里那个目标
+      要先绑上**（`[w.upper() for w in words]` 从前收不到实例）；实例收集**跑到不再长
+      为止**（从前钉死三轮，而 `.lower()` -> `_str_lower` -> `_ucase_final_sigma` ->
+      `_ucase_ignorable` -> `_ucase_rec` 是四层）。
+    - 还没接到这条路上的：`.title()` / `.capitalize()` / `.swapcase()`（要词边界那一格）
+      与 `isalpha` 那一族的非 ASCII（表里那 10 位标志已经有了，缺的是接线）。
     **那一件先量的事已经量了**（2026-09-28，拿本机 python3 遍历 0..0x10FFFF 全部 1114112 个
     码点，逐格算 upper/lower/title/casefold 与 9 个分类谓词，再去重）：
     - **去重之后只有 294 份记录** —— 整个 Unicode 的"大小写 + 分类"行为就这 294 种。

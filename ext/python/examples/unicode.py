@@ -5,10 +5,11 @@
 # `find("ö")` 回字节下标 8）。现在 python 那一层的这几格走方言新加的 UTF-8 算术
 # （`(scplen)` / `(scpsub)` / `(scpfind)`），这一份就是那一刀的判据。
 #
-# **还没接的两格**（明说，不在这一份里）：
-#   * `.upper()` / `.lower()` 对非 ASCII 不动 —— 那要 unicode 的大小写表，是借
-#     `Objects/unicodeobject.c` 的事（这一族不是 UTF-8 算术）；
-#   （`ord()` / `chr()` 那一格**这一刀接上了**：见下面第九段。）
+# **大小写那一族这一刀接上了**（见下面第十段）：逻辑在 `ext/python/lib/ucase.py`、
+# 表在 `ext/python/rt/ucase.tab`（从本机 python3 生成的 292 份记录 + 两级索引），
+# 三条腿跑的是同一份 python 源码。整张表的判据是 `npm run py:ucase-sweep`
+# （1112064 个码点 × upper / lower / casefold 与 python3 逐字节相同）。
+#   （`ord()` / `chr()` 那一格更早就接上了：见第九段。）
 
 
 def main():
@@ -57,6 +58,19 @@ def main():
     print(chr(65), chr(233), chr(20013), chr(128013))
     print(ord(chr(128013)), chr(ord("ö")))
     print("".join([chr(ord(c)) for c in s]) == s)
+
+    # 十、大小写：**查表那一份**（`ext/python/lib/ucase.py` + `ext/python/rt/ucase.tab`）
+    # 这一段从前是"当场报还没接"（方言的 supper/slower 只动 A-Z）。四类要各有一格：
+    #   * 长度会变的（ß -> SS、ﬃ -> FFI、İ 的小写是 i + 点）；
+    #   * 尾位 sigma（`ΟΔΟΣ` 的小写是 `οδος`，词中的是 `σ`）；
+    #   * casefold 与 lower **不是一回事**（ß 的 casefold 是 ss，尾位 sigma 一律 σ）；
+    #   * ASCII 那一档照旧对。
+    print("äöü".upper(), "ÄÖÜ".lower(), "Straße".upper())
+    print("ﬃ".upper(), "İ".lower(), "ǅ".upper(), "ǅ".lower())
+    print("ΟΔΟΣ".lower(), "ΣΟΦΟΣ".lower(), "Σ".lower(), "ΑΣΒ".lower())
+    print("Groß".casefold(), "ΣΟΦΟΣ".casefold(), "ﬃ".casefold())
+    print("abc".upper(), "ABC".lower(), "".upper(), "".lower(), "".casefold())
+    print("héllo wörld".upper(), "HÉLLO WÖRLD".lower())
 
 
 main()

@@ -32,6 +32,7 @@ import { typeToSx } from '../../../src/core/lower/ty.js';
 import {
   exprOf, condOf, nameOf, typeOfAnnot, tyOfCst, tyArg, pyStr, pyRepr, lenOf, hasFields, fstringParts, cmpEq,
   kwOrder, tupleOf, cmpLt, needOrd, tupleToList, sortByKeyPy, emptyOf, carriesStmts,
+  compGroups, compBind,
 } from './expr.js';
 import {
   reverseStmts, clearStmts, extendStmts, insertStmts, dropAtStmts, indexOfList,
@@ -39,6 +40,7 @@ import {
 } from './builtins.js';
 import { boxOf, unifyPy } from './dyn.js';
 import { loadPyLib, libMethodFor, libFillToks } from './pylib.js';
+import { ucaseDecls } from './ucase.js';
 
 /** 一格已经建好的 IR 表达式装的是什么。 */
 const typeOfIR = (e, C) => typeOf(e, C.tyCtx());
@@ -96,6 +98,9 @@ export function pyToIR(tree, ctx = {}) {
   C.pop();
 
   const decls = [];
+  /* **大小写那张表**（`rt/ucase.tab`）—— 一段静态数据，摆在别的声明之前（方言要
+     `(memory …)` / `(data …)` 在用之前）。用到 `.upper()` 那一族才发，没人用是空的。 */
+  decls.push(...ucaseDecls(C));
   for (const [, rec] of C.records) {
     decls.push({ kind: 'class', name: rec.type.name, fields: rec.fields });
   }
@@ -628,7 +633,17 @@ function infer(C, tree, scriptStmts) {
     C.insts.set(nm, sh.annots.every((a) => a !== null) ? [mkInst(nm, sh, sh.annots)] : []);
   }
 
-  for (let round = 0; round < 3; round += 1) {
+  /**
+   * **跑到不再长为止**（上限 8 轮，至少 3 轮）。
+   *
+   * 从前是钉死的三轮。为什么不够：一轮只往前传**一层**调用链 —— 收 `nm` 的实例时要先
+   * 有调用方的实例，调用方的实例又要它自己的调用方先有。`lib/ucase.py` 那一条链是
+   * `.lower()` -> `_str_lower` -> `_ucase_final_sigma` -> `_ucase_ignorable` -> `_ucase_rec`
+   * （四层），三轮之后 `_ucase_rec` 还是空的，报的是"`_ucase_rec(int)` 没有对得上的那一格
+   * （这份源码里生成的是 ）"。至少三轮那一条留着：返回类型每轮重算，头两轮算出来的是下界。
+   */
+  let seenN = -1;
+  for (let round = 0; round < 8; round += 1) {
     for (const [nm, sh] of shells) collectInsts(nm, sh, tree, C);
     /* 字段要在方法体扫 `return` 之前算好（`self.x` 的类型靠它）。
        元组那几格记录的字段是**按形状直接摆好的**（`tupleRec`），不从标注与 `__init__` 认 ——
@@ -645,6 +660,10 @@ function infer(C, tree, scriptStmts) {
       }
     }
     for (const s of scriptStmts) scanBinds(s, C);
+    let n = 0;
+    for (const [, l] of C.insts) n += l.length;
+    if (round >= 2 && n === seenN) break;        // 不再长了，收工
+    seenN = n;
   }
 
   /* 名字：只有一格实例时不加后缀（多数函数是这一档），多格时加类型后缀。
@@ -726,7 +745,7 @@ function collectInsts(nm, sh, tree, C) {
 
   /* **连 f-string 里那几棵一起走** —— 那些调用躺在一个 STRING 记号里，
      `allNodes(tree)` 走不到（`pyToIR` 那一趟已经把它们解析出来挂在 `C.fstrTrees` 上）。 */
-  const sweep = (nodes) => {
+  const sweepFlat = (nodes) => {
     for (const node of nodes) {
       if (tag(node) !== 'call') continue;
       const fn = kids(node)[0];
@@ -785,6 +804,46 @@ function collectInsts(nm, sh, tree, C) {
         && args.length === sh.names.length - 1) {
         const rt = tyOfCst(kids(fn)[0], C);
         if (rt !== null && rt.kind === 'named' && rt.name === sh.annots[0].name) take(args, sh.annots[0]);
+      }
+    }
+  };
+
+  /**
+   * **推导式里那个目标先绑上再往里扫**（`[w.upper() for w in words]`）。
+   *
+   * 平铺扫的时候那个 `w` 谁都没绑过（只有 `tyOfCst` 的推导式那一支临时绑一层），
+   * 于是"接收者装什么"问出来是 null —— 库那一族的实例就收不到。量出来的原话：
+   * `.upper()` 在库里那格 `_str_upper` 上没有对得上的实例（实参是 string）。
+   * 作用域怎么摆与 `tyOfCst` 那一支逐字同一条（push / compBind / 扫 / back / pop）；
+   * 往里扫时**把自己剔掉**（一格推导式的 `allNodes` 里含它自己，不剔就自绕）。
+   * 不拿一格 `seen` 挡自绕的理由：同一棵推导式会被扫**好几遍**（平铺那一遍 + 每格实例
+   * 按函数体那一遍），而只有绑上了形参与局部的那几遍问得出接收者的类型 ——
+   * 记着"来过"就等于把真正有用的那几遍挡在外头。
+   */
+  const sweep = (nodes) => {
+    sweepFlat(nodes);
+    for (const node of nodes) {
+      const tg = tag(node);
+      if (tg !== 'listcomp' && tg !== 'genexp' && tg !== 'dictcomp') continue;
+      let gs = null;
+      try {
+        gs = compGroups(kids(node).slice(tg === 'dictcomp' ? 2 : 1));
+      } catch {
+        continue;                 // 形状还没接的推导式：发射那一侧自己会报
+      }
+      C.push();
+      let back = null;
+      try {
+        back = compBind(gs, C);
+      } catch {
+        C.pop();
+        continue;
+      }
+      try {
+        sweep(allNodes(node).filter((y) => y !== node));
+      } finally {
+        back();
+        C.pop();
       }
     }
   };

@@ -903,7 +903,11 @@ const $refid = (o) => {
 // Omni 的 string 是 **UTF-8 字节序列**：length / byteAt / substr 都按字节。
 // JS 里字符串是 UTF-16，所以这里过一层编码，用单条 memo 让循环扫描保持 O(1) 摊还。
 const $enc = new TextEncoder();
-const $dec = new TextDecoder();
+/* ignoreBOM: true —— **不然字节序标记会被吃掉**：TextDecoder 默认把开头那一格
+   U+FEFF 当 BOM 剥掉，于是 chr(0xFEFF) 切出来是空串（量出来的：python 那一门
+   chr(65279).upper() 报 "ord(): 给的是空串"，而 len 那一侧答 1 —— 两处不一致）。
+   我们的 string 是**裸 UTF-8 字节**，这一层只做编解码，不该改内容。 */
+const $dec = new TextDecoder('utf-8', { ignoreBOM: true });
 let $memoS = null, $memoB = null;
 function $bytes(s) {
   if (s !== $memoS) { $memoS = s; $memoB = $enc.encode(s); }
