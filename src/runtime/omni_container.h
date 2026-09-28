@@ -91,8 +91,19 @@ static bool NAME##_contains(NAME a, T v) { \
      3. 4 格以上还要再 rebuild 一次（icap 8 -> 16），那一趟把所有键重新哈希一遍。
    量出来：单文件那一趟（`dist/omni c obj src/runtime/omni_hash.c`）里 rebuild 自时间
    14.3% 是榜首，memmove 14.0% 里也有它的一份。
-   插入序不变（keys/vals 仍然按插入顺序追加），所以迭代与 `_keys` 的输出逐字节相同。 */
+   插入序不变（keys/vals 仍然按插入顺序追加），所以迭代与 `_keys` 的输出逐字节相同。
+
+   **门槛可调，而且上面那三条理由是在 `-O0` 下量的**（2026-09-28）：`OMNI_OPT=2` 重建之后
+   榜是 `omni_dict_string_dynamic_find` **自用 25.50%**、`set_h` 13.05%、`obj_getk` 含子
+   36.20% —— 也就是"线性扫 + 逐格 EQ"本身成了第一名（`-O0` 那趟它藏在没被内联的
+   `dyn_want`/`is_int` 后面）。`-O2` 下整串哈希也被内联、`memcmp` 也被展开，八格线性扫的
+   代价反而更高，所以这个 8 迟早要重量。
+   **默认仍是 8**（那是当前默认档 `-O0` 下量出来的那个值，不许凭推测改）；
+   要试别的档用 `-DOMNI_DICT_SMALL=n`，等 `-O2` 成为默认档（要先有增量构建，见
+   `docs/design/adr-0047-js-runtime-perf.md` §6）再定新默认值。 */
+#ifndef OMNI_DICT_SMALL
 #define OMNI_DICT_SMALL 8
+#endif
 
 #define OMNI_DICT_BODY(NAME, KT, VT) \
 struct NAME##_s { \

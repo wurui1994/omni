@@ -25,9 +25,19 @@ dict 查找 —— 接受」）。这一份来还那笔债。
 ## 1. 现状的三条底座（都在明处、都可量）
 
 **值**：`omni_dyn`（`src/runtime/omni.h:150`）= `{int tag; union{…}}`，对齐后 **24 字节**、
-按值传递 ⇒ 每个动态值 3 个寄存器/栈槽。`omni_dyn_want`（`omni.h:1115`）是每个 `as_*` 的
-前缀，而 `omni_errorf` **不是 `noreturn`** ⇒ clang 不敢把检查提出循环（7.82% 就是它）。
-`is_int`（`omni_js.c:528`）连 inline 都没有。INT/UINT 分两格 tag ⇒ 每个算术多问一次。
+按值传递 ⇒ 每个动态值 3 个寄存器/栈槽。`omni_dyn_want`（`omni.h:1115`）是每个 `as_*` 的前缀。
+
+> **先纠一条错**（2026-09-28，第一版草案写错了）：`omni_errorf` **早就标了 `OMNI_NORETURN`**
+> （`omni.h:198`），所以"检查提不出循环"这个解释是假的。真正的解释更简单也更刺眼：
+> **`build:native` 默认 `-O0`**（`cli.js:3327` 的 `optFlag()`，`OMNI_OPT` 不给就是 `-O0`）
+> ⇒ 那些 `static inline`（`omni_dyn_want`/`as_*`/`is_int`）**一个都没被内联**，每次都是
+> 一次真函数调用、还要按值传一个 24 字节的结构。榜上 `dyn_want` 7.82% + `is_int` 4.37% +
+> `as_s16` 4.20% + `dyn_as_ref` 自用 3.79% 这四格，**大部分是 `-O0` 自己**。
+> 所以刀序改了：**`OMNI_OPT=2` 重建一趟先量上限**（§8 的 G 提到第一位），
+> 再决定值表示/对象/调用约定那三条要不要动、动多少。
+
+`is_int`（`omni_js.c:528`）连 inline 都没有（`-O2` 下同一文件内可内联，跨文件要 LTO）。
+INT/UINT 分两格 tag ⇒ 每个算术多问一次。
 
 **对象**：普通对象 = `dict<string,dynamic>`（`omni_container.h:97`），≤8 格线性扫 + 逐格
 `memcmp`，跨过门槛 `_rebuild` 全体重哈希；`omni_js_obj_getk`（`omni_js_obj.h:458`）在碰到
@@ -208,7 +218,8 @@ QuickJS 的引用计数 + 循环检测是为长驻进程准备的，我们只在
 
 | 刀 | 内容 | 预期 | 风险 |
 |---|---|---|---|
-| A | `omni_dyn_want` 的报错口子 `noreturn` + `is_int` 内联 + INT/UINT 合并 | 7.8+4.4% 那两格大部分 | 极低（纯 runtime） |
+| A0 | **`OMNI_OPT=2` 重建**（一行环境变量，先量上限） | `dyn_want`/`is_int`/`as_s16`/`as_ref` 四格 | 无（只是构建更慢） |
+| A | `is_int`/`is_num` 进头文件 inline + INT/UINT 合并（A0 之后还剩多少再定） | 余下的那部分 | 低（纯 runtime） |
 | B | 只读捕获不装盒 | 盒子分配再降一档 | 低（发射层判据） |
 | C | 属性名驻留成 atom（消掉 UTF-8/16 边界） | `as_s16` 4.2% + 原型链那一次分配 | 中 |
 | D | shape + monomorphic IC（`dyn-rt.h` 提升为公共层） | `obj_getk` 含子 16.8% | 高（对象表示） |
@@ -223,8 +234,48 @@ QuickJS 的引用计数 + 循环检测是为长驻进程准备的，我们只在
 
 ## 9. 当下就能做的那一刀（下一轮从这儿开始）
 
-刀 A：`src/runtime/omni.h` 的 `omni_dyn_want` 把错误出口挪成一个
-`__attribute__((noreturn))` 的 `omni_dyn_type_err(int got, int want)`，`is_int`/`is_num` 挪进
-头文件做 `static inline`，INT/UINT 合并成一格 tag（`omni_js.c` 的 `js_add`/`js_arith`/`js_eq`
-一族跟着改）。判据：`tests/js-exec` + `tests/c` 答案不变、`check:self` 绿，然后
-`build:native` 一趟 + 30s 口径量一次，看 `dyn_want`/`is_int` 那两格掉多少。
+刀 **A0**：`OMNI_OPT=2 npm run build:native`（不改一行代码），然后 30s 口径量一次。
+这一刀回答的问题是"那四格（`dyn_want` 7.82 / `is_int` 4.37 / `as_s16` 4.20 / `as_ref` 3.79）
+里有多少只是 `-O0`"。代价是 cc 变慢（`-O0` 那趟 cc 2m48，`-O2` 预计翻几倍）——**这恰好是
+§6 那套构建（切单元 + 并行 + deps_log）的第一个真实动机**：`-O2` 要成为默认档，构建就必须
+是增量的。
+
+量完之后才决定 A/C/D/E/F 各要不要动、动多少。如果 A0 就把那四格压到 2% 以下，
+那么下一刀应该直接跳到 **D（shape + IC）**——`obj_getk` 含子 16.84% 是唯一不会被 `-O2`
+自动改善的结构问题（哈希查找就是哈希查找）。
+
+## 10. A0 量完了：`-O2` 换掉了榜，露出真正的结构问题（2026-09-28）
+
+`OMNI_OPT=2 npm run build:native`（987277 行 C，cc **1m13**，比 `-O0` 那趟还短 —— 机器闲了）。
+30s 口径**仍然超时**（32.74s），但**榜彻底换了**：
+
+    -O0 那一趟                              -O2 这一趟
+    lexText 自用 9.66%                      dict_string_dynamic_find 自用 25.50%（含子 31.94%）
+    omni_dyn_want 7.82%                     dict_set_h 13.05%
+    omni_js_obj_getk 含子 16.84%            lexText 自用 4.31%
+    omni_dyn_as_ref 含子 11.49%             memcmp 3.53% · find_h 3.53% · eq_string 2.24%
+    is_int 4.37% · as_s16 4.20%             omni_dyn_want **2.78%** · obj_getk 含子 **36.20%**
+
+两条结论：
+
+1. **`dyn_want`/`is_int`/`as_s16`/`as_ref` 那四格里的大部分只是 `-O0` 没内联**
+   （`dyn_want` 7.82% → 2.78%）。§1 里"这四格是值表示的错"那个判断要按这个修正：
+   值表示的账是 24 字节的搬运，不是 tag 检查本身。⇒ 刀 A（inline/合并 tag）**降级**，
+   刀 F（换 8 字节 `OVal`）的收益也要重新估。
+2. **属性查找就是第一名**：`obj_getk` 含子 36.20%，其中 `dict_find` 自用 25.50% ——
+   那是"小表线性扫 + 逐格 EQ"（`-O2` 把 EQ 内联进去了，所以计在 `find` 自用上）。
+   ⇒ **刀 D（shape + IC）从"以后再说"变成"唯一还剩的大头"**，而且路上有一格更便宜的：
+
+### 10.1 `OMNI_DICT_SMALL` 这个门槛是在 `-O0` 下量的
+
+`omni_container.h:95` 那三条理由（"整串哈希比四次长度比较贵"）成立的前提是**哈希函数没被
+内联**。`-O2` 下 `omni_hash_string` 被内联、`memcmp` 也被展开，八格线性扫的代价反而更高。
+所以门槛改成可调（`#ifndef OMNI_DICT_SMALL`，默认先降到 **2**），重新量一趟。
+这一刀一行常量、零语义风险，而且直接命中榜首 —— **量的结果无论哪边赢，都把"这个门槛该多少"
+从 2026-07 那次 `-O0` 的测量里解放出来。**
+
+### 10.2 口径补一条（写进 memory 了）
+
+**以后量原生腿一律 `OMNI_OPT=2`**。`-O0` 那张榜会把"没被内联的 static inline"顶到前排，
+照它改就是在优化编译器的内联开关，不是在优化程序。（这一条也解释了为什么上一轮那三刀
+虽然各自有效、总时间却没动：它们打掉的是真浪费，而榜上排在它们后面的那些"税"其实是 `-O0`。）
