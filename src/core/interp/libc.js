@@ -3102,6 +3102,26 @@ const LIBC = {
     memStore('i64', cell, 0, vec);
     return cell;
   },
+  /* ------------------------------------------------------------- zlib 那几格
+   * **R 的包（utils/stats/…）是靠它装进来的**（第三十七格）：包的 R 代码存成
+   * lazy-load 数据库（`R/<pkg>.rdb` + `.rdx`），每一格都是 zlib 压过的，
+   * `loadNamespace` 一路走到 `R_decompress1` 就要 `crc32`/`uncompress`。
+   *
+   * 为什么自己写而不借 node 的 zlib：宿主面（`host/native.js`）是**自举腿的契约**，
+   * 为一格扩面的代价见 `statInfo` 那一笔账。CRC-32 与 inflate 都是**纯计算** ——
+   * 纯计算就该留在这一层，而且浏览器那条腿上也照样成立。 */
+  crc32: (a) => {
+    let c = Number(BigInt.asUintN(32, BigInt(a[0])));
+    const p = BigInt(a[1]);
+    const n = Number(BigInt(a[2]));
+    if (p === 0n) return 0n;                     // zlib 的规矩：buf 是 NULL 时回初值 0
+    c ^= 0xffffffff;
+    for (let i = 0; i < n; i += 1) {
+      c ^= Number(memLoad('i8u', p + BigInt(i), 0));
+      for (let k = 0; k < 8; k += 1) c = (c >>> 1) ^ (0xedb88320 & -(c & 1));
+    }
+    return BigInt((c ^ 0xffffffff) >>> 0);
+  },
   memcpy: (a) => {
     const n = Number(BigInt(a[2]));
     for (let i = 0; i < n; i++) {
