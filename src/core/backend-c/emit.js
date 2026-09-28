@@ -3053,6 +3053,13 @@ class CEmitter {
         }
         if (e.name === 'js_inc' && a.length === 1) return `omni_jsf_inc(${a[0]})`;
         if (e.name === 'js_dec' && a.length === 1) return `omni_jsf_dec(${a[0]})`;
+        const FB = {
+          '&': 'omni_jsf_and', '|': 'omni_jsf_or', '^': 'omni_jsf_xor',
+          '<': 'omni_jsf_shl', '>': 'omni_jsf_shr',
+        };
+        if (e.name === 'js_bitop' && a.length === 2 && FB[e.op] !== undefined) {
+          return `${FB[e.op]}(${a.join(', ')})`;
+        }
         /* `noC`：ADR-0020 P1 那一族（真对象 / Symbol / 迭代器协议）还只有 JS 侧的实现。
          * 在**发射的时候**就骂，而不是让它落成一个 C 链接期的 undefined symbol ——
          * 那种错误会指向生成的 .c 的某一行，而真相是"这条腿还没修完"。 */

@@ -50,12 +50,22 @@ const progs = readdirSync(join(HERE, 'progs')).filter((f) => f.endsWith('.js'))
 if (progs.length === 0) { console.log('没有匹配的程序'); process.exit(1); }
 mkdirSync(WORK, { recursive: true });
 
-/** 跑一趟，回 `{ ms, out }`。**stdout 收下来** —— 校验和要对。 */
-function once(cmd, args) {
+/**
+ * 跑一趟，回 `{ ms, out }`。
+ *
+ * **计时那几趟一律 `stdio: 'ignore'`，收 stdout 是另外单独一趟（不计时）。**
+ * 量出来的：同一份二进制（真实 ~280ms），`spawnSync(..., { encoding: 'utf8' })`
+ * 报 **1047~1106ms**，而 `stdio: 'ignore'` 报 284ms —— 那 750ms 是 node 这一侧
+ * 读管道的账，不是被测程序的。四份程序在这张表上一度都是 "~1020ms"（与程序无关的常数），
+ * 那个"巧合"就是它。
+ */
+function once(cmd, args, capture) {
   const t0 = process.hrtime.bigint();
-  const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 600000 });
+  const r = spawnSync(cmd, args, capture
+    ? { encoding: 'utf8', timeout: 600000 }
+    : { stdio: 'ignore', timeout: 600000 });
   const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-  return { ms, out: (r.stdout ?? '').trim(), code: r.status };
+  return { ms, out: capture ? (r.stdout ?? '').trim() : '', code: r.status };
 }
 
 /** 建一份二进制。回 `{ bin, ms }` 或 `{ err }`。 */
@@ -77,20 +87,24 @@ for (const p of progs) {
   if (bc.err !== undefined) { rows.push({ p, err: bc.err }); continue; }
   const bs = WANT_SELF ? build(src, join(WORK, `${p}-self`), {}) : { bin: null, ms: undefined };
   if (bs.err !== undefined) { rows.push({ p, err: bs.err }); continue; }
-  /* 交错：node 一趟、clang 一趟、self 一趟、node 一趟…… 各取最小。 */
+  /* 校验和：各跑一趟**不计时**的（`stdio` 换成管道会把计时整个毁掉，见 `once` 的头注）。 */
+  const out = {
+    v: once('node', [src], true).out,
+    c: once(bc.bin, [], true).out,
+    s: bs.bin === null ? undefined : once(bs.bin, [], true).out,
+  };
+  /* 交错：node 一趟、clang 一趟、self 一趟、node 一趟…… 各取最小。
+     **第一圈丢掉**：前面刚编了几份二进制（每份 ~2.5s 的 cc），机器还没静下来。 */
   const best = { v: Infinity, c: Infinity, s: Infinity };
-  const out = {};
-  for (let i = 0; i < N; i++) {
-    const v = once('node', [src]);
-    if (v.ms < best.v) best.v = v.ms;
-    out.v = v.out;
-    const c = once(bc.bin, []);
-    if (c.ms < best.c) best.c = c.ms;
-    out.c = c.out;
+  for (let i = 0; i <= N; i++) {
+    const keep = i > 0;
+    const v = once('node', [src], false);
+    if (keep && v.ms < best.v) best.v = v.ms;
+    const c = once(bc.bin, [], false);
+    if (keep && c.ms < best.c) best.c = c.ms;
     if (bs.bin !== null) {
-      const s = once(bs.bin, []);
-      if (s.ms < best.s) best.s = s.ms;
-      out.s = s.out;
+      const s = once(bs.bin, [], false);
+      if (keep && s.ms < best.s) best.s = s.ms;
     }
   }
   rows.push({

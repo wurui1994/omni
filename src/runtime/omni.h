@@ -1175,6 +1175,43 @@ static inline omni_dyn omni_jsf_dec(omni_dyn v) {
   return omni_js_dec(v);
 }
 
+/* 位运算那一族（`omni_js_bitop` 在 int-loop 上自用 32~40%，一直是那份榜的第一名）。
+ * 快路的条件比上面几格严一点：两个操作数都是 REAL **而且都已经落在 int32 里** ——
+ * 那时 ToInt32 就是一次朝零截断（见 `omni_js.c` 的 `to_i32` 头注），整条路上一次
+ * 库函数调用都没有。运算本身逐条照 `omni_js_bitop` 的 number 那一支抄
+ * （`<<` 在 uint32 上算再折回、`>>` 是算术右移、移位量 `& 31`）。 */
+omni_dyn omni_js_bitop(int op, omni_dyn a, omni_dyn b);
+static inline bool omni_jsf_i32(omni_dyn v, int32_t *out) {
+  if (v.tag != OMNI_DYN_REAL) return false;
+  if (!(v.u.r >= -2147483648.0 && v.u.r <= 2147483647.0)) return false;
+  *out = (int32_t)v.u.r;
+  return true;
+}
+#define OMNI_JSF_BITOP(name, expr)                                        \
+  static inline omni_dyn name(omni_dyn a, omni_dyn b) {                   \
+    int32_t x = 0, y = 0;                                                 \
+    if (omni_jsf_i32(a, &x) && omni_jsf_i32(b, &y)) {                     \
+      return omni_dyn_of_real((double)(expr));                            \
+    }                                                                     \
+    return omni_js_bitop(OMNI_JSF_OP_, a, b);                             \
+  }
+#define OMNI_JSF_OP_ '&'
+OMNI_JSF_BITOP(omni_jsf_and, x & y)
+#undef OMNI_JSF_OP_
+#define OMNI_JSF_OP_ '|'
+OMNI_JSF_BITOP(omni_jsf_or, x | y)
+#undef OMNI_JSF_OP_
+#define OMNI_JSF_OP_ '^'
+OMNI_JSF_BITOP(omni_jsf_xor, x ^ y)
+#undef OMNI_JSF_OP_
+#define OMNI_JSF_OP_ '<'
+OMNI_JSF_BITOP(omni_jsf_shl, (int32_t)((uint32_t)x << (y & 31)))
+#undef OMNI_JSF_OP_
+#define OMNI_JSF_OP_ '>'
+OMNI_JSF_BITOP(omni_jsf_shr, x >> (y & 31))
+#undef OMNI_JSF_OP_
+#undef OMNI_JSF_BITOP
+
 static inline void omni_dyn_want(omni_dyn v, int tag) {
   if (v.tag != tag) {
     omni_errorf("dynamic value is %s, expected %s", omni_dyn_tag_name(v.tag), omni_dyn_tag_name(tag));
