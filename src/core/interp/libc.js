@@ -1213,6 +1213,39 @@ function ctypeLoc(which) {
 let strerrAddr = 0n;
 /** @type {Map<string,bigint>} `getenv` 的答案：一个名字一格，回过的地址不再变。 */
 const envCache = new Map();
+/* PCRE2 那一面（见下面那一摞函数头上的账）：句柄 -> 真东西。
+   句柄从 0x7e001000 起，与上面那几个写死的常量句柄不撞。 */
+const pcreTab = new Map();
+let pcreSeq = 0x7e001000n;
+let pcreErr = null;
+function pcreNext() { pcreSeq += 1n; return pcreSeq; }
+/** 那几个"只当记号用"的句柄（context / tables / jit stack）也得是**真地址** ——
+ *  R 有几条路会拿 `free()` 收它们（`tables` 那一格量到过
+ *  `free: memory access out of bounds`）。所以在堆上要 16 字节，一个名字一块、只要一次。 */
+const pcreBlocks = new Map();
+function pcreBlock(name) {
+  let at = pcreBlocks.get(name);
+  if (at === undefined) { at = heapAlloc(16n); pcreBlocks.set(name, at); }
+  return at;
+}
+/** 一段字节读成 JS 串（**latin1，一字节一字符**）：于是下标就是字节偏移。
+ *  `len` 是 `PCRE2_ZERO_TERMINATED`（(size_t)-1）时读到 NUL 为止。 */
+function pcreStr(at, len) {
+  const zt = BigInt.asUintN(64, len) === BigInt.asUintN(64, -1n);
+  let s = '';
+  for (let i = 0n; zt || i < len; i += 1n) {
+    const c = Number(memLoad('i8u', at + i, 0));
+    if (zt && c === 0) break;
+    s += String.fromCharCode(c);
+  }
+  return s;
+}
+/** 这个正则有几个捕获组（拿"永远匹配空"的那一招数出来，不解析 pattern）。 */
+function reGroups(re) {
+  const probe = new RegExp(`|${re.source}`);
+  const m = probe.exec('');
+  return m === null ? 0 : m.length - 1;
+}
 /**
  * 问宿主要一个环境变量 —— **答不上来就是"没设过"**。
  *
@@ -2492,6 +2525,117 @@ const LIBC = {
       }
     }
     return undefined;
+  },
+  /* ---------------------------------------------------- PCRE2 那一面（功能映射）
+   *
+   * R 的 `perl = TRUE` 那一半正则走 PCRE2（`trimws` 是其中一个）。**默认那一半不欠** ——
+   * `grepl`/`regexpr` 不带 `perl` 走 `src/extra/tre`，那是 C、早编进来了。
+   * 而 r-source **没捎带 PCRE2 的源码**，所以这一格只能**映射**：pattern 交给 JS 的
+   * `RegExp`。ADR-0047 第三十一格。
+   *
+   * 三件要对上的事：
+   *   1. **句柄**：`pcre2_code *` 一类在 R 那边只是个不透明指针（传回来给我们、判 NULL）。
+   *      所以给一个非 0 的小整数当句柄，真东西放在 JS 这边的表里。
+   *   2. **偏移是字节偏移**：subject 按 latin1（一字节一字符）读进 JS，于是
+   *      `RegExp` 的下标就是 PCRE2 的 ovector 值。
+   *   3. **ovector 要真内存**：R 拿 `pcre2_get_ovector_pointer` 之后直接读 `ov[0]`/`ov[1]`。
+   *      所以每个 match data 在堆上留 `2*(组数+1)` 个 size_t。
+   *
+   * 不映射 JIT：`pcre2_jit_compile` 一族是空操作（JIT 只影响快慢，不影响答案）。 */
+  pcre2_compile_context_create_8: () => pcreBlock('cctx'),
+  pcre2_compile_context_free_8: () => undefined,
+  pcre2_match_context_create_8: () => pcreBlock('mctx'),
+  pcre2_match_context_free_8: () => undefined,
+  pcre2_maketables_8: () => pcreBlock('tables'),
+  pcre2_maketables_free_8: () => undefined,
+  pcre2_set_character_tables_8: () => 0n,
+  pcre2_jit_compile_8: () => 0n,
+  pcre2_jit_stack_create_8: () => pcreBlock('jit'),
+  pcre2_jit_stack_assign_8: () => undefined,
+  pcre2_jit_stack_free_8: () => undefined,
+  pcre2_config_8: (a) => {
+    /* 只有 `PCRE2_CONFIG_STACKRECURSE`(3) 与 `…_JIT`(1) 会被问到：都回 0（没有）。 */
+    if (BigInt(a[1]) !== 0n) memStore('i32', BigInt(a[1]), 0, 0n);
+    return 0n;
+  },
+  pcre2_compile_8: (a) => {
+    const pat = pcreStr(BigInt(a[0]), BigInt(a[1]));
+    const opts = BigInt(a[2]);
+    let flags = 'dg';                            // d = 要下标，g = 我们自己挪 lastIndex
+    if ((opts & 0x8n) !== 0n) flags += 'i';      // PCRE2_CASELESS
+    if ((opts & 0x400n) !== 0n) flags += 'm';    // PCRE2_MULTILINE
+    if ((opts & 0x20n) !== 0n) flags += 's';     // PCRE2_DOTALL
+    try {
+      const re = new RegExp(pat, flags);
+      const id = pcreNext();
+      pcreTab.set(id, { re, n: reGroups(re) });
+      return id;
+    } catch (e) {
+      /* 编不过：照 PCRE2 的规矩把错码与位置写回去、回 NULL（R 会去取错误文字）。 */
+      if (BigInt(a[3]) !== 0n) memStore('i32', BigInt(a[3]), 0, 100n);
+      if (BigInt(a[4]) !== 0n) memStore('i64', BigInt(a[4]), 0, 0n);
+      pcreErr = String(e && e.message).slice(0, 120);
+      return 0n;
+    }
+  },
+  pcre2_code_free_8: (a) => { pcreTab.delete(BigInt(a[0])); return undefined; },
+  pcre2_match_data_create_from_pattern_8: (a) => {
+    const code = pcreTab.get(BigInt(a[0]));
+    const n = (code === undefined ? 0 : code.n) + 1;
+    const ov = heapAlloc(BigInt(n * 2 * 8));
+    const id = pcreNext();
+    pcreTab.set(id, { ov, pairs: n });
+    return id;
+  },
+  pcre2_match_data_create_8: (a) => {
+    const n = Number(BigInt(a[0])) + 1;
+    const ov = heapAlloc(BigInt(n * 2 * 8));
+    const id = pcreNext();
+    pcreTab.set(id, { ov, pairs: n });
+    return id;
+  },
+  pcre2_match_data_free_8: (a) => { pcreTab.delete(BigInt(a[0])); return undefined; },
+  pcre2_get_ovector_pointer_8: (a) => {
+    const md = pcreTab.get(BigInt(a[0]));
+    return md === undefined ? 0n : md.ov;
+  },
+  pcre2_get_ovector_count_8: (a) => {
+    const md = pcreTab.get(BigInt(a[0]));
+    return BigInt(md === undefined ? 0 : md.pairs);
+  },
+  pcre2_match_8: (a) => {
+    const code = pcreTab.get(BigInt(a[0]));
+    const md = pcreTab.get(BigInt(a[5]));
+    if (code === undefined || md === undefined) return BigInt.asIntN(32, -1n);
+    const s = pcreStr(BigInt(a[1]), BigInt(a[2]));
+    const from = Number(BigInt(a[3]));
+    code.re.lastIndex = from;
+    const m = code.re.exec(s);
+    if (m === null) return BigInt.asIntN(32, -1n);      // PCRE2_ERROR_NOMATCH
+    /* ovector：一对一对的字节偏移，没参与的组写 PCRE2_UNSET（(size_t)-1）。 */
+    const put = (i, v) => memStore('i64', md.ov + BigInt(i * 8), 0, v);
+    put(0, BigInt(m.index));
+    put(1, BigInt(m.index + m[0].length));
+    for (let g = 1; g < md.pairs; g += 1) {
+      const ind = m.indices === undefined ? undefined : m.indices[g];
+      if (ind === undefined || ind === null) {
+        put(g * 2, BigInt.asIntN(64, -1n));
+        put(g * 2 + 1, BigInt.asIntN(64, -1n));
+      } else {
+        put(g * 2, BigInt(ind[0]));
+        put(g * 2 + 1, BigInt(ind[1]));
+      }
+    }
+    return BigInt(1 + (m.length - 1 < md.pairs - 1 ? m.length - 1 : md.pairs - 1));
+  },
+  pcre2_get_error_message_8: (a) => {
+    const msg = pcreErr === null ? 'no match' : pcreErr;
+    const cap = Number(BigInt(a[2]));
+    const bs = new TextEncoder().encode(msg);
+    const n = bs.length < cap - 1 ? bs.length : cap - 1;
+    for (let i = 0; i < n; i += 1) memStore('i8', BigInt(a[1]) + BigInt(i), 0, BigInt(bs[i]));
+    memStore('i8', BigInt(a[1]) + BigInt(n), 0, 0n);
+    return BigInt(n);
   },
   memcpy: (a) => {
     const n = Number(BigInt(a[2]));

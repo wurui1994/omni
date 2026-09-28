@@ -861,6 +861,9 @@ const IMG_EVAL = [
   'as.numeric(regmatches("x42y", regexpr("[0-9]+", "x42y")))',
   'sum(grepl("^a", c("apple", "banana", "avocado")))',
   'nchar(format(1234.5678, nsmall = 2))', 'utf8ToInt("A")',
+  /* `perl = TRUE` 那一半正则（PCRE2 那一面映到 JS 的 RegExp）；不带 perl 的走 tre */
+  'nchar(trimws("  hi  "))', 'nchar(gsub("a+", "X", "baaad", perl = TRUE))',
+  'sum(grepl("^a", c("apple", "banana"), perl = TRUE))',
   'sum(mapply(function(a, b) a * b, 1:3, 4:6))', 'sum(Reduce(`+`, 1:10))',
   'length(Filter(function(x) x > 2, 1:5))', 'sum(do.call(c, list(1, 2, 3)))',
   'sum(matrix(1:6, nrow = 2))', 'sum(t(matrix(1:6, nrow = 2)))', 'sum(diag(3))',
