@@ -1074,6 +1074,31 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     于是这一条收口了：**六格静静答错 -> 五格真答对（len / 下标 / 切片 / find / ord）
     + 一族当场报还没接（大小写与分类）**。
 
+29. **那一族要的不是整份运行时 —— 只借 `Objects/unicodectype.c`（179KB、自足）就够**
+    （2026-09-28，量过；判据 `npm run py:ucase`，1.7s）。
+    第 28 条末尾那笔账写的是"要借 `unicodeobject.c`"，把成本估高了一个量级。实际量出来：
+    `_PyUnicode_To{Upper,Lower,Title,Folded}Full` / `_PyUnicode_IsCased` /
+    `_PyUnicode_IsCaseIgnorable` 是**纯函数** —— 码点进、码点出，查的是
+    `Objects/unicodetype_db.h` 那张表，**一格运行时状态都不碰**。那份 `.o` 179KB，
+    链完只欠 libc 的 `printf` / `strlen`：**不用 Py_Initialize、不用那 21M 的产物**。
+    探针 `ext/python/rt/ucase-probe.c` 过**我们自己的 C 前端**、只与
+    `obj/Objects-unicodectype-c.o` 链，产物 234KB（多出来的就是那张表）。
+    UTF-8 的解与编那一半**是我们自己的**（那是"串怎么表示"的算术，不是 unicode 表）。
+    判据 `ext/python/rt/ucase.js`：语料 28 个词（ASCII / `äöü` / `Straße` / `İstanbul` /
+    `ǅungla` / `ﬁn` / `ΣΣΣ` / `ΌΣΟΣ` / `ΑΣ.` / 西里尔 / `ǰ` / `ΐ` / CJK / `🐍a` / 空串）
+    × 4 个映射（upper / lower / casefold / title），与**本机 python3 逐字节相同**
+    —— 含一对多（`Straße` -> `STRASSE`、`İ` -> `i̇`、`ﬁ`.casefold -> `fi`）与 `ǅ` 三档。
+    **两条要照抄的上下文规矩**（不在表里，在 `Objects/unicodeobject.c`）：
+    a. **尾位 sigma**：`handle_capital_sigma` —— 前面（跳过 case-ignorable）有一格 cased、
+       后面（同样跳过）没有 cased，就出 `ς`，否则 `σ`。不抄这一条的读数是 3 个词差。
+    b. **`casefold()` 不走 a**：一律 `σ`（`ΣΣΣ`.casefold() = `σσσ`、`ΑΣ.` = `ασ.`）。
+       我一开始把 casefold 也算进了"小写档"，读数就是那 3 个词差 —— lower / title 两档
+       从一开始就对，**差异全落在 casefold 那一列**，这才定位到。
+    下一刀是**语言层怎么调它**：出串那一格要么做薄皮 + `(lib)` / `(cabi)` / `(ccall)`
+    （`cabi` 的类型词没有串，得走 `ptr + i64 + 调用方给缓冲区`那种协议），
+    要么像 `py_repr` 那样直接做成一格 Builtin（`src/runtime/*.c` 是"额外 .o 进产物"
+    唯一铺好的通道）。这一刀落下去，第 28 条那一族就能从"报还没接"变成"真答对"。
+
 ## 二、进度
 
 ### 已落地
