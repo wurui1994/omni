@@ -1229,11 +1229,29 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
          包括一个字符都没碰过 unicode 的程序）。同一份表**打成 `.a`** 再给：**+0 字节**
          （没人引用就不取），真有人引用时成员照样进来。
        - 把现有那 21 份 `.o` 打成一份 `.a` 再链 hello world：**404KB -> 246KB，跑对**。
+         自带链接器那路也验过（**我们自己的 `writeArchive` 打 ELF 成员、`c link --dylib`
+         按需取用**）：**786KB -> 439KB，只拉了 12 个成员（21 中的 12），跑对**。
+         最广的那个用户也验过：`emit c src/cli.js` 出来的 24MB C + 那份 `.a` ->
+         18.6MB 的可执行文件，**链得上、跑起来**（`omni — stage0 bootstrap compiler`）。
+         `nm` 对账：`omni_r3`（三维光栅器）**一个符号都没进来**，而 `omni_prof` 那一族
+         **照旧在**（它被 `omni_host_init` 引用着）—— 所以"弱引用取不进来"这个担心
+         在实测里没出现。
        所以这条路要先修一格 omni 核心的账：**运行时应该按 `.a` 给，不是按裸 `.o` 给**。
-       那一刀的风险在"只被弱约定引用的符号"（`omni_prof` 的 atexit 报告、`omni_r3` 里
-       dlopen GL 那条、`omni_all_init_` / `omni_run_entry` 这类由生成的 `main` 显式调的
-       入口）—— 按需取用只按"名字在索引里 + 现在还未定义"取，所以要一份**强制保留清单**
-       （tcc 那边对应 `-u` / `--whole-archive`，我们现在没有）。
+       那一刀的形状（下次动手照这个走）：
+       a. 加一个 `runtimeArgsSelf(arch, os, fmt)`：拿 `runtimeObjectsSelf` 那 21 格，
+          用 `link/ar.js` 的 `writeArchive` 打一份 `librt.a` 落在**同一个缓存格**里
+          （`syms` 由 ELF 的 `.symtab` 说），回给 `c link` 的是
+          `--dylib <a>`（Mach-O 那支按后缀分派进 `archives`）或 `--ar <a>`（ELF 那支）；
+          **PE 那支先不动**，打不出来就退回"21 个 `.o` 全给"那条老路 ——
+          绝不因为这一格让构建失败。三处调用点：`cli.js` 的 `:2807`（asy 的共用 dylib）、
+          `:4294`（`buildSelf`）、`:4453`。
+       b. 外部 cc 那一路（`runtimeObjects`）同理，但成员是 clang 出的 Mach-O ——
+          那批用系统 `ar` 打（macOS 的 `ar` 认 Mach-O、不认 ELF，账在第 22 条）。
+       c. 判据：`tests/sexpr` / `tests/c` / `tests/oir` / `tests/llvm` / `check:self` /
+          `test:bootstrap` / `test:selfrun` / `tests/python` 三腿 —— 编译器自己是这条链
+          最大的用户，它引用的运行时面最广，是最好的"别漏符号"尺子。另外
+          `tests/oir` 一族**自己拼 clang 命令行**（直接 `import { runtimeSources }`），
+          量不到这条新路，要单独加一格。缓存键里得加"打包方式"那一格，让旧缓存自然失效。
     3. **把那张表当数据搬一份进仓库**（`unicodetype_db.h` 292KB 源、编出来 175KB）——
        表是**数据**，不是算法：搬它不违反"库函数不自己写"（我们不重写 `To*Full` 的逻辑，
        只是不再每次去参考树里现编）。三条腿共用同一份数据，逻辑各写一遍、逐字节相同。
