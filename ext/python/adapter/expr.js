@@ -959,7 +959,7 @@ function tyOfBin(x, C) {
 }
 
 /** **收"选项"那一族命名实参的内建** —— 那几格不算实参（见 `tyOfCall`）。 */
-const KW_OPTS = new Set(['zip', 'sorted', 'min', 'max', 'print']);
+const KW_OPTS = new Set(['zip', 'sorted', 'min', 'max', 'print', 'enumerate']);
 
 /** 一格调用装的是什么。 */
 function tyOfCall(x, C) {
@@ -3857,6 +3857,19 @@ export function callOf(x, C) {
     }
     return formatOf(String(recvF.value), pos, C, named);
   }
+  /* **`enumerate(xs, start=2)`** —— `start=` 与位置的第二格是同一件事，所以在算实参
+     之前把它并回位置那一串（下面那一圈见了 `kw` 就报）。`for i, v in enumerate(xs, start=…)`
+     那条路在 `index.js` 的 `pairIter` 里另接了一格，两处是同一条口径。 */
+  if (tag(fn) === 'n' && String(nameOf(fn)) === 'enumerate'
+    && argToks.some((a) => tag(a) === 'kw')) {
+    const pos = argToks.filter((a) => tag(a) !== 'kw');
+    const kw = argToks.filter((a) => tag(a) === 'kw');
+    if (pos.length !== 1 || kw.length !== 1 || String(leaf(kids(kw[0])[0])) !== 'start') {
+      throw new Error('python->IR: `enumerate()` 收 `enumerate(xs)` / `enumerate(xs, n)`'
+        + ' / `enumerate(xs, start=n)` 这三种');
+    }
+    return pairsList('enumerate', [exprOf(pos[0], C), exprOf(kids(kw[0])[1], C)], C);
+  }
   /* **`zip(a, b, strict=True)`** —— python 3.10 那一格：长度不一样就 ValueError。
      `strict` 只收布尔字面量（两种走法是两条代码，得在编译期定）。 */
   if (tag(fn) === 'n' && String(nameOf(fn)) === 'zip'
@@ -3899,6 +3912,19 @@ export function callOf(x, C) {
     if (['kw', 'star', 'starstar'].includes(tag(a))) {
       throw new Error(`python->IR: 实参里的 \`${tag(a)}\` 还没接（命名实参 / 展开）`);
     }
+  }
+  /* **`tuple(x)`** —— 这一层的元组是**编译期定长的记录**（每一格各有自己的类型），
+     所以只在 x 是一格**非空的表/元组字面量**时接：那时长度与每格的类型都在编译期定得下来。
+     `tuple(xs)` 那一档（长度要到运行期才知道）得先有"变长的异构容器"，还没有 ——
+     当场说清楚，别让它落到"不认识 tuple()"那句不相干的话上。 */
+  if (tag(fn) === 'n' && String(nameOf(fn)) === 'tuple') {
+    if (argToks.length === 1 && ['list', 'tuple'].includes(tag(argToks[0]))
+      && kids(argToks[0]).length > 0) {
+      return tupleLit(argToks[0], C);
+    }
+    throw new Error('python->IR: `tuple(x)` 只在 x 是一格**非空的表/元组字面量**时接了'
+      + ' —— 这一层的元组是编译期定长的记录（每一格各有自己的类型），'
+      + '长度要到运行期才知道的那一档还没接');
   }
   /* **吃序列的那几个内建：实参位置上的 `range(…)` 现场铺成一张表**。
      `range` 当值用本身没接（python 印 `range(0, 3)`，铺成表就印错了），可

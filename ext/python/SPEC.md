@@ -1413,6 +1413,25 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 
 ### 已落地
 
+- **`tuple(字面量)`、`enumerate(xs, start=n)`（2026-09-29）** —— 第十二趟扫
+  （容器与迭代那一族 33 格，差 4 格、全是明着报）：
+  - **`enumerate(xs, start=n)`**：`start=` 与位置的第二格是同一件事，所以在算实参之前
+    就并回位置那一串。**三条路各有一处**要改（当值用那条在 `callOf`、`for` 里那条在
+    `pairIter`、推导式那条走 `pairIter` 同一格），外加 `KW_OPTS` 加 `enumerate`
+    （不加的话 `tyOfCst` 对 `kw` 答 null、整格调用的类型也成了 null）。
+  - **`tuple(x)`** 只在 x 是**非空的表/元组字面量**时接：这一层的元组是**编译期定长的
+    记录**（每一格各有自己的类型），字面量那一档长度与类型都在编译期定得下来
+    （`tuple([1, "a", 2.5])` 也对）。`tuple(xs)` 那一档要"变长的异构容器"，还没有 ——
+    从前落到"不认识 `tuple()`"那句不相干的话上，现在当场说清是哪一层的事。
+  - 这一趟**别的全绿**：`list(range(5))` / `list("abc")` / `list(d.items())` / 切片那几档
+    （`xs[::-1]` / `xs[::2]`）/ `d.get` 两档 / `d.setdefault` / `sorted(key=, reverse=)` /
+    `zip` 三张表 / 链式比较 / `a = b = 0` / 交换赋值 / `"".join(生成器)` /
+    `max(key=)` / `divmod(7.5, 2)` / `in` 对字典与元组 / `extend` / `insert(-1, …)` /
+    `remove` / `pop(i)` / 推导式两档 / `any([])` / `all([])` / `round` 的半数取偶 /
+    `7 % -2` 那几格取模 / `reversed` / `sorted(串)`。
+  **还没接**（明说）：`dict.fromkeys`（类方法那一格 —— `dict` 这个名字本身不是值）、
+  `%(name)s`（`%` 格式化按字典的键取）。
+
 - **bool 与数混着挑、混着比（2026-09-29）** —— 第十一趟扫（`max(True, 2)` 那一格）：
   - `max` / `min` 交的是**赢的那一格本身**（原样的型），所以混型那一档**全都装箱**
     （从前只在 int 配 real 时装）。`min(False, 0)` 是 `False` 不是 `0` —— 平手留左边

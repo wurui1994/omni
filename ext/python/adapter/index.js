@@ -1268,9 +1268,17 @@ function pairIter(target, iterTok, C) {
   const kws = as.filter((a) => tag(a) === 'kw');
   const pos = as.filter((a) => tag(a) !== 'kw');
   if (fn === 'zip' && kws.length > 0) return null;
-  if (fn === 'enumerate' && (pos.length === 1 || pos.length === 2) && kws.length === 0) {
-    const et = elemOf(tyOfCst(pos[0], C), pos[0]);
-    return { fn, args: pos, t0: INT, t1: et };
+  if (fn === 'enumerate' && (pos.length === 1 || pos.length === 2)) {
+    /* `start=` 写成命名实参那一档（`enumerate(xs, start=2)`）与位置的第二格是同一件事 ——
+       并回 args 里就行。别的名字（写错了的）答 null，由上头那条路去报。 */
+    let args = pos;
+    if (kws.length > 0) {
+      if (pos.length !== 1 || kws.length !== 1) return null;
+      if (String(leaf(kids(kws[0])[0])) !== 'start') return null;
+      args = [pos[0], kids(kws[0])[1]];
+    }
+    const et = elemOf(tyOfCst(args[0], C), args[0]);
+    return { fn, args, t0: INT, t1: et };
   }
   if (fn === 'zip' && pos.length === 2) {
     return {

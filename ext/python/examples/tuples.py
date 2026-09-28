@@ -186,3 +186,12 @@ for i, q in enumerate([1, 2]):
     print(i, q)
 for i, q in enumerate("ab"):
     print(i, q)
+
+# **`tuple(x)`** —— 只在 x 是一格非空的表/元组字面量时接：那时长度与每格的类型都在
+# 编译期定得下来（元组落成记录）。`tuple(xs)` 那一档要"变长的异构容器"，当场报。
+print(tuple([3, 1, 2]), tuple([1, "a", 2.5]), tuple((4, 5)))
+# **`enumerate(xs, start=n)`** 与位置的第二格是同一件事（当值用、for 里、推导式里三条路）。
+es = [3, 1, 2]
+print(list(enumerate(es, start=2)), [i for i, v in enumerate(es, start=5)])
+for i, v in enumerate(es, start=10):
+    print(i, v)
