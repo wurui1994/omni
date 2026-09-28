@@ -78,6 +78,20 @@ static void omni_noop(void) { }
 static void omni_busy(int which) { (void)which; }
 static void omni_suicide(const char *s) { printf("R_Suicide: %s\\n", s); }
 
+/* **locale 那一格的功能映射**（第二十九格）：这条腿上字符集就是 UTF-8。
+ *
+ * R 本来在 `Rf_initialize_R` 里 `setlocale(LC_CTYPE, "")` 之后按 `MB_CUR_MAX` 摆
+ * `mbcslocale` / `utf8locale`（util.c 的那两个全局）。我们不叫那一句，于是两个都是
+ * FALSE —— 症状是**静默答错**：`nchar("héllo")` 回 6（按字节数）而不是 5（按字符数）。
+ * 这一格明着摆上：字符集 UTF-8、是多字节 locale、不是 latin1。 */
+void omni_locale_init(void) {
+  utf8locale = TRUE;
+  mbcslocale = TRUE;
+  latin1locale = FALSE;
+  known_to_be_utf8 = TRUE;
+  known_to_be_latin1 = FALSE;
+}
+
 /* 顶层上下文（main.c 的 setup_Rmainloop 那一段）：R 的出错那条路要沿着
    R_GlobalContext 往上跳，没有它就是在空链上转圈（量出来：eval 一去不回）。 */
 void omni_toplevel_init(void) {

@@ -1251,6 +1251,36 @@ strsplit/vapply）都与 Rscript 对得上，**铺完到答完 3.8 秒**（整�
    两处都改走 `envAsk`：**答不上来就是"没设过"** —— 这在页面上是真话，
    而不是"把错咽下去"。
 
+## 第二十九格：拿镜像扫一遍（85 句 R 对 Rscript），79 句对得上
+
+镜像铺回去只要 2 秒，所以"多问几句 R"已经不要钱了 —— 这是现在最省的推进方式。
+工具：`.omni-cache/probe/sweep-img.js`（85 句，覆盖数值/整数取模/字符串/apply 一族/
+矩阵/排序集合表/列表属性/data.frame/控制流与递归）。**79/85 对得上**，而且
+**一句静默答错都没有** —— 对不上的六句每一句都明着说缺什么：
+
+* `strcoll`（`table()` 那一路要排序）—— 补上了：这条腿上 locale 是 C，"按 locale 比"
+  就是"按字节比"，`strxfrm` 同理就是 `strcpy`。
+* `mbrtowc`（`nchar("héllo")`）—— 补上了：UTF-8 解一个字符进 `wchar_t`（4 字节）。
+* `pcre2_compile_context_create_8`（`trimws` 走正则）、`dgemm_`（`%*%` / `outer` 走 BLAS）
+  —— 这两样是**整个库还没进来**（PCRE2 与 BLAS），不是一个函数的事，各记一刀。
+* `sum(table(...))` / `sum(head(sort(...), 2))` 回 -3（R 里出错）—— 还没追。
+
+### 一格**先动手后量**的教训：locale 那两个全局不能光设不管
+
+`nchar("héllo")` 补上 `mbrtowc` 之后**不报错了，答 6**（按字节数）——
+因为 R 的 `mbcslocale` / `utf8locale` 还是 FALSE（那是 `Rf_initialize_R` 里
+`setlocale` 之后摆的，我们不叫那一句）。于是写了个 `omni_locale_init()` 把这两个
+明着摆成 TRUE —— **结果 `as.numeric("1")` 回了 NA**：R 一进多字节那条路就要
+`MB_CUR_MAX`（`__mb_cur_max` 这个平台数据符号我们没有，是 0）与 `iswspace` 一族，
+`isBlankString` 于是把 `"1"` 看成空串。
+
+所以那一格**先退回去**（`omni_locale_init` 留在 `ext/r/rt/omni_rhost.c` 里但不进
+初始化序列），欠账记这儿：要开多字节这条路，得**一起**补 `__mb_cur_max`、
+`iswspace`/`iswalpha` 一族与 `wcwidth`，然后整份 base 重装一遍看有没有别的缝。
+`nchar` 按字节数是**答错**，但它是**一致地错**（R 自己在 C locale 下也这么答），
+而 NA 那个是真错 —— 两害取轻。
+
+
 
 
 

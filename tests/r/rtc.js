@@ -840,6 +840,7 @@ const $F = (s) => {
  *
  *  这一节问的是"铺回去还活着吗"：几句**身子在 base 的 R 代码里**的函数对 Rscript。 */
 const IMG_EVAL = [
+  /* base 的 R 代码里那几族（身子不是 C 写的，所以镜像铺回去才问得出来） */
   'mean(1:10)',
   'nchar("hello")',
   'sum(sapply(1:5, function(i) i * i))',
@@ -847,8 +848,35 @@ const IMG_EVAL = [
   'sum(duplicated(c(1, 2, 2, 3)))',
   'as.numeric(strsplit("1,2,3", ",")[[1]][2])',
   'sum(vapply(list(1:3, 1:5), length, 1L))',
+  /* 下面这一摞是 `.omni-cache/probe/sweep-img.js` 那 85 句里**量过对得上**的那部分
+     （镜像铺回去只要 2 秒，多问几句不要钱 —— 钉住就不会悄悄退回去）。 */
+  'sum(cumsum(1:5))', 'sum(diff(c(1, 4, 9, 16)))', 'round(pi, 3)', 'signif(123456, 3)',
+  'floor(-2.5)', 'ceiling(-2.5)', 'trunc(-2.7)', 'log(100, 10)', 'log2(1024)',
+  'log1p(1e-8) * 1e8', 'sum(sin(seq(0, pi, length.out = 5)))',
+  '7 %/% 2', '-7 %/% 2', '7 %% 3', '-7 %% 3',
+  'bitwAnd(12L, 10L)', 'bitwXor(12L, 10L)', 'bitwShiftL(1L, 10L)',
+  'as.numeric(strtoi("ff", 16L))',
+  'nchar(paste(1:5, collapse = "-"))', 'as.numeric(substr("12345", 2, 3))',
+  'nchar(sprintf("%08.3f", pi))', 'nchar(gsub("a", "bb", "banana"))',
+  'as.numeric(regmatches("x42y", regexpr("[0-9]+", "x42y")))',
+  'sum(grepl("^a", c("apple", "banana", "avocado")))',
+  'nchar(format(1234.5678, nsmall = 2))', 'utf8ToInt("A")',
+  'sum(mapply(function(a, b) a * b, 1:3, 4:6))', 'sum(Reduce(`+`, 1:10))',
+  'length(Filter(function(x) x > 2, 1:5))', 'sum(do.call(c, list(1, 2, 3)))',
+  'sum(matrix(1:6, nrow = 2))', 'sum(t(matrix(1:6, nrow = 2)))', 'sum(diag(3))',
+  'nrow(cbind(1:3, 4:6))', 'sum(apply(matrix(1:6, 2), 1, sum))',
+  'sort(c(3, 1, 2))[1]', 'order(c(3, 1, 2))[1]', 'which.max(c(1, 9, 3))',
+  'length(union(1:3, 2:5))', 'length(intersect(1:5, 3:8))', 'length(setdiff(1:5, 3:8))',
+  'sum(match(c("b", "c"), c("a", "b", "c")))', 'sum(rank(c(10, 30, 20)))',
+  'sum(unlist(list(a = 1, b = 2)))', 'length(names(list(a = 1, b = 2)))',
+  'nrow(data.frame(x = 1:3, y = 4:6))', 'sum(data.frame(x = 1:3)$x)',
+  'local({ s <- 0; for (i in 1:10) s <- s + i; s })',
+  'local({ f <- function(n) if (n <= 1) 1 else n * f(n - 1); f(10) })',
+  'local({ x <- tryCatch(stop("no"), error = function(e) 42); x })',
 ];
-const IMG_MS_CEIL = 8000;        // 铺完到答完的时间天花板（量到 2.8 秒）
+/** 铺完到答完的时间天花板。铺像本身 1.4~2.6 秒，剩下是那 ${IMG_EVAL.length} 句
+ *  **真的 R 求值**（量出来一句约 110ms —— 头一趟要编 R 的闭包）。 */
+const IMG_MS_CEIL = 14000;
 if (only === 'img') imgSection();
 
 process.stdout.write(`\n  ${pass} passed, ${fail} failed\n`);

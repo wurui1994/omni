@@ -2319,6 +2319,56 @@ const LIBC = {
       if (c === 0 || set.indexOf(String.fromCharCode(c)) >= 0) return i;
     }
   },
+  /* `strcoll` / `strxfrm`（C11 7.24.4.3 / 7.24.4.5）：这条腿上 locale 一律是 **C**，
+     而 C locale 里"按 locale 比"就是"按字节比" —— 所以它们分别就是 `strcmp` 与 `strcpy`。
+     R 的 `table()`（factor 那一路要排序）撞的是这一格：`strcoll: libc: 没有这个函数`。 */
+  strcoll: (a) => {
+    for (let i = 0n; ; i += 1n) {
+      const x = memLoad('i8u', BigInt(a[0]) + i, 0);
+      const y = memLoad('i8u', BigInt(a[1]) + i, 0);
+      if (x !== y) return x - y;
+      if (x === 0n) return 0n;
+    }
+  },
+  strxfrm: (a) => {
+    /* 回的是"要几个字节"（不数结尾的 0）；`n` 是 0 时只问长度、不写。 */
+    const d = BigInt(a[0]);
+    const s = BigInt(a[1]);
+    const n = BigInt(a[2]);
+    let len = 0n;
+    for (;;) {
+      const c = memLoad('i8u', s + len, 0);
+      if (len + 1n < n) memStore('i8', d + len, 0, c);
+      if (c === 0n) break;
+      len += 1n;
+    }
+    if (n > 0n) memStore('i8', d + (len < n - 1n ? len : n - 1n), 0, 0n);
+    return len;
+  },
+  /* `mbrtowc`（C11 7.29.6.3.2）：UTF-8 那一个字符 -> 一个 `wchar_t`（这条腿上 4 字节）。
+     R 的 `nchar("héllo")` 走的就是它（多字节串数字符）。**只认 UTF-8** —— 这条腿上
+     locale 的字符集就是 UTF-8（`ctype` 那三张表只折 ASCII 那一段，见上面那条）。
+     回值照 C 的规矩：0 = 那个字符是 NUL、n = 吃了 n 个字节、(size_t)-1 = 坏字节、
+     (size_t)-2 = 还没吃完（`n` 不够）。 */
+  mbrtowc: (a) => {
+    const pwc = BigInt(a[0]);
+    const s = BigInt(a[1]);
+    const n = BigInt(a[2]);
+    if (s === 0n) return 0n;                       // s == NULL：问"要不要接着读"，不要
+    if (n === 0n) return BigInt.asIntN(64, -2n);
+    const b0 = Number(memLoad('i8u', s, 0));
+    const need = b0 < 0x80 ? 1 : b0 >= 0xf0 ? 4 : b0 >= 0xe0 ? 3 : b0 >= 0xc0 ? 2 : -1;
+    if (need < 0) return BigInt.asIntN(64, -1n);   // 0x80..0xbf 开头是坏的
+    if (BigInt(need) > n) return BigInt.asIntN(64, -2n);
+    let cp = need === 1 ? b0 : b0 & (need === 2 ? 0x1f : need === 3 ? 0x0f : 0x07);
+    for (let i = 1; i < need; i += 1) {
+      const bi = Number(memLoad('i8u', s + BigInt(i), 0));
+      if ((bi & 0xc0) !== 0x80) return BigInt.asIntN(64, -1n);
+      cp = (cp << 6) | (bi & 0x3f);
+    }
+    if (pwc !== 0n) memStore('i32', pwc, 0, BigInt(cp));
+    return cp === 0 ? 0n : BigInt(need);
+  },
   memcpy: (a) => {
     const n = Number(BigInt(a[2]));
     for (let i = 0; i < n; i++) {
