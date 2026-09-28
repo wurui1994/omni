@@ -845,6 +845,19 @@ export const EVINST = ['frq=60,64', 'inc=0.037275327,0.000022676',
   'off=1e+32 vol=3492.3307', 'step=0.037275327,0.000022676', 'scratch=0,7,14'];
 
 /**
+ * **函数指针形参**（`ext/evaldraw/examples/fnptr.kc`，`eval.txt` 的
+ * "Function parameter syntax"：`a()` 一格 double 形参、`a(,)` 两格、`a(,,)` 三格）。
+ *
+ * 五行都是手算的，后两行是要紧的那两格：
+ * * `chain 16` —— 形参拿到的那格函数**再往下递一层**（`apply(f, apply(f, v))`，
+ *   递的是形参自己而不是名字）；
+ * * `shad 125` —— 形参的名字与顶层那格函数同名（`shad(sq(), v)` 收到的是 `cube`）：
+ *   **形参赢**。这一条钉住 `callOf` 里那个次序 —— 函数指针形参要拦在"脚本自己那张表"
+ *   之前，不然 `sq(v)` 会直接调顶层的 `sq`，印出来是 25（也不报错）。
+ */
+export const EVFNPTR = ['one 9', 'two 7', 'three 234', 'chain 16', 'shad 125'];
+
+/**
  * **cpp 的类模板**（`ext/cpp/examples/ctmpl.cpp`）。`Box<int>` 落成一格叫 `Box__int` 的
  * 普通记录、方法叫 `Box__int_get`。第五、六行钉住"同一格实例只造一遍"（两个变量各自独立、
  * 互不串味），最后一行钉住类模板的记录当**返回值**交出去。期望输出由 `c++` 给。

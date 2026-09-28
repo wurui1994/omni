@@ -691,10 +691,36 @@ function blockArg(raw, C, fname) {
     + ` ${isList(x) ? tag(x) : '别的东西'} —— 只接名字 / \`a[i]\` / \`p.x\` 这三种`);
 }
 
+/**
+ * **函数当实参递过去**（收它的那一格形参是 `f()` 那种，见 `paramOne` 的 `pfn*`）。
+ *
+ * 只认两样：**顶层具名函数的名字**（落成 `(fnref f)`）与**本函数自己那格函数指针形参**
+ * （原样往下递）。别的（表达式、数组、宿主函数名）当场报 —— 这门语言里没有闭包、
+ * 也没有函数字面量，所以"名字"就是全部；宿主那一族不是真函数，递过去调不动。
+ */
+function fnArg(x, C, fname) {
+  if (isList(x) && tag(x) === 'name') {
+    const n = idOf(x);
+    if (C.fnParams !== undefined && C.fnParams.has(n)) return nameRef(n);
+    if (C.fns.has(n)) return { kind: 'fn-ref', name: n };
+  }
+  throw new Error(`eval->IR: \`${fname}\` 这一格形参要的是一个函数，`
+    + '这儿给的不是"脚本自己定义的函数名"也不是"本函数的函数指针形参"');
+}
+
 function callOf(x, C) {
   const head = kids(x)[0];
   if (tag(head) !== 'name') throw new Error('eval->IR: 调用的不是一个名字（函数指针还没接）');
   const n = idOf(head);
+  /* **通过函数指针形参调**（`apply(f(),v) { return f(v); }`）：要拦在"脚本自己那张表"
+     **之前** —— 形参遮住同名的顶层函数（与 go 那一门同一个次序，`ext/go/adapter/expr.js`）。 */
+  if (C.fnParams !== undefined && C.fnParams.has(n)) {
+    return {
+      kind: 'call-value',
+      fn: nameRef(n),
+      args: kids(x).slice(1).map((a) => exprOf(a, C)),
+    };
+  }
   /**
    * **`readtouch(&id,&x,&y)`**（EvalDraw，`evaldraw.txt:1413`）：读多点触摸。
    *
@@ -823,6 +849,10 @@ function callOf(x, C) {
         const bl = blockArg(raw, C, n);
         out.push(nameRef(bl.name), bl.off);
         wi += 2;
+      } else if (want[wi] !== undefined && want[wi] !== null
+        && want[wi].kind === 'fn-type') {
+        out.push(fnArg(raw, C, n));
+        wi += 1;
       } else {
         out.push(exprOf(raw, C));
         wi += 1;
@@ -3563,6 +3593,23 @@ function paramOne(p, C, register) {
     }
     /* `&a` 形参：拿到的是调用方那一格长度 1 的数组（`C.boxed` 里那一族）。 */
     if (t === 'pref') return { name: idOf(k[0]), type: ARR };
+    /**
+     * **函数指针形参**（`a()` / `a(,)` / `a(,,)` / `a(,,,)`，`eval.txt` 那张表）。
+     *
+     * 标准 IR 里本来就有这一格（`{kind:'fn-type'}` + `fn-ref` / `call-value`，ADR-0010）——
+     * go 那一门就是这么落的（`ext/go/adapter/expr.js` 的 `fntype` 与 "形参里装着函数"
+     * 那两处）。EVAL 这边更省：被当成值传的**一定是顶层具名函数**（这门语言里没有
+     * 闭包也没有函数字面量），所以 `(fnref f)` 那条薄适配器的路正好够，不必 `mkclo`/`cap`。
+     *
+     * 形参那张表里它**只占一格**（不像收整块的要补一格偏移）。
+     */
+    if (t === 'pfn1' || t === 'pfn2' || t === 'pfn3' || t === 'pfn4') {
+      const n = Number(t.slice(3));
+      return {
+        name: idOf(k[0]),
+        type: { kind: 'fn-type', params: Array.from({ length: n }, () => REAL), ret: REAL },
+      };
+    }
     return { name: idOf(k[0]), type: REAL };
   }
 }
@@ -3924,6 +3971,9 @@ export function evalToIR(cst, host, src = '') {
     C.innerLabels = new Map();
     /* 这一份函数体里"收整块的形参"各自那格偏移（`名字$o`）—— 下标都要加上它。 */
     C.offs = new Map(ps.filter((p) => p.type === ARR).map((p) => [p.name, offName(p.name)]));
+    /* 这一份函数体里那几格**函数指针形参**（`callOf` 与 `fnArg` 按它分路）。 */
+    C.fnParams = new Map(ps.filter((p) => p.type !== null && typeof p.type === 'object'
+      && p.type.kind === 'fn-type').map((p) => [p.name, p.type]));
     decls.push({
       kind: 'fn',
       name,
@@ -3946,6 +3996,8 @@ export function evalToIR(cst, host, src = '') {
      所以这儿的偏移永远是 0，不用登记。 */
   C.offs = new Map();
   C.innerLabels = new Map();
+  /* 同一条：上一份函数那几格函数指针形参不许串到主函数里（主函数没有这一族）。 */
+  C.fnParams = new Map();
   /* graphing mode 那一档：形参是**真形参**（宿主每像素喂一组），别在体里补 `let`。 */
   let mainBody = [
     ...(C.graph !== null ? [] : mainInfos.flatMap((p) => (p.type === ARR

@@ -1,0 +1,40 @@
+// ext/evaldraw/examples/fnptr.kc —— **函数指针形参**（`eval.txt` 的 "Function parameter syntax"）
+//
+//     kasm87 写法      C/C++ 写法                     意思
+//        a()          double (*a)(double)            一格 double 形参的函数
+//        a(,)         double (*a)(double,double)     两格
+//        a(,,)        …                              三格
+//
+// 落法：标准 IR 里本来就有函数值那两格（`fn-ref` / `call-value`，ADR-0010）——
+// 这门语言里没有闭包也没有函数字面量，被当成值传的**一定是顶层具名函数**，所以
+// `(fnref f)` 那条薄适配器的路正好够。四条腿（js / interp / c / jit）都认它。
+//
+// 印出来的五行都是手算的：
+//   one   = sq(3) = 9
+//   two   = add(3,4) = 7
+//   three = mix(2,3,4) = 2*100+3*10+4 = 234
+//   chain = sq(sq(2)) = 16               （形参再往下递一层）
+//   shad  = cube(5) = 125                （形参遮住同名的顶层函数 `sq`）
+
+()
+{
+   printf("one %g\n", apply(sq, 3));
+   printf("two %g\n", apply2(add, 3, 4));
+   printf("three %g\n", apply3(mix, 2, 3, 4));
+   printf("chain %g\n", chain(sq, 2));
+   printf("shad %g\n", shad(cube, 5));
+}
+
+sq(x) { return x*x; }
+cube(x) { return x*x*x; }
+neg(x) { return -x; }
+add(a, b) { return a+b; }
+mix(a, b, c) { return a*100 + b*10 + c; }
+
+apply(f(), v) { return f(v); }
+apply2(f(,), a, b) { return f(a, b); }
+apply3(f(,,), a, b, c) { return f(a, b, c); }
+   // 形参拿到的那格函数**再往下递一层**（递的是形参自己，不是名字）
+chain(f(), v) { return apply(f, apply(f, v)); }
+   // 形参的名字与顶层那格函数同名：**形参赢**（调的是传进来的 cube，不是顶层的 sq）
+shad(sq(), v) { return sq(v); }
