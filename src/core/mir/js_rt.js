@@ -148,6 +148,70 @@ function memHeap() {
   callLibc('__omni_heap_init', [BigInt(base)]);
 }
 
+/**
+ * **整个程序共用的那张函数表**（一个 .c 一个 .js 那条路上的"跨模块函数指针"）。
+ *
+ * 单份模块那一档里函数指针就是「本模块函数号 + 1」，`$FN` 一张本地表查得到。N 份模块
+ * 一摆，这个数就不认识了：A 模块造出来的 `37n` 到了 B 模块，`$FN[36]` 是 B 的第 37 个
+ * 函数 —— **静默答错**（R 的 `R_FunTab` 正是这个形状：表在 names.c、`do_*` 在几十份
+ * 别的 .c 里、读表并调的是 eval.c）。
+ *
+ * 所以模块档里函数指针的值改成「**这张全程序表**的下标 + 1」，键是**链接名**：
+ * 对外可见的函数就是它的名字，`static` 的挂上模块自己的标记（那一格只有本模块能引用，
+ * 但值要全局唯一）。槽位**按名字先到先得**地分配（`fnSlot`），谁定义谁往里放身子
+ * （`fnBind`）—— 于是"引用在前、定义在后"也接得上（ESM 的装载次序不必操心）。
+ */
+const FN_SLOT = new Map();
+const FN_TAB = [];
+
+/** 名字 -> 指针值（下标 + 1）。没有就现开一格（身子等 `fnBind`）。 */
+function fnSlot(name) {
+  let i = FN_SLOT.get(name);
+  if (i === undefined) {
+    i = FN_TAB.length;
+    FN_TAB.push(null);
+    FN_SLOT.set(name, i);
+  }
+  return BigInt(i + 1);
+}
+
+/**
+ * 把身子放进那一格。`pt` 是每个形参"是不是 i32"的一位、`rt` 是回值那一位 ——
+ * libc 回调那扇门要按它换口径（libc 那一份的整数一律 BigInt）。
+ */
+function fnBind(name, fn, pt, rt) {
+  const i = Number(fnSlot(name)) - 1;
+  FN_TAB[i] = { fn, pt, rt };
+}
+
+function fnEntry(fp) {
+  const no = Number(fp) - 1;
+  if (no < 0) failRt('call of a null function pointer');
+  const e = FN_TAB[no];
+  if (e === undefined) failRt('function pointer index ' + no + ' out of range');
+  if (e === null) {
+    let nm = '?';
+    for (const [k, v] of FN_SLOT) if (v === no) nm = k;
+    failRt("call of an unbound function pointer '" + nm + "'（那一份模块没装载？）");
+  }
+  return e;
+}
+
+/** MIR 自己发的 `CALLI`：两侧口径一致，直接调。 */
+function fnCall(fp, args) { return fnEntry(fp).fn(...args); }
+
+/** libc 那扇门（qsort 的比较器那一路）：按签名把实参装/卸一次。 */
+function fnCallLibc(fp, args) {
+  const e = fnEntry(fp);
+  const as = [];
+  for (let k = 0; k < args.length; k += 1) {
+    const v = args[k];
+    as.push(e.pt[k] === 1 && typeof v === 'bigint' ? Number(BigInt.asIntN(32, v)) : v);
+  }
+  const r = e.fn(...as);
+  return e.rt === 1 && typeof r === 'number' ? BigInt(r) : r;
+}
+
 export const RT = {
   memInit,
   memData,
@@ -160,6 +224,10 @@ export const RT = {
   memStoreFn,
   memLoadFnN,
   memStoreFnN,
+  fnSlot,
+  fnBind,
+  fnCall,
+  fnCallLibc,
   callLibc,
   hasLibc,
   /* `exit` 抛的那个信号**用谓词而不是类**过去：类在封闭子集里只能出现在

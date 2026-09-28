@@ -16,7 +16,7 @@
 //   node tests/r/rtc.js
 //   node tests/r/rtc.js -v      # 连每一份的成败一起印
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -491,22 +491,47 @@ if (want('jsrun')) {
       units.push({ path, out: join(dir, `${label}__${n.replace(/\.c$/, '')}.mjs`) });
     }
   }
+  /* **按 key 缓存**（判据不许一趟一分钟）：源文件与编译器那几份源都没动过，就直接用
+     上一趟发出来的那 251 份 `.mjs`。命中时这一节 1 秒内跑完发射那一半，只剩装载与调用。
+     符号表落一份 `.syms.json` —— 探针（`.omni-cache/probe/*.js`）拿它只编自己那一份胶水。 */
+  const keyFile = join(dir, '.key');
+  const symsFile = join(dir, '.syms.json');
+  const stampOf = (p) => { const s = statSync(p); return `${s.mtimeMs}:${s.size}`; };
+  const key = [
+    ...units.map((u) => `${u.path}=${stampOf(u.path)}`),
+    ...['src/core/frontend-c/tccgen.js', 'src/core/frontend-c/tccpp.js', 'src/core/mir/emit_js.js',
+      'src/core/mir/ir.js', 'src/core/mir/js_rt.js', 'src/core/lang/c.js']
+      .map((f) => `${f}=${stampOf(join(ROOT, f))}`),
+  ].join('\n');
   let linked = null;
+  let hit = false;
+  if (existsSync(keyFile) && readFileSync(keyFile, 'utf8') === key && existsSync(symsFile)
+    && units.every((u) => existsSync(u.out))) {
+    hit = true;
+    const syms = new Map(Object.entries(JSON.parse(readFileSync(symsFile, 'utf8'))));
+    linked = { units: units.map((u) => ({ path: u.path, out: u.out, lib: true })), entry: null, syms };
+  }
   try {
-    linked = cJsModules(units, {
-      incs: INCS, defs: DEFS, rtImport: join(ROOT, 'src/core/mir/js_rt.js'),
-    });
-    for (const u of linked.units) writeFileSync(u.out, u.text);
+    if (!hit) {
+      linked = cJsModules(units, {
+        incs: INCS, defs: DEFS, rtImport: join(ROOT, 'src/core/mir/js_rt.js'),
+      });
+      for (const u of linked.units) writeFileSync(u.out, u.text);
+      writeFileSync(symsFile, JSON.stringify(Object.fromEntries(linked.syms), null, 0));
+      writeFileSync(keyFile, key);
+    }
   } catch (e) {
     no('全部运行时发成 JS 模块', String(e instanceof Error ? e.message : e).slice(0, 400));
+    linked = null;
   }
   if (linked !== null) {
-    const bytes = linked.units.reduce((a, u) => a + u.text.length, 0);
+    const bytes = linked.units.reduce((a, u) => a + (u.text === undefined
+      ? statSync(u.out).size : u.text.length), 0);
     if (linked.units.length !== units.length) {
       no('全部运行时发成 JS 模块', `只发了 ${linked.units.length}/${units.length} 份`);
     } else {
       ok('全部运行时发成 JS 模块', `${linked.units.length} 份 .mjs、${bytes} 字节、`
-        + `对外符号 ${linked.syms.size} 个`);
+        + `对外符号 ${linked.syms.size} 个${hit ? '（命中缓存，没重编）' : ''}`);
     }
     /* 装载 + 真调。入口自己写（`cJsEntry` 要一份有 `main` 的，libR 没有）。 */
     const L = [];
@@ -552,7 +577,13 @@ if (want('jsrun')) {
     }
     const entry = join(dir, '$judge.mjs');
     writeFileSync(entry, `${L.join('\n')}\n`);
-    const r = spawnSync(process.execPath, [entry], { encoding: 'utf8', maxBuffer: 1 << 26 });
+    /* **V8 的编译缓存**（`NODE_COMPILE_CACHE`）：55 MB 的 JS 解析一趟要 30 秒，
+       那是判据里最贵的一格。缓存之后重跑只花几秒 —— 判据不许一趟一分钟。 */
+    const r = spawnSync(process.execPath, [entry], {
+      encoding: 'utf8',
+      maxBuffer: 1 << 26,
+      env: { ...process.env, NODE_COMPILE_CACHE: join(dir, '.v8cache') },
+    });
     const lines = (r.stdout ?? '').trim().split('\n').map((s) => s.split('\t'));
     const got = new Map(lines.filter((a) => a[0] !== 'init' && a[0] !== 'sexp').map((a) => [a[0], a[1]]));
     const initOut = new Map(lines.filter((a) => a[0] === 'init').map((a) => [a[1], a[2]]));

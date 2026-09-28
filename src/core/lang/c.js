@@ -302,7 +302,9 @@ export function cJsModules(units, opts) {
   for (const m of mods) {
     const syms = new Map();
     for (const [sym, file] of provide) if (file !== m.out) syms.set(sym, file);
-    const text = emitMirJs(m.mir, { rtImport: opts.rtImport, module: true, symbols: syms });
+    const text = emitMirJs(m.mir, {
+      rtImport: opts.rtImport, module: true, symbols: syms, modId: m.out,
+    });
     const lib = !m.mir.funcIndex.has('main');
     if (!lib) entry = m.out;
     out.push({ path: m.path, out: m.out, text, lib });

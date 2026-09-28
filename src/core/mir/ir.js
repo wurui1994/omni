@@ -844,6 +844,15 @@ export class ConstPool {
    * 类型与文本照 `int` 那一格，所以下游（解释腿 / JS 腿 / 后端 / 摘要）一个字都不用改。
    */
   addr(v) { return this.fresh(T_I64, 'int', String(v)); }
+  /**
+   * **一格"其实是函数地址"的 i64 常量**（`&f` / 裸 `f` 当值用，线性内存腿上是「函数号 + 1」）。
+   *
+   * 与 `addr` 同一个道数（不去重 + 调用方记进 `mod.funcRefs`），但它防的是另一件事：
+   * 函数指针值是**小整数**，与真的小整数撞得太容易（`37n` 既可能是"第 36 个函数"
+   * 也可能就是 37）。一个 .c 一个 .js 那条路上要把它换成全程序那张表的下标
+   * （见 `js_rt.js` 的 `fnSlot`），换错一格就是调错函数 —— 所以这一格必须自己占一条。
+   */
+  fnaddr(v) { return this.fresh(T_I64, 'int', String(v)); }
   // i32 的常量也存**符号扩展后的十进制**（规范形，见 T_I32）：常量池是按 (类型码, 文本)
   // 去重的，所以 `i32 -1` 与 `i64 -1` 是两条，不会互相顶掉。
   i32(v) { return this.intern(T_I32, 'int', String(v)); }
@@ -1217,6 +1226,16 @@ export class MirModule {
     this.dataSyms = new Map();
     /** @type {{name:string, ref:number, add:number}[]} */
     this.dataRefs = [];
+    /**
+     * **哪几条常量其实是函数地址**（`&f` / 裸 `f`，`consts.fnaddr` 造的那几条）。
+     *
+     * 与 `addrConsts` 对称的一格，记的是「这条常量说的是第几号函数」。一个 .c 一个 .js
+     * 那条路上，发代码时要把它换成全程序那张函数表的槽位（`js_rt.js` 的 `fnSlot`）——
+     * 不换就是 A 模块的函数号被 B 模块的表解释，**静默调错函数**。
+     * 单份模块那一档不看这张表（值本来就是本地函数号 + 1）。
+     * @type {Map<number, number>}
+     */
+    this.funcRefs = new Map();
     /**
      * **这份模块要一个堆，但堆不在它自己的像里**（一个 .c 一个 .js 那条路，ADR-0047）。
      *

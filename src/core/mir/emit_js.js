@@ -145,6 +145,7 @@ const JS_CMP = new Map([
 const JS_PROLOGUE = `'use strict';
 const { memInit, memData, memAlloc, memPut, memHeap, memSize, memGrow,
   memLoadFn, memStoreFn, memLoadFnN, memStoreFnN,
+  fnSlot, fnBind, fnCall, fnCallLibc,
   callLibc, hasLibc, isExitCall, failRt, flushOut, libcAtExit, setFnPtrCaller,
   sjTok, sjSet, sjThrow, sjCatch } = $rt;
 const $W = (x) => BigInt.asIntN(64, x);
@@ -207,6 +208,8 @@ class JsFromMir {
     this.modular = modular === true;
     /** module 档里用到的地址常量：常量池下标 -> 顶层那条 `const $k<下标>`。 */
     this.addrRefs = new Set();
+    /** module 档里用到的**函数**地址常量：常量池下标 -> 顶层那条 `const $fp<下标>`。 */
+    this.fnRefs = new Set();
     /**
      * **别的模块提供的符号** name -> 那个模块的 specifier（`opts.symbols`）。
      * 函数与数据同一张表 —— C 的符号表就是一张（`add` 与 `R_NilValue` 没有区别）。
@@ -252,6 +255,14 @@ class JsFromMir {
         if (this.mir.addrConsts.has(r)) {
           this.addrRefs.add(r);
           return `$k${r}`;
+        }
+        /* 这一条其实是**函数**的地址（第一百五十二片）：模块档里函数指针的值是
+           全程序那张表的槽位，顶层现要一格（`$fp<下标>`）。本地函数号在模块之间
+           互不认识，不换就是静默调错函数。 */
+        const fno = this.mir.funcRefs === undefined ? undefined : this.mir.funcRefs.get(r);
+        if (fno !== undefined) {
+          this.fnRefs.add(r);
+          return `$fp${r}`;
         }
       }
       return jsConstText(this.mir.consts.items[r]);
@@ -732,7 +743,22 @@ class JsFromMir {
     const fnp = mir.funcs.map((f) => `[${f.params.map((p) => (p.t === T_I32 ? 1 : 0)).join(',')}]`);
     L.push(`const $FNP = [${fnp.join(', ')}];`);
     L.push(`const $FNR = [${mir.funcs.map((f) => (f.ret === T_I32 ? 1 : 0)).join(', ')}];`);
-    L.push(`const $calli = (fp, args) => {
+    /* **module 档走那张全程序的表**（第一百五十二片）：本地函数号出了这份 .js 就不认识
+       （A 的 `37n` 到了 B 是 B 的第 37 个函数 —— 静默调错），所以指针值是
+       `fnSlot(链接名)`、调用走 `fnCall`。本模块定义的（不是桩、有身子的）在装载期把身子
+       放进去；"引用在前定义在后"也接得上，因为槽位按名字先到先得。 */
+    if (this.modular) {
+      for (let no = 0; no < mir.funcs.length; no += 1) {
+        const f = mir.funcs[no];
+        if (f.thunk !== null && f.thunk !== undefined && this.syms.has(f.thunk)) continue;
+        if (f.extern === true) continue;
+        if (f.count() === 0) continue;
+        L.push(`fnBind(${JSON.stringify(this.linkKey(no))}, $f${no}, $FNP[${no}], $FNR[${no}]);`);
+      }
+      L.push('const $calli = (fp, args) => fnCall(fp, args);');
+      L.push('const $callFromLibc = (fp, args) => fnCallLibc(fp, args);');
+    } else {
+      L.push(`const $calli = (fp, args) => {
   const no = Number(fp) - 1;
   if (no < 0) failRt('call of a null function pointer');
   if ($FN[no] === undefined) failRt('function pointer index ' + no + ' out of range');
@@ -751,6 +777,7 @@ const $callFromLibc = (fp, args) => {
   const r = $FN[no](...as);
   return $FNR[no] === 1 && typeof r === 'number' ? BigInt(r) : r;
 };`);
+    }
     L.push(...this.runner());
     L.push(...this.linkage());
     /* import 是**最后**才拼的（哪几格要 import 得等函数体发完才知道），但 ESM 里
@@ -798,6 +825,20 @@ const $callFromLibc = (fp, args) => {
    * 也在这张像里（`tccgen` 按 `dataOff` 一路往上排），整块搬才能让它们仍然对得上
    * —— 与 `tests/mir/reloc.js` 搬的是同一块东西。
    */
+  /**
+   * 一个函数的**链接名**（module 档，第一百五十二片）：全程序那张函数表的键。
+   *
+   * 对外可见的函数就是它的名字；`static` 的挂上本模块自己的标记 —— 两份 `.c` 里各有
+   * 一个 `static int cmp(...)` 是常事，共用一格就是**静默调错函数**。桩（别的模块提供的）
+   * 按桩名走，那一格由**定义方**往里放身子。
+   */
+  linkKey(no) {
+    const f = this.mir.funcs[no];
+    const nm = f.thunk === null || f.thunk === undefined ? f.name : f.thunk;
+    if (f.local === true) return `${this.modId === undefined ? this.mir.name : this.modId}#${nm}`;
+    return nm;
+  }
+
   moduleBase() {
     if (!this.modular) return [];
     const mir = this.mir;
@@ -814,6 +855,11 @@ const $callFromLibc = (fp, args) => {
     ];
     for (const r of this.addrRefs) {
       L.push(`const $k${r} = ${BigInt(mir.consts.items[r].text)}n + $Dn;`);
+    }
+    /* 函数指针那几格（第一百五十二片）：值 = 全程序那张表的槽位。键是**链接名** ——
+       对外可见的就是名字，`static` 的挂上本模块的标记（值要全局唯一，但只有本模块引用）。 */
+    for (const r of this.fnRefs) {
+      L.push(`const $fp${r} = fnSlot(${JSON.stringify(this.linkKey(mir.funcRefs.get(r)))});`);
     }
     /* 本模块定义的全局量：把**地址**导出去（C 那边它就是一块内存）。
        别人那句 `import { $sym_base }` 接的就是这一格。 */
@@ -841,6 +887,12 @@ const $callFromLibc = (fp, args) => {
           continue;
         }
         rs.push(`[${r.at},${r.size}]`);
+      }
+      /* data 段里的**函数地址**（`static f_t tab[] = { do_a, do_b };`，R 的 `R_FunTab`
+         就是这个形状）：同样不是"加一个差"，写的是那张全程序函数表的槽位。 */
+      for (const r of d.relocs === undefined ? [] : d.relocs) {
+        if (r.fn === undefined) continue;
+        fix.push(`[${r.at},fnSlot(${JSON.stringify(this.linkKey(r.fn))})]`);
       }
       L.push(`memPut(${d.off} + $D, [${d.bytes.join(',')}], [${rs.join(',')}], $D`
         + `${fix.length > 0 ? `, [${fix.join(',')}]` : ''});`);
@@ -929,6 +981,10 @@ export function emitMirJs(mir, opts) {
   const modular = opts !== undefined && opts.module === true;
   const syms = opts === undefined ? undefined : opts.symbols;
   const gen = new JsFromMir(mir, modular, syms);
+  /* **这份模块自己的标记**（第一百五十二片）：`static` 函数进那张全程序函数表时挂在
+     名字后头。两份 `.c` 里各有一个 `static int cmp(...)` 是常事，共用一格就是静默调错。
+     缺省用 MIR 的模块名（JS 腿上那一格可能没名字），成品那一层传 `modId`（落盘路径）。 */
+  if (opts !== undefined && opts.modId !== undefined) gen.modId = opts.modId;
   const src = gen.emit();
   const spec = opts === undefined ? undefined : opts.rtImport;
   if (spec === undefined) return src;

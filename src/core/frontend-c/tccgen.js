@@ -838,6 +838,12 @@ export class CGen {  /**
 
     /** 地址常量的去重表（值的十进制 -> 常量池里那一条）—— 见 `kaddr`。 @type {Map<string,number>} */
     this.addrRefs = new Map();
+    /** 函数地址常量的去重表（函数号 -> 常量池里那一条）—— 见 `fnAddrConst`。 @type {Map<number,number>} */
+    this.fnAddrRefs = new Map();
+    /** 函数指针**值** -> 函数号。data 段里那几格按值回查（`static f_t tab[] = { a, b };`）。 @type {Map<bigint,number>} */
+    this.fnPtrVals = new Map();
+    /** data 段里"这一格装的是第几号函数"（与 `pendingPtr` 并列）。 @type {{off:number,no:number}[]} */
+    this.pendingFnPtr = [];
     /**
      * native：初值里的**地址**（第九刀第二十八片）。`off` 是那块暂存区上的绝对偏移，
      * 八个字节宽；`kind`/`no` 是它指着的符号（`g` 全局 / `f` 函数 / `s` 串常量）。
@@ -1704,6 +1710,12 @@ export class CGen {  /**
       if (!this.native && folded === kv && this.mod.addrConsts.has(r)) {
         return sVal(ty, this.kaddr(folded));
       }
+      /* **函数地址那一格同理**（第一百五十二片）：`pick(self, 7)` 里那个实参要过一次
+         "指针转指针"，折完值没变 —— 记号也得跟着走，不然它在模块档里成了一个普通的
+         小整数，`fnSlot` 那一步就换不成全程序的槽位（静默调错函数）。 */
+      if (!this.native && folded === kv && this.mod.funcRefs.has(r)) {
+        return sVal(ty, this.fnAddrConst(this.mod.funcRefs.get(r)));
+      }
       return sVal(ty, this.konst(ty, folded));
     }
     const srcMir = mirTypeOf(from);
@@ -2178,6 +2190,25 @@ export class CGen {  /**
   }
 
   /**
+   * **一条"其实是函数地址"的常量**（`&f` / 裸 `f` 当值用，第一百五十二片）。
+   *
+   * 值照旧是 `fnPtr(函数号)`，所以解释腿与单份模块那一档一个字都不用改；多出来的只是
+   * 一条记号：`mod.funcRefs` 记下"这一条说的是第几号函数"。一个 .c 一个 .js 那条路上
+   * 发代码时按它换成全程序那张函数表的槽位 —— 不记就只能拿一个小整数猜，猜错是
+   * **静默调错函数**（R 的 `R_FunTab` 就是这个形状）。
+   */
+  fnAddrConst(no) {
+    const hit = this.fnAddrRefs.get(no);
+    if (hit !== undefined) return hit;
+    const ref = this.mod.consts.fnaddr(fnPtr(no));
+    this.mod.funcRefs.set(ref, no);
+    this.fnAddrRefs.set(no, ref);
+    /* data 段那一侧（`static f_t tab[] = { a, b };`）按**值**回查函数号，见 `emitPtrBytes`。 */
+    this.fnPtrVals.set(fnPtr(no), no);
+    return ref;
+  }
+
+  /**
    * 字符串字面量进 data 段，回它的地址。
    * 同一份文本只进一次 —— C 没规定字面量是否共享，但共享省 data 段，而且
    * 「同一份输入两次编译逐字节相同」要求这张表是确定的（Map 按插入序，是）。
@@ -2420,6 +2451,11 @@ export class CGen {  /**
      */
     const v = Number(BigInt.asUintN(64, value));
     if (v >= MEM_PAGE && v < this.dataOff) this.pendingPtr.push({ off: addr });
+    /* 函数指针那一格（第一百五十二片）：值是**小整数**（函数号 + 1），不在上面那个区间里，
+       所以它自己一张表。按值回查 —— 只有 `fnAddrConst` 造过的那些值在表里，所以
+       `static int *p = (int*)3;` 这种普通小整数不会被认成函数。 */
+    const fno = this.fnPtrVals.get(BigInt.asUintN(64, value));
+    if (fno !== undefined) this.pendingFnPtr.push({ off: addr, no: fno });
   }
 
   /**
@@ -2989,6 +3025,9 @@ export class CGen {  /**
       /* 线性内存腿上"哪几格是地址"那张表同理（`pendingPtr`）—— 复制出来的那几格
          也各是一格地址，搬 data 段时要跟着改。 */
       const freshPtr = this.pendingPtr.filter((x) => x.off >= lo && x.off + 8 <= lo + size);
+      /* 函数指针那张表同理（第一百五十二片）：`{[0 ... 1] = do_a}` 复制出来的那几格
+         也各是一格函数地址。 */
+      const freshFn = this.pendingFnPtr.filter((x) => x.off >= lo && x.off + 8 <= lo + size);
       for (let k = 1; k < nb; k++) {
         for (const d of fresh) {
           /* **字节要抄一份**，不许与原件共用同一个数组：这几段各自带一条"这儿是地址"的
@@ -3003,6 +3042,7 @@ export class CGen {  /**
           });
         }
         for (const x of freshPtr) this.pendingPtr.push({ off: x.off + k * size });
+        for (const x of freshFn) this.pendingFnPtr.push({ off: x.off + k * size, no: x.no });
       }
       return;
     }
@@ -3737,7 +3777,7 @@ export class CGen {  /**
           if (this.native && !fn.defined) fn.addrTaken = true;
           fptr = this.native
             ? this.f.emit(OP.FADDR, T_I64, REF_NONE, REF_NONE, fn.no)
-            : this.mod.consts.int(fnPtr(fn.no));
+            : this.fnAddrConst(fn.no);
         }
         return this.postfix(sMem(funcTypeOf(fn), fptr, 0));
 
@@ -7636,6 +7676,9 @@ export class CGen {  /**
       if (fn !== undefined && fn.declared) {
         this.next();
         fn.used = true;
+        /* 记一条"这个值是函数地址"（第一百五十二片）：data 段那一侧靠 `fnPtrVals`
+           按值回查，一个 .c 一个 .js 那条路上要把它换成全程序那张表的槽位。 */
+        this.fnPtrVals.set(fnPtr(fn.no), fn.no);
         return fnPtr(fn.no);
       }
     }
@@ -8794,6 +8837,8 @@ export function lowerC(path, text, host, defs, args, opts) {
      "加一个差"能对的 —— 它要等提供方的地址，所以记 `{sym, add}`，由
      一个 .c 一个 .js 那条路发成 `$sym_arr + add`（ADR-0047 第十一格）。 */
   const ptrAt = new Set(gen.pendingPtr.map((p) => p.off));
+  /** data 段里的**函数地址**（第一百五十二片）：绝对偏移 -> 函数号。 */
+  const fnAt = new Map(gen.pendingFnPtr.map((p) => [p.off, p.no]));
   const rd8 = (bytes, at) => {
     let v = 0n;
     for (let i = 7; i >= 0; i -= 1) v = (v << 8n) | BigInt(bytes[at + i]);
@@ -8809,6 +8854,15 @@ export function lowerC(path, text, host, defs, args, opts) {
         for (const s of gen.extSpans) if (v >= s.lo && v < s.hi) { sp = s; break; }
         if (sp === null) relocs.push({ at: k, size: 8 });
         else relocs.push({ at: k, size: 8, sym: sp.name, add: v - sp.lo });
+      }
+    }
+    /* 函数地址那几格：`{at, size, fn: 函数号}`。单份模块那一档没人看它（值本来就对），
+       一个 .c 一个 .js 那条路上要按它发成 `fnSlot('名字')`。 */
+    if (fnAt.size > 0) {
+      for (let k = 0; k + 8 <= d.bytes.length; k += 1) {
+        const no = fnAt.get(d.off + k);
+        if (no === undefined) continue;
+        relocs.push({ at: k, size: 8, fn: no });
       }
     }
     mod.addData(d.off, d.bytes, relocs);

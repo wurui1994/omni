@@ -299,6 +299,26 @@ const twoUnits = [
     ],
     want: 'code=5 out="2.75 -0.5\\n"',
   },
+  {
+    /* **跨模块的函数指针**（第一百五十二片）：R 的 `R_FunTab` 就是这个形状 ——
+       表在 b（`static` 的、装着 c 里那几个函数的地址），读表并调的是 a。
+       从前函数指针的值是"本模块函数号 + 1"，出了这份 .js 就不认识（A 的 37n 到了 B
+       是 B 的第 37 个函数）—— 静默调错函数。现在值是全程序那张表的槽位。 */
+    name: 'fnptr-across',
+    units: [
+      { name: 'a', src: `${P}int callTab(int, int);\nint pick(int (*)(int), int);\n`
+        + 'int self(int x){ return x + 100; }\n'
+        + 'int main(void){ int u = callTab(0, 5), v = callTab(1, 5), w = pick(self, 7);\n'
+        + '  printf("%d %d %d\\n", u, v, w); return u + v + w; }\n' },
+      { name: 'b', src: 'int dbl(int);\nint tri(int);\n'
+        + 'typedef int (*fn_t)(int);\n'
+        + 'static struct { const char *nm; fn_t f; } TAB[] = { {"dbl", dbl}, {"tri", tri}, {0, 0} };\n'
+        + 'int callTab(int i, int x){ return TAB[i].f(x); }\n'
+        + 'int pick(fn_t f, int x){ return f(x); }\n' },
+      { name: 'c', src: 'int dbl(int x){ return x * 2; }\nint tri(int x){ return x * 3; }\n' },
+    ],
+    want: 'code=132 out="10 15 107\\n"',
+  },
 ];
 
 for (const t of twoUnits) {
