@@ -11,12 +11,14 @@
 // 查 `unicodetype_db.h` 那张表），**不借整份运行时** —— 不用 Py_Initialize，也不用 21M 产物。
 // UTF-8 的解与编那一半是我们自己的（"串怎么表示"的算术）。
 //
-// 读数（这台机器）：借来的那份 `.o` **179KB**，链完只欠 libc 的 `printf` / `strlen`。
+// 读数（这台机器）：那张表编出来的 `.o` **175KB**，链完只欠 libc 的 `printf` / `strlen`；
+// 表与探针**两份都过我们自己的 C 前端** —— 不必先 `py:sweep` 把 201 份预热出来，
+// 要的只是参考树里那两份文件（`Objects/unicodectype.c` + `unicodetype_db.h`）。
 //
 // ## 门
 //
 // 语料里每一个词的四个映射（upper / lower / casefold / title）与本机 python3 **逐字节相同**。
-// 没有参考树 / clang / python3 / 没预热过 `obj/` 就说清并跳过（不假装绿）。
+// 没有参考树 / clang（链接那一步）/ python3 / 没探过 `pyconfig.h` 就说清并跳过（不假装绿）。
 import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
@@ -37,22 +39,28 @@ const skip = (why) => { say(`py-rt/ucase: ${why} —— 跳过`); process.exit(0
 
 if (!existsSync(join(SRC, 'Objects', 'unicodectype.c'))) skip(`参考树不在（${SRC}）`);
 if (!existsSync(join(INC, 'pyconfig.h'))) skip('还没探过 pyconfig.h（先 `npm run py:sweep`）');
-const TABLE = join(WORK, 'obj', 'Objects-unicodectype-c.o');
-if (!existsSync(TABLE)) skip(`${TABLE} 不在（先 \`npm run py:sweep\`）`);
 if (spawnSync(CC, ['--version'], { encoding: 'utf8' }).status !== 0) skip(`本机没有 ${CC}`);
 if (spawnSync('python3', ['--version'], { encoding: 'utf8' }).status !== 0) skip('本机没有 python3');
 
-/* 一、探针过**我们自己那台 C 前端**（这才是被试者的一半）。 */
+/* 编一份 `.o`：过**我们自己的 C 前端**，一格外部编译器都不用。 */
+const ourCC = (src, obj, rel) => spawnSync(process.execPath, [CLI,
+  ...flagsFor(obj, INC, SRC, perFileFlags(rel, SRC)), src], { encoding: 'utf8' });
+const diagOf = (r) => ((r.stderr ?? '') + (r.stdout ?? '')).split('\n')
+  .filter((l) => /error:/.test(l)).slice(0, 6).join('\n');
+
+/* 一、两份都过**我们自己那台 C 前端**：探针是我们写的，表是借来的（一格没改）。 */
 const t0 = Date.now();
 mkdirSync(OUT, { recursive: true });
 const OBJ = join(OUT, 'ucase-probe.o');
-const cc = spawnSync(process.execPath, [CLI,
-  ...flagsFor(OBJ, INC, SRC, perFileFlags('Programs/_freeze_module.c', SRC)),
-  join(here, 'ucase-probe.c')], { encoding: 'utf8' });
+const cc = ourCC(join(here, 'ucase-probe.c'), OBJ, 'Programs/_freeze_module.c');
 if (cc.status !== 0 || !existsSync(OBJ)) {
-  const diag = ((cc.stderr ?? '') + (cc.stdout ?? '')).split('\n')
-    .filter((l) => /error:/.test(l)).slice(0, 6).join('\n');
-  say(`py-rt/ucase: 我们编不出探针：\n${diag || '编不出'}`);
+  say(`py-rt/ucase: 我们编不出探针：\n${diagOf(cc) || '编不出'}`);
+  process.exit(1);
+}
+const TABLE = join(OUT, 'unicodectype.o');
+const tb = ourCC(join(SRC, 'Objects', 'unicodectype.c'), TABLE, 'Objects/unicodectype.c');
+if (tb.status !== 0 || !existsSync(TABLE)) {
+  say(`py-rt/ucase: 我们编不出借来的那份表：\n${diagOf(tb) || '编不出'}`);
   process.exit(1);
 }
 
@@ -63,8 +71,9 @@ if (ld.status !== 0 || !existsSync(BIN)) {
   say(`py-rt/ucase: 链不起来（说明那一份不是纯的，还牵着别的符号）：\n${(ld.stderr ?? '').split('\n').slice(0, 8).join('\n')}`);
   process.exit(1);
 }
-say(`cc+ld: 探针过我们的 C 前端、只与 Objects/unicodectype.c 的 .o 链`
-  + `（表 ${(statSync(TABLE).size / 1024).toFixed(0)}KB、产物 ${(statSync(BIN).size / 1024).toFixed(0)}KB）`);
+say(`cc: 探针与借来的那份表**都过我们自己的 C 前端**`
+  + `（表的 .o ${(statSync(TABLE).size / 1024).toFixed(0)}KB）；ld: 只这两份`
+  + `（产物 ${(statSync(BIN).size / 1024).toFixed(0)}KB）`);
 
 /* 三、语料。每一格后面注的是"它照出哪一条规矩"。 */
 const WORDS = [

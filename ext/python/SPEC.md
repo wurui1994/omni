@@ -1081,8 +1081,10 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     `_PyUnicode_IsCaseIgnorable` 是**纯函数** —— 码点进、码点出，查的是
     `Objects/unicodetype_db.h` 那张表，**一格运行时状态都不碰**。那份 `.o` 179KB，
     链完只欠 libc 的 `printf` / `strlen`：**不用 Py_Initialize、不用那 21M 的产物**。
-    探针 `ext/python/rt/ucase-probe.c` 过**我们自己的 C 前端**、只与
-    `obj/Objects-unicodectype-c.o` 链，产物 234KB（多出来的就是那张表）。
+    探针 `ext/python/rt/ucase-probe.c` 过**我们自己的 C 前端**，**借来的那份表也过我们自己的
+    C 前端**（`Objects/unicodectype.c` 一个字不改，编出 175KB 的 `.o`）—— 所以这一格
+    **不必先 `py:sweep` 把 201 份预热出来**，要的只是参考树里那两份文件
+    （`unicodectype.c` 288 行 + `unicodetype_db.h` 292KB）。产物 234KB。
     UTF-8 的解与编那一半**是我们自己的**（那是"串怎么表示"的算术，不是 unicode 表）。
     判据 `ext/python/rt/ucase.js`：语料 28 个词（ASCII / `äöü` / `Straße` / `İstanbul` /
     `ǅungla` / `ﬁn` / `ΣΣΣ` / `ΌΣΟΣ` / `ΑΣ.` / 西里尔 / `ǰ` / `ΐ` / CJK / `🐍a` / 空串）
