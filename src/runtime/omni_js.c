@@ -694,11 +694,22 @@ omni_dyn omni_js_dec(omni_dyn v) {
    标签，所以判据只能是"两边都 int 才按 64 位算"。判据与 prelude 的 $js_toi32 相同。 */
 static int32_t to_i32(omni_dyn v) {
   if (is_int(v)) return (int32_t)(uint32_t)(uint64_t)v.u.i;
-  double d = OMNI_JS_TO_NUM(v).u.r;
-  if (!isfinite(d)) return 0;
-  double m = fmod(trunc(d), 4294967296.0);
-  if (m < 0) m += 4294967296.0;
-  return (int32_t)(uint32_t)m;
+  {
+    double d = OMNI_JS_TO_NUM(v).u.r;
+    /* **已经落在 int32 里的那一格不走 fmod**（J1b，2026-09-28）。
+       JS 的 number 就是 double，所以 `a | 0` / `a >> 2` 每个操作数都会走到这儿；
+       慢路是 `fmod(trunc(d), 2^32)` —— 两次库函数调用，而 `omni_js_bitop` 在
+       `bench/js/progs/int-loop.js` 上自用 **40.61%**（clang -O2 那趟采样里的第一名）。
+       范围内时 `fmod(trunc(d), 2^32) == trunc(d)`，而 `(int32_t)d` 就是朝零截断
+       ⇒ 这一支与慢路**逐位相同**，不是近似。 */
+    if (d >= -2147483648.0 && d <= 2147483647.0) return (int32_t)d;
+    if (!isfinite(d)) return 0;
+    {
+      double m = fmod(trunc(d), 4294967296.0);
+      if (m < 0) m += 4294967296.0;
+      return (int32_t)(uint32_t)m;
+    }
+  }
 }
 
 omni_dyn omni_js_bitop(int op, omni_dyn a, omni_dyn b) {

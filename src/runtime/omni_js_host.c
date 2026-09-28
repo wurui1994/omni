@@ -647,13 +647,18 @@ omni_dyn omni_js_proc_stderr_bytes(omni_dyn s) {
  *     而 JS 的 `(a/b)|0` 回的是 INT32_MIN / 0。所以这两格单列。
  *   - 有符号溢出也是 UB，所以加减乘一律在 `uint32_t` 上算完再折回来。
  */
-/** ECMAScript 的 ToInt32：非有限回 0，其余对 2^32 取模再看符号。 */
+/** ECMAScript 的 ToInt32：非有限回 0，其余对 2^32 取模再看符号。
+ *  范围内那一格不走 fmod（与 `omni_js.c` 的 `to_i32` 同一条快路、同一个理由：
+ *  `fmod(trunc(d), 2^32) == trunc(d)`，而 `(int32_t)d` 就是朝零截断 ⇒ 逐位相同）。 */
 static int32_t to_int32(double d) {
+  if (d >= -2147483648.0 && d <= 2147483647.0) return (int32_t)d;
   if (!isfinite(d)) return 0;
-  double m = fmod(trunc(d), 4294967296.0);
-  if (m < 0) m += 4294967296.0;
-  if (m >= 2147483648.0) m -= 4294967296.0;
-  return (int32_t)m;
+  {
+    double m = fmod(trunc(d), 4294967296.0);
+    if (m < 0) m += 4294967296.0;
+    if (m >= 2147483648.0) m -= 4294967296.0;
+    return (int32_t)m;
+  }
 }
 
 /* 进来那一格也要走 ToInt32，**不能直接 `(int32_t)double`**：C 的这个转换在超出 i32
