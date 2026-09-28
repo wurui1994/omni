@@ -349,6 +349,25 @@ function cpFind(s, needle) {
   return -1n;
 }
 
+/** `(scpord S)` / `(scpchr I)` —— 一格字符与它的码点之间（UTF-8 的编解码）。 */
+function cpOrd(s) {
+  const b = bytesOf(s);
+  if (b.length === 0) rtError('ord(): 收的是一格字符，给的是空串');
+  const b0 = b[0];
+  let n = 1;
+  let cp = b0;
+  if (b0 >= 0x80) {
+    if ((b0 & 0xE0) === 0xC0) { n = 2; cp = b0 & 0x1F; } else if ((b0 & 0xF0) === 0xE0) { n = 3; cp = b0 & 0x0F; } else if ((b0 & 0xF8) === 0xF0) { n = 4; cp = b0 & 0x07; } else rtError('ord(): 不是合法的 UTF-8 起始字节');
+  }
+  if (b.length !== n) {
+    let m = 0;
+    for (let i = 0; i < b.length; i += 1) if ((b[i] & 0xC0) !== 0x80) m += 1;
+    rtError(`ord(): 收的是一格字符（这一格有 ${m} 个码点）`);
+  }
+  for (let i = 1; i < n; i += 1) cp = (cp << 6) | (b[i] & 0x3F);
+  return BigInt(cp);
+}
+
 function cpSub(s, start, len) {
   const b = bytesOf(s);
   const st = Number(start);
@@ -1393,6 +1412,7 @@ export function applyBuiltin(I, e, a) {
     case 'cplen': return BigInt(cpLen(a[0]));
     case 'cpsub': return cpSub(a[0], a[1], a[2]);
     case 'cpfind': return cpFind(a[0], a[1]);
+    case 'cpord': return cpOrd(a[0]);
 
     case 'indexOf': return indexOfStr(a[0], a[1]);
     case 'join': return a[0].join(a[1]);

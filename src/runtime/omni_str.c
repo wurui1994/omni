@@ -133,6 +133,24 @@ int64_t omni_str_cpfind(omni_str s, omni_str needle) {
   return n;
 }
 
+/** `(scpord S)` —— 一格字符的**码点**（UTF-8 解一个字符；S 必须正好一个字符）。 */
+int64_t omni_str_cpord(omni_str s) {
+  if (s.len == 0) omni_error("ord(): 收的是一格字符，给的是空串");
+  unsigned char b0 = (unsigned char)s.p[0];
+  int64_t n;
+  int64_t cp;
+  if (b0 < 0x80) { n = 1; cp = b0; }
+  else if ((b0 & 0xE0) == 0xC0) { n = 2; cp = b0 & 0x1F; }
+  else if ((b0 & 0xF0) == 0xE0) { n = 3; cp = b0 & 0x0F; }
+  else if ((b0 & 0xF8) == 0xF0) { n = 4; cp = b0 & 0x07; }
+  else { omni_error("ord(): 不是合法的 UTF-8 起始字节"); return 0; }
+  if (s.len != n) {
+    omni_errorf("ord(): 收的是一格字符（这一格有 %lld 个码点）", (long long)omni_str_cplen(s));
+  }
+  for (int64_t i = 1; i < n; i++) cp = (cp << 6) | ((unsigned char)s.p[i] & 0x3F);
+  return cp;
+}
+
 omni_str omni_str_cpsub(omni_str s, int64_t start, int64_t len) {
   int64_t n = omni_str_cplen(s);
   if (start < 0 || len < 0 || start + len > n) {

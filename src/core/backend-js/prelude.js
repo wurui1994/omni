@@ -950,6 +950,26 @@ function $cpfind(s, needle) {
   }
   return -1;
 }
+// (scpord S) / (scpchr I) —— 一格字符与它的码点之间（UTF-8 的编解码，不是 unicode 表）。
+function $cpord(s) {
+  const b = $bytes(s);
+  if (b.length === 0) $rt_error("ord(): 收的是一格字符，给的是空串");
+  const b0 = b[0];
+  let n = 1, cp = b0;
+  if (b0 >= 0x80) {
+    if ((b0 & 0xE0) === 0xC0) { n = 2; cp = b0 & 0x1F; }
+    else if ((b0 & 0xF0) === 0xE0) { n = 3; cp = b0 & 0x0F; }
+    else if ((b0 & 0xF8) === 0xF0) { n = 4; cp = b0 & 0x07; }
+    else $rt_error("ord(): 不是合法的 UTF-8 起始字节");
+  }
+  if (b.length !== n) {
+    let m = 0;
+    for (let i = 0; i < b.length; i++) if ((b[i] & 0xC0) !== 0x80) m++;
+    $rt_error("ord(): 收的是一格字符（这一格有 " + m + " 个码点）");
+  }
+  for (let i = 1; i < n; i++) cp = (cp << 6) | (b[i] & 0x3F);
+  return cp;
+}
 function $cpsub(s, start, len) {
   const b = $bytes(s), st = Number(start), ln = Number(len);
   let n = 0;

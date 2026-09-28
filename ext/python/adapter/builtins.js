@@ -1443,45 +1443,15 @@ export function intOfStr(s0, base, C, badMsg) {
 }
 
 /**
- * `ord(c)` —— 方言里没有"串 → 码位"那一格算子，所以**反着来**：拿 `(chr i)` 从 0 数到
- * 127，对上了就是它。128 步是上限，而且只有 ASCII 那一档对得上 —— 非 ASCII 的字符在
- * 这一层是**几个字节**（串是字节不是码点），对不上就当场报，不悄悄答个字节值出去。
+ * `ord(c)` —— **方言里现在有那一格了**（`(scpord S)`，UTF-8 解一个字符）。
+ *
+ * 从前这儿是反着来的：拿 `(chr i)` 从 0 数到 127 比一遍，于是非 ASCII 一律报
+ * "ord() 只接 ASCII（串是字节不是码点）"。那是"串是字节"那笔账的一部分
+ * （`ext/python/SPEC.md` §一 第 28 条）—— 现在码点那一族进了方言，这儿就是一格算子：
+ * 一个字符的码点由 UTF-8 的编码自己说，不需要任何 unicode 表。
  */
 export function ordOf(c0, C) {
-  const h = holder(C);
-  const c = h.keep(c0, 'od_c');
-  const out = h.decl('od_o', INT, int(-1));
-  const i = h.decl('od_i', INT, int(0));
-  h.pre.push({
-    kind: 'if',
-    cond: bin('!=', call1('scplen', [c]), int(1)),
-    then: [{
-      kind: 'builtin-stmt',
-      name: 'fail',
-      args: [str('ord() expected a character (one ASCII byte)')],
-    }],
-    else_: null,
-  });
-  h.pre.push({
-    kind: 'while',
-    cond: bin('&&', bin('<', out, int(0)), bin('<', i, int(128))),
-    body: [
-      {
-        kind: 'if',
-        cond: bin('==', call1('chr', [i]), c),
-        then: [{ kind: 'assign', target: out, value: i }],
-        else_: null,
-      },
-      inc(i),
-    ],
-  });
-  h.pre.push({
-    kind: 'if',
-    cond: bin('<', out, int(0)),
-    then: [{ kind: 'builtin-stmt', name: 'fail', args: [str('ord() 只接 ASCII（串是字节不是码点）')] }],
-    else_: null,
-  });
-  return h.wrap(out);
+  return { kind: 'builtin', name: 'scpord', args: [c0], type: INT };
 }
 
 /**

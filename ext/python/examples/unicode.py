@@ -8,7 +8,7 @@
 # **还没接的两格**（明说，不在这一份里）：
 #   * `.upper()` / `.lower()` 对非 ASCII 不动 —— 那要 unicode 的大小写表，是借
 #     `Objects/unicodeobject.c` 的事（这一族不是 UTF-8 算术）；
-#   * `ord()` / `chr()` 对非 ASCII 报话 —— 那一格是 UTF-8 的编解码，该我们做，下一刀。
+#   （`ord()` / `chr()` 那一格**这一刀接上了**：见下面第九段。）
 
 
 def main():
@@ -51,6 +51,12 @@ def main():
     # 八、比较与排序（UTF-8 的字节序就是码点序 —— 这一档本来就对，别弄坏）
     print("abc" < "abd", "Z" < "a", "é" > "e")
     print(sorted(["banana", "Äpfel", "cherry"]))
+
+    # 九、`ord` / `chr`：一格字符与它的码点之间（UTF-8 的编解码，不是 unicode 表）
+    print(ord("A"), ord("é"), ord("中"), ord("🐍"))
+    print(chr(65), chr(233), chr(20013), chr(128013))
+    print(ord(chr(128013)), chr(ord("ö")))
+    print("".join([chr(ord(c)) for c in s]) == s)
 
 
 main()

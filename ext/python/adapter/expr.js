@@ -3450,6 +3450,8 @@ function builtinOf(nm, args, argToks, C) {
       }
       return ordOf(args[0], C);
     case 'chr':
+      /* `chr(i)` —— 方言的 `(chr I)` 本来就是"码点变一格字符"（UTF-8 编，三条腿都量过：
+         `chr(20013)` 出 `中`、`chr(128013)` 出 `🐍`）。这一格不必动。 */
       return { kind: 'builtin', name: 'chr', args };
     case 'abs':
       if (t0.kind === 'real') return { kind: 'rmath', fn: 'fabs', args };

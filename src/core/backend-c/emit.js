@@ -2958,6 +2958,7 @@ class CEmitter {
       case 'cplen': return `omni_str_cplen(${a[0]})`;
       case 'cpsub': return `omni_str_cpsub(${a[0]}, ${a[1]}, ${a[2]})`;
       case 'cpfind': return `omni_str_cpfind(${a[0]}, ${a[1]})`;
+      case 'cpord': return `omni_str_cpord(${a[0]})`;
 
 
       case 'int_of_string': return `omni_int_of_string(${a[0]})`;

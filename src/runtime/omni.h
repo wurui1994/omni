@@ -374,6 +374,8 @@ omni_str omni_str_sub(omni_str s, int64_t start, int64_t len);
 int64_t omni_str_cplen(omni_str s);
 omni_str omni_str_cpsub(omni_str s, int64_t start, int64_t len);
 int64_t omni_str_cpfind(omni_str s, omni_str needle);
+/* `(scpord S)` —— 一格字符的码点（UTF-8 解一个字符）。反过来那一格方言早就有：`(chr I)`。 */
+int64_t omni_str_cpord(omni_str s);
 
 int64_t omni_str_length(omni_str s);
 omni_str omni_chr(int64_t cp);

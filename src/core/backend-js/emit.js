@@ -1071,6 +1071,7 @@ class JsEmitter {
       case 'cplen': return `$cplen(${a[0]})`;
       case 'cpsub': return `$cpsub(${a[0]}, ${a[1]}, ${a[2]})`;
       case 'cpfind': return `$cpfind(${a[0]}, ${a[1]})`;
+      case 'cpord': return `$cpord(${a[0]})`;
 
 
       case 'int_of_string': return `$int_of_string(${a[0]})`;

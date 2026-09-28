@@ -110,6 +110,7 @@ export const SX_ARITY = {
   scplen: 1,
   scpsub: 3,
   scpfind: 2,
+  scpord: 1,
 
   /* 截到 N 位（ADR-0031 §8.2）：`(trunc N E)` = asUintN、`(sext N E)` = asIntN、
      `(zext N E)` 与 trunc 同值（分开写只为让读的人看出意图）。N 是 1..64 的字面量。 */
@@ -243,6 +244,7 @@ export const ipow = (a, b) => op('ipow', a, b);
 export const scplen = (v) => op('scplen', v);
 export const scpsub = (v, a, b) => op('scpsub', v, a, b);
 export const scpfind = (v, t) => op('scpfind', v, t);
+export const scpord = (v) => op('scpord', v);
 
 export const slen = (v) => op('slen', v);
 export const sfind = (v, x) => op('sfind', v, x);
