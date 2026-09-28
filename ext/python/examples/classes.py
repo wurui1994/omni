@@ -263,3 +263,41 @@ if r:
     print("truthy")
 
 
+# **继承** —— 编译期把父类的字段与方法**抄进子类**（方言的记录没有继承这一档，这一层
+# 也不要 vtable）。抄方法为什么对：`C.fnNodes` 的键是 `<类名>.<方法名>`，单态化那趟按
+# 调用点的 `self` 类型收实例，于是抄过来那份在子类上**自己生成一份**、读的是子类的字段。
+# 子类覆盖了同名方法时，父类那份挪到 `__super__<名字>` 上 —— `super().<名字>(…)` 落到它。
+# `isinstance` 沿 `base` 链往上找（编译期就答得出来）。
+# **多态没接**：把子类装进父类那格变量、或者混在一张表里，那两档要 vtable 或箱子 ——
+# 撞上了当场报"这张表里装着 named / named —— 合不成一格"。
+class Animal:
+    def __init__(self, name: str):
+        self.name = name
+
+    def speak(self) -> str:
+        return "..."
+
+    def intro(self) -> str:
+        return self.name + " says " + self.speak()
+
+
+class Dog(Animal):
+    def __init__(self, name: str, tricks: int):
+        super().__init__(name)
+        self.tricks = tricks
+
+    def speak(self) -> str:
+        return "woof"
+
+    def brag(self) -> str:
+        return super().speak() + "/" + str(self.tricks)
+
+
+a = Animal("thing")
+d = Dog("rex", 2)
+print(a.speak(), a.intro())
+print(d.speak(), d.intro(), d.brag())
+print(d.name, d.tricks, len(d.name))
+print(isinstance(d, Dog), isinstance(d, Animal), isinstance(a, Animal), isinstance(a, Dog))
+
+

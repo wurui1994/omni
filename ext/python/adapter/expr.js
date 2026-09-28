@@ -3717,9 +3717,15 @@ function isinstanceOf(valTok, tyTok, C) {
   const nm = String(nameOf(tyTok));
   const v0 = exprOf(valTok, C);
   const t = ty(v0, C);
-  /* 一格记录：这一层没有继承，所以就是"是不是同一个类"。 */
+  /* 一格记录：**编译期就答得出来**（这一层的类型是静态的）。继承那一档要**沿着
+     `base` 链往上找**：`isinstance(q, P)` 在 `class Q(P)` 上是 True。 */
   if (C.records.has(nm)) {
-    return { kind: 'bool', value: t.kind === 'named' && t.name === C.ref(nm) };
+    let ok = false;
+    for (let r = t.kind === 'named' ? C.recOf(t) : null; r !== null && r !== undefined;) {
+      if (r.name === nm) { ok = true; break; }
+      r = r.base === null || r.base === undefined ? null : C.records.get(r.base) ?? null;
+    }
+    return { kind: 'bool', value: ok };
   }
   if (nm === 'list') return { kind: 'bool', value: t.kind === 'arr' };
   if (nm === 'dict') return { kind: 'bool', value: t.kind === 'map' };
@@ -4011,6 +4017,39 @@ export function callOf(x, C) {
     throw new Error('python->IR: `tuple(x)` 只在 x 是一格**非空的表/元组字面量**时接了'
       + ' —— 这一层的元组是编译期定长的记录（每一格各有自己的类型），'
       + '长度要到运行期才知道的那一档还没接');
+  }
+  /* **`super().<方法>(…)`** —— 落成调"父类那一份抄到子类上的副本"（`__super__<方法>`，
+     见 `index.js` 的 `declareClasses`）。这一层没有"当前在哪个类里"那格上下文，
+     所以**靠 `self` 装的类型认**（`super()` 只在方法体里有意义）。 */
+  if (tag(fn) === 'attr' && tag(kids(fn)[0]) === 'call'
+    && tag(kids(kids(fn)[0])[0]) === 'n'
+    && String(nameOf(kids(kids(fn)[0])[0])) === 'super') {
+    const mn = String(leaf(kids(fn)[1]));
+    const selfT = C.lookup === undefined ? null : C.lookup('self');
+    const recS = selfT === null || selfT === undefined ? null : C.recOf(selfT);
+    if (recS === null) {
+      throw new Error('python->IR: `super()` 只在方法体里接了（要认得出 `self` 装的是哪个类）');
+    }
+    const key = `__super__${mn}`;
+    if (!recS.methods.has(key)) {
+      throw new Error(`python->IR: \`super().${mn}()\` —— \`class ${recS.name}\` 上没有`
+        + `父类那一份 \`${mn}\`（只有"子类覆盖了父类同名方法"那一档才有 super 那一格）`);
+    }
+    const self = { kind: 'name', name: C.ref('self') };
+    const vals = [self, ...argToks.map((a) => exprOf(a, C))];
+    const tys = vals.map((v) => ty(v, C));
+    let inst = C.resolveMethod(recS.name, key, tys);
+    /* 实例收不到：`super().m(…)` 不是"按名字调用"的形状，收实例那一趟看不见它。 */
+    if (inst === null && C.requireFn !== undefined) {
+      inst = C.requireFn(`${recS.name}.${key}`, tys);
+    }
+    if (inst === null) {
+      throw new Error(`python->IR: \`super().${mn}()\` 没有对得上的那一格实例`);
+    }
+    return {
+      kind: 'call', fn: { kind: 'name', name: inst.mangled }, args: vals,
+      type: inst.ret ?? undefined,
+    };
   }
   /* **`dict.fromkeys(ks, v)`** —— `dict` 这个名字本身不是一格值（类对象没接），所以这一格
      得当"特殊形式"拦下来。**只接键写成表/元组字面量**那一档：那时格数在编译期，逐格

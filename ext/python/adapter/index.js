@@ -166,8 +166,29 @@ function declareClasses(nodes, C) {
   for (const cls of nodes) {
     const nm = String(nameOf(kids(cls).find((y) => tag(y) === 'n')));
     if (C.records.has(nm)) throw new Error(`python->IR: \`class ${nm}\` 定义了两遍 —— 还没接`);
-    if (kids(part(cls, 'bases') ?? { kind: 'list', items: [] }).length > 0) {
-      throw new Error(`python->IR: \`class ${nm}(…)\` 的继承还没接`);
+    /* **继承 = 编译期把父类的字段与方法抄进子类**（方言的记录没有继承这一档，而这一层
+       也不想要 vtable）。所以：一格基类、必须是**这份源码里前面已经定义过的类**；
+       子类的方法表先摆父类那几格（子类自己的覆盖它），类级标注也抄过来。
+       抄方法为什么对：`C.fnNodes` 的键是 `<类名>.<方法名>`，单态化那趟按调用点的
+       `self` 类型收实例 —— 抄过来那份在子类上**自己生成一份**，`self.x` 读的是子类的字段。
+       **多态没接**（把子类装进父类那格变量、或者混在一张表里）：那两档要 vtable
+       或者箱子，撞上了当场报"合不成一格"。 */
+    const bases = kids(part(cls, 'bases') ?? { kind: 'list', items: [] });
+    if (bases.length > 1) {
+      throw new Error(`python->IR: \`class ${nm}\` 的多继承还没接（一格基类接了）`);
+    }
+    let baseRec = null;
+    if (bases.length === 1) {
+      if (tag(bases[0]) !== 'n') {
+        throw new Error(`python->IR: \`class ${nm}(…)\` 的基类要写成一格类名`
+          + `（给的是 ${tag(bases[0])}）`);
+      }
+      const bn = String(nameOf(bases[0]));
+      baseRec = C.records.get(bn) ?? null;
+      if (baseRec === null) {
+        throw new Error(`python->IR: \`class ${nm}(${bn})\` 里的 \`${bn}\` 还没定义 ——`
+          + '继承只认这份源码里**前面**定义过的类');
+      }
     }
     if (part(cls, 'tparams') !== undefined) {
       throw new Error(`python->IR: \`class ${nm}[T]\` 的类型形参还没接`);
@@ -178,10 +199,26 @@ function declareClasses(nodes, C) {
       fields: [],
       methods: new Map(),
       annots: [],
+      base: baseRec === null ? null : baseRec.name,
     };
+    if (baseRec !== null) {
+      rec.annots.push(...baseRec.annots);
+      for (const [mn, node] of baseRec.methods) {
+        if (mn.startsWith('__super__')) continue;
+        rec.methods.set(mn, node);
+        C.fnNodes.set(`${nm}.${mn}`, node);
+      }
+    }
     for (const s of flatten(kids(part(cls, 'body') ?? { kind: 'list', items: [] }))) {
       if (tag(s) === 'def') {
         const mn = String(nameOf(kids(s).find((y) => tag(y) === 'n')));
+        /* 覆盖了父类那一格：父类那份挪到 `__super__<名字>` 上 —— `super().<名字>(…)`
+           落到它身上（`self` 照旧是子类，所以字段读得对）。 */
+        if (baseRec !== null && baseRec.methods.has(mn)) {
+          const sup = `__super__${mn}`;
+          rec.methods.set(sup, baseRec.methods.get(mn));
+          C.fnNodes.set(`${nm}.${sup}`, baseRec.methods.get(mn));
+        }
         rec.methods.set(mn, s);
         C.fnNodes.set(`${nm}.${mn}`, s);
         continue;
@@ -226,12 +263,16 @@ function inferFields(rec, C) {
     annotated.add(n);
     add(n, t);
   }
-  const init = rec.methods.get('__init__');
-  for (const inst of C.insts.get(`${rec.name}.__init__`) ?? []) {
-    if (init === undefined) break;
-    C.push();
-    for (const p of inst.params) C.bind(p.name, p.type);
-    for (const s of flatten(kids(part(init, 'body') ?? { kind: 'list', items: [] }))) {
+  /* **`__init__` 可能有两格**：自己那一格，外加继承来的那一格（`__super____init__` ——
+     子类的 `__init__` 里一句 `super().__init__(…)` 就把父类那几个字段也装上了，
+     而那几句 `self.x = …` 写在父类那份体里）。两份都扫，次序是**父类先**。 */
+  for (const key of ['__super____init__', '__init__']) {
+    const init = rec.methods.get(key);
+    if (init === undefined) continue;
+    for (const inst of C.insts.get(`${rec.name}.${key}`) ?? []) {
+      C.push();
+      for (const p of inst.params) C.bind(p.name, p.type);
+      for (const s of flatten(kids(part(init, 'body') ?? { kind: 'list', items: [] }))) {
       /* **`self.xs: list[int] = []`** —— 带标注的那一句是 `annot` 不是 `assign`，
          从前这儿只看 `assign`，于是那一格字段**根本没认出来**（症状：`Stack` 没有字段
          `items`（一格都没有））。标注就在手上，照它算，比从右边猜准。 */
@@ -258,7 +299,8 @@ function inferFields(rec, C) {
         add(n, tyOfCst(value, C));
       }
     }
-    C.pop();
+      C.pop();
+    }
   }
   rec.fields = order
     .map((n) => ({ name: n, type: unifyPy(seen.get(n)) }))
@@ -913,6 +955,19 @@ function collectInsts(nm, sh, tree, C) {
       const mname = nm.slice(dot + 1);
       /* 造一格：`C(…)` -> `C.__init__(self, …)`。 */
       if (mname === '__init__' && tag(fn) === 'n' && String(nameOf(fn)) === cname
+        && args.length === sh.names.length - 1) {
+        take(args, sh.annots[0]);
+        continue;
+      }
+      /* **`super().m(…)`** —— 这一格的名字是 `<子类>.__super__<m>`（父类那一份抄到子类
+         上的副本）。接收者不是一格值，所以上面那条"recv 装的正是这个类"认不出它；
+         `self` 听 `sh.annots[0]`（shells 那趟已经按键名标成子类了）。
+         不收这一格的后果：`inferFields` 扫不到父类 `__init__` 里那几句 `self.x = …`，
+         报的是"`Q` 没有字段 `k`"。 */
+      if (mname.startsWith('__super__') && tag(fn) === 'attr'
+        && String(leaf(kids(fn)[1])) === mname.slice('__super__'.length)
+        && tag(kids(fn)[0]) === 'call' && tag(kids(kids(fn)[0])[0]) === 'n'
+        && String(nameOf(kids(kids(fn)[0])[0])) === 'super'
         && args.length === sh.names.length - 1) {
         take(args, sh.annots[0]);
         continue;
