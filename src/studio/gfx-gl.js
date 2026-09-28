@@ -158,6 +158,42 @@ function mk2d(w, h) {
   return null;
 }
 
+/**
+ * **取一张图**（文件纹理与 `pic` 两处）。页面上就是 `new Image()`；**Worker 里没有它**
+ * （任务 #39）⇒ 用 `fetch + createImageBitmap` 补一格**形状一样的壳子**：
+ * `onload` / `onerror` / `naturalWidth` / `naturalHeight` 这几格调用处照旧读。
+ *
+ * 两处与 `Image` 不一样，调用处要照着写：
+ * * 换 URL 走 **`imgSrc(im, url)`** 而不是 `im.src = url` —— 这一份不许用赋值器
+ *   （取值/赋值器不在那个 JS 子集里，`check:self` 那道门）；
+ * * 往 GL / 2D 画布上传那一格递 **`imgOf(im)`**（页面上是那张 `Image`、Worker 里是
+ *   `ImageBitmap` —— `texImage2D` 与 `drawImage` 两样都认）。
+ */
+function newImg() {
+  const IM = globalThis.Image;
+  if (typeof IM === 'function') return new IM();
+  return { onload: null, onerror: null, naturalWidth: 0, naturalHeight: 0, bmp: null, shim: 1 };
+}
+
+function imgSrc(im, url) {
+  if (im.shim !== 1) { im.src = url; return; }
+  const f = globalThis.fetch;
+  const mk = globalThis.createImageBitmap;
+  const bad = () => { if (typeof im.onerror === 'function') im.onerror(); };
+  if (typeof f !== 'function' || typeof mk !== 'function') { bad(); return; }
+  f(url).then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))))
+    .then((b) => mk(b))
+    .then((bm) => {
+      im.bmp = bm;
+      im.naturalWidth = bm.width;
+      im.naturalHeight = bm.height;
+      if (typeof im.onload === 'function') im.onload();
+    })
+    .catch(() => { bad(); });
+}
+
+const imgOf = (im) => (im.shim === 1 ? im.bmp : im);
+
 function open(canvas, w, h) {
   /* **`alpha: false` 是一条判据不是一格口味**：正本画的是窗口的帧缓冲，那儿没有
      alpha 通道 —— 片元写多少 alpha 都不影响看见的颜色。浏览器这边默认 `alpha: true`
@@ -1006,7 +1042,7 @@ function texFile(slot, name, fmt) {
   t.w = 1;
   t.h = 1;
   t.fmt = fmt;
-  const im = new Image();
+  const im = newImg();
   let tried = 0;
   /* **落点试两处**：先脚本旁边，再那棵语料树的根。为什么有第二处：原版是拿
      `polydraw.exe` 所在的目录当基准的（本机那一档对应 `OMNI_GFX_DIR`）——
@@ -1014,9 +1050,9 @@ function texFile(slot, name, fmt) {
   const root = FT.base.split('/')[0] ?? '';
   const next = () => {
     tried += 1;
-    if (tried === 1) { im.src = assetUrl(assetPath(name)); return true; }
+    if (tried === 1) { imgSrc(im, assetUrl(assetPath(name))); return true; }
     if (tried === 2 && root !== '' && root !== FT.base) {
-      im.src = assetUrl(assetPath(name, root));
+      imgSrc(im, assetUrl(assetPath(name, root)));
       return true;
     }
     return false;
@@ -1053,11 +1089,11 @@ function texFile(slot, name, fmt) {
       const c2 = cut.getContext('2d');
       for (let f = 0; f < 6; f++) {
         c2.clearRect(0, 0, fw, fh);
-        c2.drawImage(im, 0, fh * order[f], fw, fh, 0, 0, fw, fh);
+        c2.drawImage(imgOf(im), 0, fh * order[f], fw, fh, 0, 0, fw, fh);
         g2.texImage2D(faces[f], 0, g2.RGBA, g2.RGBA, g2.UNSIGNED_BYTE, cut);
       }
     } else {
-      g2.texImage2D(g2.TEXTURE_2D, 0, g2.RGBA, g2.RGBA, g2.UNSIGNED_BYTE, im);
+      g2.texImage2D(g2.TEXTURE_2D, 0, g2.RGBA, g2.RGBA, g2.UNSIGNED_BYTE, imgOf(im));
     }
     if (texParams(fmt, tar)) g2.generateMipmap(tar);
     t.w = im.naturalWidth;
@@ -1846,14 +1882,14 @@ const PIC = {
 function picLoad(name) {
   const e = { st: 'load', w: 0, h: 0, px: null };
   PIC.m.set(name, e);
-  const im = new Image();
+  const im = newImg();
   let tried = 0;
   const root = FT.base.split('/')[0] ?? '';
   const next = () => {
     tried += 1;
-    if (tried === 1) { im.src = assetUrl(assetPath(name)); return true; }
+    if (tried === 1) { imgSrc(im, assetUrl(assetPath(name))); return true; }
     if (tried === 2 && root !== '' && root !== FT.base) {
-      im.src = assetUrl(assetPath(name, root));
+      imgSrc(im, assetUrl(assetPath(name, root)));
       return true;
     }
     return false;
@@ -1862,7 +1898,7 @@ function picLoad(name) {
     const cv = mk2d(im.naturalWidth, im.naturalHeight);
     if (cv === null) { miss('pic:2d'); return; }
     const c2 = cv.getContext('2d', { willReadFrequently: true });
-    c2.drawImage(im, 0, 0);
+    c2.drawImage(imgOf(im), 0, 0);
     e.px = c2.getImageData(0, 0, cv.width, cv.height).data;
     e.w = cv.width;
     e.h = cv.height;
