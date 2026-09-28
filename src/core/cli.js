@@ -4243,6 +4243,61 @@ function runtimeObjectsSelf(arch, os) {
 }
 
 /**
+ * 运行时那几格**打成一份 `.a` 再给链接器** —— 按需取用（`alacarte`），
+ * 谁都没引用的成员一个字节都不进产物。
+ *
+ * 为什么要这一格：位置实参上的 `.o` 是**无条件全链上**的。量过（2026-09-28）：
+ * 一份只 `print("hi")` 的产物 786KB 里躺着整台三维光栅器（`omni_r3.o`）、整个正则引擎、
+ * 整个采样 profiler —— `nm` 对账每格 `.o` 导出的符号一个没少。打成 `.a` 之后同一份
+ * hello world 是 **439KB，21 个成员只拉了 12 个**；编译器自己（那 24MB 的 C）也照旧
+ * 链得上、跑得起来，而 `omni_r3` 一个符号都没进去。
+ *
+ * 三格口径：
+ *   * `syms`（谁定义了什么）由 ELF 的 `.symtab` 说 —— `writeArchive` 只管格式、不认得
+ *     ELF；少了符号索引，按需取用就取不出成员（症状是"符号 '…' 没有定义"）。
+ *   * 回的是**给 `c link` 的那几个词**：Mach-O 那支 `--dylib` 按后缀分派进 `archives`，
+ *     ELF 那支认 `--ar`。**PE 那支还没这一格**，照旧给裸 `.o`。
+ *   * 出任何岔子都**退回"那几格全给"那条老路** —— 这一格省的是体积，
+ *     不该成为构建失败的理由。
+ */
+function runtimeArgsSelf(arch, os, fmt) {
+  const objs = runtimeObjectsSelf(arch, os);
+  const flag = fmt === 'macho' ? '--dylib' : (fmt === 'elf' ? '--ar' : null);
+  if (flag === null || objs.length === 0) return objs;
+  const lib = join(dirname(objs[0]), 'librt.a');
+  try {
+    if (!exists(lib)) {
+      const ar = coreMod('link/ar.js');
+      const elf = coreMod('link/elf.js');
+      const pl = coreMod('link/pe_load.js');
+      const members = [];
+      for (const p of objs) {
+        const s = readBinary(p);
+        const bytes = new Uint8Array(s.length);
+        for (let k = 0; k < s.length; k++) bytes[k] = s.charCodeAt(k);
+        const syms = [];
+        for (const x of pl.readSymbols(elf.readObject(bytes))) {
+          if (x.name !== '' && x.bind === 1 && x.shndx !== 0) syms.push(x.name);
+        }
+        members.push({ name: basename(p), bytes, syms });
+      }
+      const a = ar.writeArchive(members);
+      let text = '';
+      for (let k = 0; k < a.length; k++) text += String.fromCharCode(a[k]);
+      /* 先落到旁边再 rename：同一个卷上的 rename 是原子的，别的进程要么看见整份 `.a`、
+         要么看不见（与那 21 格 `.o` 逐格搬进暖存同一个道理）。 */
+      writeBinary(`${lib}.tmp`, text);
+      rename(`${lib}.tmp`, lib);
+    }
+    vStep(`runtime .a  ${objs.length} 格打成 ${basename(lib)}  ${fileSize(lib)} bytes（按需取用）`);
+    return [flag, lib];
+  } catch (e) {
+    vStep(`runtime .a  打不出来（${e.message}）—— 退回 ${objs.length} 格裸 .o`);
+    return objs;
+  }
+}
+
+/**
  * workDir 给的时候，生成的 .c 就留在那里（名字跟着产物走）——
  * `omni bootstrap` 与 `build --work DIR` 要的是"中间产物留在构建目录里"：链断在哪一代
  * 都能直接翻出那份 C 来看。不给的时候落在 `.omni-cache/work/c-<产物名>` 底下，
@@ -4437,7 +4492,7 @@ function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms)
    * `DT_SONAME` —— 两个格式各认自己那一个，给错的那个会被静静地忽略）。核心里那些符号
    * 留成未定义 —— 造共享库时 `relocate_syms` 那道筛子整个撤掉（`tccelf.c`：
    * `|| s1->output_type != TCC_OUTPUT_EXE`），由 `dlopen` 在平坦命名空间里解析。 */
-  const rt = plugin === undefined ? runtimeObjectsSelf(arch, os) : [];
+  const rt = plugin === undefined ? runtimeArgsSelf(arch, os, fmt) : [];
   const sh = plugin === undefined ? []
     : ['--shared', fmt === 'macho' ? '--install-name' : '--soname', basename(outPath)];
   /* `--stdlib` 一个词把「默认 libc + crt + 入口 `_start`」都带上（见 `c-link` 那一段）；
@@ -4596,14 +4651,14 @@ function buildSelfModules(mod, outPath, dir) {
     made++;
   }
   vStep(`c obj  ${objs.length} 份模块（这一趟编了 ${made} 格）`);
-  const rt = runtimeObjectsSelf(arch, os);
+  const rt = runtimeArgsSelf(arch, os, fmt);
   const stk = fmt === 'macho' ? ['--stack-size', String(0x20000000)] : [];
   const rc = subMain(['c', 'link', ...objs, ...rt, '-o', outPath,
     '--arch', arch, '--os', os, '-f', fmt, '--stdlib', ...stk, ...sysArgs,
     ...cAbiLibs(mod.cabi ?? []).map((l) => `-l${l}`), ...selfLibArgs(mod.libs), '-q']);
   if (rc !== 0) throw new OmniError(`OMNI_CC=self：链接没过（各模块的 C 留在 ${dir}）`);
   spawn('chmod', ['+x', outPath], 'c');
-  vStep(`c link（我们自己的链接器）  ${objs.length + rt.length} 个 .o -> ${outPath}`
+  vStep(`c link（我们自己的链接器）  ${objs.length} 个 .o + 运行时 -> ${outPath}`
     + `  ${fileSize(outPath)} bytes`);
   tally(basename(outPath), false, all.map((x) => x.c).join('\n'), fileSize(outPath), tGen,
     nowMs() - t0);
