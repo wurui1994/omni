@@ -542,8 +542,11 @@ static omni_dyn omni_js_obj_getk(omni_dyn o, omni_str key) { \
        那些原型是带 get 陷阱的代理，陷阱照**成员表**答：表里有 C 孪生的发一个原生
        （`"ab".toUpperCase` 取出来能调）、表里有而 C 那侧还没落地的当场报、
        根本不在表里的名字给 undefined —— 那才是这个值域里的答案（`[].zork`）。 */ \
-    return omni_js_getp(omni_js_proto_of_tag_(o), \
-                        omni_dyn_of_s16(omni_s16_of_utf8(key)), o); \
+    /* **键留在 UTF-8**（2026-09-28）：`getp` 要一格 dyn 键，于是这儿从前是
+       UTF-8 -> UTF-16 一次转换 + 一次分配，而 `a.dot` 这种"自己没有、原型上有"的读
+       **每一次**都走这条路（量到 `_platform_memmove` 自用 7.88%）。`getp_k` 收 `omni_str`，
+       与上面 OBJ 那一支同一个理由（那儿的注写着"别再转一圈"，只是这三处漏了）。 */ \
+    return omni_js_getp_k(omni_js_proto_of_tag_(o), key, o); \
   } \
   /* contains + get 是两次哈希 —— 取属性是解释器最热的一条，只探一次 */ \
   int64_t e = DT##_find(d, key); \
@@ -553,8 +556,11 @@ static omni_dyn omni_js_obj_getk(omni_dyn o, omni_str key) { \
      成员表落地之后 list 那一支也接得上了：陷阱认不出的名字答 undefined，
      所以 `a.zork` 照旧是 undefined，不会变成一句响错。 */ \
   if (o.tag == OMNI_DYN_DICT || o.tag == OMNI_DYN_LIST) { \
-    return omni_js_getp(omni_js_proto_of_tag_(o), \
-                        omni_dyn_of_s16(omni_s16_of_utf8(key)), o); \
+    /* **键留在 UTF-8**（2026-09-28）：`getp` 要一格 dyn 键，于是这儿从前是
+       UTF-8 -> UTF-16 一次转换 + 一次分配，而 `a.dot` 这种"自己没有、原型上有"的读
+       **每一次**都走这条路（量到 `_platform_memmove` 自用 7.88%）。`getp_k` 收 `omni_str`，
+       与上面 OBJ 那一支同一个理由（那儿的注写着"别再转一圈"，只是这三处漏了）。 */ \
+    return omni_js_getp_k(omni_js_proto_of_tag_(o), key, o); \
   } \
   return omni_dyn_undef(); \
 } \
