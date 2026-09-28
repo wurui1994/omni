@@ -840,6 +840,16 @@ static LT omni_js_find_slot_(omni_dyn o, omni_str key, omni_dyn *holder) { \
   } \
   return NULL; \
 } \
+/* "表里那个带前缀的键" vs "裸键"：只比不拼。槽表里的键形如 `'s' + 名字`（见 pkey_），
+   而发射层给的是名字本身，所以拼一份再比是白搬一趟字节。属性名几乎都是 1~8 字节，
+   所以短的走逐字节（`omni_eq_string` 那一刀同一个理由：那点长度上 memcmp 全是调用开销）。 */ \
+static bool omni_js_pkeq_(omni_str sk, omni_str key) { \
+  int64_t i; \
+  if (sk.len != key.len + 1 || sk.p[0] != 's') return false; \
+  if (key.len > 8) return memcmp(sk.p + 1, key.p, (size_t)key.len) == 0; \
+  for (i = 0; i < key.len; i++) { if (sk.p[i + 1] != key.p[i]) return false; } \
+  return true; \
+} \
 /* 带 IC 的属性读（键是编译期常量那一支）。形态与失效的理由写在宏外头那格 struct 上。
    命中时做的事：一次 tag 比、一次指针比、一次 `n` 比、一次 `live` 读、一次短键比 ——
    哈希与线性扫都不做。没命中就走一趟真查找，顺手把这一格记上；凡是**形状不合**
@@ -874,24 +884,28 @@ static omni_dyn omni_js_obj_getk_ic(omni_dyn o, omni_str key, struct omni_js_ic_
   ov = (omni_js_objv *)o.u.ref; \
   if (ov->px_h.tag != OMNI_DYN_UNDEF) return omni_js_obj_getk(o, key); \
   if (key.len >= (int64_t)sizeof(kbuf) - 1) return omni_js_obj_getk(o, key); \
-  kbuf[0] = 's'; \
-  if (key.len > 0) memcpy(kbuf + 1, key.p, (size_t)key.len); \
-  pk.p = kbuf; \
-  pk.len = key.len + 1; \
   ps = (DT)ov->ps; \
+  /* 命中那一段**不拼前缀键**：直接拿"表里那个带前缀的键"与裸键比（`omni_js_pkeq_`）。
+     从前这儿先 `kbuf[0]='s' + memcpy` 拼一份再 `omni_eq_string` 比，等于把同一串字节
+     搬一趟再看一趟 —— 采样里 `_platform_memmove` 6.2%、`omni_eq_string` 22.7%。
+     拼那一份只有**没命中**时才要（`DT##_find` 要一格完整的键）。 */ \
   if (ic->kind == 1) { \
-    if (ic->slot < ps->n && ps->live[ic->slot] && omni_eq_string(ps->keys[ic->slot], pk)) { \
+    if (ic->slot < ps->n && ps->live[ic->slot] && omni_js_pkeq_(ps->keys[ic->slot], key)) { \
       LT sl = (LT)ps->vals[ic->slot].u.ref; \
       if (!sl->items[1].u.b) return sl->items[0]; \
     } \
   } else if (ic->kind == 2 && ic->own == (void *)ps && ps->n == ic->own_n \
              && ov->pr.tag == OMNI_DYN_OBJ && ic->pr == ov->pr.u.ref) { \
     DT H = (DT)ic->hold; \
-    if (ic->slot < H->n && H->live[ic->slot] && omni_eq_string(H->keys[ic->slot], pk)) { \
+    if (ic->slot < H->n && H->live[ic->slot] && omni_js_pkeq_(H->keys[ic->slot], key)) { \
       LT sl = (LT)H->vals[ic->slot].u.ref; \
       if (!sl->items[1].u.b) return sl->items[0]; \
     } \
   } \
+  kbuf[0] = 's'; \
+  if (key.len > 0) memcpy(kbuf + 1, key.p, (size_t)key.len); \
+  pk.p = kbuf; \
+  pk.len = key.len + 1; \
   cur = o; \
   { \
     int64_t depth = 0; \
