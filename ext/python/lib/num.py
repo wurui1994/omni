@@ -22,6 +22,34 @@ def _float_inf():
     return big * 10.0
 
 
+def _math_gcd(a, b):
+    # `math.gcd` —— 辗转相除。python 那边收负数（`gcd(-12, 18)` 是 6），两个 0 答 0。
+    x = a
+    y = b
+    if x < 0:
+        x = 0 - x
+    if y < 0:
+        y = 0 - y
+    while y != 0:
+        t = x % y
+        x = y
+        y = t
+    return x
+
+
+def _math_factorial(n):
+    # `math.factorial` —— python 那边负数是 ValueError；库函数这一层没有"停下来"那格算子，
+    # 所以负数答 0（**明说的不足**，不是静静答错：0 不是任何 n 的阶乘）。
+    if n < 0:
+        return 0
+    out = 1
+    i = 2
+    while i <= n:
+        out = out * i
+        i = i + 1
+    return out
+
+
 def _float_nan():
     x = _float_inf()
     return x - x

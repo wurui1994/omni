@@ -694,6 +694,11 @@ export function tyOfCst(x, C) {
     }
     /* `p.x` —— 记录的字段。 */
     case 'attr': {
+      /* `math.pi` 那几格常量是 real（取属性那一支，见 `exprOf`）。 */
+      if (tag(kids(x)[0]) === 'n' && String(nameOf(kids(x)[0])) === 'math') {
+        const f0 = String(leaf(kids(x)[1]));
+        return MATH_CONST.has(f0) || f0 === 'inf' || f0 === 'nan' ? REAL : null;
+      }
       const rec = C.recOf(tyOfCst(kids(x)[0], C));
       if (rec === null) return null;
       const f = rec.fields.find((y) => y.name === String(leaf(kids(x)[1])));
@@ -702,6 +707,36 @@ export function tyOfCst(x, C) {
     case 'call': return tyOfCall(x, C);
     default: return null;
   }
+}
+
+/**
+ * **实数上的 `**`** —— 多一句运行期的检查：**负底数配非整数指数，python 交的是复数**
+ * （`(-8) ** (1/3)` 是 `1.0000000000000002+1.7320508075688772j`），而 C 的 `pow` 交 nan。
+ * 复数这一族还没接，所以那一档**当场停下来**，不拿 nan 装作答对了
+ * （静静答错是最坏的一类，这条规矩写在 SPEC §一 第 27 条）。
+ */
+function realPow(a, b, C) {
+  const pre = [];
+  const x = holdTmp(toReal(a, C), 'pw_x', C, pre);
+  const y = holdTmp(toReal(b, C), 'pw_y', C, pre);
+  pre.push({
+    kind: 'if',
+    cond: {
+      kind: 'binop', op: '&&',
+      left: { kind: 'binop', op: '<', left: x, right: { kind: 'real', value: 0 } },
+      right: {
+        kind: 'binop', op: '!=',
+        left: { kind: 'rmath', fn: 'floor', args: [y] },
+        right: y,
+      },
+    },
+    then: [{
+      kind: 'builtin-stmt', name: 'fail',
+      args: [{ kind: 'string', value: '负数的非整数次幂交的是复数 —— 还没接' }],
+    }],
+    else_: null,
+  });
+  return { kind: 'block-expr', stmts: pre, value: { kind: 'rmath', fn: 'pow', args: [x, y] } };
 }
 
 /** 二元那一格装的是什么 —— **python 的规矩**（`/` 出浮点、`//` 跟着操作数、串 `*` 出串）。 */
@@ -770,6 +805,10 @@ function tyOfCall(x, C) {
     /* `math.*` 先答 —— `math` 不是一格值，问它装什么会回 null。 */
     if (tag(kids(fn)[0]) === 'n' && String(nameOf(kids(fn)[0])) === 'math') {
       const f = String(leaf(kids(fn)[1]));
+      if (MATH_BOOL.has(f)) return BOOL;
+      if (MATH_LIB.has(f)) return INT;
+      if (f === 'trunc') return INT;
+      if (MATH_OTHER.has(f)) return REAL;
       return MATH_INT.has(f) ? INT : (MATH.has(f) ? REAL : null);
     }
     const recvTy = tyOfCst(kids(fn)[0], C);
@@ -1273,6 +1312,30 @@ export function exprOf(x, C) {
       }
       const ta = ty(then, C);
       const tb = ty(els, C);
+      /* **两支夹着语句时要真短路**（与 `and` / `or` 那一处同一条账）：`block-expr` 里那几句
+         会被**提到整句前头**，于是没走的那一支也算了一遍 —— `1 if ok else int("zz")` 当场
+         炸（python 印 1），`x if ok else xs.pop()` 会把表 pop 一格。
+         落成"一格临时量 + 一句 if"：只有该算的那一支才算。 */
+      const mkCond = (a0, b0, t0) => {
+        const cnd = condOf(c, C);
+        if (!carriesStmts(a0) && !carriesStmts(b0)) {
+          return { kind: 'ternary', type: t0, cond: cnd, then: a0, else_: b0 };
+        }
+        const n = C.fresh('cd_v');
+        C.bind(n, t0);
+        const v = { kind: 'name', name: n };
+        const arm = (e) => (e.kind === 'block-expr'
+          ? [...e.stmts, { kind: 'assign', target: v, value: e.value }]
+          : [{ kind: 'assign', target: v, value: e }]);
+        return {
+          kind: 'block-expr',
+          stmts: [
+            { kind: 'let', name: n, type: t0, init: null },
+            { kind: 'if', cond: cnd, then: arm(a0), else_: arm(b0) },
+          ],
+          value: v,
+        };
+      };
       if (!sameType(ta, tb)) {
         /* **两支不同型就退到箱子**（`3 if ok else "n"` / `x if ok else None` /
            `1.5 if ok else 2` —— python 里这三种都天经地义）。装得进箱子的才行：
@@ -1280,15 +1343,10 @@ export function exprOf(x, C) {
            **int 与 real 混着也走这条**：不能把 int 提到 real —— python 的
            `1 if ok else 2.5` 交的是 `1`，印 `1` 不是 `1.0`。 */
         const boxOK = (t0) => ['int', 'real', 'bool', 'string', 'dyn'].includes(t0.kind);
-        if (boxOK(ta) && boxOK(tb)) {
-          return {
-            kind: 'ternary', type: DYN, cond: condOf(c, C),
-            then: boxOf(then, C), else_: boxOf(els, C),
-          };
-        }
+        if (boxOK(ta) && boxOK(tb)) return mkCond(boxOf(then, C), boxOf(els, C), DYN);
         throw new Error(`python->IR: \`a if c else b\` 的两支不同型（${ta.kind} / ${tb.kind}）—— 还没接`);
       }
-      return { kind: 'ternary', type: ta, cond: condOf(c, C), then, else_: els };
+      return mkCond(then, els, ta);
     }
     case 'cmp': return cmpOf(x, C);
     case 'bin': return binOf(x, C);
@@ -1315,6 +1373,17 @@ export function exprOf(x, C) {
     case 'index': return indexOf(x, C);
     /* `p.x` —— 记录的字段。 */
     case 'attr': {
+      /* **`math` 里那几格常量**（`math.pi` / `math.inf` / `math.nan`）—— 取属性，不是调用。 */
+      if (tag(kids(x)[0]) === 'n' && String(nameOf(kids(x)[0])) === 'math') {
+        const f = String(leaf(kids(x)[1]));
+        if (MATH_CONST.has(f)) return MATH_CONST.get(f);
+        if (f === 'inf') return mathInf();
+        if (f === 'nan') {
+          const inf = mathInf();
+          return { kind: 'binop', op: '-', left: inf, right: mathInf() };
+        }
+        throw new Error(`python->IR: \`math.${f}\` 还没接（常量接了 pi / e / tau / inf / nan）`);
+      }
       const obj = exprOf(kids(x)[0], C);
       const name = String(leaf(kids(x)[1]));
       const rec = C.recOf(ty(obj, C));
@@ -2052,7 +2121,7 @@ function binOf(x, C) {
     /* 两边都是 int 而指数不是字面量：**退到箱子**（`dynBin` 里那一支在运行期问"指数非负吗"，
        非负走 `(ipow)`、负的走 real）—— 与 `tyOfCst` 里那一格说的 DYN 是同一件事。 */
     if (isInt(ta) && isInt(tb)) return dynBin('**', a, b, C, DYN_ARITH(C));
-    return { kind: 'rmath', fn: 'pow', args: [toReal(a, C), toReal(b, C)] };
+    return realPow(a, b, C);
 
   }
 
@@ -3070,12 +3139,95 @@ const MATH = new Map([
   ['fmod', 'fmod'], ['sin', 'sin'], ['cos', 'cos'], ['tan', 'tan'], ['asin', 'asin'],
   ['acos', 'acos'], ['atan', 'atan'], ['atan2', 'atan2'], ['sinh', 'sinh'], ['cosh', 'cosh'],
   ['tanh', 'tanh'], ['asinh', 'asinh'], ['acosh', 'acosh'], ['atanh', 'atanh'],
-  ['exp', 'exp'], ['expm1', 'expm1'], ['log10', 'log10'], ['log1p', 'log1p'],
+  ['exp', 'exp'], ['expm1', 'expm1'], ['log', 'log'], ['log10', 'log10'], ['log1p', 'log1p'],
   ['cbrt', 'cbrt'], ['hypot', 'hypot'],
 ]);
 
 /** 这几格 `math.*` 在 python 里交的是 **int**（不是 float）。 */
 const MATH_INT = new Set(['floor', 'ceil']);
+
+/** `math` 那一族里"不是一格 rmath"的几格（见 `mathOther`）。 */
+const MATH_OTHER = new Set(['isnan', 'isinf', 'isfinite', 'trunc', 'degrees', 'radians', 'copysign']);
+
+/** `math` 那一族里**落到库函数**的几格（整数上的循环，`lib/num.py`）。 */
+const MATH_LIB = new Map([['gcd', '_math_gcd'], ['factorial', '_math_factorial']]);
+
+/** 这几格 `math.*` 交的是 **bool**。 */
+const MATH_BOOL = new Set(['isnan', 'isinf', 'isfinite']);
+
+/**
+ * **`math` 里那几格常量** —— `math.pi` 这种是"取属性"，不是调用。
+ * `inf` / `nan` 方言里没有字面量，拿算式做（与 `lib/num.py` 里那两格同一条）。
+ */
+const MATH_CONST = new Map([
+  ['pi', { kind: 'real', value: Math.PI }],
+  ['e', { kind: 'real', value: Math.E }],
+  ['tau', { kind: 'real', value: Math.PI * 2 }],
+]);
+
+/** `math.inf` / `math.nan`：`1e308 * 10` 与 `inf - inf`。 */
+function mathInf() {
+  return {
+    kind: 'binop', op: '*', left: { kind: 'real', value: 1e308 }, right: { kind: 'real', value: 10 },
+  };
+}
+
+/**
+ * **`math` 那一族里"不是一格 rmath"的几格** —— 各按定义落：
+ *   * `isnan` / `isinf` / `isfinite`：`x != x` 与 `x - x != 0`（不必有新算子）；
+ *   * `trunc`：向零取整，正是方言的 `toint`（python 交 int）；
+ *   * `degrees` / `radians`：乘一格常量；
+ *   * `copysign`：按 b 的符号挑 —— **b 是 `-0.0` 那一档要看文本**（`srepr` 出 `-0.0`），
+ *     光判 `b < 0` 会把 `copysign(2, -0.0)` 答成 `2.0`（python 是 `-2.0`）。
+ */
+function mathOther(f, args, C) {
+  const one = () => toReal(args[0], C);
+  if (f === 'isnan' || f === 'isinf' || f === 'isfinite') {
+    const pre = [];
+    const x = holdTmp(one(), 'mi_x', C, pre);
+    const nan = { kind: 'binop', op: '!=', left: x, right: x };
+    const notFin = {
+      kind: 'binop', op: '!=',
+      left: { kind: 'binop', op: '-', left: x, right: x },
+      right: { kind: 'real', value: 0 },
+    };
+    let v;
+    if (f === 'isnan') v = nan;
+    else if (f === 'isfinite') v = { kind: 'unop', op: '!', operand: notFin };
+    else v = { kind: 'binop', op: '&&', left: notFin, right: { kind: 'unop', op: '!', operand: nan } };
+    return pre.length === 0 ? v : { kind: 'block-expr', stmts: pre, value: v };
+  }
+  if (f === 'trunc') return { kind: 'builtin', name: 'toint', args: [one()] };
+  if (f === 'degrees') {
+    return { kind: 'binop', op: '*', left: one(), right: { kind: 'real', value: 180 / Math.PI } };
+  }
+  if (f === 'radians') {
+    return { kind: 'binop', op: '*', left: one(), right: { kind: 'real', value: Math.PI / 180 } };
+  }
+  if (f === 'copysign') {
+    if (args.length !== 2) throw new Error('python->IR: `math.copysign(a, b)` 收两格实参');
+    const pre = [];
+    const b = holdTmp(toReal(args[1], C), 'cs_b', C, pre);
+    const mag = { kind: 'rmath', fn: 'fabs', args: [toReal(args[0], C)] };
+    /* `-0.0`：`b < 0` 答不出来，看文本第一格是不是 `-`（`srepr(-0.0)` 是 `"-0.0"`）。 */
+    const negZero = {
+      kind: 'binop', op: '==',
+      left: {
+        kind: 'builtin', name: 'scpsub',
+        args: [{ kind: 'builtin', name: 'srepr', args: [b] }, { kind: 'int', value: 0 }, { kind: 'int', value: 1 }],
+      },
+      right: { kind: 'string', value: '-' },
+    };
+    const v = {
+      kind: 'ternary', type: REAL,
+      cond: { kind: 'binop', op: '||', left: { kind: 'binop', op: '<', left: b, right: { kind: 'real', value: 0 } }, right: negZero },
+      then: { kind: 'unop', op: '-', operand: mag },
+      else_: mag,
+    };
+    return pre.length === 0 ? v : { kind: 'block-expr', stmts: pre, value: v };
+  }
+  return null;
+}
 
 /**
  * 两格同型的值里挑一格（`min` / `max`）—— 不纯的先落一格临时量。
@@ -3552,6 +3704,29 @@ export function callOf(x, C) {
   /* `math.sqrt(x)` 那一族 —— 先看它，再看方法（`math` 不是一格值）。 */
   if (tag(fn) === 'attr' && tag(kids(fn)[0]) === 'n' && String(nameOf(kids(fn)[0])) === 'math') {
     const f = String(leaf(kids(fn)[1]));
+    /* **`math.log(x, base)`** —— python 那一格是"换底"，方言的 `log` 只收一格。 */
+    if (f === 'log' && args.length === 2) {
+      return {
+        kind: 'binop', op: '/',
+        left: { kind: 'rmath', fn: 'log', args: [toReal(args[0], C)] },
+        right: { kind: 'rmath', fn: 'log', args: [toReal(args[1], C)] },
+      };
+    }
+    const other = MATH_OTHER.has(f) ? mathOther(f, args, C) : null;
+    if (other !== null) return other;
+    /* `math.gcd` / `math.factorial` —— 整数上的循环，写在库里那份 python
+       （`lib/num.py`），adapter 自己要一格实例。 */
+    const libNm = MATH_LIB.get(f);
+    if (libNm !== undefined) {
+      const tys = args.map(() => INT);
+      const inst = C.requireFn === undefined ? null : C.requireFn(libNm, tys);
+      if (inst === null || inst === undefined) {
+        throw new Error(`python->IR: \`math.${f}\` 落到库里那格 \`${libNm}\` 上没有对得上的实例`);
+      }
+      return {
+        kind: 'call', fn: { kind: 'name', name: inst.mangled }, args, type: INT,
+      };
+    }
     if (!MATH.has(f)) throw new Error(`python->IR: \`math.${f}\` 还没接`);
     const call = { kind: 'rmath', fn: MATH.get(f), args: args.map((a) => toReal(a, C)) };
     /* **`math.floor` / `math.ceil` 在 python 里交的是 int**（3.0 起），不是 float ——
@@ -3911,12 +4086,17 @@ function builtinOf(nm, args0, argToks, C) {
        与 `**` 那一处同一条（`argToks` 手上有，所以这儿判得出来）。 */
     case 'pow': {
       if (args.length !== 2) throw new Error('python->IR: `pow()` 收两格实参（三格的模幂还没接）');
-      const p = { kind: 'rmath', fn: 'pow', args: [toReal(args[0], C), toReal(args[1], C)] };
       const bTok = argToks[1];
       const wantInt = ty(args[0], C).kind === 'int' && bTok !== undefined && tag(bTok) === 'num'
         && numValue(leaf(kids(bTok)[0])).kind === 'int'
         && numValue(leaf(kids(bTok)[0])).value >= 0n;
-      return wantInt ? { kind: 'builtin', name: 'toint', args: [p] } : p;
+      /* 整数那一档照旧走 `pow` 再 `toint`（判据里的那几格都在 double 的 53 位以内）；
+         实数那一档走 `realPow`（负底数配非整数指数是复数 —— 当场停下来，不答 nan）。 */
+      if (wantInt) {
+        const p = { kind: 'rmath', fn: 'pow', args: [toReal(args[0], C), toReal(args[1], C)] };
+        return { kind: 'builtin', name: 'toint', args: [p] };
+      }
+      return realPow(args[0], args[1], C);
     }
     case 'type':
       throw new Error('python->IR: `type(x)` 还没接 —— 这一层没有"类型当值"那一档；'

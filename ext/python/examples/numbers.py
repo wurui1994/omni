@@ -130,3 +130,16 @@ print(round(25.0, -1), round(-125.0, -1), round(0.4, -1), round(-0.4, -1))
 print(round(125, -1), round(135, -1), round(-125, -1), round(-135, -1))
 print(round(1234, -2), round(1250, -2), round(1350, -2), round(5, -1))
 print(round(1234567890123456789, -1), round(999, -1), round(0, -3))
+
+# ---- `math` 里那几格常量与那几格"不是一格 rmath"的函数 ------------------------
+# `inf` / `nan` 方言里没有字面量：拿 `1e308 * 10` 与 `inf - inf` 算（与 `lib/num.py` 一条）。
+print(math.pi, math.e, math.tau, math.inf, -math.inf, math.nan)
+# `isnan` / `isinf` / `isfinite` 按 `x != x` 与 `x - x != 0` 落，不必有新算子
+print(math.isnan(math.nan), math.isnan(1.0), math.isinf(math.inf), math.isfinite(1.0))
+# `trunc` 是向零取整（交 int）；`log(x, base)` 是换底；`degrees` / `radians` 乘一格常量
+print(math.trunc(2.7), math.trunc(-2.7), math.log(8, 2), math.log(math.e))
+print(math.degrees(math.pi), math.radians(180), math.log10(100), math.hypot(3, 4))
+# `copysign` 的 **`-0.0` 那一档要看文本**（`b < 0` 答不出来 —— python 交 -2.0）
+print(math.copysign(2, -1), math.copysign(2, -0.0), math.copysign(-3, 1))
+# `gcd` / `factorial` 是整数上的循环 —— 写在 `lib/num.py` 里，adapter 自己要一格实例
+print(math.gcd(12, 18), math.gcd(-12, 18), math.gcd(0, 0), math.factorial(5), math.factorial(0))
