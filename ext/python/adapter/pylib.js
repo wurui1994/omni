@@ -66,6 +66,7 @@ export const LIB_METHODS = new Map([
   ['string.isspace', '_str_isspace'],
   ['string.isupper', '_str_isupper'],
   ['string.islower', '_str_islower'],
+  ['string.istitle', '_str_istitle'],
 ]);
 
 /** 接收者装的东西 + 方法名 → 库函数名（没有就答 null）。 */

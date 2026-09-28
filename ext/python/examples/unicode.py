@@ -93,6 +93,10 @@ def main():
     print("äöü".isalpha(), "½".isnumeric(), "½".isdigit(), "٣".isdigit(), "１２３".isdecimal())
     print("Ⅻ".isnumeric(), "Ⅻ".isupper(), "ǅA".isupper(), "A1".isupper(), "1".isupper())
     print("ß".islower(), "ʲ".islower(), "\u00a0".isspace(), "".isalpha(), "aA".islower())
+    # `.istitle()` 是"**是不是首字母大写的写法**"：大写那一档前面不许也是 cased
+    # （`"AB"` False）、小写那一档前面必须是 cased（`"aA"` False）、一格 cased 都没有
+    # 也是 False（`"123"`）。`ǅ` 是首字母大写那一档，所以 `"ǅa"` 是 True。
+    print("Abc Def".istitle(), "Abc def".istitle(), "AB".istitle(), "ǅa".istitle(), "123".istitle())
     print("abc".upper(), "ABC".lower(), "".upper(), "".lower(), "".casefold())
     print("héllo wörld".upper(), "HÉLLO WÖRLD".lower())
 

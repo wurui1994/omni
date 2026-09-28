@@ -226,6 +226,36 @@ def _str_islower(s):
         i = i + 1
     return cased
 
+def _str_istitle(s):
+    # "是不是首字母大写的写法"（CPython 的 `unicode_istitle`）—— 逐格走一趟：
+    # 大写/首字母大写那一档**前面不许也是 cased**（`"AA"` 是 False），
+    # 小写那一档**前面必须是 cased**（`"aA"` 是 False），别的一格把"前面是 cased"清掉。
+    # 一格 cased 都没有是 False（空串、`"123"`）。
+    n = len(s)
+    i = 0
+    cased = False
+    prev = False
+    while i < n:
+        f = _urecf(_ucase_rec(ord(s[i])))
+        up = (f >> 6) & 1 == 1
+        lo = (f >> 7) & 1 == 1
+        ti = (not up) and (not lo) and ((f >> 10) & 1 == 1)
+        if up or ti:
+            if prev:
+                return False
+            prev = True
+            cased = True
+        elif lo:
+            if not prev:
+                return False
+            prev = True
+            cased = True
+        else:
+            prev = False
+        i = i + 1
+    return cased
+
+
 def _str_swapcase(s):
     # 大写的换小写、小写的换大写，**别的一格不动**（`ǅ` 是首字母大写那一档，两边都不是，
     # 所以 `"ǅa".swapcase()` 是 `ǅA`）。

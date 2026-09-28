@@ -1336,7 +1336,8 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     - **总判据 `npm run py:ucase-sweep`（四趟，各约 111 万个码点，全绿）**：
       一趟**四个映射**（upper / lower / casefold，7.0s）、二趟**尾位 sigma 的前位与后位**
       （43.2s）、三趟 **title / capitalize / swapcase**（外加 `("a"+c).title()`，19.8s）、
-      四趟**分类那一族**（8 个谓词 + `("A"+c).isupper()` / `("a"+c).islower()`，24.5s）。
+      四趟**分类那一族**（9 个谓词 + `("A"+c).isupper()` / `("a"+c).islower()` /
+      `("A"+c).istitle()` / `("a"+c).istitle()`，24.0s）。
       每一趟都有"单独一格字符量不到"的那一格搭在里头 —— 上下文那几条规矩只有多字符才现形。
       写成一格 while 循环 —— 一百万条语句那种写法编译期就撑不住（量过：3365 条就被
       30s 看门狗掐了）。`examples/unicode.py` 第十～十二段是常驻的那三格（三条腿）。
@@ -1361,8 +1362,11 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
       要先绑上**（`[w.upper() for w in words]` 从前收不到实例）；实例收集**跑到不再长
       为止**（从前钉死三轮，而 `.lower()` -> `_str_lower` -> `_ucase_final_sigma` ->
       `_ucase_ignorable` -> `_ucase_rec` 是四层）。
-    - 还没接到这条路上的：`.istitle()`（词边界那条规矩的谓词版）、`isidentifier` /
-      `isprintable`（那是另外两张表）。**大小写与分类那一族收完了**（2026-09-29）：
+    - 还没接到这条路上的：`isidentifier` / `isprintable`（那是另外两张表）、
+      **dyn 接收者上的方法**（那一格明着报"还没接"，不是静静答错）。
+      `.istitle()` 也接上了（2026-09-29）：口径是"大写那一档前面不许也是 cased、
+      小写那一档前面必须是 cased、一格 cased 都没有也是 False"（`"AB"` False /
+      `"aA"` False / `"123"` False / `"ǅa"` True）。**大小写与分类那一族收完了**（2026-09-29）：
       `.title()` / `.capitalize()` / `.swapcase()` 那三格加**一位新标志**
       （第 10 位 = Cased 本身，`.title()` 记"上一格算不算 cased"要它 —— 与第 8 位
       "cased 而且不可忽略"只在 ʲ 那一族上不同）；`isalpha` / `isdigit` / `isdecimal` /
