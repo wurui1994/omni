@@ -149,11 +149,11 @@ const want = (n) => only === null || only === n;
  *   * 复数算术（前端逐分量 + `__muldc3`/`__divdc3` 自己用 C 写）**110/111**；
  *   * 语句表达式里的计算跳转（R 的 `NEXT()`）**111/111** —— 全份编得过。
  *
- * 2026-09-28 从 111 改成 **110**，而且**不是退步**：`main/lapack.c`（那个 dlopen 的桩）
- * 从这一组里**摘掉**了，真身换成 `src/modules/lapack/Lapack.c`（在 `lapackmod` 那一组，
- * 也编得过）。份数总数没变（251 份），只是有一份换了组。
+ * 2026-09-28 试过把 `main/lapack.c` 摘掉（以为它只是 dlopen 的桩）—— **错了**：
+ * FunTab 里那条 `do_lapack` 就在它里头。摘掉之后 solve/det 当场喊
+ * `do_lapack: 没有这个函数`。所以地板回到 111，模块那一份是**加**上去的（252 份）。
  */
-const FLOOR = 110;
+const FLOOR = 111;
 
 
 let pass = 0;
@@ -176,12 +176,12 @@ function mkVar(path, name) {
 }
 
 const groups = [
-  /* `main/lapack.c` **摘掉**（第三十二格）：那一份是个桩，活是
-     `R_getModuleHandle("lapack")` 去 dlopen `lapack.so`；真身在下面那个模块里，
-     两份都定义 `do_lapack`，撞名在这条腿上是 loud（链接器查重会当场喊）。
-     R 自己在静态链接那一档也是让模块那一份顶上。 */
-  ['main', 'src/main',
-    mkVar(join(RSRC, 'src/main/Makefile.in'), 'SOURCES_C').filter((n) => n !== 'lapack.c'), true],
+  /* `main/lapack.c` **要留着**（第三十二格头一版摘错了，量出来的）：FunTab 里那条
+     `do_lapack` 就在它里头，它的活是"从模块那张表里取函数指针再转手"；而模块那一份
+     （`src/modules/lapack/Lapack.c`）里是 `static mod_do_lapack` + `R_init_lapack`
+     ——两边**不撞名**，是一对。摘掉 main 那一份的下场是 `do_lapack: 没有这个函数`。
+     还差的一步：跳过 dlopen，自己叫一句 `R_init_lapack` 把那张表填上。 */
+  ['main', 'src/main', mkVar(join(RSRC, 'src/main/Makefile.in'), 'SOURCES_C'), true],
   ['appl', 'src/appl', mkVar(join(RSRC, 'src/appl/Makefile.in'), 'SOURCES_C'), true],
   ['unix', 'src/unix', mkVar(join(RSRC, 'src/unix/Makefile.in'), 'SOURCES_C_BASE'), true],
   /* 这四组是**同一个运行时的别处**（第十八格）：nmath 那 123 份走过 `tests/r/cjs.js`，
