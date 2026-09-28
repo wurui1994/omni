@@ -19,11 +19,14 @@
 //
 // 语料里每一个词的四个映射（upper / lower / casefold / title）与本机 python3 **逐字节相同**。
 // 没有参考树 / clang（链接那一步）/ python3 / 没探过 `pyconfig.h` 就说清并跳过（不假装绿）。
-import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readArchive, writeArchive } from '../../../src/core/link/ar.js';
+import { readObject } from '../../../src/core/link/elf.js';
+import { readSymbols } from '../../../src/core/link/pe_load.js';
 import { flagsFor, incDirFor, perFileFlags } from './scope.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -42,9 +45,10 @@ if (!existsSync(join(INC, 'pyconfig.h'))) skip('还没探过 pyconfig.h（先 `n
 if (spawnSync(CC, ['--version'], { encoding: 'utf8' }).status !== 0) skip(`本机没有 ${CC}`);
 if (spawnSync('python3', ['--version'], { encoding: 'utf8' }).status !== 0) skip('本机没有 python3');
 
-/* 编一份 `.o`：过**我们自己的 C 前端**，一格外部编译器都不用。 */
-const ourCC = (src, obj, rel) => spawnSync(process.execPath, [CLI,
-  ...flagsFor(obj, INC, SRC, perFileFlags(rel, SRC)), src], { encoding: 'utf8' });
+/* 编一份 `.o`：过**我们自己的 C 前端**，一格外部编译器都不用。
+   `more` 里可以再加开关（门三要 `--format elf`：自带链接器吃的是 ELF）。 */
+const ourCC = (src, obj, rel, more = []) => spawnSync(process.execPath, [CLI,
+  ...flagsFor(obj, INC, SRC, [...perFileFlags(rel, SRC), ...more]), src], { encoding: 'utf8' });
 const diagOf = (r) => ((r.stderr ?? '') + (r.stdout ?? '')).split('\n')
   .filter((l) => /error:/.test(l)).slice(0, 6).join('\n');
 
@@ -133,18 +137,44 @@ const jsBad = compare(js.stdout ?? '');
 bad += jsBad;
 say(`门二（JS 腿：同一份 C -> MIR -> JS）：${jsBad === 0 ? '逐字节相同' : `${jsBad} 个不同`}`);
 
-/* 六、**方言层调得通吗**：`(lib 那份 .o)` + `(cabi)` + `(pnew)` + `(ccall)`。
+/* 六、**方言层调得通吗**：`(lib 那份 .a)` + `(cabi)` + `(pnew)` + `(ccall)`。
  *
  * 这一门量的是"语言层怎么用那张表"那一刀的前提 —— 不是我们自己写的 C 去调它，
- * 而是**方言写的程序**去调它。三格要照顾：
- *   * `ptr` 那格缓冲区走 `(pnew (ptr int) N)`（方言里**没有** `(addr 局部量)`）；
+ * 而是**方言写的程序**去调它，而且**一个外部工具都不用**：借来的表过我们的 C 前端
+ * 出 ELF `.o`、我们自己的 `writeArchive` 打成 `.a`、我们自己的链接器按需取用。
+ * 三格要照顾：
+ *   * 出参缓冲走 `(pnew (ptr int) N)`（方言里**没有** `(addr 局部量)`）；
  *   * 方言的 `int` 是 8 字节、没有 u32 —— 一格装两个 `Py_UCS4`，自己拆（小端）；
- *   * `.o` 只有**外部 cc** 那一路收（自带链接器只吃动态库），所以挂 `OMNI_CC=clang`。
+ *   * 裸 `.o` 自带链接器不收（位置实参得是 `.o`/`.a`，`--dylib` 那一路按后缀分派），
+ *     所以先打成 `.a` —— 成员是我们自己发的 ELF，`syms` 由 `.symtab` 说。
  */
+const LIB = join(OUT, 'libucase.a');
+{
+  /* 自带链接器吃的是 **ELF** 的 `.o`（tcc 的老路：内部表示 ELF、输出才是 Mach-O），
+     而门一那份表是 Mach-O（要与 clang 链）—— 所以这儿**另编一份 ELF 的**。 */
+  const TABLE_ELF = join(OUT, 'unicodectype-elf.o');
+  const te = ourCC(join(SRC, 'Objects', 'unicodectype.c'), TABLE_ELF,
+    'Objects/unicodectype.c', ['--format', 'elf']);
+  if (te.status !== 0 || !existsSync(TABLE_ELF)) {
+    say(`py-rt/ucase: ELF 那份表编不出来：\n${diagOf(te) || '编不出'}`);
+    process.exit(1);
+  }
+  const buf = readFileSync(TABLE_ELF);
+  const bytes = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+  const syms = readSymbols(readObject(bytes))
+    .filter((s) => s.name !== '' && s.bind === 1 && s.shndx !== 0).map((s) => s.name);
+  const ar = writeArchive([{ name: 'unicodectype.o', bytes, syms }]);
+  writeFileSync(LIB, ar);
+  const back = readArchive(ar);
+  if (back.index === null || back.index.syms.length === 0) {
+    say('py-rt/ucase: 我们打的那份 .a 没有符号索引（按需取用就取不出成员）');
+    process.exit(1);
+  }
+}
 const CPS = [65, 223, 912, 0x3A3, 20013];         // A / ß / ΐ / Σ / 中
 const sx = [
   '(module',
-  `  (lib ${JSON.stringify(TABLE)})`,
+  `  (lib ${JSON.stringify(LIB)})`,
   '  (cabi _PyUnicode_ToUpperFull i32 (i32 ptr))',
   '  (fn lo32 ((w int)) int (ret (bin "&" (var w) (int 4294967295))))',
   '  (fn hi32 ((w int)) int (ret (bin "u>>" (var w) (int 32))))',
@@ -165,8 +195,10 @@ const sx = [
 ].join('\n');
 const SX = join(OUT, 'ucase-probe.sx');
 writeFileSync(SX, `${sx}\n`);
-const sxRun = spawnSync(process.execPath, [CLI, 'run-c', SX],
-  { encoding: 'utf8', env: { ...process.env, OMNI_CC: CC } });
+/* `OMNI_CC` 要空着 —— 有它就走外部 cc，那这一门就不是"全自己一条链"了。 */
+const sxEnv = { ...process.env };
+delete sxEnv.OMNI_CC;
+const sxRun = spawnSync(process.execPath, [CLI, 'run-c', SX], { encoding: 'utf8', env: sxEnv });
 /* 期望值是 python3 算的：`chr(cp).upper()` 的码点，补到 3 格（ToUpperFull 只写 n 格，
    剩下的是 `pnew` 给的零）。 */
 const sxWant = spawnSync('python3', ['-c',
@@ -182,8 +214,8 @@ if (sxBad !== 0) {
     + `${sxRun.status === 0 ? '' : `\n    （exit=${sxRun.status}）${(sxRun.stderr ?? '').split('\n').slice(0, 4).join('\n')}`}`);
 }
 bad += sxBad;
-say(`门三（方言调它：(lib .o) + (cabi) + (pnew) + (ccall)，${CPS.length} 个码点的 upper）：`
-  + `${sxBad === 0 ? '与 python3 相同' : '不同'}`);
+say(`门三（方言调它，全自己一条链：我们的 C 前端 -> ELF .o -> 我们的 ar -> 我们的链接器，`
+  + `${CPS.length} 个码点的 upper）：${sxBad === 0 ? '与 python3 相同' : '不同'}`);
 
 say('');
 say(`三门都过 = 借来的那张表在原生腿、JS 腿、**方言层**上都与 python3 相同`

@@ -1153,10 +1153,14 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
        方言里**没有** `(addr 局部量)` / 栈上数组 / `alloca` —— 那要求局部量可寻址，是单独一刀。
     b. 方言的 `int` 是 **8 字节、没有 u32**：一格 `int` 装两个 `Py_UCS4`，自己按小端拆
        （`& 0xFFFFFFFF` / `u>> 32`）。想省掉这一步就写一层薄 C shim，签名用 `int64_t *`。
-    c. **`.o` / `.a` 只有外部 cc 那一路收**（`libLinkArgs` 把路径原样当位置实参推上去）；
-       自带链接器走 `--dylib`，只吃动态库（喂 `.o` 是 `dyld: unloadable mach-o file type 1`、
-       喂 `.a` 是 `elf: 这不是一个 ELF 文件`）。所以判据挂 `OMNI_CC=clang`；
-       要在默认腿上用就先 `clang -shared` 打成 `.dylib`。
+    c. **裸 `.o` 自带链接器不收，`.a` 收**：`c link`（Mach-O 那一路）对 `--dylib` 的参数
+       按后缀分派，`.a` 进 `archives`（按需取用 / `alacarte`），别的当真库或 `.tbd` 读。
+       所以门三的路子是：借来的表过我们的 C 前端出 **ELF** 的 `.o`（`--format elf` ——
+       自带链接器吃的是 ELF，tcc 的老路：内部表示 ELF、输出才是 Mach-O）、我们自己的
+       `writeArchive` 打成 `.a`（`syms` 由 `.symtab` 说 —— 没有符号索引，按需取用就
+       取不出成员，症状是"符号 '…' 没有定义"）、我们自己的链接器链。
+       **一个外部工具都没用**（外部 cc 那一路也能走，`libLinkArgs` 把 `.o`/`.a` 原样
+       当位置实参推上去，那时挂 `OMNI_CC=clang`）。
     d. `(lib "相对路径")` **一个字节都不解析**，按**进程 cwd** 交给链接器 —— 写绝对路径。
     e. **`(ccall …)` 在解释器腿是硬拒**（"interp: C ABI call … is not supported"）；
        backend-js 腿**能用**（`raw` 的落 `$cffi.<符号>`，走我们自己发的 N-API 扩展，
