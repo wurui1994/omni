@@ -30,10 +30,27 @@
 
   <div class="spacer"></div>
 
-  <div class="swatches" id="swatches" aria-label="强调色"></div>
-  <button class="icon-btn" id="btn-theme" aria-label="深浅">
-    <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="4.2"/><path d="M10 1.6v2.2M10 16.2v2.2M1.6 10h2.2M16.2 10h2.2M4.1 4.1l1.5 1.5M14.4 14.4l1.5 1.5M15.9 4.1l-1.5 1.5M5.6 14.4l-1.5 1.5"/></svg>
+  <!-- 外观（强调色 + 深浅）：**一颗按钮开一格浮层**，不是摆在顶栏上的一排色板。
+       八颗色板 + 深浅那颗在 390px 的屏上要 220px，与模式那一排加起来必然越界 ——
+       顶栏上只留一颗 32px 的按钮，八颗色板进浮层里放大成手指点得到的尺寸。 -->
+  <button class="icon-btn" id="btn-appear" aria-label="外观" aria-expanded="false"
+          aria-haspopup="true" title="外观（强调色 / 深浅）">
+    <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.6"/><path d="M10 3.4a6.6 6.6 0 0 1 0 13.2z" fill="currentColor" stroke="none"/></svg>
   </button>
+  <div class="popover" id="appear" role="dialog" aria-label="外观" hidden>
+    <div class="pop-sec">
+      <div class="pop-lbl">强调色</div>
+      <div class="swatches" id="swatches"></div>
+    </div>
+    <div class="pop-sec">
+      <div class="pop-lbl">深浅</div>
+      <div class="seg small wide" id="theme-seg" role="group" aria-label="深浅">
+        <button data-theme="">跟系统</button>
+        <button data-theme="light">浅色</button>
+        <button data-theme="dark">深色</button>
+      </div>
+    </div>
+  </div>
 </header>
 
 <main class="shell">
@@ -143,8 +160,13 @@
     <div class="pane-head">
       <span>目录</span>
       <input id="filter" type="search" placeholder="过滤…" spellcheck="false">
-      <button class="icon-btn sm" id="btn-new" aria-label="新建文件" title="新建文件">
-        <svg viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg>
+      <!-- 两颗，与 VS Code 的资源管理器一样：**新建文件** 与 **新建目录**。
+           两颗都是"在选中的位置就地长出一行输入框"（见 studio.js 的 `startNewEntry`）。 -->
+      <button class="icon-btn sm" id="btn-new-file" aria-label="新建文件" title="新建文件">
+        <svg viewBox="0 0 20 20"><path d="M11.4 2.6H5.6a1 1 0 0 0-1 1v12.8a1 1 0 0 0 1 1h8.8a1 1 0 0 0 1-1V6.6zM11.4 2.6v4h4"/></svg>
+      </button>
+      <button class="icon-btn sm" id="btn-new-dir" aria-label="新建目录" title="新建目录">
+        <svg viewBox="0 0 20 20"><path d="M2.6 15.4V4.6a1 1 0 0 1 1-1h3l1.6 2h8.2a1 1 0 0 1 1 1v8.8a1 1 0 0 1-1 1h-12.8a1 1 0 0 1-1-1z"/></svg>
       </button>
     </div>
     <div class="tree-body" id="tree-body"><div class="hint">正在读目录树…</div></div>
@@ -159,7 +181,7 @@
       <!-- js 默认原样交给 node（`--direct`）。勾上才走我们的前端 —— 这一页的用处之一
            是拿真 node 当参照，所以"对照"要是默认的那一边。别的语言上这一格藏起来。 -->
       <label class="check" id="js-parse-box" hidden title="走我们的 js 前端（不勾 = 原样交给 node）">
-        <input type="checkbox" id="js-parse"><span>我们的解析</span>
+        <input type="checkbox" id="js-parse"><span class="lg">我们的解析</span><span class="sh">解析</span>
       </label>
       <!-- asy 有两条出口，各有各的缺口，所以给个开关、默认走 EPS：
            **EPS**（不勾）由这一页翻成 SVG（`render.js` 的 `epsToSvg`）—— 路径与**位图**
@@ -167,9 +189,9 @@
            **原生 SVG**（勾上，`-f svg`）标签走 `<text>`，可位图那一族还没接 ——
            量出来：三维的例子在那条路上是一整块黑。 -->
       <label class="check" id="asy-svg-box" hidden title="asy 走原生 SVG 出口（标签有了，但位图那一族还没接）">
-        <input type="checkbox" id="asy-svg"><span>SVG 出图</span>
+        <input type="checkbox" id="asy-svg"><span class="lg">SVG 出图</span><span class="sh">SVG</span>
       </label>
-      <button class="run" id="btn-run"><svg viewBox="0 0 20 20"><path d="M6 4l10 6-10 6z"/></svg>运行</button>
+      <button class="run" id="btn-run" aria-label="运行"><svg viewBox="0 0 20 20"><path d="M6 4l10 6-10 6z"/></svg><span class="lbl">运行</span></button>
     </div>
     <div class="code-body">
       <pre id="view" class="hl"><code></code></pre>

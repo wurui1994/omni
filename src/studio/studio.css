@@ -109,13 +109,33 @@ body {
 .icon-btn.sm { width: 26px; height: 26px; border-radius: 7px; flex: none; }
 .icon-btn.sm svg { width: 15px; height: 15px; stroke-width: 1.8; }
 
-.swatches { display: flex; gap: 6px; }
+/* ---- 外观浮层（强调色 + 深浅）----
+ *
+ * 从前这两样直接摆在顶栏上：八颗色板（8×17 + 7×6 = 178px）加一颗深浅按钮。
+ * 390px 的屏上光模式那一排就 230px，加起来必然越过右边界 —— 顶栏只留一颗按钮，
+ * 内容进这格浮层。浮层里的色板反而**放大**到 30px：手指点得到（HIG 是 44pt，
+ * 30px 的圆 + 8px 的间隙合起来够）。
+ */
+.popover {
+  position: absolute; top: calc(var(--bar-h) - 4px + env(safe-area-inset-top)); right: 10px;
+  z-index: 40; min-width: 216px; max-width: calc(100vw - 20px);
+  padding: 12px; display: grid; gap: 12px;
+  background: var(--bg-elev); border: 1px solid var(--line-2);
+  border-radius: var(--r-md); box-shadow: var(--shadow);
+}
+.popover[hidden] { display: none; }
+.pop-lbl { font-size: 11.5px; color: var(--fg-3); margin-bottom: 7px; }
+.pop-sec .seg.wide { display: flex; width: 100%; }
+.pop-sec .seg.wide button { flex: 1; }
+
+.swatches { display: flex; flex-wrap: wrap; gap: 8px; }
 .swatches button {
-  width: 17px; height: 17px; border-radius: 50%; border: 0; cursor: pointer; padding: 0;
+  width: 30px; height: 30px; border-radius: 50%; border: 0; cursor: pointer; padding: 0;
+  flex: 0 0 auto;
   transition: transform var(--dur), box-shadow var(--dur);
 }
-.swatches button:hover { transform: scale(1.14); }
-.swatches button[aria-pressed="true"] { box-shadow: 0 0 0 2.5px var(--bg), 0 0 0 4px currentColor; }
+.swatches button:hover { transform: scale(1.08); }
+.swatches button[aria-pressed="true"] { box-shadow: 0 0 0 2.5px var(--bg-elev), 0 0 0 4px currentColor; }
 
 /* ---------------------------------------------------------------- 布局 */
 .shell {
@@ -135,8 +155,17 @@ body {
 }
 .pane-head > span:first-child { font-weight: 590; color: var(--fg-2); }
 .path {
+  /* **这一栏里唯一会缩的东西就是它**。别的（语言标签、那两格开关、运行按钮）一律
+     `flex: none` —— 顶栏那一排越界就是"谁都不缩"的后果：spacer 缩到 0 之后
+     每一格都按内容宽撑着，加起来超过一行就直接溢出右边界。
+     `direction: rtl` 让省略号落在**左边**，看得见的是文件名那一头。 */
+  flex: 1 1 auto; min-width: 4ch;
   font: 12px var(--mono); color: var(--fg-2);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  /* `direction: rtl` 把省略号挪到**左**边（看得见的是文件名那一头）；
+     `text-align: left` 是它的搭子 —— 少了这一格，短名字会被推到那一栏的右端，
+     看着像"标题居中了"（截图上 `docs/guide.md` 离左边界差一大截就是这个）。 */
+  direction: rtl; text-align: left;
 }
 .tag {
   flex: none; font: 500 10.5px var(--font); text-transform: uppercase; letter-spacing: .04em;
@@ -158,15 +187,22 @@ body {
 .tree-body { flex: 1; overflow: auto; padding: 6px; -webkit-overflow-scrolling: touch; }
 .hint { color: var(--fg-3); font-size: 12.5px; padding: 10px; }
 .node { user-select: none; }
-/* 新建那一行（树里就地输入，见 studio.js 的 `startNewEntry`）：行高与普通行一样，
+/* 新建那一行（**在选中的位置**就地输入，见 studio.js 的 `startNewEntry`）：
+   前面留一格与兄弟行等宽的空箭头位，于是输入框与同层的文件名**左边对齐**；
    输入框占满剩下的宽 —— 窄屏上也不许越过右边界（`min-width: 0` 是那一条的关键）。 */
-.row.newrow { padding-left: 8px; }
+.row.newrow { cursor: default; background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.row.newrow:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .row.newrow input {
-  flex: 1 1 auto; min-width: 0; width: 100%; box-sizing: border-box;
+  flex: 1 1 auto; min-width: 0; box-sizing: border-box;
   font: inherit; color: var(--fg); background: var(--bg-elev);
   border: 1px solid var(--accent); border-radius: var(--r-sm);
-  padding: 2px 6px; outline: none;
+  padding: 2px 6px; outline: none; margin-right: 2px;
 }
+/* 建的是文件还是目录：行首那格图标说话（它占的就是 `.caret` 那一格，所以宽度
+   在 `.row .caret` 那儿定 —— 窄屏上跟着一起抬到 26px）。 */
+.row.newrow .kind-ic { color: var(--fg-3); }
+.row.newrow .kind-ic svg { width: 15px; height: 15px; fill: none; stroke: currentColor;
+  stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .row {
   display: flex; align-items: center; gap: 4px;
   /* 32px 高：手指点得到（Apple HIG 的最小可点区是 44pt，桌面上 32 够、
@@ -176,6 +212,9 @@ body {
   transition: background var(--dur);
 }
 .row:hover { background: var(--bg-sunk); }
+/* **选中**（新建就落在这一格里）：比"打开的那一份"淡一档 —— 目录也能被选中，
+   而目录不会被"打开"，所以这两件事得分得开。 */
+.row.sel { background: var(--bg-sunk); color: var(--fg); }
 .row.on { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--fg); }
 /* **展开那个箭头**：从前 9px 的字号 + 12px 的框，小到看不清也点不着。
    现在是一格 20×20 的三角形 SVG —— 与文件名的视觉重量对得上，而且整行都可点。 */
@@ -251,8 +290,13 @@ body {
    白底是**刻意的**：那一份 html 自己该决定背景，而这一栏不该替它选。 */
 .html-frame { width: 100%; height: 100%; border: 0; display: block; background: #fff; }
 
-/* ---- Markdown 排版 ---- */
-.md { padding: 18px 22px; max-width: 78ch; font: 14.5px/1.72 var(--font); color: var(--fg); }
+/* ---- Markdown 排版 ----
+ *
+ * `max-width: 78ch` 是**读起来舒服的行长**，可它在一格 flex 容器里同时也是"我要多宽"
+ * ⇒ 390px 的屏上这一块仍然摊成 700px，于是段落不换行、右半截被裁掉，要横着拖才读得全
+ * （量出来的）。`flex: 1 1 auto; min-width: 0` 才是"窄了就跟着窄、宽了顶到 78ch"。 */
+.md { flex: 1 1 auto; min-width: 0;
+  padding: 18px 22px; max-width: 78ch; font: 14.5px/1.72 var(--font); color: var(--fg); }
 .md > :first-child { margin-top: 0; }
 .md h1 { font-size: 1.7em; font-weight: 600; margin: 0 0 .6em; letter-spacing: -.02em;
   border-bottom: 1px solid var(--line); padding-bottom: .3em; }
@@ -264,7 +308,7 @@ body {
 .md b, .md strong { font-weight: 640; }
 .md i, .md em { font-style: italic; }
 .md code { font: .87em/1.35 var(--mono); background: var(--bg-sunk);
-  padding: 1.5px 5px; border-radius: 5px; }
+  padding: 1.5px 5px; border-radius: 5px; overflow-wrap: anywhere; }
 .md pre.md-code { background: var(--bg-sunk); padding: 11px 13px; border-radius: var(--r-sm);
   overflow-x: auto; margin: 0 0 1em; font: 12.5px/1.55 var(--mono); }
 .md pre.md-code code { background: none; padding: 0; font-size: 1em; }
@@ -424,8 +468,26 @@ body {
 .hl .ty  { color: var(--s-ty); }
 .hl .pn  { color: var(--s-pn); }
 
-.check { display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px; color: var(--fg-3); }
+.check { display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px;
+  color: var(--fg-3); white-space: nowrap; }
+/* **`display: flex` 会把 `hidden` 这个属性吃掉**（UA 那条 `[hidden]{display:none}`
+   特异度最低，任何作者样式里的 `display` 都压得过它）。于是"只在 js 上出现"的那两格
+   开关**在每一份文件上都露着** —— 打开一份 `.md` 也能看见"我们的解析"。这一条补回来。 */
+.check[hidden] { display: none; }
 .check input { accent-color: var(--accent); margin: 0; }
+/* 那两格开关有两套字（`.lg` 宽屏 / `.sh` 窄屏）。**不是隐藏文字** ——
+   一个光秃秃的勾没人看得懂，所以窄屏上给的是短的那一版（"解析" / "SVG"）。 */
+.check .sh { display: none; }
+/* 面板头那一排：**只有 `.path` 与 `#filter` 会缩**，别的一律按内容宽站住。
+   （`.spacer` 那一格仍然吃剩下的空隙 —— 它不在这张名单里。） */
+.pane-head > .check, .pane-head > .run, .pane-head > .seg,
+.pane-head > .tag { flex: none; }
+/* 状态那一格（`#status` / `#lab-status`）**可以缩**，但缩了要省略号 ——
+   它是一句话（"编不过"/"12ms"），不是一颗按钮。不许它把运行按钮顶出边界。 */
+.pane-head > .badge {
+  flex: 0 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .run {
   appearance: none; border: 0; cursor: pointer;
   font: 590 12px var(--font); padding: 5px 13px 5px 9px;
@@ -489,11 +551,14 @@ body {
 /* ---- 响应式 ---- */
 .only-narrow { display: none; }
 @media (max-width: 800px) {
-  /* ---- 那几排控件不许越过右边界（2026-09-28）----
-     手机上顶栏（模式切换那一排）与输出头（运行 + tab 那一排）宽度都不够，从前是
-     **直接溢出**：选中那一格的 accent 背景被右边界切掉、最后一两个 tab 根本点不到。
-     修法不是缩字号（缩到看不清是另一种坏），是**让那一排自己能横滑、按钮不收缩** ——
-     与 iOS 上那些分段控件同一个做法。滚动条藏起来（这一排只有几格，滚动条比内容还显眼）。 */
+  /* ---- 那几排控件不许越过右边界（2026-09-28 重做）----
+     第一版只是"让那一排能横滑" —— 那是把溢出藏起来，不是让它放得下：**八颗色板
+     还在顶栏上**（178px），用户一眼就看出来了。现在按"先减东西、再缩尺寸"来：
+       · 强调色与深浅收进一格浮层（顶栏上只剩一颗 32px 的按钮）；
+       · 520px 以下把品牌那一格藏掉（标题在标签页上已经有了）；
+       · 模式那四格收紧内边距；
+       · 兜底才是横滑（320px 那一档、以及将来多一个模式的时候）。
+     算一趟 390px：抽屉 38 + 模式 4×48=192 + 外观 38 + 间隙 18 + padding 16 = 302 < 390。 */
   .bar { padding: 0 8px; gap: 6px; min-width: 0; }
   .bar .seg, #out-tabs {
     max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain;
@@ -501,9 +566,14 @@ body {
   }
   .bar .seg::-webkit-scrollbar, #out-tabs::-webkit-scrollbar { display: none; }
   .seg > button { flex: 0 0 auto; }
+  .bar .seg > button { padding: 5px 9px; }
   /* 运行那颗按钮与它旁边几格：宁可挤在一起横滑，也不许被压成一条缝。 */
   #btn-run { flex: 0 0 auto; }
   .out-head { min-width: 0; gap: 6px; }
+  /* 代码那一栏的头（路径 + 标签 + 开关 + 运行）在窄屏上最挤 —— 间隙收一半，
+     那两格开关的字小半号。**不许藏掉文字**：藏了之后那个勾没人看得懂。 */
+  .code > .pane-head { gap: 7px; padding: 0 9px; }
+  .code > .pane-head .check { font-size: 11.5px; }
   .shell { grid-template-columns: 1fr; grid-template-rows: minmax(0,1fr) minmax(0,1fr); }
   .tree { position: fixed; top: var(--bar-h); left: 0; bottom: 0; width: 280px;
     z-index: 30; transform: translateX(-100%); transition: transform var(--dur);
@@ -522,11 +592,8 @@ body {
     grid-template-rows: minmax(0, 1.3fr) minmax(0, .8fr) minmax(0, .8fr);
   }
   .con-main { grid-row: 1; }
-  /* 实验室在窄屏上摞成一列。 */
-  [data-mode="lab"] .lab {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
-  }
+  /* 实验室那一套在窄屏上也摞成一列 —— **那一格在文件末尾**（`[data-mode="lab"] .lab`
+     的两列版排在这段媒体查询之后，同特异度，写在这儿会被它盖掉）。 */
   .gal-head h1 { font-size: 22px; }
   .gal-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
   /* 手指点的目标要够大（Apple HIG 是 44pt）—— 目录行与那几格图标一起抬。 */
@@ -538,6 +605,30 @@ body {
   .hl, #edit { font-size: 13.5px; padding: 12px 10px; }
   /* 抽屉开着的时候点别处要能关掉它（`#tree-mask` 由 studio.js 挂）。 */
   .mask { position: fixed; inset: var(--bar-h) 0 0 0; z-index: 29; background: rgba(0,0,0,.25); }
+}
+
+/* 手机那一档（≤520px）：顶栏上**品牌那一格让位**给模式那四格 —— 标题在标签页上已经
+   有了，而"现在在哪个模式"是随时要看的。浮层贴着两边留 10px，不许比屏还宽。 */
+@media (max-width: 520px) {
+  .brand { display: none; }
+  .popover { right: 10px; left: 10px; min-width: 0; }
+  .swatches button { width: 34px; height: 34px; }
+  /* 代码那一栏的头：语言标签让位（后缀名就在文件名里），那两格开关换成短的那一版。
+     省下来的宽度全给文件名 —— 量出来的：320px 上原先只剩 29px，等于看不见。 */
+  .code > .pane-head > .tag { display: none; }
+  .check .lg { display: none; }
+  .check .sh { display: inline; }
+  /* 预览那一栏的排版也收一档 —— 22px 的左右留白在 390px 上等于少了两个字。 */
+  .md { padding: 14px 15px; font-size: 14px; }
+}
+
+/* 最窄那一档（≤360px，iPhone SE 那一代）：运行按钮**只留三角**。
+   量出来的：320px 上"实时 + 我们的解析 + 运行"三格加起来把按钮顶出右边界 47px。
+   留图标不留字是因为那颗三角本来就是"运行"的通用符号，而 `aria-label` 仍在。 */
+@media (max-width: 360px) {
+  #btn-run .lbl { display: none; }
+  #btn-run { padding: 6px 9px; border-radius: 999px; }
+  .code > .pane-head { gap: 6px; padding: 0 7px; }
 }
 
 /* ---- 实验室（Language Laboratory）----
@@ -624,6 +715,23 @@ body {
   background: var(--bg-sunk); color: var(--fg-2);
   font: 12px var(--mono); padding: 4px 8px;
   max-width: 200px; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ---- 实验室那一套在窄屏上摞成一列 ----
+ *
+ * **这一格必须排在上面那几条基础样式之后**：`[data-mode="lab"] .lab` 的两列版与
+ * 媒体查询里那条同特异度，谁在后面谁说话。先前那条写在文件中段的 `@media` 里，
+ * 于是**从来没生效过** —— 实验室在手机上一直是两列、右半栏整个落在屏外
+ * （量出来 `#lab-status` 的右边界在 435px 处，而屏只有 390px）。
+ */
+@media (max-width: 800px) {
+  [data-mode="lab"] .lab {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  #lab-load { max-width: 112px; }
+  .lab-stats { gap: 12px; }
+  .lab-stat .n { font-size: 22px; }
 }
 
 /* 谁把动画关了就别动（`prefers-reduced-motion`）。 */

@@ -32,6 +32,16 @@ const ACCENTS = [
   ['#ff9f0a', '橙'], ['#30d158', '绿'], ['#40c8e0', '青'], ['#8e8e93', '灰'],
 ];
 
+/**
+ * 外观：强调色 + 深浅。
+ *
+ * **两样都在一格浮层里**（`#appear`），顶栏上只有一颗按钮。从前是"八颗色板 + 一颗
+ * 深浅按钮"直接摆在顶栏上 —— 那一排在手机上要 220px，与模式那四格加起来必然越过
+ * 右边界（2026-09-28 用户指出）。浮层里色板反而放大到 30px：手指点得到。
+ *
+ * 深浅是**三档**（跟系统 / 浅 / 深），不是一颗按钮循环三个状态 ——
+ * 循环那种做法看不出"现在是哪一档"，也没法一步回到"跟系统"。
+ */
 function initTheme() {
   const saved = localStorage.getItem('omni.accent');
   if (saved) document.documentElement.style.setProperty('--accent', saved);
@@ -44,6 +54,7 @@ function initTheme() {
     b.style.background = c;
     b.style.color = c;
     b.title = name;
+    b.setAttribute('aria-label', name);
     b.setAttribute('aria-pressed', String((saved ?? ACCENTS[0][0]) === c));
     b.onclick = () => {
       document.documentElement.style.setProperty('--accent', c);
@@ -52,13 +63,38 @@ function initTheme() {
     };
     box.append(b);
   }
-  $('#btn-theme').onclick = () => {
-    const cur = document.documentElement.dataset.theme;
-    const next = cur === 'dark' ? 'light' : (cur === 'light' ? '' : 'dark');
+
+  const seg = $('#theme-seg');
+  const paintSeg = () => {
+    const cur = document.documentElement.dataset.theme ?? '';
+    for (const b of seg.children) b.classList.toggle('on', b.dataset.theme === cur);
+  };
+  seg.onclick = (e) => {
+    const b = e.target.closest('button');
+    if (b === null) return;
+    const next = b.dataset.theme;
     if (next) document.documentElement.dataset.theme = next;
     else delete document.documentElement.dataset.theme;
     localStorage.setItem('omni.theme', next);
+    paintSeg();
   };
+  paintSeg();
+
+  /* 浮层的开合。点外面关、Esc 关 —— 少了这两条的浮层在手机上是**关不掉**的
+     （那儿没有"按 Esc"，也没有 hover）。 */
+  const pop = $('#appear');
+  const btn = $('#btn-appear');
+  const setOpen = (on) => {
+    pop.hidden = !on;
+    btn.setAttribute('aria-expanded', String(on));
+  };
+  btn.onclick = (e) => { e.stopPropagation(); setOpen(pop.hidden); };
+  document.addEventListener('click', (e) => {
+    if (pop.hidden) return;
+    if (pop.contains(e.target) || e.target === btn) return;
+    setOpen(false);
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setOpen(false); });
 }
 
 /* ---------------------------------------------------------------- 预览：GLSL
@@ -740,6 +776,13 @@ const put = (p, body) => api(p, {
 
 /* ---------------------------------------------------------------- 目录树 */
 
+/** 展开着的目录（按**路径**记，不按 DOM）—— 树是重建的，DOM 活不过一次 `loadTree`。 */
+const OPEN = new Set();
+/** 这一页自己建的空目录（还没有任何文件）。为什么只活在这一页：见 `mergeNewDirs`。 */
+const NEW_DIRS = new Set();
+/** 选中的那一行（`.row`）。"新建"落在哪儿全看它。 */
+let SEL = null;
+
 function countFiles(n) {
   if (n.kind === 'file') return 1;
   return (n.children ?? []).reduce((a, k) => a + countFiles(k), 0);
@@ -762,6 +805,10 @@ function caretSvg() {
  * 加 `.open`，可孩子是懒建的、那时还没建 —— 于是看起来是"合着的、三角却朝下"，
  * 第一次点击把 `.open` 去掉（看起来才对上：三角转回右），第二次点击才真的展开。
  * 现在只有 `setOpen` 一处改这件事，它先保证孩子在、再改类名。
+ *
+ * 行上挂三样给"新建"用（`startNewEntry`）：`__node`（这一格是谁）、
+ * `__kids`（目录的孩子容器）、`__open`（把它展开）。**不另存一张表** ——
+ * 树是重建的，另一张表活得比 DOM 长，就会指着已经没了的行。
  */
 function renderNode(n, depth) {
   const box = el('div', 'node');
@@ -772,6 +819,7 @@ function renderNode(n, depth) {
   row.append(el('span', 'nm', n.name));
   if (n.kind === 'dir') row.append(el('span', 'cnt', String(countFiles(n))));
   row.title = n.path;
+  row.__node = n;
   box.append(row);
   if (n.kind === 'dir') {
     const kids = el('div', 'kids');
@@ -785,69 +833,171 @@ function renderNode(n, depth) {
       }
       box.classList.toggle('open', on);
       row.setAttribute('aria-expanded', String(on));
+      /* 展开状态记在路径上 —— 重建树（新建一份文件之后）要照原样展回去，
+         不然刚建好的那一格连着它那几层目录一起合上了。 */
+      if (on) OPEN.add(n.path); else OPEN.delete(n.path);
     };
-    row.onclick = () => setOpen(!box.classList.contains('open'));
-    if (depth === 0) setOpen(true);          // 顶层默认展开 —— 孩子也就在这一刻建好
+    row.__kids = kids;
+    row.__open = () => setOpen(true);
+    /* 点目录 = 选中它 + 开合（VS Code 就是这两件事一起）。 */
+    row.onclick = () => { select(row); setOpen(!box.classList.contains('open')); };
+    if (depth === 0 || OPEN.has(n.path)) setOpen(true);
     else setOpen(false);
   } else {
-    row.onclick = () => { openFile(n.path, row); };
+    row.onclick = () => { select(row); openFile(n.path, row); };
   }
   return box;
 }
 
+/** 选中一行（目录也能被选中 —— "新建"就落在它里头）。 */
+function select(row) {
+  for (const r of $('#tree-body').querySelectorAll('.row.sel')) r.classList.remove('sel');
+  row.classList.add('sel');
+  SEL = row;
+}
+
 /**
- * **新建文件：树里就地一行输入**（VS Code 的行为，2026-09-28 改）。
+ * **新建文件 / 新建目录：在选中的位置就地长出一行输入框**（VS Code 的行为）。
  *
- * 从前是 `prompt()` —— 那一格在移动端会被系统弹窗接管、在桌面端也不像 IDE，
- * 而且没法边看树边填。现在照 VS Code：树顶上长出一行 `input`，自动聚焦，
- * **Enter 建、Esc 取消、失焦也取消**（VS Code 就是失焦即弃）。
+ * 「选中的位置」按 VS Code 的规矩算：
+ *   * 选中的是**目录** -> 建在它里头（顺手把它展开）；
+ *   * 选中的是**文件** -> 建在它**旁边**（也就是它所在的那层目录里）；
+ *   * 什么都没选 -> 第一棵根目录里。
+ * 这一格从前是"树顶上一行、要你自己填整条路径" —— 那等于把"在哪儿"这件事推给用户，
+ * 而树上明明已经选好了。
  *
- * 目录怎么办：这一侧的"文件系统"是**虚拟的**（`serve.js` 的 `putEdit`，仓库里一个
- * 字节不动），目录是从路径推出来的 ⇒ 填 `docs/notes/my.md` 就同时"建"了两层目录，
- * 不需要第二个按钮。所以提示语直接把这件事说出来，而不是给一个建不出空目录的
- * "新建目录"按钮（那会撒谎）。
+ * 目录这一格怎么落地：服务那侧的虚拟文件系统是**按路径推**出来的（`serve.js` 的
+ * `mergeEdits`），一个空目录没有任何字节可存 ⇒ **空目录先只活在这一页**（`NEW_DIRS`），
+ * 等里头建了第一份文件，它自然就成了服务那侧也认的目录。两条腿（serve 与单体 HTML）
+ * 都不用改 —— 空目录本来就没有第二个人需要知道。
+ *
+ * 键位与 VS Code 一样：Enter 建、Esc 取消、失焦也取消。名字里带 `/` 就顺手建中间那几层。
  */
-function startNewEntry() {
+function startNewEntry(kind) {
   const body = $('#tree-body');
   const old = body.querySelector('.row.newrow');
-  if (old !== null) { old.querySelector('input').focus(); return; }
-  const row = document.createElement('div');
-  row.className = 'row newrow';
+  if (old !== null) old.remove();
+
+  /* ---- 一、落在哪一层：目录名（'' = 根） + 那一层的容器。 */
+  let dir = '';
+  let host = body;
+  if (SEL !== null && SEL.isConnected) {
+    const n = SEL.__node;
+    if (n.kind === 'dir') {
+      dir = n.path;
+      SEL.__open();
+      host = SEL.__kids;
+    } else {
+      const cut = n.path.lastIndexOf('/');
+      dir = cut < 0 ? '' : n.path.slice(0, cut);
+      host = SEL.parentElement.parentElement;   /* .row -> .node -> 上一层的 .kids */
+      if (!host.classList.contains('kids')) host = body;
+    }
+  }
+
+  /* ---- 二、那一行。图标**占的就是箭头那一格**（`.caret`）—— 于是输入框与同层
+     那几个文件名左边对齐；图标本身说的是"建的是文件还是目录"。 */
+  const row = el('div', 'row newrow');
+  const ic = el('span', 'caret kind-ic');
+  ic.innerHTML = kind === 'dir'
+    ? '<svg viewBox="0 0 20 20"><path d="M2.6 15.4V4.6a1 1 0 0 1 1-1h3l1.6 2h8.2a1 1 0 0 1 1 1v8.8a1 1 0 0 1-1 1h-12.8a1 1 0 0 1-1-1z"/></svg>'
+    : '<svg viewBox="0 0 20 20"><path d="M11.4 2.6H5.6a1 1 0 0 0-1 1v12.8a1 1 0 0 0 1 1h8.8a1 1 0 0 0 1-1V6.6zM11.4 2.6v4h4"/></svg>';
+  row.append(ic);
   const inp = document.createElement('input');
   inp.type = 'text';
   inp.spellcheck = false;
   inp.autocapitalize = 'off';
-  inp.placeholder = '名字或路径，如 my.go / docs/notes/my.md';
+  inp.autocomplete = 'off';
+  inp.setAttribute('aria-label', kind === 'dir' ? '新目录的名字' : '新文件的名字');
+  inp.placeholder = kind === 'dir' ? '目录名' : '文件名，如 hello.go';
   row.append(inp);
-  body.prepend(row);
+  host.prepend(row);
+  row.scrollIntoView({ block: 'nearest' });
   inp.focus();
+
   let done = false;
   const close = () => { if (!done) { done = true; row.remove(); } };
   const submit = async () => {
-    const v = inp.value.trim();
     if (done) return;
-    if (v === '' || v.startsWith('/') || v.includes('..')) { close(); return; }
+    const name = inp.value.trim().replace(/^\/+|\/+$/g, '');
+    /* 空名字、`..`、绝对路径一律当"算了" —— 这三样不是错误提示该出现的地方。 */
+    if (name === '' || name.includes('..') || name.includes('\0')) { close(); return; }
     done = true;
     row.remove();
+    const path = dir === '' ? name : `${dir}/${name}`;
     try {
-      await put('/api/file', { path: v, text: '' });
+      if (kind === 'dir') {
+        NEW_DIRS.add(path);
+        /* 把这一层与它上头每一层都记成"开着" —— 不然刚建的目录藏在合着的父目录里。 */
+        const segs = path.split('/');
+        for (let i = 1; i <= segs.length; i += 1) OPEN.add(segs.slice(0, i).join('/'));
+        await loadTree();
+        const r = rowOf(path);
+        if (r !== undefined) { select(r); r.scrollIntoView({ block: 'nearest' }); }
+        setStatus(`建了目录 ${path}`, '');
+        return;
+      }
+      await put('/api/file', { path, text: '' });
+      const up = path.split('/').slice(0, -1);
+      for (let i = 1; i <= up.length; i += 1) OPEN.add(up.slice(0, i).join('/'));
       await loadTree();
-      await openFile(v);
+      await openFile(path, rowOf(path));
       $('#edit').focus();
     } catch (e) { setStatus(`新建失败：${e.message ?? e}`, 'bad'); }
   };
   inp.onkeydown = (e) => {
     if (e.key === 'Enter') { e.preventDefault(); submit(); return; }
-    if (e.key === 'Escape') { e.preventDefault(); close(); }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
   };
   inp.onblur = close;
 }
 
+/** 树里那条路径的行（重建之后要重新指一次 —— 老的那个 DOM 已经没了）。 */
+function rowOf(path) {
+  for (const r of $('#tree-body').querySelectorAll('.row')) {
+    if (r.__node !== undefined && r.__node.path === path) return r;
+  }
+  return undefined;
+}
+
+/**
+ * 把"这一页自己建的空目录"并进树。
+ *
+ * 与 `serve.js` 的 `mergeEdits` 同一个做法（缺哪一层补哪一层），区别只有一个：
+ * 那边并的是**文件**，这边并的是**还没有任何文件的目录**。里头一有文件，服务那侧
+ * 自己就会把这一层补出来，这儿并出来的那一格正好被它盖住（路径相同 ⇒ 找得到、不重复）。
+ */
+function mergeNewDirs(tree) {
+  if (NEW_DIRS.size === 0) return tree;
+  const out = { roots: tree.roots.map((r) => ({ ...r, children: [...(r.children ?? [])] })) };
+  for (const rel of [...NEW_DIRS].sort()) {
+    const segs = rel.split('/');
+    let node = out.roots.find((r) => r.path === segs[0]);
+    if (node === undefined) continue;             /* 不认的根：跳过（不造"新建"那一格） */
+    for (let i = 1; i < segs.length; i += 1) {
+      const sub = segs.slice(0, i + 1).join('/');
+      let nx = (node.children ?? []).find((c) => c.path === sub && c.kind === 'dir');
+      if (nx === undefined) {
+        nx = { name: segs[i], path: sub, kind: 'dir', children: [], dirty: true };
+        node.children = [...(node.children ?? []), nx];
+      }
+      node = nx;
+    }
+  }
+  return out;
+}
+
 async function loadTree() {
-  S.tree = await api('/api/tree');
+  S.tree = mergeNewDirs(await api('/api/tree'));
   const body = $('#tree-body');
   body.textContent = '';
   for (const r of S.tree.roots) body.append(renderNode(r, 0));
+  /* 选中与"打开的那一份"都要重新指一次 —— 上面刚把整棵树的 DOM 换掉了。 */
+  SEL = null;
+  if (S.path !== null) {
+    const r = rowOf(S.path);
+    if (r !== undefined) { r.classList.add('on'); select(r); }
+  }
 }
 
 /** 过滤：把不含这串的文件行藏起来（目录跟着空就藏）。 */
@@ -894,7 +1044,7 @@ async function openFile(path, row) {
   /* 换文件先把页面那格帧循环停掉 —— 不停的话上一份 `.kc` 会一直在预览区里画。 */
   glStop();
   for (const r of $('#tree-body').querySelectorAll('.row.on')) r.classList.remove('on');
-  if (row) row.classList.add('on');
+  if (row) { row.classList.add('on'); select(row); }
   setStatus('读…', '');
   let f = null;
   try {
@@ -1914,7 +2064,8 @@ async function main() {
     mask.style.display = open ? 'block' : 'none';
   };
   $('#filter').oninput = (e) => applyFilter(e.target.value);
-  $('#btn-new').onclick = () => startNewEntry();
+  $('#btn-new-file').onclick = () => startNewEntry('file');
+  $('#btn-new-dir').onclick = () => startNewEntry('dir');
   $('#sh').addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
     const v = e.target.value;
