@@ -510,6 +510,9 @@ const EVAL_CHECKS = [
   'sum(rep(2, 5))',
   'prod(2:5)',
   'sum(seq_len(100))',
+  /* 要 base 那个包的 R 代码那几句（`nchar` / `paste0` / `mean` / `sd` / `sapply`）
+     **还不在这张表里**：`omni_base_init` 装得动，但装一趟 >50 秒（base 是 1.4 MB 的
+     R 源码），判据不许一趟一分钟。速度那一刀之后再进来。 */
 ];
 if (want('jsrun')) {
   const dir = join(ROOT, '.omni-cache', 'r-rt', 'jsall');
@@ -591,7 +594,8 @@ if (want('jsrun')) {
     L.push(`for (const s of ${JSON.stringify(INIT_SEQ)}) {
   const f = $F(s);
   if (f === null) { appendFileSync(LOG, 'init\\t' + s + '\\t没这个符号\\n'); continue; }
-  try { f(); appendFileSync(LOG, 'init\\t' + s + '\\tok\\n'); }
+  const t1 = Date.now();
+  try { const rv = f(); appendFileSync(LOG, 'init\\t' + s + '\\tok\\t' + (Date.now() - t1) + 'ms rv=' + rv + '\\n'); }
   catch (e) { appendFileSync(LOG, 'init\\t' + s + '\\t炸了：' + String(e && e.message).slice(0, 100) + '\\n'); }
 }`);
     L.push(`{
@@ -631,7 +635,13 @@ if (want('jsrun')) {
          这儿一等就是几分钟。30 秒够装载 + 初始化 + 那几格。 */
       timeout: 45000,
       killSignal: 'SIGKILL',
-      env: { ...process.env, NODE_COMPILE_CACHE: join(dir, '.v8cache') },
+      env: {
+        ...process.env,
+        NODE_COMPILE_CACHE: join(dir, '.v8cache'),
+        /* base 那个包的 R 代码在这棵树里（`ext/r/build-libR.js` 编装的）——
+           `R_OpenLibraryFile("base")` 就是按 `R_HOME` 找它。 */
+        R_HOME: join(ROOT, '.omni-cache', 'r-rt', 'libR', 'home'),
+      },
     });
     const logText = existsSync(logFile) ? readFileSync(logFile, 'utf8') : '';
     const lines = `${r.stdout ?? ''}${logText}`.trim().split('\n').map((s) => s.split('\t'));
@@ -653,7 +663,7 @@ if (want('jsrun')) {
     for (const s of INIT_SEQ) {
       const v = initOut.get(s);
       if (v === undefined) { bad.push(`init ${s}: 一行都没印（那一步之前就断了）`); break; }
-      if (v === 'ok') continue;
+      if (v !== undefined && v.startsWith('ok')) continue;
       if (INIT_ALLOW_FAIL.has(s)) continue;
       bad.push(`init ${s}: ${v}`);
     }

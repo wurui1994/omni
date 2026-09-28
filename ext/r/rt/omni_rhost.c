@@ -65,6 +65,12 @@ int printf(const char*, ...);
 /* Defn.h 里 R_Toplevel 那一条被 extern0 包着（只在 main.c 那一份里现身），
    所以这儿自己声明一次 —— 类型 RCNTXT 是 Defn.h 给的。 */
 extern RCNTXT R_Toplevel;
+/* `R_ReplFile` 在 Defn.h 里是 attribute_hidden 的（只在 main.c 那一份里现身）。 */
+/* `R_Home` 是 `Rf_initialize_R` 从 `getenv("R_HOME")` 填的那一格（Defn.h 里 extern0）——
+   我们不叫那一句，所以自己填：`R_OpenLibraryFile` 就是按它拼
+   `R_HOME/library/base/R/base` 这条路。量出来不填就是 fp == NULL（回 -1）。 */
+extern char *R_Home;
+char *getenv(const char *);
 
 static void omni_wc(const char *buf, int len) { printf("%.*s", len, buf); }
 static void omni_msg(const char *s) { printf("%s", s); }
@@ -120,6 +126,44 @@ void omni_console_init(void) {
 double omni_eval_1p1(void) { return omni_eval1("1+1"); }
 double omni_eval_sum(void) { return omni_eval1("sum(1:10)"); }
 double omni_eval_sd(void) { return omni_eval1("sd(c(1,2,3,4))"); }
+
+/* **把 base 那个包的 R 代码装进来**（第二十三格）。
+ *
+ * `nchar` / `paste0` / `sd` 这些不是 C 写的，是 base 包里的 R 函数（身子只有一句
+ * `.Internal(...)`）。R 自己在 `setup_Rmainloop`（main.c 1045-1073）里这么装：
+ * `Init_R_Variables(R_BaseNamespace)` 之后打开 `R_HOME/library/base/R/base`
+ * （一份序列化过的 lazy-load 库），交给 `R_ReplFile` 一句一句跑。
+ *
+ * 要 `R_HOME` —— 那是 `getenv("R_HOME")`，判据那边把它指到我们自己编装的那棵树。
+ * 回 0 是装上了、-1 是打不开那份文件。 */
+int omni_base_init(void) {
+  SEXP baseNSenv = R_BaseNamespace;
+  FILE *fp;
+  int errs = 0;
+  if (R_Home == NULL) R_Home = getenv("R_HOME");
+  if (R_Home == NULL) return -2;
+  Init_R_Variables(baseNSenv);
+  fp = R_OpenLibraryFile("base");
+  if (fp == NULL) return -1;
+  /* `R_ReplFile` 本身是 `attribute_hidden`（main.c 里的文件局部），跨模块调不到 ——
+     报的是 `R_ReplFile: libc: 没有这个函数`，**loud 不 silent**，正是要的。
+     所以这一圈自己写：`R_Parse1File` 一句一句读，`R_tryEval` 一句一句在 base 的
+     命名空间里跑（R 自己那一圈的形状，只是错误回到我们手上而不是 longjmp 出去）。 */
+  for (;;) {
+    ParseStatus st = PARSE_NULL;
+    SEXP e = R_Parse1File(fp, 1, &st);
+    int err = 0;
+    if (st == PARSE_EOF) break;
+    if (st == PARSE_NULL) continue;
+    if (st != PARSE_OK) { errs += 1000; break; }
+    PROTECT(e);
+    R_tryEval(e, baseNSenv, &err);
+    UNPROTECT(1);
+    if (err) errs += 1;
+  }
+  fclose(fp);
+  return errs;
+}
 
 /* **任意一句 R 从 JS 递进来**：C 这边留一块固定的缓冲，JS 那边把字节写进去
  * （地址问 `omni_src_ptr()`），再叫 `omni_eval_buf()`。

@@ -1016,3 +1016,26 @@ R 的语法分析器认关键字要它们。补在 `src/core/interp/libc.js`（�
   18 句 R 与 Rscript 对得上，30 秒一趟。
 * 软缺的天花板 203 → **195**（`stat`/`lstat` 由我们自己的 C 提供，另六个进了 libc）。
 * `getpid` 没补（`InitEd` 要它，而那一步不在这条路上）—— `mkdtemp` 的随机改用单调时钟。
+
+## 第二十三格：base 那个包**装得动了**，但还不够快（2026-09-28）
+
+`nchar` / `paste0` / `mean` / `sd` / `sapply` 都不是 C 写的 —— 它们是 base 包里的
+R 函数（身子常常只有一句 `.Internal(...)`）。装它们照 R 自己那一段（main.c 1045-1073）：
+`Init_R_Variables(R_BaseNamespace)` -> `R_OpenLibraryFile("base")` -> 一句一句跑。
+
+落在 `ext/r/rt/omni_rhost.c` 的 `omni_base_init()`。路上三件事：
+
+1. **`R_Home` 要自己填**。`R_OpenLibraryFile` 按它拼
+   `R_HOME/library/base/R/base`，而填它的是 `Rf_initialize_R`（我们不叫那一句）。
+   不填就是 `fp == NULL` —— 头一版那个"ok"其实是"没抛异常"，回值才是 -1。
+   **判据要看回值，不要看"没炸"**。
+2. **`R_ReplFile` 调不到**：它在 main.c 里是 `attribute_hidden`（文件局部），
+   跨模块不导出。报的是 `R_ReplFile: libc: 没有这个函数` —— loud 不 silent，正是要的。
+   所以那一圈自己写：`R_Parse1File` 一句一句读、`R_tryEval` 一句一句在 base 的命名空间里跑
+   （`R_Parse1File` 是导出的）。
+3. **它慢**：base 是 1.4 MB 的 R 源码，一趟 >50 秒还没完。所以这一格**先不进判据** ——
+   判据不许一趟一分钟（`tests/r/rtc.js jsrun` 现在 31 秒）。那 5 句 R 也先留在表外。
+
+下一刀就是这个速度：先量清楚时间花在哪（解析 / 求值 / GC / 我们的内存访问器），
+再决定是压 JS 腿的常数，还是走 R 自己的 lazy-load 数据库（`base.rdb`/`base.rdx`，
+那样就不必现场解析 1.4 MB 源码）。
