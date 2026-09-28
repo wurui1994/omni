@@ -119,8 +119,15 @@ export function evalUnitTexts(path, argv = [], o = {}) {
     if (f.head === 'main') { main = sxDoStmts(f.text); continue; }
     putForm(rtSet.has(f.name) ? lib : app, f);
   }
+  /* **`main` 里那几句要留在一格 `(do …)` 里**（2026-09-28）：`link.js` 发的是
+     `(main 语句…)`，而那几句与模块级的 `(global …)` **同一层** —— 脚本在 main 里遮蔽一个
+     同名全局（`arrslot0.kc` 里 `q` 先是全局数组、main 里又 `let q real`）就成了重复声明。
+     症状是一串 `.sx` 错：`'q' 在这一层已经声明过了` + 后面所有用到它的地方类型不对，
+     而**整份那条路是对的**（它发的是 `(main (do …))`，main 的正文自成一层）。
+     包回去就与整份那一份一字不差。这一格对 `.pss` 也一样（那边只是碰巧没遮蔽过）。 */
+  const mainDo = main.length === 0 ? [] : [`(do\n${main.join('\n')})`];
   /* 入口那一份的名字按**它自己那几项**算（含 `(main …)` 里那几句）。 */
-  const appText = [...app.cls, ...app.glb, ...app.fns, ...main].join('\n');
+  const appText = [...app.cls, ...app.glb, ...app.fns, ...mainDo].join('\n');
   const entry = entryName(path, appText);
   /* **命中那一档**：`lib` 一项都没有（正文压根没降）—— 那一份按 `skipped` 交出去，
      它的签名从盘上那份接口读（`<名字>.d.sx`）。 */
@@ -132,7 +139,7 @@ export function evalUnitTexts(path, argv = [], o = {}) {
       secs: new Map([[0, app]]),
       keys,
       weak: [],
-      main,
+      main: mainDo,
       skipped: new Map([[1, { sigs: d === null ? [] : d.sigs }]]),
     }, (k) => (k.file === `<${rt.name}>` ? rt.name : entry)), new Map([[entry, secSigs(app)]]));
     return { ...r, rtKey: rt.key, rtName: rt.name };
@@ -143,7 +150,7 @@ export function evalUnitTexts(path, argv = [], o = {}) {
     const secs = new Map([[0, app]]);
     return {
       ...withSigs(asyUnitModules({
-        ids: [0], secs, keys: new Map([[0, { file: path }]]), weak: [], main,
+        ids: [0], secs, keys: new Map([[0, { file: path }]]), weak: [], main: mainDo,
       }, () => entry), new Map([[entry, secSigs(app)]])),
       rtKey: '',
       rtName: '',
@@ -154,7 +161,7 @@ export function evalUnitTexts(path, argv = [], o = {}) {
   const nameOf = (k) => (k.file === `<${rtName}>` ? rtName : entry);
   return {
     ...withSigs(asyUnitModules({
-      ids: [0, 1], secs: new Map([[0, app], [1, lib]]), keys, weak: [], main,
+      ids: [0, 1], secs: new Map([[0, app], [1, lib]]), keys, weak: [], main: mainDo,
     }, nameOf), new Map([[entry, secSigs(app)], [rtName, secSigs(lib)]])),
     rtKey: rt.key,
     rtName,

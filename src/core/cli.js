@@ -2080,10 +2080,16 @@ function jsRuntimeOnce() {
   return JS_RT_ONCE;
 }
 
-function emitUnits(path, rest) {
+/**
+ * **按单元产物**那一趟（比印记、只编该编的那几份）。回 `{dir, r}`，`r.mainPath` 是启动器。
+ *
+ * `emit js --units`（发给页面的那条路）与 `run`（本进程装起来跑）**共用这一格** ——
+ * 两条路只在"拿到产物之后干什么"上分岔。
+ */
+function unitsBuild(path, rest) {
   const units = unitsBuilderOf(path, rest);
   if (units === null) {
-    throw new OmniError(`emit js --units：${path} 这门语言没有按单元产物那条路`);
+    throw new OmniError(`按单元产物：${path} 这门语言没有那条路（登记处那张表上没有 units）`);
   }
   const dir = moduleDir(cacheRoot(), 'js-eval');
   mkdirAll(dir);
@@ -2101,12 +2107,40 @@ function emitUnits(path, rest) {
     runtimeText: jsRuntimeOnce().text,
     runtimeName: jsRuntimeOnce().name,
   });
+  return { dir, r };
+}
+
+function emitUnits(path, rest) {
+  const { dir, r } = unitsBuild(path, rest);
   if (r === null) return 1;
   vStep(`eval units     新编 ${r.made} 份、复用 ${r.kept} 份  -> ${dir}`);
   stdout(`${JSON.stringify({
     dir, main: r.mainPath, made: r.made, kept: r.kept, names: r.names,
   })}\n`);
   return 0;
+}
+
+/**
+ * **`run` 走按单元产物那条路**（任务 #38）。
+ *
+ * 为什么：EVAL 两门的运行时那一层（`gl_*`/`g3_*`/`gfx_*`/`gt_*`，90 个函数、260KB）
+ * **每份脚本一字不差**，而从前 `run` 那一路是"整份降 -> 整份解析 -> 整份发 JS -> V8 整份编"。
+ * 量出来的账（`02-gl.pss --gfx null --frames 0 --stat`，合计 185ms）：
+ *   116ms 核心方言前端（90 funcs）· 11ms 摇树（90 -> 24）· 28ms 发 JS(264KB) · 30ms 跑
+ * 也就是说**六成时间花在重新解析一份每趟都一样的运行时上**。走单元之后那一层编一次，
+ * 往后每趟只装（`.load.js` + V8 的 eval 编译缓存）。
+ *
+ * 只在**默认那条 js 腿**上接：别的腿（`--backend`/`--direct`/`--interp`/`--mir`）、
+ * 要分层账的（`--stat`）、要插桩的（`--profile`）、要中间文本的（`--emit-sx`）一律照旧走
+ * 老路 —— 那些档要的正是"整份在手"。
+ */
+function runUnits(path, rest) {
+  const { dir, r } = unitsBuild(path, rest);
+  if (r === null) return 1;
+  vStep(`eval units     新编 ${r.made} 份、复用 ${r.kept} 份  -> ${dir}`);
+  // eval / Function(src) 要编译器在运行期在场（ADR-0020 P6）—— 与整份那条路同一格钩子。
+  installSrcEvalHook((m, o) => target('js').emit(m, o));
+  return asyRunModules(dir, r.mainPath);
 }
 
 function jsModulesDir() {
@@ -2568,12 +2602,18 @@ const ASY_OWNER = new Map();
 const ASY_SPANS = new Map();
 const ASY_STALE = new Set();
 
+/* **这三张按文件记的表要带上目录**（2026-09-28，EVAL 两门也走这条路之后）：产物名在两个
+   目录里会撞 —— `omni_rt.js` 与 `main-….js` 两家都有（asy 在 `modules/js`、EVAL 在
+   `modules/js-eval`）。只按名字记的话，一个进程里先跑 asy 再跑 `.pss`，第二趟会拿到
+   第一趟那份正文。`ASY_OWNER`/`ASY_STALE` 照旧按**顶层名字**记（那本来就是全局的）。 */
+const fileKey = (dir, name) => `${dir}\u0000${name}`;
+
 function asySpans(dir, name) {
   const at = mtimeMs(join(dir, name));
-  const had = ASY_SPANS.get(name);
+  const had = ASY_SPANS.get(fileKey(dir, name));
   if (had !== undefined && had.at === at) return had.map;
   const map = declSpans(asyLoadText(dir, name));
-  ASY_SPANS.set(name, { at, map });
+  ASY_SPANS.set(fileKey(dir, name), { at, map });
   return map;
 }
 
@@ -2603,11 +2643,11 @@ function asyLoadText(dir, name) {
   const src = join(dir, name);
   const lp = join(dir, `${name.slice(0, name.length - '.js'.length)}.load.js`);
   const fresh = exists(lp) && mtimeMs(lp) >= mtimeMs(src);
-  const had = ASY_LOAD_TEXT.get(name);
+  const had = ASY_LOAD_TEXT.get(fileKey(dir, name));
   if (fresh && had !== undefined && had.at >= mtimeMs(src)) return had.text;
   const text = fresh ? readText(lp) : loadableText(dir, name);
   if (!fresh) writeText(lp, text);
-  ASY_LOAD_TEXT.set(name, { text, at: mtimeMs(src) });
+  ASY_LOAD_TEXT.set(fileKey(dir, name), { text, at: mtimeMs(src) });
   return text;
 }
 
@@ -2628,10 +2668,10 @@ function asyRunModules(dir, mainPath) {
       const at = mtimeMs(src);
       /* 「这一份已经装过了」还得**名字没被别人按不同正文盖过**（`ASY_STALE`）—— 少了
          后半句就会拿到上一个程序的同名定义。 */
-      if (ASY_LOADED.get(m) === at && !ASY_STALE.has(m)) { kept++; continue; }
+      if (ASY_LOADED.get(fileKey(dir, m)) === at && !ASY_STALE.has(m)) { kept++; continue; }
       evalJs(asyLoadText(dir, m));
       asyClaim(dir, m);
-      ASY_LOADED.set(m, at);
+      ASY_LOADED.set(fileKey(dir, m), at);
       loaded++;
       continue;
     }
@@ -2641,6 +2681,13 @@ function asyRunModules(dir, mainPath) {
         evalJs(asyLoadText(dir, m));
         asyClaim(dir, m);
       } catch (e) {
+        /* **带 `$exit` 的错是"正常收摊"**（`host/native.js` 立的规矩：这条腿上"退出进程"
+           就是抛它）。EVAL 那两门靠它停下脚本自己写的 `while(1)`（`gfx-cpu.js` 的
+           `refresh`，帧数够了就抛）—— 不在这儿接住就印出一片栈、回 1，而那一趟其实画完了。 */
+        if (e !== null && typeof e === 'object' && '$exit' in e) {
+          vStep(`exec in-process  装 ${loaded} 份、复用 ${kept} 份；$exit ${e.$exit}`);
+          return e.$exit;
+        }
         /* 那格全局槽只用 `evalJs` 读（`cli.js` 这一份里连 `globalThis` 这个名字都不该
            出现 —— 自举那条腿的封闭子集，见文件头注）。 */
         const msg = evalJs('globalThis.$OMNI_ASY_ERR');
@@ -6206,6 +6253,18 @@ function main(argv) {
   if (path !== undefined && path !== null && node.key === 'emit'
       && rest.includes('--units') && borrowedExts().some((e) => path.endsWith(e))) {
     return emitUnits(path, rest);
+  }
+  /* **`run` 也走按单元产物**（任务 #38）：理由与口径在 `runUnits` 的头注里。
+     这一格摆在这儿 —— `applyGfxFlags` 已经跑过（设备是靠环境变量配的），而底下那一步会
+     把 `path` 换成核心方言那份中间文本，按单元产物要的是**源码本身**。 */
+  if (path !== undefined && path !== null && node.key === 'run'
+      && hasJsEngine() && STAT === null && PROF === null
+      && !rest.includes('--backend') && !rest.includes('--direct')
+      && !rest.includes('--interp') && !rest.includes('--mir') && !rest.includes('--work')
+      && !rest.includes('--emit-sx') && env('OMNI_UNITS_RUN') !== '0'
+      && lang(path) === null && borrowedExts().some((e) => path.endsWith(e))
+      && unitsBuilderOf(path, rest) !== null) {
+    return runUnits(path, rest);
   }
   if (path !== undefined && path !== null
       && ['run', 'build', 'emit', 'check'].includes(node.key)

@@ -4004,3 +4004,56 @@ goto 那一族八份语料脚本逐份跑过（kenken/calend/morse/chess/bowling
 反复出现 = 先怀疑读的是旧文件。**
 
 语料账 **227 / 228**，剩的一份是 `magsword.kc` —— 脚本自己的毛病（见 §36.8）。
+
+## 37. `run` 也走按单元产物了（任务 #38，2026-09-28）
+
+### 37.1 那一刀落在哪儿
+
+机制本来就在（`src/core/build/modules.js` 的 `buildUnits` + `ext/polydraw/units.js` 的
+`evalUnitsBuild`，登记处 `lower/langs.js` 上的 `units:`），**可只有 `emit js --units`
+那一条路用它**（页面那一档）。`omni run x.pss` 走的还是"整份降 -> 整份解析 -> 整份发 JS ->
+V8 整份编"。量出来的账（`02-gl.pss --gfx null --frames 0 --stat`，合计 **185ms**）：
+
+    116ms  62.7%  核心方言前端  90 funcs
+     11ms   5.9%  摇树  90 -> 24 funcs（摇掉 66）
+     28ms  15.1%  发 JS  263985 字节
+     30ms  16.2%  本进程跑
+
+也就是说**六成时间花在重新解析一份每趟都一字不差的运行时上**（`gl_*`/`g3_*`/`gfx_*`/`gt_*`
+那 90 个函数）。这一刀把 `run` 接到同一格机制上：`cli.js` 里 `unitsBuild`（`emit --units`
+与 `run` 共用）+ `runUnits`，装起来跑那一步**直接复用 asy 那条腿的 `asyRunModules`**
+（`.load.js` + 一进程里只装一次那套账）。
+
+### 37.2 量出来的
+
+整条命令的墙上时间（交错跑三趟、各取最小；`OMNI_UNITS_RUN=0` 是老路）：
+
+    老路   0.58s      按单元   0.49s        （冷启那一趟 2.13s：两份产物都要编）
+
+省下的约 **90ms/趟**。看着不如上面那张表大，原因写清楚：单元那条路**不摇树**
+（按模块编译的规矩 —— 摇过的库产物会随"这个程序用到哪几个函数"变），所以 V8 要编的正文
+比老路大（老路摇成 24 个函数才发）。真正的大头在**同一个进程里跑第二趟**：Studio 的
+热工人池里 `ev_rt_*` 那一份连装都不装（`ASY_LOADED` 那格账），而老路每趟全套重来。
+
+### 37.3 两个坑
+
+1. **`(main …)` 里那几句与 `(global …)` 同一层** —— `link.js` 发的是 `(main 语句…)`，
+   而整份那条路发的是 `(main (do …))`。于是脚本在 main 里遮蔽一个同名全局
+   （`arrslot0.kc`：`q` 先是全局数组、main 里又 `let q real`）在单元这条路上成了
+   **重复声明**，接着一串类型错。修法是把那几句包回一格 `(do …)`（`units.js` 的 `mainDo`）。
+   这个洞在 `emit --units` 那条路上**本来就在**（页面上点 `arrslot0.kc` 一样报），
+   只是没人跑到 —— `run` 接上来才露出来。
+2. **`$exit` 是正常收摊** —— `asyRunModules` 的 catch 只认 `$OMNI_ASY_ERR`，而 EVAL 靠
+   抛 `$exit` 停下脚本自己写的 `while(1)`（`gfx-cpu.js` 的 `refresh`，帧数够了就抛）。
+   不接住就印一片栈、回 1，而那一趟其实画完了。现在那一格在两门语言上口径一致。
+   顺手把 `ASY_LOADED`/`ASY_LOAD_TEXT`/`ASY_SPANS` 三张按文件名记的表**加上目录**：
+   `omni_rt.js` 与 `main-….js` 两家都有（asy 在 `modules/js`、EVAL 在 `modules/js-eval`），
+   只按名字记的话一个进程里先跑 asy 再跑 `.pss` 会拿到上一趟那份正文。
+
+### 37.4 判据
+
+* 22 份 `.kc` + 8 份 `.pss`（仓库自带）**两条路 stdout 逐字节相同**；`02-gl.pss` 的 PNG
+  两条路**逐字节相同**（307528 字节）。
+* `tests/eval/scan.js`（`--leg js --gfx null`，语料那一轴）**228 / 228、0 红**（整趟 259s）。
+* 逃生口留着：`OMNI_UNITS_RUN=0` 走老路；`--backend/--direct/--interp/--mir/--stat/
+  --profile/--emit-sx` 这几档**照旧走老路**（那些档要的正是"整份在手"）。
