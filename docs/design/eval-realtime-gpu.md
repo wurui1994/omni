@@ -4291,3 +4291,54 @@ glGetTexImage(tex[itex].tar,0,format,type,gbmp);   // tar 可能是 3D / CUBE_MA
 落在近的那四个圆里头 —— 数出来的像素数也对得上（近的四色各 ~1008 格 ≈ π·17.8²，
 远的四色各只剩 21~23 格，就是往里那一侧 1 像素宽的一牙）。`(145,105)` 那一格现在就是
 **深度的闸**，而且两个方向都拦得住：反着排的话 `(142,102)` 也会变绿。
+
+## 41. Worker 那一档的两格前置：设备不认 DOM + 等待点要两条路（任务 #39，2026-09-29）
+
+语料里二十几份脚本**自己在死循环里用 `refresh()` 驱动帧**（`geeky/pi.kc` 的
+`for(z=1;1;z+=2)`）。浏览器这一档帧体在主线程同步跑，`refresh()` 没法真等 ——
+现在靠一道看门狗（1500ms 抛）保住标签页，那一族画不动。正路是**跑进 Worker**
+（`transferControlToOffscreen()` 把画布交过去），Worker 里阻塞是合法的。
+
+落地了两格前置：
+
+### 41.1 设备不认 DOM 了
+
+`src/studio/gfx-gl.js` 里原来有六处 DOM：`installInput` 的 `canvas.addEventListener` /
+`window.addEventListener` / `getBoundingClientRect`、裁子图与取像素两处的
+`document.createElement('canvas')`、文件纹理与 `pic` 两处的 `new Image()`。现在：
+
+* `installInput` 先问一句"挂得上吗"（`OffscreenCanvas` 没有 `addEventListener`、Worker 里
+  没有 `window`）—— 挂不上就**一个监听都不挂**，键位表照旧开好（脚本读 `keystatus[…]`
+  读到 0，而不是"这一格压根没有"）；输入改由宿主推：`dev.setInput({mx,my,bst,keys})`。
+* `mk2d(w,h)`：有 DOM 用 `document.createElement`，否则 `new OffscreenCanvas`，
+  两样都没有回 null 并记一笔 miss（不静默当成成功）。
+* `newImg()` / `imgSrc(im,url)` / `imgOf(im)`：有 `Image` 就是它；没有就给一格**形状一样的
+  壳子**（`onload`/`onerror`/`naturalWidth`/`naturalHeight`），`imgSrc` 那一档走
+  `fetch` -> `blob` -> `createImageBitmap`。**不做成 `src` 赋值器** —— 取值/赋值器不在那个
+  JS 子集里（`check:self` 那道门），所以换 URL 是一格函数调用。
+  往 `texImage2D` / `drawImage` 递的那一格过 `imgOf`（页面上是 `Image`、Worker 里是
+  `ImageBitmap`，两样都认）。
+
+判据（`tests/studio`，75 -> 76）：设备装在一格 `OffscreenCanvas` 上跑 `draw2d.kc`，
+等两次 rAF、`snapshot()` 里非背景色格数 > 2000、miss 一条都没有。页面那一档**逐字不变**
+（`newImg` 回真 `Image`、`imgSrc` 就是 `im.src=`、`imgOf` 回它自己）。
+
+### 41.2 等待点：`Atomics.wait` 要跨源隔离，`file://` 上永远没有
+
+这一格是**先量后写**的（探针：同一份页面、同一台 playwright，只差两个响应头）：
+
+    不带 COOP/COEP：crossOriginIsolated=false   typeof SharedArrayBuffer === "undefined"
+    带上：          true                        "function"
+    带上之后 Worker 里 Atomics.wait(a, 0, 0, 50) -> "timed-out"，墙上 57ms
+    没有 SAB 时的退路（Worker 里忙等 50ms）：误差 < 1ms，而且**不冻主线程**
+
+于是：
+
+* `omni serve` 这一档发三个头（`serve.js` 的 `isoHead()`：COOP `same-origin` +
+  COEP `require-corp` + CORP `same-origin`），页面与它那几样子资源都带。
+  前提是**所有子资源同源** —— 判据里"外链一格都不许剩"那条正好守着它。
+  真页面上量过：`crossOriginIsolated=true`、画廊 25 格 0 红、控制台 0 错
+  （COEP 没把 `<iframe srcdoc>` 与图挡掉）。判据：`tests/serve` 那一格判两个头真发了。
+* **单体 HTML（`file://`）拿不到任何头 ⇒ 那一档永远没有 SAB**。所以 `refresh()` 的等待点
+  必须写成两条路：有 SAB 走 `Atomics.wait`（不烧 CPU），没有就忙等（烧一核，但页面不卡，
+  因为它在 Worker 里）。**别把 Worker 那条路写成"非 SAB 不可"**。
