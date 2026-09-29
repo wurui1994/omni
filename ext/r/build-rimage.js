@@ -19,7 +19,7 @@
 //   base.img.gz —— 线性内存那一块（gzip level 1）
 //   base.json   —— { bump, bytes, stmts, errs, bases, order }
 
-import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
@@ -30,8 +30,8 @@ const METAF = join(OUT, 'base.json');
 const HOME = join(ROOT, '.omni-cache', 'r-rt', 'libR', 'home');
 const RT = join(ROOT, 'src/core/mir/js_rt.js');
 const LOG = join(OUT, 'base-build.log');
-/* 开机那 17 步，与 `tests/r/rtc.js` 的 `INIT_SEQ` 一字不差（次序不是可选的）。 */
-const INIT = ['Rf_InitArithmetic', 'Rf_InitTempDir', 'Rf_InitMemory', 'Rf_InitStringHash',
+/* 开机那 18 步，与 `tests/r/rtc.js` 的 `INIT_SEQ` 一字不差（次序不是可选的）。 */
+const INIT = ['omni_env_init', 'Rf_InitArithmetic', 'Rf_InitTempDir', 'Rf_InitMemory', 'Rf_InitStringHash',
   'Rf_InitBaseEnv', 'Rf_InitNames', 'InitParser', 'Rf_InitGlobalEnv', 'InitDynload',
   'Rf_InitOptions', 'Rf_InitGraphics', 'Rf_InitTypeTables', 'Rf_InitS3DefaultTypes',
   'R_InitConditions', 'Rf_InitConnections', 'omni_console_init', 'omni_toplevel_init', 'omni_locale_init'];
@@ -49,6 +49,20 @@ if (process.argv.includes('--reset')) {
 if (!existsSync(join(OUT, 'omni__omni_rhost.mjs'))) {
   process.stdout.write('先跑：timeout 30 node tests/r/rtc.js jsrun（要那 251 份 .mjs）\n');
   process.exit(1);
+}
+/* **像与那几份 .mjs 是一对**：像里存的是绝对地址，模块一重发，里头的布局就动了。
+   量出来的症状（2026-09-29，改完 `omni_rhost.c` 重发之后撞的）是**铺回去每一句 R 都回 -1**，
+   而账上写着 `errs: 0, done: true` —— 看账像是好的，这正是不许留的那种缝。
+   判据很便宜：**有哪份 .mjs 比 base.json 新**，那份像就作废，从头装。 */
+if (existsSync(METAF)) {
+  const t = statSync(METAF).mtimeMs;
+  const newer = readdirSync(OUT)
+    .filter((f) => f.endsWith('.mjs') && !f.startsWith('$'))     // `$…mjs` 是这个脚本自己写的胶水，不算
+    .filter((f) => statSync(join(OUT, f)).mtimeMs > t);
+  if (newer.length > 0) {
+    for (const f of [IMG, METAF]) if (existsSync(f)) unlinkSync(f);
+    process.stdout.write(`有 ${newer.length} 份 .mjs 比像新（${newer[0]} …）—— 像作废，从头装\n`);
+  }
 }
 
 /** 两个子进程共用的开头：按需装载那套胶水。 */
@@ -95,7 +109,12 @@ say('开机 17 步：' + (Date.now() - t0) + 'ms、起来 ' + $RT.linkStats().mo
 {
   const { gunzipSync } = await import('node:zlib');
   const bytes = new Uint8Array(gunzipSync(readFileSync(${JSON.stringify(IMG)})));
-  $RT.memImageLoad({ bytes, bump: META.bump });
+$RT.memImageLoad({ bytes, bump: META.bump });
+/* **像里没有环境变量**：那一摞在宿主那一侧的 Map 里（`interp/libc.js` 的 `envCache`），
+   `memImageSave` 只存线性内存。所以铺完像要把"住在宿主那边"的那一步补上 ——
+   现在只有 `etc/Renviron` 这一格。不补的症状：`Sys.getenv("EDITOR")` 回空串，
+   于是 `loadNamespace("utils")` 报 `invalid value for 'editor'`。 */
+F('omni_env_init')();
   pos = META.pos; stmts = META.stmts;
   say('铺回上一轮：' + META.order.length + ' 份 + ' + bytes.length + ' 字节、'
     + (Date.now() - t0) + 'ms、上一轮走到字节 ' + pos);

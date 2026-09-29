@@ -96,6 +96,25 @@ void omni_locale_init(void) {
   R_MB_CUR_MAX = 4;
 }
 
+/* **`R_HOME/etc/Renviron` 那一格**（第三十八格）：R 自己在 `Rf_initialize_R`
+   （unix/system.c）里 `R_Home = R_HomeDir()` 之后紧跟一句 `process_system_Renviron()`。
+   我们不叫那一句，于是那份文件里摆的环境变量一个都没生效。
+
+   症状是**在别处炸**：`loadNamespace("utils")` 的 `.onLoad` 里
+   `editor = Sys.getenv("EDITOR")` 拿到空串，`options()` 那一关不收 ——
+   `invalid value for 'editor'`。而 `etc/Renviron` 第 31 行正是
+   `EDITOR=${EDITOR-${VISUAL-vi}}`。同一份文件还管着 R_PAPERSIZE、R_BROWSER、
+   R_LIBS_SITE 一摞，所以这一格要摆在**最前面**（比 `Rf_InitTempDir` 还早：
+   TMPDIR 也可能是它给的）。
+
+   回 0 = 跑过了、-2 = 连 R_HOME 都没有。 */
+int omni_env_init(void) {
+  if (R_Home == NULL) R_Home = getenv("R_HOME");
+  if (R_Home == NULL) return -2;
+  process_system_Renviron();
+  return 0;
+}
+
 /* 顶层上下文（main.c 的 setup_Rmainloop 那一段）：R 的出错那条路要沿着
    R_GlobalContext 往上跳，没有它就是在空链上转圈（量出来：eval 一去不回）。 */
 void omni_toplevel_init(void) {

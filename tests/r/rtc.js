@@ -16,7 +16,7 @@
 //   node tests/r/rtc.js
 //   node tests/r/rtc.js -v      # 连每一份的成败一起印
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -480,7 +480,7 @@ const JSRUN = [
  * `InitTempDir` 要 `stat`、`InitEd` 要 `getpid` —— 我们的 libc 还没有这两个，
  * 所以那两步明着炸（`ALLOW_FAIL`），不静默跳过。
  */
-const INIT_SEQ = ['Rf_InitArithmetic', 'Rf_InitTempDir', 'Rf_InitMemory', 'Rf_InitStringHash',
+const INIT_SEQ = ['omni_env_init', 'Rf_InitArithmetic', 'Rf_InitTempDir', 'Rf_InitMemory', 'Rf_InitStringHash',
   'Rf_InitBaseEnv', 'Rf_InitNames', 'InitParser', 'Rf_InitGlobalEnv', 'InitDynload',
   'Rf_InitOptions', 'Rf_InitGraphics',
   'Rf_InitTypeTables', 'Rf_InitS3DefaultTypes', 'R_InitConditions', 'Rf_InitConnections',
@@ -901,10 +901,9 @@ const IMG_EVAL = [
   'sum(unlist(list(a = 1, b = 2)))', 'length(names(list(a = 1, b = 2)))',
   /* table() 这两句要系统 Rprofile 先跑过（options(warn = 0) 那一条）—— 见第三十六格 */
   'sum(table(c("a", "b", "a")))', 'length(table(c(1, 1, 2)))',
-  /* `table()` 那一族**不进这儿**：量出来它**看状态**（单独跑回 -3，跟在另一句
+  /*      `table()` 那一族**不进这儿**：量出来它**看状态**（单独跑回 -3，跟在另一句
      `table()` 后头又回对了 —— R 那边还伴着 `options(op): option 'warn' cannot be
-     deleted`）。这种"时绿时红"的不许进判据，单独记一刀去追。
-     `head`/`tail` 也不在这儿：它们在 utils 包里，base 装完也没有。 */
+     deleted`）。这种"时绿时红"的不许进判据，单独记一刀去追。 */
   'nrow(data.frame(x = 1:3, y = 4:6))', 'sum(data.frame(x = 1:3)$x)',
   'local({ s <- 0; for (i in 1:10) s <- s + i; s })',
   'local({ f <- function(n) if (n <= 1) 1 else n * f(n - 1); f(10) })',
@@ -913,22 +912,49 @@ const IMG_EVAL = [
 /** 铺完到答完的时间天花板。铺像本身 1.4~2.6 秒，剩下是那 ${IMG_EVAL.length} 句
  *  **真的 R 求值**（量出来一句约 110ms —— 头一趟要编 R 的闭包）。 */
 const IMG_MS_CEIL = 14000;
-if (only === 'img') imgSection();
+/** **装 R 的包**那一节（第三十六~三十七格）：`head`/`tail` 的身子在 utils 里，不在 base。
+ *  走 `utils::` 是因为这条腿上还没有"开机把 defaultPackages 附上"那一步
+ *  （Rscript 那边 utils 是默认附着的，所以那边不写前缀也行 —— 两边写法要一样才比得）。
+ *  进来的路是：`loadNamespace("utils")` → 压过的 lazy-load 库（自写 inflate）
+ *  → `popen("uname -sr")` / `popen("which 'uname'")` → `getline`。
+ *
+ *  **单独一节**是因为它贵：量出来 `loadNamespace("utils")` 那一下 **9.7 秒**
+ *  （6000 次 `inflate` + 6000 次 `crc32`，一次约 1.6ms —— 每个字节都过一遍 BigInt
+ *  的 `memLoad`/`memStore`）。混进 `img` 会把那一节顶到 22 秒；分开两节，
+ *  每节都在 30 秒的规矩里，而这 9.7 秒明着记在这儿当账。 */
+const PKG_EVAL = [
+  'sum(utils::head(sort(c(5, 3, 9, 1)), 2))', 'sum(utils::head(1:10, 3))',
+  'length(utils::tail(letters, 3))', 'sum(utils::head(c(10, 20, 30), -1))',
+  'nchar(paste(utils::tail(letters, 3), collapse = ""))',
+];
+const PKG_MS_CEIL = 22000;
+if (only === 'img') imgSection('铺开机镜像', IMG_EVAL, IMG_MS_CEIL, 'img');
+if (only === 'pkg') imgSection('装 R 的包（utils）', PKG_EVAL, PKG_MS_CEIL, 'pkg');
 
 process.stdout.write(`\n  ${pass} passed, ${fail} failed\n`);
 process.exit(fail > 0 ? 1 : 0);
 
-function imgSection() {
+function imgSection(label, EVAL, msCeil, tag) {
   const dir = join(ROOT, '.omni-cache', 'r-rt', 'jsall');
   const metaF = join(dir, 'base.json');
   const imgF = join(dir, 'base.img.gz');
   const symsF = join(dir, '.syms.json');
   if (!existsSync(metaF) || !existsSync(imgF) || !existsSync(symsF)) {
-    no('铺开机镜像', '还没有像 —— 先跑 node ext/r/build-rimage.js（反复跑到"装完了"）');
+    no(label, '还没有像 —— 先跑 node ext/r/build-rimage.js（反复跑到"装完了"）');
     return;
   }
   const meta = JSON.parse(readFileSync(metaF, 'utf8'));
-  const logFile = join(dir, '$img.log');
+  /* 像与那几份 .mjs 是**一对**（像里是绝对地址）。有哪份比像新，这一节就不算数 ——
+     不拦的症状是"每一句 R 都回 -1"，而账上 `errs: 0, done: true`（2026-09-29 撞过）。 */
+  const tImg = statSync(metaF).mtimeMs;
+  const newer = readdirSync(dir)
+    .filter((f) => f.endsWith('.mjs') && !f.startsWith('$'))     // `$…mjs` 是跑一次就重写的胶水，不算
+    .filter((f) => statSync(join(dir, f)).mtimeMs > tImg);
+  if (newer.length > 0) {
+    no(label, `有 ${newer.length} 份 .mjs 比像新（${newer[0]} …）—— 先重造像：node ext/r/build-rimage.js`);
+    return;
+  }
+  const logFile = join(dir, `$${tag}.log`);
   writeFileSync(logFile, '');
   const L = [
     "import { readFileSync, appendFileSync } from 'node:fs';",
@@ -948,11 +974,13 @@ function imgSection() {
     "const { gunzipSync } = await import('node:zlib');",
     `const bytes = new Uint8Array(gunzipSync(readFileSync(${JSON.stringify(imgF)})));`,
     '$RT.memImageLoad({ bytes, bump: META.bump });',
+    /* 像里没有环境变量（那在宿主那一侧的 Map 里），所以铺完像补一句 —— 见 build-rimage.js 的注释。 */
+    "F('omni_env_init')();",
     "say('load\\t' + (Date.now() - t0));",
     "const st = $RT.memStoreFn('i8');",
     "const ptr = F('omni_src_ptr')();",
     "const ev = F('omni_eval_buf');",
-    `for (const src of ${JSON.stringify(IMG_EVAL)}) {`,
+    `for (const src of ${JSON.stringify(EVAL)}) {`,
     '  try {',
     '    const bs = new TextEncoder().encode(src);',
     '    for (let i = 0; i < bs.length; i++) st(ptr, i, BigInt(bs[i]));',
@@ -962,7 +990,7 @@ function imgSection() {
     '}',
     "say('all\\t' + (Date.now() - t0));",
   ];
-  const entry = join(dir, '$img.mjs');
+  const entry = join(dir, `$${tag}.mjs`);
   writeFileSync(entry, `${L.join('\n')}\n`);
   const r = spawnSync(process.execPath, [entry], {
     encoding: 'utf8',
@@ -982,26 +1010,26 @@ function imgSection() {
   const msAll = Number(one.get('all'));
   if (!Number.isFinite(msAll)) {
     bad.push(`铺像那一趟没跑到底（${(r.stderr ?? '').split('\n').slice(0, 2).join(' ').slice(0, 200)}）`);
-  } else if (msAll > IMG_MS_CEIL) bad.push(`铺完到答完 ${msAll}ms（天花板 ${IMG_MS_CEIL}ms）`);
+  } else if (msAll > msCeil) bad.push(`铺完到答完 ${msAll}ms（天花板 ${msCeil}ms）`);
   if (meta.errs !== 0 || meta.done !== true) {
     bad.push(`像本身不干净（装了 ${meta.stmts} 句、错 ${meta.errs}、done=${meta.done}）`);
   }
   const rsi = spawnSync('Rscript', ['-e',
-    IMG_EVAL.map((e) => `cat(sprintf("%.17g", {${e}}), "\\n")`).join(';')], { encoding: 'utf8' });
+    EVAL.map((e) => `cat(sprintf("%.17g", {${e}}), "\\n")`).join(';')], { encoding: 'utf8' });
   const refi = (rsi.stdout ?? '').trim().split('\n').map((x) => Number(x));
-  if (rsi.status !== 0 || refi.length !== IMG_EVAL.length) {
+  if (rsi.status !== 0 || refi.length !== EVAL.length) {
     bad.push(`Rscript 那把尺子没量出来（${(rsi.stderr ?? '').split('\n')[0].slice(0, 100)}）`);
   } else {
-    IMG_EVAL.forEach((src, i) => {
+    EVAL.forEach((src, i) => {
       const v = Number(evs.get(src));
       const w = refi[i];
-      if (!Number.isFinite(v)) { bad.push(`img ${src}: 我们 ${evs.get(src)}、R ${w}`); return; }
+      if (!Number.isFinite(v)) { bad.push(`${tag} ${src}: 我们 ${evs.get(src)}、R ${w}`); return; }
       const rel = Math.abs(v - w) / Math.max(Math.abs(w), 1e-300);
-      if (rel > 1e-12) bad.push(`img ${src}: 我们 ${v}、R ${w}`);
+      if (rel > 1e-12) bad.push(`${tag} ${src}: 我们 ${v}、R ${w}`);
     });
   }
-  if (bad.length > 0) { no('铺开机镜像', bad.slice(0, 6).join('\n       ')); return; }
-  ok('铺开机镜像', `${meta.order.length} 份模块 + ${meta.bytes} 字节的像铺回去 `
+  if (bad.length > 0) { no(label, bad.slice(0, 6).join('\n       ')); return; }
+  ok(label, `${meta.order.length} 份模块 + ${meta.bytes} 字节的像铺回去 `
     + `${one.get('load')}ms，装 base 那 ${meta.stmts} 句一句不用重跑（原本 17 秒）；`
-    + `${IMG_EVAL.length} 句 base 的函数都与 Rscript 对得上，铺完到答完 ${msAll}ms`);
+    + `${EVAL.length} 句 R 都与 Rscript 对得上，铺完到答完 ${msAll}ms`);
 }

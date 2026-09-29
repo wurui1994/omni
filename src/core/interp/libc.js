@@ -1235,6 +1235,159 @@ function pcreBlock(name) {
 }
 /** 那一格 `struct passwd`（见 `getpwuid` 头上的账）：造一次就记住。 */
 let pwAt = 0n;
+/* ------------------------------------------------------------------ inflate
+ *
+ * **自己写的 DEFLATE 解码**（RFC 1951 + 1950 的 zlib 头 / 1952 的 gzip 头）。
+ * 为什么不借宿主的 zlib：宿主面是自举腿的契约（见 `statInfo` 那笔账），而这是**纯计算**
+ * —— 纯计算留在这一层，浏览器那条腿上也照样成立。ADR-0047 第三十七格。
+ *
+ * 只做**解**不做压：R 装包只读（`R_decompress1`），写那一路我们不走。
+ */
+const LEN_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59,
+  67, 83, 99, 115, 131, 163, 195, 227, 258];
+const LEN_EXTRA = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3,
+  4, 4, 4, 4, 5, 5, 5, 5, 0];
+const DIST_BASE = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385,
+  513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
+const DIST_EXTRA = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7,
+  8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+const CLEN_ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+
+/** 一张按码长表建出来的 Huffman 表（规范霍夫曼：同长按符号号排）。 */
+function huffTable(lens) {
+  const counts = new Array(16).fill(0);
+  for (const l of lens) if (l > 0) counts[l] += 1;
+  const offs = new Array(16).fill(0);
+  for (let i = 1; i < 15; i += 1) offs[i + 1] = offs[i] + counts[i];
+  const syms = new Array(lens.length).fill(0);
+  for (let s = 0; s < lens.length; s += 1) if (lens[s] > 0) syms[offs[lens[s]]++] = s;
+  return { counts, syms };
+}
+
+/** 位流 + 解码：**输入不够就抛 `INFL_SHORT`**（调用方拿它当"等更多字节"）。 */
+const INFL_SHORT = 'INFL_SHORT';
+
+function inflateRaw(src, from) {
+  let pos = from;
+  let bitbuf = 0;
+  let bitcnt = 0;
+  const out = [];
+  const bits = (n) => {
+    while (bitcnt < n) {
+      if (pos >= src.length) throw new Error(INFL_SHORT);
+      bitbuf |= src[pos++] << bitcnt;
+      bitcnt += 8;
+    }
+    const v = bitbuf & ((1 << n) - 1);
+    bitbuf >>>= n;
+    bitcnt -= n;
+    return v;
+  };
+  const decode = (t) => {
+    let code = 0;
+    let first = 0;
+    let index = 0;
+    for (let len = 1; len <= 15; len += 1) {
+      code |= bits(1);
+      const count = t.counts[len];
+      if (code - first < count) return t.syms[index + (code - first)];
+      index += count;
+      first = (first + count) << 1;
+      code <<= 1;
+    }
+    throw new Error('inflate: 坏的霍夫曼码');
+  };
+  let fixedLit = null;
+  let fixedDist = null;
+  for (;;) {
+    const last = bits(1);
+    const type = bits(2);
+    if (type === 0) {                            // 存储块
+      bitbuf = 0;
+      bitcnt = 0;
+      if (pos + 4 > src.length) throw new Error(INFL_SHORT);
+      const n = src[pos] | (src[pos + 1] << 8);
+      pos += 4;
+      if (pos + n > src.length) throw new Error(INFL_SHORT);
+      for (let i = 0; i < n; i += 1) out.push(src[pos + i]);
+      pos += n;
+    } else if (type === 1 || type === 2) {
+      let lit;
+      let dist;
+      if (type === 1) {
+        if (fixedLit === null) {
+          const ll = new Array(288).fill(8);
+          for (let i = 144; i < 256; i += 1) ll[i] = 9;
+          for (let i = 256; i < 280; i += 1) ll[i] = 7;
+          fixedLit = huffTable(ll);
+          fixedDist = huffTable(new Array(30).fill(5));
+        }
+        lit = fixedLit;
+        dist = fixedDist;
+      } else {
+        const nlen = bits(5) + 257;
+        const ndist = bits(5) + 1;
+        const ncode = bits(4) + 4;
+        const clens = new Array(19).fill(0);
+        for (let i = 0; i < ncode; i += 1) clens[CLEN_ORDER[i]] = bits(3);
+        const ct = huffTable(clens);
+        const lens = [];
+        while (lens.length < nlen + ndist) {
+          const sym = decode(ct);
+          if (sym < 16) { lens.push(sym); continue; }
+          let rep;
+          let v = 0;
+          if (sym === 16) { v = lens[lens.length - 1]; rep = 3 + bits(2); }
+          else if (sym === 17) rep = 3 + bits(3);
+          else rep = 11 + bits(7);
+          for (let i = 0; i < rep; i += 1) lens.push(v);
+        }
+        lit = huffTable(lens.slice(0, nlen));
+        dist = huffTable(lens.slice(nlen));
+      }
+      for (;;) {
+        const sym = decode(lit);
+        if (sym < 256) { out.push(sym); continue; }
+        if (sym === 256) break;
+        const li = sym - 257;
+        const len = LEN_BASE[li] + bits(LEN_EXTRA[li]);
+        const di = decode(dist);
+        const d = DIST_BASE[di] + bits(DIST_EXTRA[di]);
+        const start = out.length - d;
+        if (start < 0) throw new Error('inflate: 回指到块外');
+        for (let i = 0; i < len; i += 1) out.push(out[start + i]);
+      }
+    } else throw new Error('inflate: 保留的块类型 3');
+    if (last) break;
+  }
+  return { out, consumed: pos - from };
+}
+
+/** zlib / gzip 的头（`windowBits` 说是哪一种）：跳过去，回数据从第几个字节开始。 */
+function inflateSkipHeader(src, wb) {
+  if (wb < 0) return 0;                          // raw
+  if (wb > 15) {                                 // gzip（15+16）：RFC 1952 的头
+    if (src.length < 10) throw new Error(INFL_SHORT);
+    let p = 10;
+    const flg = src[3];
+    if (flg & 4) {                               // FEXTRA
+      if (src.length < p + 2) throw new Error(INFL_SHORT);
+      p += 2 + (src[p] | (src[p + 1] << 8));
+    }
+    if (flg & 8) { while (p < src.length && src[p] !== 0) p += 1; p += 1; }   // FNAME
+    if (flg & 16) { while (p < src.length && src[p] !== 0) p += 1; p += 1; }  // FCOMMENT
+    if (flg & 2) p += 2;                         // FHCRC
+    if (p > src.length) throw new Error(INFL_SHORT);
+    return p;
+  }
+  if (src.length < 2) throw new Error(INFL_SHORT);
+  return 2;                                      // zlib：CMF + FLG
+}
+
+/** 流式那一侧的状态（`z_stream` 的 `state` 那一格存的是这张表的号）。 */
+const zStates = new Map();
+let zSeq = 0n;
+
 function pwEntry() {
   if (pwAt !== 0n) return pwAt;
   const str = (s) => {
@@ -1501,6 +1654,72 @@ function openMode(m) {
 }
 
 /** 把一份还没落盘的写入落到盘上。只读的流上是空操作。 */
+/** `uname(2)` 那五格 —— 这条腿上的机器就叫这个名字。
+ *  `uname` 与 `popen("uname …")` 共用这一份，免得同一个问题两处各说一套。 */
+const UTS = { s: 'Omni', n: 'omni', r: '1.0', v: 'omni-js', m: 'linear-memory' };
+
+/** 我们自己答得上来的那几条 shell 命令（给 `popen` 用）。答不上来回 `null`。
+ *
+ *  先把 shell 的壳剥掉：`2>/dev/null` 这类重定向丢掉（这条腿上没有第二条流要接），
+ *  `|| 退路` 也丢掉 —— 答得上来就不会走退路。剩下的按 argv 认。
+ *
+ *  这条腿上"装着的程序"就 `uname` 这一个（`SHELL_HAVE`）—— `which` 问别的名字时
+ *  回**空输出**，那正是真 `which` 找不到时的样子，R 的 `Sys.which()` 会答 ""。 */
+const SHELL_HAVE = new Set(['uname']);
+
+function shellRun(cmd) {
+  const head = cmd.split('||')[0].replace(/[12]?>\s*(&\d|\/dev\/null|\/dev\/stderr)/g, '');
+  /* 只认单/双引号裹起来的整词（`which 'uname'` 就是这个形状），不做变量展开。 */
+  const argv = (head.trim().match(/'[^']*'|"[^"]*"|\S+/g) ?? [])
+    .map((w) => (/^['"]/.test(w) ? w.slice(1, -1) : w));
+  const prog = (argv[0] ?? '').split('/').pop();
+  if (prog === 'which') {
+    return argv.slice(1).filter((x) => SHELL_HAVE.has(x)).map((x) => `/usr/bin/${x}\n`).join('');
+  }
+  if (prog !== 'uname') return null;
+  /* `uname` 印出来的次序是固定的 s n r v m（`-a` = 全要），与旗标写的先后无关。 */
+  const want = new Set();
+  for (const f of argv.slice(1)) {
+    if (!f.startsWith('-')) return null;
+    for (const c of f.slice(1)) {
+      if (c === 'a') { for (const k of 'snrvm') want.add(k); } else if ('snrvm'.includes(c)) want.add(c); else return null;
+    }
+  }
+  if (want.size === 0) want.add('s');                 // 不带旗标就是 `-s`
+  return `${[...'snrvm'].filter((k) => want.has(k)).map((k) => UTS[k]).join(' ')}\n`;
+}
+
+/** `getline` / `getdelim` 的正身：缓冲区不够就撑大，新地址与新容量写回出参。 */
+function getDelim(lpp, npp, delim, fh) {
+  const e = files.get(BigInt(fh));
+  if (e === undefined) { setErrno(9); return BigInt.asIntN(64, -1n); }   // EBADF
+  if (e.pos >= e.data.length) { e.eof = true; return BigInt.asIntN(64, -1n); }
+  const dc = String.fromCharCode(delim);
+  let s = '';
+  while (e.pos < e.data.length) {
+    const ch = e.data[e.pos];
+    e.pos += 1;
+    s += ch;
+    if (ch === dc) break;
+  }
+  const lp = BigInt(lpp);
+  const np = BigInt(npp);
+  let buf = memLoad('i64', lp, 0);
+  const cap = memLoad('i64', np, 0);
+  const need = BigInt(s.length + 1);
+  /* `*lineptr == NULL` 时 `*n` 的值**不算数**（POSIX 明说），所以先看指针再看容量。 */
+  if (buf === 0n || cap < need) {
+    const q = heapAlloc(need);
+    if (q === 0n) { setErrno(12); return BigInt.asIntN(64, -1n); }       // ENOMEM
+    if (buf !== 0n) heapFree(buf);
+    buf = q;
+    memStore('i64', lp, 0, buf);
+    memStore('i64', np, 0, need);
+  }
+  writeCStr(buf, s);
+  return BigInt(s.length);
+}
+
 function fileSync(e) {
   if (!e.write || !e.dirty) return;
   /* `mode` 只有从 `open(…, O_CREAT, mode)` 来的那些有（新建时才生效，见宿主那一侧）。
@@ -2145,6 +2364,12 @@ const LIBC = {
     writeCStr(a[0], s);
     return BigInt(a[0]);
   },
+  /** `getline` / `getdelim`（POSIX 2008）：读到分隔符**为止（含它）**。
+   *  与 `fgets` 的差别在**缓冲区是出参** —— 不够长就撑大，新地址与新容量写回
+   *  `*lineptr` / `*n`。回的是**读到的字节数**（不含收尾那个 0），
+   *  一个字节都没读到（EOF）回 -1。 */
+  getdelim: (a) => getDelim(a[0], a[1], Number(BigInt(a[2])) & 0xff, a[3]),
+  getline: (a) => getDelim(a[0], a[1], 0x0a, a[2]),
   /* `sscanf`（C11 7.21.6.7）：输入是内存里的一个串。`va_list` 就是变参区的地址，
    * 所以 `vsscanf` 与它是同一条 —— 与 `printf`/`vprintf` 那一对完全一样。 */
   sscanf: (a) => {
@@ -2199,6 +2424,25 @@ const LIBC = {
   ftell: (a) => {
     const e = files.get(BigInt(a[0]));
     return e === undefined ? -1n : BigInt(e.pos);
+  },
+  /* `ftello`/`fseeko`（POSIX 的大文件版）：这一层的位置本来就是 64 位的数，
+     所以与上面那两条**同一份实现**（R 的 lazy-load 数据库读 `.rdb` 走它）。 */
+  ftello: (a) => {
+    const e = files.get(BigInt(a[0]));
+    return e === undefined ? -1n : BigInt(e.pos);
+  },
+  fseeko: (a) => {
+    const e = files.get(BigInt(a[0]));
+    if (e === undefined) return -1n;
+    const off = Number(BigInt.asIntN(64, BigInt(a[1])));
+    const whence = Number(BigInt(a[2]));
+    let p = off;
+    if (whence === 1) p = e.pos + off;
+    else if (whence === 2) p = e.data.length + off;
+    if (p < 0) return -1n;
+    e.pos = p;
+    e.eof = false;
+    return 0n;
   },
   rewind: (a) => {
     const e = files.get(BigInt(a[0]));
@@ -3049,11 +3293,11 @@ const LIBC = {
         memStore('i8', at + BigInt(i * 256 + j), 0, BigInt(j < bs.length ? bs[j] : 0));
       }
     };
-    put(0, 'Omni');                     // sysname
-    put(1, 'omni');                     // nodename
-    put(2, '1.0');                      // release
-    put(3, 'omni-js');                  // version
-    put(4, 'linear-memory');            // machine
+    put(0, UTS.s);                      // sysname
+    put(1, UTS.n);                      // nodename
+    put(2, UTS.r);                      // release
+    put(3, UTS.v);                      // version
+    put(4, UTS.m);                      // machine
     return 0n;
   },
   /** `getlogin` / `getuid` 一族：`Sys.info()` 问"谁在跑"。这条腿上没有"用户"这回事 ——
@@ -3121,6 +3365,166 @@ const LIBC = {
       for (let k = 0; k < 8; k += 1) c = (c >>> 1) ^ (0xedb88320 & -(c & 1));
     }
     return BigInt((c ^ 0xffffffff) >>> 0);
+  },
+  /* --------------------------------------------------- 流式 zlib 那三格（只解不压）
+   * `z_stream` 的排布（64 位，zlib 1.2.x）：
+   *   +0 next_in  +8 avail_in(4)  +16 total_in  +24 next_out  +32 avail_out(4)
+   *   +40 total_out  +48 msg  +56 state  +64 zalloc +72 zfree +80 opaque
+   *   +88 data_type(4)  +96 adler  +104 reserved   （共 112 字节）
+   * `state` 那一格我们放**自己那张表的号** —— R 只把它当不透明指针传回来。
+   * 做法是"**攒够再解**"：每次把新来的输入接到尾上、整份重解一遍、按 `avail_out` 往外倒。
+   * 攒不够（`INFL_SHORT`）就当"还要更多字节"回 Z_OK —— 这正是流式接口的语义。 */
+  inflateInit2_: (a) => {
+    const strm = BigInt(a[0]);
+    const wb = Number(BigInt.asIntN(32, BigInt(a[1])));
+    zSeq += 1n;
+    zStates.set(zSeq, { wb, inp: [], out: null, cur: 0, done: false });
+    memStore('i64', strm, 56, zSeq);             // state
+    memStore('i64', strm, 16, 0n);               // total_in
+    memStore('i64', strm, 40, 0n);               // total_out
+    memStore('i64', strm, 48, 0n);               // msg = NULL
+    return 0n;                                   // Z_OK
+  },
+  inflate: (a) => {
+    const strm = BigInt(a[0]);
+    const st = zStates.get(memLoad('i64', strm, 56));
+    if (st === undefined) return BigInt.asIntN(32, -2n);          // Z_STREAM_ERROR
+    /* 一、把这一趟给的输入收下来 */
+    const nin = Number(memLoad('i32u', strm, 8));
+    const pin = memLoad('i64', strm, 0);
+    for (let i = 0; i < nin; i += 1) st.inp.push(Number(memLoad('i8u', pin + BigInt(i), 0)));
+    memStore('i64', strm, 0, pin + BigInt(nin));
+    memStore('i32', strm, 8, 0n);
+    memStore('i64', strm, 16, memLoad('i64', strm, 16) + BigInt(nin));
+    /* 二、还没解出来就整份重解一遍（攒够才解，攒不够就等下一趟） */
+    if (st.out === null) {
+      try {
+        const src = st.inp;
+        const at = inflateSkipHeader(src, st.wb);
+        st.out = inflateRaw(src, at).out;
+        st.cur = 0;
+      } catch (e) {
+        if (String(e && e.message) === INFL_SHORT) return 0n;     // Z_OK：还要更多
+        return BigInt.asIntN(32, -3n);                            // Z_DATA_ERROR
+      }
+    }
+    /* 三、按 avail_out 往外倒 */
+    const nout = Number(memLoad('i32u', strm, 32));
+    const pout = memLoad('i64', strm, 24);
+    const left = st.out.length - st.cur;
+    const k = left < nout ? left : nout;
+    for (let i = 0; i < k; i += 1) memStore('i8', pout + BigInt(i), 0, BigInt(st.out[st.cur + i]));
+    st.cur += k;
+    memStore('i64', strm, 24, pout + BigInt(k));
+    memStore('i32', strm, 32, BigInt(nout - k));
+    memStore('i64', strm, 40, memLoad('i64', strm, 40) + BigInt(k));
+    return st.cur >= st.out.length ? 1n : 0n;                     // Z_STREAM_END / Z_OK
+  },
+  inflateEnd: (a) => {
+    const strm = BigInt(a[0]);
+    zStates.delete(memLoad('i64', strm, 56));
+    memStore('i64', strm, 56, 0n);
+    return 0n;
+  },
+  inflateReset: (a) => {
+    const strm = BigInt(a[0]);
+    const st = zStates.get(memLoad('i64', strm, 56));
+    if (st !== undefined) { st.inp = []; st.out = null; st.cur = 0; }
+    return 0n;
+  },
+  /** `uncompress`：一口气解一块（R 的 `R_decompress1` 走这一条）。
+   *  `destLen` 是"进来是容量、出去是真长度"那种用法。 */
+  uncompress: (a) => {
+    const dst = BigInt(a[0]);
+    const pcap = BigInt(a[1]);
+    const src = BigInt(a[2]);
+    const n = Number(BigInt(a[3]));
+    const cap = Number(memLoad('i64', pcap, 0));
+    const bytes = [];
+    for (let i = 0; i < n; i += 1) bytes.push(Number(memLoad('i8u', src + BigInt(i), 0)));
+    let out;
+    try {
+      out = inflateRaw(bytes, inflateSkipHeader(bytes, 15)).out;
+    } catch (e) {
+      return BigInt.asIntN(32, String(e && e.message) === INFL_SHORT ? -5n : -3n);
+    }
+    if (out.length > cap) return BigInt.asIntN(32, -5n);          // Z_BUF_ERROR
+    for (let i = 0; i < out.length; i += 1) memStore('i8', dst + BigInt(i), 0, BigInt(out[i]));
+    memStore('i64', pcap, 0, BigInt(out.length));
+    return 0n;
+  },
+  /* --------------------------------- 编译器内建那几格（前端还没折掉的，落到这儿兜住）
+   * `__builtin_constant_p(x)` 本该在**编译期**折成 0/1（GCC 的语义：实参是不是编译期
+   * 常量）。我们的前端现在把它当普通外部函数发出去了 —— 编译时只有一条 warning，
+   * 到运行时才 loud（`xdr`/`tre` 那几份里有）。
+   * 这儿答 **0**（"不是常量"）：那是**总是安全**的一侧 —— 调用方会走通用那条路。
+   * 真正的修法在 `frontend-c/tccgen.js` 里把它当内建折掉，那要重发 252 份，
+   * 单独一刀；记在这儿免得忘。 */
+  __builtin_constant_p: () => 0n,
+  __builtin_expect: (a) => BigInt(a[0]),
+  __builtin_memcpy: (a) => {
+    const n = Number(BigInt(a[2]));
+    const d = BigInt(a[0]);
+    const s = BigInt(a[1]);
+    for (let i = 0; i < n; i += 1) memStore('i8', d + BigInt(i), 0, memLoad('i8u', s + BigInt(i), 0));
+    return d;
+  },
+  /** `fileno`：这一层的"文件描述符"就是我们自己发的那个句柄号（`FILE*` 与 fd 同源）。
+   *  R 拿它判"这个流是不是终端"（`isatty`）与 `dup` 那一路。 */
+  fileno: (a) => {
+    const h = BigInt(a[0]);
+    const e = files.get(h);
+    if (e !== undefined) return h;
+    return BigInt.asIntN(32, -1n);
+  },
+  isatty: () => 0n,                              // 这条腿上没有终端：谁都不是 tty
+  /** `fstat`：R 的 lazy-load 数据库读 `.rdb` 之前拿它问长度。
+   *  **这儿的 `struct stat` 排布是照 macOS 那版写死的**（`st_mode` 在 +4、`st_size` 在 +96），
+   *  而 `stat`/`lstat` 那一路是 C 那边 `omni_fill_stat` 按头文件填的 —— 同一张结构在两处
+   *  各写了一遍，这是账：下一刀该把这一格也挪到 C 那边去，省掉"两处不一致"的风险。
+   *  只填 R 真用的那两格，其余清零（清零本身也是真话：这条腿上没有 inode/设备号）。 */
+  fstat: (a) => {
+    const e = files.get(BigInt(a[0]));
+    const sb = BigInt(a[1]);
+    for (let i = 0; i < 144; i += 1) memStore('i8', sb + BigInt(i), 0, 0n);
+    if (e === undefined) { setErrno(9); return BigInt.asIntN(32, -1n); }   // EBADF
+    memStore('i16', sb, 4, 0x81a4n);              // S_IFREG | 0644
+    memStore('i64', sb, 96, BigInt(e.data.length));
+    return 0n;
+  },
+  /** `clearerr`：把 eof 与出错那两个标志清掉（C11 7.21.10.1）。 */
+  clearerr: (a) => {
+    const e = files.get(BigInt(a[0]));
+    if (e !== undefined) { e.eof = false; e.err = false; }
+    return undefined;
+  },
+  /** `popen`：这条腿上**没有 shell**，起不了子进程。但 R 确实要跑那么两三条
+   *  「问机器一句话」的命令（`utils` 的 `.onLoad` 里 `defaultUserAgent()` 跑
+   *  `uname -sr`），所以这儿摆一张**自己答得上来**的小命令表 —— 答的就是
+   *  `uname(2)` 那几格，两处一个说法。
+   *
+   *  认不出的命令 **loud**，而且把原话带上：不带的话只知道"撞了 popen"，
+   *  不知道谁在跑什么。**不许**悄悄回空管子 —— 那是静默答错（R 会把
+   *  `character(0)` 当成"这台机器就叫空"接着往下走）。 */
+  popen: (a) => {
+    const cmd = readCStr(a[0]);
+    const mode = readCStr(a[1]);
+    if (!mode.startsWith('r')) {
+      throw new Error(`popen: 只能读（'${mode}' 要往命令的 stdin 里写，这条腿上没有子进程）`);
+    }
+    const out = shellRun(cmd);
+    if (out === null) throw new Error(`popen: 这条腿上没有 shell，答不上来 '${cmd}'`);
+    const h = nextFile;
+    nextFile += 1n;
+    files.set(h, { path: `|${cmd}`, data: out, pos: 0, write: false, eof: false, err: false, dirty: false });
+    return h;
+  },
+  /** `pclose`：关掉那根管子，回**子进程的退出状态**（不是 `fclose` 的 0/EOF）。
+   *  我们答得上来的命令一律算成功退出，所以是 0。 */
+  pclose: (a) => {
+    const f = BigInt(a[0]);
+    if (!files.delete(f)) return BigInt.asIntN(32, -1n);
+    return 0n;
   },
   memcpy: (a) => {
     const n = Number(BigInt(a[2]));

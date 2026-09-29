@@ -1355,6 +1355,86 @@ strsplit/vapply）都与 Rscript 对得上，**铺完到答完 3.8 秒**（整�
 还需要一条"按名字取指针"的门（把 `js_rt` 的 `fnSlot` 递进去）。
 好处是这一刀**不动发射缓存**（libc 不在 key 里）—— 252 份现编的那套就够。
 
+## 第三十一格：PCRE2 那一族做功能映射（已落，2026-09-28）
+
+R 的 `grepl`/`sub`/`regmatches` 走 PCRE2。映过来的是 14 个函数（`pcre2_compile_8`、
+`pcre2_match_8`、`pcre2_match_data_create_from_pattern_8`、`pcre2_get_ovector_pointer_8` …），
+身子是 JS 的 `RegExp`。
+
+踩的那一格值得记：**句柄不能是常数**。头一版 `pcre2_compile_8` 回 `1n`、`2n` 这种票号，
+R 用完 `pcre2_code_free_8` 之前会先 `free()` 那块 —— 常数进 `free()` 就是
+`memory access out of bounds`。改成 `pcreBlock()`：真在堆上要一小块，
+地址当句柄，JS 那侧的 `RegExp` 挂在 Map 里按地址索引。
+
+## 第三十二格：LAPACK 那一族（已落，2026-09-28）
+
+按上一格量好的正解做的：`dlopen`/`dlsym`/`dlclose`/`dlerror` 映到自家符号表
+（`js_rt.js` 新开一条 `setSymLookup`，先 `needFn` 再 `needSym`），
+`modules/lapack/Lapack.c` 进单子、`main/lapack.c` **放回去**（两份是一对）。
+Fortran 那一面补了 `dgesv_`/`dgetrf_`/`dlange_`/`dgecon_`。
+
+判据：`solve(matrix(c(2,1,1,3),2))[1,1]` 与 `det(...)` 对上 Rscript；`FLOOR` 回 111。
+**欠账**：`dgecon_` 不是 LAPACK 的 `dlacn2` 估计器，是个近似 —— 条件数只用在
+"要不要发 warning"那一路上，但它是账。
+
+## 第三十三格：多字节 locale（退回过一次，重做后 88/90）
+
+头一版只摆 `utf8locale`/`mbcslocale` 两个全局，量出来 `as.numeric("1")` 回 **NA** ——
+R 自己那个 `R_MB_CUR_MAX`（Defn.h 的，不是 libc 的）还是 0，`Mbrtowc(…, 0, …)`
+回"没吃完"，`isBlankString("1")` 就把数字当空串。**先退回**，
+连 `R_MB_CUR_MAX = 4` 与宽字符一族（`mbstowcs`/`wcslen`/`wcwidth`/`isw*`/`tow*` 共 20 来个）
+一起重做才算通。判据：`nchar("中文字")` 答 3。
+**欠账**：`iswalpha`/`wcwidth` 还没搬 Unicode 表，现在只认 ASCII 与"宽字符默认 1 格"。
+
+## 第三十四格：系统 `Rprofile` 也要跑（"时绿时红"的根）
+
+`table()` 那一格时绿时红，根不在 `table()`：是 `R_HOME/etc/Rprofile.site` 那一份
+从来没跑过，其中第 27 行 `options(warn = 0)` 没执行，于是 R 代码里
+`op <- options(...)` 还原时报 `option 'warn' cannot be deleted`。
+补 `omni_profile_init()`（打开那份文件、一句一句在 `R_BaseEnv` 里 `R_tryEval`），错 0。
+
+## 第三十五格：zlib 的解压自己写（已落，2026-09-28）
+
+R 的包是**压过的 lazy-load 数据库**，所以 `loadNamespace` 那条路绕不过 zlib。
+映射的做法是**自己写 DEFLATE 解码**（`huffTable`/`inflateRaw`/`inflateSkipHeader`，
+三种块都认；输入不够就抛 `INFL_SHORT`），再包成 `inflateInit2_`/`inflate`/`inflateEnd`/
+`inflateReset`/`uncompress` 与 `crc32`。`z_stream` 的 ABI 按 64 位 112 字节摆，
+偏移写在注释里；流式那一格的做法是"收输入 → 攒够整份重解 → 按 `avail_out` 往外倒"。
+
+## 第三十六格：装 R 的包（`loadNamespace("utils")`）—— 一条七格长的探针
+
+这一格的形状值得单独记：**不是缺一个函数，是缺一条链**。每一格都是 loud 报出来的，
+一格一格往前走（工具 `.omni-cache/probe/why.js`，读 `R_curErrorBuf` 把 R 自己的话印出来）：
+
+`crc32` → `inflateInit2_`（第三十五格那一摞）→ `ftello` → `__builtin_constant_p`
+→ `fileno` → `fstat` → `clearerr` → `popen` → `getline` → **R 自己的错**。
+
+最后两格值得说：
+
+* **`popen`**：撞它的是 `utils` 的 `.onLoad` 里 `defaultUserAgent()` 跑
+  `uname -sr 2>/dev/null||echo darwin`（`utils/R/readhttp.R:35`）。这条腿上没有 shell，
+  但也**不许悄悄回空管子**（R 会把 `character(0)` 当成"这台机器就叫空"接着走）。
+  做法是一张**自己答得上来的小命令表**（`shellRun`）：把 `2>/dev/null` 与 `|| 退路`
+  这层壳剥掉，认 `uname` 的 `-snrvma`，答的就是 `uname(2)` 那五格（同一份 `UTS`，两处一个说法）。
+  认不出的命令 loud，而且把原话带上。
+* **`getline`/`getdelim`**：与 `fgets` 的差别在**缓冲区是出参** —— 不够长就撑大，
+  新地址与新容量写回 `*lineptr` / `*n`。
+
+## 第三十七格：`etc/Renviron` 也要跑（`editor` 那个红的真因）
+
+探针走完之后 R 自己说话了：`.onLoad failed … invalid value for 'editor'`。
+根不在 `utils`，在**开机少了一步**：R 自己在 `Rf_initialize_R`（unix/system.c）里
+`R_Home = R_HomeDir()` 之后紧跟一句 `process_system_Renviron()`，我们没叫 ——
+于是 `R_HOME/etc/Renviron` 第 31 行 `EDITOR=${EDITOR-${VISUAL-vi}}` 没生效，
+`Sys.getenv("EDITOR")` 回空串，`options()` 那一关不收。
+
+补的是 `omni_env_init()`（`ext/r/rt/omni_rhost.c`），摆在 `INIT_SEQ` 的**最前面** ——
+比 `Rf_InitTempDir` 还早，因为 TMPDIR 也可能是那份文件给的。开机从 18 步变 19 步。
+同一份文件还管着 R_PAPERSIZE / R_BROWSER / R_LIBS_SITE 一摞，所以这一格是"一次补一片"。
+
+**这一格的教训与第三十四格（系统 `Rprofile`）是同一条**：R 的"启动"有一半不在 C 的
+`Init*` 里，在 `R_HOME/etc` 的那几份文本里。缺了不报错，**在离它很远的地方答错**。
+
 
 
 
