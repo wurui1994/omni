@@ -308,6 +308,16 @@ class JsEmitter {
       this.out = outer;
     }
     if (this.esm === true) this.importLines();
+    /* **chunk 模式的内存初始化**（python 的 units 那条路要，见 `ext/python/units.js`）：
+       整份那条路上它排在入口调用之前（下面非 chunk 那一格）；单元产物没有"入口之前"
+       —— 就放模块顶层。ESM 的求值次序（依赖先于本模块体）保证它先于任何 init 跑：
+       启动器先 import 公共库那一份，内存与 data 段就在那一刻就位。 */
+    if (chunk && this.mod.mem !== undefined && this.mod.mem !== null) {
+      this.line(`$lin_init(${this.mod.mem.min}, ${this.mod.mem.max});`);
+      for (const d of this.mod.mem.data) {
+        this.line(`$lin_data(${d.off}, [${d.bytes.join(', ')}]);`);
+      }
+    }
     for (const s of this.mod.structs) this.struct(s);
     for (const e of this.mod.enums ?? []) this.enumDecl(e);
     for (const c of this.mod.classes ?? []) this.classDecl(c);

@@ -14,15 +14,15 @@
 # 口径：**照 CPython 的 `Objects/unicodeobject.c`**，不是照文档猜。
 
 
-def _str_ljust(s, w, fill=" "):
+def _str_ljust(s: str, w: int, fill: str = " ") -> str:
     return s + fill * (w - len(s))
 
 
-def _str_rjust(s, w, fill=" "):
+def _str_rjust(s: str, w: int, fill: str = " ") -> str:
     return fill * (w - len(s)) + s
 
 
-def _str_zfill(s, w):
+def _str_zfill(s: str, w: int) -> str:
     # 与 `rjust(w, "0")` **不是一回事**：开头那一格符号要留在最前头
     # （`"-7".zfill(4)` 是 `-007`，不是 `00-7`）。
     pad = "0" * (w - len(s))
@@ -32,7 +32,7 @@ def _str_zfill(s, w):
     return pad + s
 
 
-def _str_center(s, w, fill=" "):
+def _str_center(s: str, w: int, fill: str = " ") -> str:
     # CPython 的原式（`unicodeobject.c` 的 `unicode_center_impl`）：
     #   marg = width - len(s); left = marg / 2 + (marg & width & 1)
     # 也就是说**多出来那一格填在哪边要看 marg 与 width 的奇偶**，
@@ -46,7 +46,7 @@ def _str_center(s, w, fill=" "):
     return fill * left + s + fill * (marg - left)
 
 
-def _str_repr(s):
+def _str_repr(s: str) -> str:
     # 串的 `repr()` —— 照 CPython 的 `unicode_repr`。两条容易写错的：
     #   * **引号是挑出来的**：里头有 `'` 而没有 `"` 时用双引号包（那时 `'` 不转义），
     #     别的一律单引号。`repr("a'b")` 是 `"a'b"`，这一层从前答的是 `'a'b'`。
@@ -86,7 +86,7 @@ def _str_repr(s):
     return out + q
 
 
-def _str_isascii(s):
+def _str_isascii(s: str) -> bool:
     # 空串是 True。ASCII 就是"每一格码点 < 128" —— 这一格不查表
     # （从前记在账上说"拿字节值只有 ord() 那一条、它在非 ASCII 上当场报"，
     # 那笔账早过时了：`ord()` 现在交的是**码点**，非 ASCII 也答得出来）。
@@ -99,7 +99,7 @@ def _str_isascii(s):
     return True
 
 
-def _str_hexesc(o):
+def _str_hexesc(o: int) -> str:
     # 一个码点的转义写法：`\xHH`（< 0x100）/ `\uHHHH`（< 0x10000）/ `\U` 八位 ——
     # CPython 的 `unicode_repr` 就这三档，十六进制一律小写。
     d = "0123456789abcdef"
@@ -117,7 +117,7 @@ def _str_hexesc(o):
     return out
 
 
-def _str_group3(s, sep):
+def _str_group3(s: str, sep: str) -> str:
     # 千分位（格式说明里的 `,` 与 `_`）—— **只动整数那一段**：符号留在最前头，
     # 小数点及其后面原样。收的是**已经排好的那串文本**，所以这一格与数的类型无关。
     i = 0
@@ -140,7 +140,7 @@ def _str_group3(s, sep):
     return s[:i] + digits[:k] + out + s[j:]
 
 
-def _str_zgroup(s, sep, width):
+def _str_zgroup(s: str, sep: str, width: int) -> str:
     # 千分位与零填充**同时**给（`f"{1234567:012,}"`）—— python 那时"补的零也要分组"，
     # 所以不能先补零再分组、也不能分组完一把补零。收的是**已经分好组的**那串文本，
     # 一位一位往左加零，最左那段满 3 位就先加一格分隔符。

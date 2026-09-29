@@ -34,6 +34,7 @@ import { rToIR } from '../../../ext/r/adapter.js';
    各自的文件也整份摆进来 —— 产物里一格不少。 */
 import * as polydrawUnits from '../../../ext/polydraw/units.js';
 import * as librRun from '../../../ext/r/libr-run.js';
+import * as pyUnits from '../../../ext/python/units.js';
 
 /**
  * adapter 的路径 -> 那份模块的导出（键与 `langs.js` 里 `adapter` 那一栏**逐字相同**）。
@@ -67,6 +68,7 @@ const MEM = new Map();
 const SPEC_MODS = new Map([
   ['ext/polydraw/units.js', polydrawUnits],
   ['ext/r/libr-run.js', librRun],
+  ['ext/python/units.js', pyUnits],
 ]);
 
 /**

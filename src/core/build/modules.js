@@ -290,7 +290,9 @@ export function sxForms(text) {
   let depth = 0;
   for (const ln of lines) {
     if (cur === null) {
-      const m = /^\s{1,}\((fn|cfn|class|struct|global|kernel|main|extern)\b\s*([A-Za-z_$][\w$]*)?/
+      /* `memory` / `data`：python 的公共库带着那张 ucase 表（一段静态数据）——
+         切单元的时候它们归 `py_rt` 那一份（见 `ext/python/units.js`）。 */
+      const m = /^\s{1,}\((fn|cfn|class|struct|global|kernel|main|extern|memory|data)\b\s*([A-Za-z_$][\w$]*)?/
         .exec(ln);
       if (m === null) continue;
       cur = { head: m[1], name: m[2] === undefined ? '' : m[2], lines: [] };

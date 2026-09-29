@@ -62,7 +62,11 @@ export function ucaseTable(root) {
   return cached;
 }
 
-/** 那两条模块声明（线性内存 + 初始字节）。没用到就一格都不发。 */
+/** 那两条模块声明（线性内存 + 初始字节）。没用到就一格都不发。
+ *
+ * `units` 那条路（`ext/python/units.js`）把这两条切给 `py_rt` 那一份；入口自己
+ * 现造的库实例要用表时，入口的文本里也会带上同样的一份 —— 重复初始化无害
+ * （内容一字不差），少一份就过不了方言那道"(mload …) 之前要有 (memory …)"的闸。 */
 export function ucaseDecls(C) {
   if (C.ucaseUsed !== true) return [];
   const t = ucaseTable(C.root);

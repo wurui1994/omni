@@ -192,6 +192,10 @@ export function sxTextOf(path, argv = [], out = null, opts = {}) {
     };
     const ir = rt.toIR(tree, {
       also, src: mainSrc, parseExpr, root: treeRoot(),
+      /* **公共库的签名接口**（`units` 那条路递进来的，见 `ext/python/units.js`）：
+         盘上那份 `py_rt_*` 还算数时带过来，adapter 按它把库的实例登记成 frozen，
+         体一格都不推。别的语言不认这一格，传 undefined 就是老样子。 */
+      lib: opts.lib,
     });
     /* **顺手把"哪些名字是那门语言的运行时层"带出去**（`out.rtNames`，EVAL 两门在用）：
        切单元产物时按它分 —— 运行时那一层是所有脚本共用的一格，只编一次只发一次

@@ -16,13 +16,13 @@
 # `_sreal(s)` 是 adapter 认的一格内建：直通方言的 `(sreal S)`。
 
 
-def _float_inf():
+def _float_inf() -> float:
     # 方言里没有 `inf` 字面量：拿最大的有限值再乘一趟（IEEE 的规矩，三条腿一致）。
     big = 1e308
     return big * 10.0
 
 
-def _math_gcd(a, b):
+def _math_gcd(a: int, b: int) -> int:
     # `math.gcd` —— 辗转相除。python 那边收负数（`gcd(-12, 18)` 是 6），两个 0 答 0。
     x = a
     y = b
@@ -37,7 +37,7 @@ def _math_gcd(a, b):
     return x
 
 
-def _math_factorial(n):
+def _math_factorial(n: int) -> int:
     # `math.factorial` —— python 那边负数是 ValueError；库函数这一层没有"停下来"那格算子，
     # 所以负数答 0（**明说的不足**，不是静静答错：0 不是任何 n 的阶乘）。
     if n < 0:
@@ -50,12 +50,12 @@ def _math_factorial(n):
     return out
 
 
-def _float_nan():
+def _float_nan() -> float:
     x = _float_inf()
     return x - x
 
 
-def _float_of_str(s):
+def _float_of_str(s: str) -> float:
     t = _str_strip(s)
     low = _str_lower(t)
     if low == "inf" or low == "+inf" or low == "infinity" or low == "+infinity":

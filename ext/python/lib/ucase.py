@@ -15,12 +15,12 @@
 # 口径：照本机 python3（`gen-ucase.js` 问的就是它），不是照 Unicode 标准的文字猜。
 
 
-def _ucase_rec(cp):
+def _ucase_rec(cp: int) -> int:
     # 两级索引：一级按 64 格一块、二级是去重之后的块。
     return _uidx2(_uidx1(cp >> 6) * 64 + (cp & 63))
 
 
-def _ucase_map(cp, w):
+def _ucase_map(cp: int, w: int) -> str:
     # 第 w 格映射（0 upper / 1 lower / 2 title / 3 casefold）。
     # 单格的存的是**差值**（`a` -> `A` 与 `b` -> `B` 是同一格记录），多格的存绝对码点。
     r = _ucase_rec(cp)
@@ -35,24 +35,24 @@ def _ucase_map(cp, w):
     return out
 
 
-def _ucase_cased(cp):
+def _ucase_cased(cp: int) -> bool:
     # "后随算不算 cased"那一位（第 8 位）。
     return (_urecf(_ucase_rec(cp)) >> 8) & 1 == 1
 
 
-def _ucase_ignorable(cp):
+def _ucase_ignorable(cp: int) -> bool:
     # "算不算 case-ignorable"那一位（第 9 位）。
     return (_urecf(_ucase_rec(cp)) >> 9) & 1 == 1
 
 
-def _ucase_cased_plain(cp):
+def _ucase_cased_plain(cp: int) -> bool:
     # **Cased 本身**（第 10 位，不带"不可忽略"那一条）。`.title()` 记"上一格算不算 cased"
     # 用的是这一位 —— CPython 的 `fix_title` 问的是 `_PyUnicode_IsCased`。
     # 与第 8 位的差别只在 ʲ 那一族（既 cased 又可忽略）身上。
     return (_urecf(_ucase_rec(cp)) >> 10) & 1 == 1
 
 
-def _ucase_final_sigma(s, i, n):
+def _ucase_final_sigma(s: str, i: int, n: int) -> str:
     # 尾位 sigma（CPython `unicodeobject.c` 的 `handle_capital_sigma`）：
     # **前面**跳过 case-ignorable 之后有 cased，**后面**跳过 case-ignorable 之后没有 ——
     # 那这一格 `Σ` 小写成 `ς`，否则是 `σ`。`casefold()` **不走这一条**（一律 `σ`）。
@@ -79,7 +79,7 @@ def _ucase_final_sigma(s, i, n):
     return "\u03c2"
 
 
-def _ucase_lower_at(s, i, n):
+def _ucase_lower_at(s: str, i: int, n: int) -> str:
     # 第 i 格的小写 —— 尾位 sigma 那条规矩要看**整条串里的上下文**，所以按位置问。
     # `.title()` / `.capitalize()` / `.swapcase()` 里那几处小写也走这一格
     # （量出来的：`"ΣΣ".swapcase()` 是 `σς`、`"σΣ".title()` 是 `Σς`）。
@@ -89,7 +89,7 @@ def _ucase_lower_at(s, i, n):
     return _ucase_map(cp, 1)
 
 
-def _str_upper(s):
+def _str_upper(s: str) -> str:
     out = ""
     i = 0
     n = len(s)
@@ -99,7 +99,7 @@ def _str_upper(s):
     return out
 
 
-def _str_lower(s):
+def _str_lower(s: str) -> str:
     out = ""
     i = 0
     n = len(s)
@@ -109,7 +109,7 @@ def _str_lower(s):
     return out
 
 
-def _str_casefold(s):
+def _str_casefold(s: str) -> str:
     out = ""
     i = 0
     n = len(s)
@@ -119,7 +119,7 @@ def _str_casefold(s):
     return out
 
 
-def _str_title(s):
+def _str_title(s: str) -> str:
     # 词首用**首字母大写映射**（第 2 格），词中用小写 —— "上一格算不算 cased"记在 prev 里
     # （CPython 的 `fix_title`）。所以 `"a'b".title()` 是 `A'B`（撇号不 cased，`b` 又起一个词）。
     out = ""
@@ -137,7 +137,7 @@ def _str_title(s):
     return out
 
 
-def _str_capitalize(s):
+def _str_capitalize(s: str) -> str:
     # 头一格走**首字母大写映射**（不是 upper：`"ǅ".capitalize()` 是 `ǅ`、`"ß"` 是 `Ss`），
     # 其余一律小写（`"abc def".capitalize()` 是 `Abc def` —— 与 `.title()` 正相反）。
     n = len(s)
@@ -151,7 +151,7 @@ def _str_capitalize(s):
     return out
 
 
-def _ucase_all(s, bit):
+def _ucase_all(s: str, bit: int) -> bool:
     # `isalpha` 那一族的共同形状：**空串是 False**，非空要求每一格都带那一位。
     n = len(s)
     if n == 0:
@@ -164,31 +164,31 @@ def _ucase_all(s, bit):
     return True
 
 
-def _str_isalpha(s):
+def _str_isalpha(s: str) -> bool:
     return _ucase_all(s, 0)
 
 
-def _str_isdigit(s):
+def _str_isdigit(s: str) -> bool:
     return _ucase_all(s, 1)
 
 
-def _str_isdecimal(s):
+def _str_isdecimal(s: str) -> bool:
     return _ucase_all(s, 2)
 
 
-def _str_isnumeric(s):
+def _str_isnumeric(s: str) -> bool:
     return _ucase_all(s, 3)
 
 
-def _str_isalnum(s):
+def _str_isalnum(s: str) -> bool:
     return _ucase_all(s, 4)
 
 
-def _str_isspace(s):
+def _str_isspace(s: str) -> bool:
     return _ucase_all(s, 5)
 
 
-def _str_isprintable(s):
+def _str_isprintable(s: str) -> bool:
     # **空串是 True**（与 `isalpha` 那一族正好相反 —— 量出来的）。第 11 位直接是
     # 本机 python3 的 `chr(cp).isprintable()`，所以不必在这儿复述"哪几个类别算可打印"。
     n = len(s)
@@ -200,7 +200,7 @@ def _str_isprintable(s):
     return True
 
 
-def _str_isidentifier(s):
+def _str_isidentifier(s: str) -> bool:
     # 头一格看第 12 位（`chr(cp).isidentifier()` —— XID_Start 加下划线），
     # 其余看第 13 位（后随，`("a" + chr(cp)).isidentifier()`）。空串是 False。
     # 关键字照旧算标识符（`"if".isidentifier()` python 也答 True）。
@@ -217,7 +217,7 @@ def _str_isidentifier(s):
     return True
 
 
-def _str_isupper(s):
+def _str_isupper(s: str) -> bool:
     # **不是"每一格都大写"**：口径是"有至少一格 cased，而且没有小写、没有首字母大写那一档"
     # （CPython 的 `unicode_isupper`）。所以 `"A1".isupper()` 是 True、`"1"` 是 False、
     # `"ǅA"` 是 False（ǅ 是首字母大写那一档）。
@@ -238,7 +238,7 @@ def _str_isupper(s):
     return cased
 
 
-def _str_islower(s):
+def _str_islower(s: str) -> bool:
     # 与 `_str_isupper` 对称。
     n = len(s)
     i = 0
@@ -255,7 +255,7 @@ def _str_islower(s):
         i = i + 1
     return cased
 
-def _str_istitle(s):
+def _str_istitle(s: str) -> bool:
     # "是不是首字母大写的写法"（CPython 的 `unicode_istitle`）—— 逐格走一趟：
     # 大写/首字母大写那一档**前面不许也是 cased**（`"AA"` 是 False），
     # 小写那一档**前面必须是 cased**（`"aA"` 是 False），别的一格把"前面是 cased"清掉。
@@ -285,12 +285,12 @@ def _str_istitle(s):
     return cased
 
 
-def _ucase_isspace_cp(cp):
+def _ucase_isspace_cp(cp: int) -> bool:
     # 表里那一位空白（python 的空白是 Unicode 的：NBSP / EM SPACE / 全角空格都算）。
     return (_urecf(_ucase_rec(cp)) >> 5) & 1 == 1
 
 
-def _ucase_in_chars(chars, ch):
+def _ucase_in_chars(chars: str, ch: str) -> bool:
     i = 0
     n = len(chars)
     while i < n:
@@ -300,7 +300,7 @@ def _ucase_in_chars(chars, ch):
     return False
 
 
-def _str_lstrip(s):
+def _str_lstrip(s: str) -> str:
     # **不带 chars 那一档**：按表里的空白位剥。带 chars 的是另一格函数
     # （`_str_lstrip_chars`）—— 不合成一格的理由：合起来那格的 chars 形参在"没给"那一档
     # 是 dyn，而体里要 `len(chars)` / `chars[i]`，那一档当场报"len 作用在 dyn 上"。
@@ -314,7 +314,7 @@ def _str_lstrip(s):
     return s[a:]
 
 
-def _str_rstrip(s):
+def _str_rstrip(s: str) -> str:
     b = len(s)
     while b > 0:
         if _ucase_isspace_cp(ord(s[b - 1])):
@@ -324,11 +324,11 @@ def _str_rstrip(s):
     return s[:b]
 
 
-def _str_strip(s):
+def _str_strip(s: str) -> str:
     return _str_rstrip(_str_lstrip(s))
 
 
-def _str_lstrip_chars(s, chars):
+def _str_lstrip_chars(s: str, chars: str) -> str:
     n = len(s)
     a = 0
     while a < n:
@@ -339,7 +339,7 @@ def _str_lstrip_chars(s, chars):
     return s[a:]
 
 
-def _str_rstrip_chars(s, chars):
+def _str_rstrip_chars(s: str, chars: str) -> str:
     b = len(s)
     while b > 0:
         if _ucase_in_chars(chars, s[b - 1]):
@@ -349,11 +349,11 @@ def _str_rstrip_chars(s, chars):
     return s[:b]
 
 
-def _str_strip_chars(s, chars):
+def _str_strip_chars(s: str, chars: str) -> str:
     return _str_rstrip_chars(_str_lstrip_chars(s, chars), chars)
 
 
-def _str_swapcase(s):
+def _str_swapcase(s: str) -> str:
     # 大写的换小写、小写的换大写，**别的一格不动**（`ǅ` 是首字母大写那一档，两边都不是，
     # 所以 `"ǅa".swapcase()` 是 `ǅA`）。
     out = ""
@@ -371,7 +371,7 @@ def _str_swapcase(s):
         i = i + 1
     return out
 
-def _str_split_ws(s):
+def _str_split_ws(s: str) -> list[str]:
     # `.split()` **不带分隔符**那一档：按连续空白切、两头的空段不算
     # （python 的空白是 Unicode 的 —— 从前只认 ASCII 那六个，静静少切）。
     # 带分隔符的 `.split(sep)` 是另一条规矩（空段算一格），照旧在 adapter 里。

@@ -98,6 +98,9 @@ export const LANGS = new Map([
   ['python', {
     grammar: 'ext/python/python.grammar', exts: ['py'],
     adapter: 'ext/python/adapter/index.js', exports: { toIR: 'pyToIR', hooks: 'PY_HOOKS' },
+    /* 公共库（`ext/python/lib/*.py` 那些函数 + ucase 那张表）每份脚本一字不差 ——
+       按单元产物切出去编一次、往后复用（`ext/python/units.js`，EVAL 两门同一条路）。 */
+    units: { adapter: 'ext/python/units.js', name: 'pyUnitsBuild' },
   }],
   ['nim', {
     grammar: 'ext/nim/nim.grammar', exts: ['nim'],

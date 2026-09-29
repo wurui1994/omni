@@ -40,6 +40,7 @@ import {
 } from './builtins.js';
 import { boxOf, unifyPy } from './dyn.js';
 import { loadPyLib, libMethodFor, libFillToks, libBuiltinFor } from './pylib.js';
+import { parseSig } from './libsig.js';
 import { ucaseDecls } from './ucase.js';
 
 /** 一格已经建好的 IR 表达式装的是什么。 */
@@ -62,6 +63,9 @@ export function pyToIR(tree, ctx = {}) {
 
   const C = makeCtx();
   C.parseExpr = ctx.parseExpr ?? null;
+  /* **公共库的签名接口**（`units` 那条路递进来的，见 `ext/python/units.js`）：
+     盘上那份 `py_rt_*` 还算数时带过来，库的实例按接口登记成 frozen —— 见 `infer`。 */
+  C.lib = ctx.lib ?? null;
   /* **这棵树的根**由核心递进来（`drive.js`），扩展这一侧不自己去找 —— `import.meta.url`
      不在这门语言的子集里，而 `treeRoot()` 在核心那一份里已经有了。`lib/*.py` 按它拼。 */
   C.root = ctx.root ?? null;
@@ -78,9 +82,14 @@ export function pyToIR(tree, ctx = {}) {
   declareClasses(classNodes, C);
   /* **函数里套的函数**：没有捕获外层名字的那一档**提到模块级**（见 `hoistNested`）。 */
   for (const f of fnNodes) hoistNested(f, C);
-  /* **库函数**（`ext/python/lib/*.py`）—— 用同一张语法表解析，`def` 摆进 `C.fnNodes`，
-     从此与用户函数走同一趟。没人用的一格都不发（单态化按调用点收实例）。 */
-  loadPyLib(C);
+  /* **库函数**（`ext/python/lib/*.py`）—— 只在**没有签名接口**时才读、才解析、才推断。
+     接口在（`units` 那条路判过：lib 文件与编译器都没变，盘上那份 `py_rt_*` 照旧算数）
+     意味着库是依赖图上**没变的节点**：这一趟一个字节都不碰它 —— 不读源、不进
+     `fnNodes`/`shells`、不收实例、不推断。脚本里的库调用按接口签名解析
+     （`registerFrozen`），正文在 `py_rt` 里编好了。库的实例集是 lib 文件的
+     **纯函数**（全标注、一 def 一例），不随任何脚本变 —— 这一条靠标注钉住，
+     于是"改脚本"永远不碰库。 */
+  if (C.lib === null) loadPyLib(C);
   /* **f-string 里那几段表达式先解析出来**。单态化那一趟是从**调用点**收实例的，而
      `f"{twice(n)}"` 里那次调用躺在一个 STRING 记号里 —— `allNodes` 看不见它，于是
      `twice` 一格实例都收不到（量出来的原话：`twice(int)` 没有对得上的那一格）。
@@ -99,7 +108,7 @@ export function pyToIR(tree, ctx = {}) {
   const fns = [];
   /* 一格实例只发一遍（`requireFn` 现造的那几格可能与下面这趟撞上）。 */
   const emit = (nm, inst) => {
-    if (inst.done === true) return;
+    if (inst.done === true || inst.frozen === true) return;
     inst.done = true;
     fns.push(fnDecl(nm, inst, C));
   };
@@ -128,7 +137,26 @@ export function pyToIR(tree, ctx = {}) {
   for (const [name, ty] of C.globals) decls.push({ kind: 'global', name: C.ref(name), type: ty });
   decls.push(...fns);
   decls.push({ kind: 'main', body });
-  return { kind: 'module', decls };
+  /* **运行时那一层的名字**（`units` 那条路要，见 `ext/python/units.js`）：
+     库函数（`ext/python/lib/*.py` 的 defs，经单态化后的每格实例）的正文与那张
+     ucase 表每份脚本一字不差 —— 报出去，切单元的时候归 `py_rt`，编一次往后复用。 */
+  const rtNames = [];
+  if (C.lib === null) {
+    for (const [nm, insts] of C.insts) {
+      if (!C.libFns.has(nm)) continue;
+      for (const inst of insts) {
+        /* **frozen 不算**：它们的正文在盘上那份 `py_rt_*` 里，这一份的文本里没有 ——
+           报出去的话切单元那侧会找一个不存在的顶层项。 */
+        if (inst.frozen === true) continue;
+        rtNames.push(inst.mangled);
+      }
+    }
+  }
+  /* **接口那一路（frozen）报空表**：文本里没有库的任何顶层项 —— 库整个在盘上那份
+     `py_rt_*` 里。入口现造的那几格（调用要的类型接口里没有时）是**入口自己的**，
+     报进 rtNames 会被切单元那侧归给 lib、又随命中丢掉（踩过：fstring 的
+     `_str_repr` 就这么丢的，报"未声明的函数"）。 */
+  return { kind: 'module', decls, rtNames };
 }
 
 /**
@@ -334,6 +362,51 @@ function tyTag(t) {
   }
 }
 const tyKey = (types) => types.map(tyTag).join(',');
+
+/**
+ * **公共库的实例按接口登记成 frozen**（`units` 那条路，见 `ext/python/units.js`）。
+ *
+ * 盘上那份 `py_rt_*` 还算数时，库的实例集**不再从调用点收、体也不再推** —— 按接口
+ * （`py_rt*.d.sx` 的那几行签名）直接登记：调用点照常经 `resolveFn`/`requireFn` 解析，
+ * 对得上就用 frozen 那格（正文与数据都在盘上那份里）；对不上（这次要的类型接口里
+ * 没有）照旧现造一格 —— 那格落在入口，`py_rt` 不动。
+ *
+ * 名字的口径：接口里记的是**当时的 mangled 名**（盘上那份产物的导出名），一个字符
+ * 都不改；python 那边的名字把单态化后缀剥掉（`add__int_int` → `add`）。
+ * 哪一行读不懂就整体放弃（回 false）—— 退回整份重推的老路，宁可慢不可错。
+ */
+function registerFrozen(C, sigs) {
+  const parsed = [];
+  for (const line of sigs ?? []) {
+    const p = parseSig(line);
+    if (p === null) return false;
+    const at = p.mangled.lastIndexOf('__');
+    const nm = at < 0 ? p.mangled : p.mangled.slice(0, at);
+    /* **脚本与库同名**：接口实例进 `C.insts` 之后，shells 那圈 `C.insts.set` 会把它
+       整表盖掉 —— 名字与 `py_rt` 的导出撞上，入口发射出去就是重复定义。当场报。 */
+    if (C.fnNodes.has(nm)) {
+      throw new Error(`python->IR: \`def ${nm}\` 与库里那一格同名`
+        + '（库的函数名以 `_` 开头是给出来的地盘）—— 改一个名字');
+    }
+    parsed.push(p);
+  }
+  for (const p of parsed) {
+    const at = p.mangled.lastIndexOf('__');
+    const nm = at < 0 ? p.mangled : p.mangled.slice(0, at);
+    const inst = {
+      key: tyKey(p.params.map((x) => x.type)),
+      mangled: p.mangled,
+      params: p.params,
+      ret: p.ret,
+      frozen: true,
+    };
+    const list = C.insts.get(nm);
+    if (list === undefined) C.insts.set(nm, [inst]);
+    else if (!list.some((i) => i.mangled === p.mangled)) list.push(inst);
+    C.fns.set(p.mangled, { params: p.params, ret: p.ret });
+  }
+  return true;
+}
 
 /* ─── 上下文 ──────────────────────────────────────────────────────────────── */
 
@@ -774,6 +847,10 @@ function infer(C, tree, scriptStmts) {
     C.insts.set(nm, sh.annots.every((a) => a !== null) ? [mkInst(nm, sh, sh.annots)] : []);
   }
 
+  /* **公共库的 frozen 实例**（`units` 那条路，接口见 `ext/python/units.js` 的头注）：
+     摆在 shells 那圈之后 —— 上一圈 `C.insts.set` 会整表盖掉，frozen 得在它后面登记。 */
+  if (C.lib !== null && !registerFrozen(C, C.lib.sigs)) C.lib = null;
+
   /**
    * **跑到不再长为止**（上限 8 轮，至少 3 轮）。
    *
@@ -793,8 +870,14 @@ function infer(C, tree, scriptStmts) {
        后装 int"）。 */
     for (const [, rec] of C.records) if (rec.tuple === undefined) inferFields(rec, C);
     for (const [nm, list] of C.insts) {
-      const { retAnnot } = shells.get(nm);
+      /* **接口那一路**：库的 owner 在 `shells` 里没有（库没进 fnNodes）—— 整组跳过，
+         frozen 的 ret 在 `registerFrozen` 里定死了。 */
+      const sh = shells.get(nm);
+      if (sh === undefined) continue;
+      const { retAnnot } = sh;
       for (const inst of list) {
+        /* **frozen 的返回类型就是接口里那句**（盘上那份产物照它编的），不重算。 */
+        if (inst.frozen === true) continue;
         /* **每轮都重算一遍**（不是"空着才算"）：头一轮里被调方的返回类型可能还没定，
            那时算出来的是个下界；到最后一轮全定了，不一致的地方才现形。 */
         inst.ret = retAnnot !== null ? retAnnot : inferRet(nm, inst, C);
@@ -826,6 +909,12 @@ function infer(C, tree, scriptStmts) {
     }
     const base = nm.indexOf('.') < 0 ? C.ref(nm) : C.ref(nm.replace('.', '_'));
     for (const inst of list) {
+      /* **frozen**：名字就是接口里那句（盘上那份产物的导出名），一个字符都不改 ——
+         改了的话入口 import 的名字与 `py_rt` 导出的对不上。 */
+      if (inst.frozen === true) {
+        C.fns.set(inst.mangled, { params: inst.params, ret: inst.ret });
+        continue;
+      }
       inst.mangled = list.length === 1
         ? base
         : `${base}__${inst.key.replace(/[^A-Za-z0-9_]/g, '_')}`;
@@ -888,6 +977,9 @@ function elemOfCst(tok, C) {
 }
 
 function collectInsts(nm, sh, tree, C) {
+  /* **frozen 的实例也在表里**（接口登记的，`registerFrozen`）—— `takeTys` 按
+     类型键去重，对得上的那几格不会再造；接口没盖住的调用点照旧现造一格，
+     落在入口（`py_rt` 不动）。所以这一趟对库函数照走不误。 */
   if (sh.annots.every((a) => a !== null)) return;      // 全标注了，不看调用点
   const list = C.insts.get(nm);
   const dot = nm.indexOf('.');
@@ -1052,6 +1144,8 @@ function collectInsts(nm, sh, tree, C) {
    */
   for (const [owner, f] of C.fnNodes) {
     for (const inst of C.insts.get(owner) ?? []) {
+      /* **frozen 不扫**：体在盘上那份 `py_rt` 里，入口这一趟读都不读它。 */
+      if (inst.frozen === true) continue;
       C.push();
       for (const p of inst.params) C.bind(p.name, p.type);
       scanBinds(part(f, 'body'), C);

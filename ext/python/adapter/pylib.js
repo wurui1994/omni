@@ -33,8 +33,10 @@ import {
 /** 顶层那几句（`(line …)` 那一层剥掉）—— 这儿只关心 `def`。 */
 const topOf = (items) => items.flatMap((s) => (tag(s) === 'line' ? topOf(kids(s)) : [s]));
 
-/** 库源码，按文件。次序无所谓（这一层只收 `def`，不跑模块级语句）。 */
+/** 库源码，按文件。次序无所谓（这一层只收 `def`，不跑模块级语句）。
+ *  `units` 那条路也按这份清单算公共库的新鲜度（`ext/python/units.js`）—— 导出。 */
 const LIB_FILES = ['str.py', 'ucase.py', 'num.py'];
+export { LIB_FILES };
 
 /**
  * **方法名 → 库函数名**，按接收者装的东西分。
@@ -158,14 +160,43 @@ export function libParams(fnName, C) {
  * 与用户函数那一侧（`kwOrder`）同一条办法：默认值是调用点展开的。这儿不走 `kwOrder`
  * 是因为它按"这份源码里的函数"认签名，而库函数的调用点在 CST 里长的是**方法**的样子。
  */
+/**
+ * 库函数形参的**默认值字面量文本**（与 `lib/*.py` 的 `def` 逐字一致）。
+ *
+ * 命中接口那一路（库没进 `fnNodes`、`libParams` 读不到 CST）用它补默认值；全量那一路
+ * 仍读 CST。键 = 函数名，值 = 按**形参序**的数组（无默认值的那几格是 null）。
+ * 全库带默认值的形参只有 `_str_ljust` / `_str_rjust` / `_str_center` 那一格 `fill`。 */
+export const LIB_DEFAULTS = new Map([
+  ['_str_ljust', [null, null, '" "']],
+  ['_str_rjust', [null, null, '" "']],
+  ['_str_center', [null, null, '" "']],
+]);
+
 export function libFillToks(fnName, nGiven, C) {
   const ps = libParams(fnName, C);
-  if (ps === null) return null;
+  if (ps !== null) {
+    const out = [];
+    for (let i = nGiven; i < ps.length; i += 1) {
+      const d = part(ps[i], 'default');
+      if (d === undefined) return null;               // 少了一格必给的 —— 交给下游报
+      out.push(kids(d)[0]);
+    }
+    return out;
+  }
+  /* **接口那一路**：库不在 `fnNodes`。形参数从 `registerFrozen` 登记的签名
+     （`C.fns`）取；默认值字面量从静态表取（带默认值的就那三格），用 `exprTreeOf`
+     解成树（`parseExpr` 那一份解出来是 `module`，不是表达式）。 */
+  const sig = C.fns.get(fnName);
+  const np = sig === undefined ? undefined : (sig.params?.length);
+  if (np === undefined) return null;
+  if (nGiven >= np) return [];                          // 不缺 —— 不用补
+  const defs = LIB_DEFAULTS.get(fnName);
+  if (defs === undefined || typeof C.exprTreeOf !== 'function') return null;
   const out = [];
-  for (let i = nGiven; i < ps.length; i += 1) {
-    const d = part(ps[i], 'default');
-    if (d === undefined) return null;                 // 少了一格必给的 —— 交给下游报
-    out.push(kids(d)[0]);
+  for (let i = nGiven; i < np; i += 1) {
+    const lit = i < defs.length ? defs[i] : null;
+    if (lit === null) return null;                      // 必给的没给 —— 交给下游报
+    out.push(C.exprTreeOf(lit, `lib/${fnName} 默认值`));
   }
   return out;
 }
