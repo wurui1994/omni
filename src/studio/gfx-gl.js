@@ -51,7 +51,15 @@ const D = {
      不含浏览器等下一次 vsync 的空档 —— 那一截不是我们的开销）；
      `pms`/`pfps` 是上一次结算出来的两个数（每 ~0.5 秒结算一次，照 c_impl 的 view）。 */
   pn: 0, psum: 0, pms: 0, pfps: 0, pt0: 0,
-  mx: 0, my: 0, bst: 0,           /* 鼠标：canvas 左上角起的像素位置 + 按键位（bit0 左/1 右/2 中） */
+  /* 鼠标：canvas 左上角起的像素位置 + 按键位（bit0 左/1 右/2 中）。
+     **开局那个位置是 (320,240)** —— 与 CPU 备选那一档逐字相同（`host/gfx-cpu.js` 的
+     `D.mx/my`）：原版一开机光标就在窗口正中（默认窗口 640×480），参考也是这么定死的
+     （`c_impl/src/pd_polyhead.c` 那句 "original starts the cursor at window center"），
+     **不随画布尺寸变**。13 份 `.pss` 读这两格，给 0 的后果是整幅退化 ——
+     `ken/texture.pss` 的立方体（`rz += (mousy/yres-.5)*4 + 1`）与 `ken/orthoglobe.pss`
+     在浏览器里全黑就是这一格（§42.1）。**换程序不回初值**：页面上鼠标是真事件，
+     跑下一份时把它扳回正中反而会让画面跳（离屏判据每趟新装一台设备，拿到的就是初值）。 */
+  mx: 320, my: 240, bst: 0,
   keys: null,                     /* `keystatus[256]`：扫描码 -> 0/1（下面那张表把 code 换成扫描码） */
   /* **看门狗**（见 `refresh/0` 那段注）：这一趟帧函数是什么时候进去的、里头调了几次
      `refresh()`、给它多少毫秒。`fbudget` 摆 1500ms：够慢脚本画一帧，又远在浏览器
