@@ -29,7 +29,7 @@ import {
   memLoad, memStore, printBytes, flushOut, memSize, memGrow, outDirect,
   gfxFrameLin, gfxCallLin,
 } from './builtin.js';
-import { stderrBytes as hostStderr, readBinary, writeBinary, removeFile, env as hostEnv, spawn as hostSpawn, nowMs, mkdirAll, exists as hostExists, isDir as hostIsDir, fileSize as hostFileSize, mtimeMs as hostMtimeMs } from '../host/native.js';
+import { stderrBytes as hostStderr, readBinary, writeBinary, removeFile, env as hostEnv, spawn as hostSpawn, nowMs, mkdirAll, exists as hostExists, isDir as hostIsDir, fileSize as hostFileSize, mtimeMs as hostMtimeMs, readDir as hostReadDir } from '../host/native.js';
 
 /**
  * `exit` 抛的那个信号（第六刀第十七片）。
@@ -995,6 +995,42 @@ function cScan(fmt, input, va) {
       if (!skip) { writeCStr(ap.ptr(), input.slice(start, ip)); n++; }
       continue;
     }
+    /* `%[…]`（扫描集，C11 7.21.6.2/12）：**不跳空白**，读"在集合里"的那一串，补结尾的 0。
+     * 三条边角照标准：`^` 开头是取反、紧跟在 `[` 或 `[^` 后面的 `]` 是**字面的** `]`、
+     * `a-z` 是区间（`-` 在两头时是字面的）。一个字符都没读到算**匹配失败**（不是 EOF）。
+     * 撞它的是 `pdf()` 那条路 —— `devPS.c` 用 `%[^ ]` 一类读 afm 与编码表。 */
+    if (conv === '[') {
+      let neg = false;
+      if (fmt[fi] === '^') { neg = true; fi++; }
+      const set = new Set();
+      const ranges = [];
+      let first = true;
+      for (;;) {
+        if (fi >= fmt.length) throw new Error('scanf: %[ 少了收尾的 ]');
+        const ch = fmt[fi];
+        if (ch === ']' && !first) { fi++; break; }
+        first = false;
+        if (fmt[fi + 1] === '-' && fmt[fi + 2] !== undefined && fmt[fi + 2] !== ']') {
+          ranges.push([ch.charCodeAt(0), fmt.charCodeAt(fi + 2)]);
+          fi += 3;
+          continue;
+        }
+        set.add(ch);
+        fi += 1;
+      }
+      const inSet = (c) => {
+        if (set.has(c)) return true;
+        const k = c.charCodeAt(0);
+        return ranges.some(([a, b]) => k >= a && k <= b);
+      };
+      const w = width === 0 ? Infinity : width;
+      const start = ip;
+      let cnt = 0;
+      while (ip < input.length && cnt < w && inSet(input[ip]) !== neg) { ip++; cnt++; }
+      if (ip === start) return atEnd() ? stop() : fail();
+      if (!skip) { writeCStr(ap.ptr(), input.slice(start, ip)); n++; }
+      continue;
+    }
     /* `%n`：不读输入、**不算进返回值**（量出来的：`sscanf("42abc","%d%n",&a,&n)` 回 1）。 */
     if (conv === 'n') {
       if (!skip) memStore(scanIntKind(len), ap.ptr(), 0, BigInt(ip));
@@ -1644,6 +1680,10 @@ const F_STDERR = 3n;
  */
 const files = new Map();      // 句柄 -> 那张表里的一行
 let nextFile = 4n;            // 1/2/3 是三条标准流
+/** `setlocale` 回的那个静态串（第一次要它的时候才在堆上要一小块）。 */
+let localeStr = 0n;
+/** `rand` 的状态（`srand` 不叫的话就是 C 说的默认种子 1）。 */
+let randState = 1n;
 
 /** `fopen` 的模式串：C 只认那几个字母，多的（`b`、`x`、`+`）在这一片按主字母算。 */
 function openMode(m) {
@@ -1654,10 +1694,65 @@ function openMode(m) {
 }
 
 /** 把一份还没落盘的写入落到盘上。只读的流上是空操作。 */
-/** `uname(2)` 那五格 —— 这条腿上的机器就叫这个名字。
- *  `uname` 与 `popen("uname …")` 共用这一份，免得同一个问题两处各说一套。 */
-const UTS = { s: 'Omni', n: 'omni', r: '1.0', v: 'omni-js', m: 'linear-memory' };
+/** 一级路径里的通配符（`*` / `?` / `[...]`）翻成正则。`*` 与 `?` **不跨斜杠**。 */
+function globSeg(seg) {
+  let re = '^';
+  for (let i = 0; i < seg.length; i += 1) {
+    const c = seg[i];
+    if (c === '*') { re += '[^/]*'; continue; }
+    if (c === '?') { re += '[^/]'; continue; }
+    if (c === '[') {
+      const j = seg.indexOf(']', i + 1);
+      if (j < 0) { re += '\\['; continue; }
+      let cls = seg.slice(i + 1, j);
+      if (cls.startsWith('!')) cls = `^${cls.slice(1)}`;
+      re += `[${cls}]`;
+      i = j;
+      continue;
+    }
+    re += c.replace(/[.+^${}()|\\\]]/g, '\\$&');
+  }
+  return new RegExp(`${re}$`);
+}
 
+/** `glob(3)` 的身子（C 那边 `omni_libc.c` 的 `glob()` 只管把结果摆进 `glob_t`）。
+ *
+ *  一级一级往下走：这一级带通配就列目录挑出对得上的，不带就直接拼上去看在不在。
+ *  与 POSIX 一致的两条：**结果排序**、点开头的名字只有模式也以点开头时才出现。
+ *  撞它的是 base 的 `.libPaths()`（`etc/Renviron` 把 `R_LIBS` 摆上之后才走到），
+ *  少这一格的指纹是 `glob: libc: 没有这个函数`。 */
+function globExpand(pat) {
+  const abs = pat.startsWith('/');
+  const segs = pat.split('/').filter((s) => s !== '');
+  let cur = [abs ? '' : '.'];               // '' + '/x' = '/x'；'.' 是相对的起点
+  for (const seg of segs) {
+    const next = [];
+    if (/[*?[]/.test(seg)) {
+      const re = globSeg(seg);
+      for (const base of cur) {
+        let names;
+        try { names = hostReadDir(base === '' ? '/' : base); } catch { continue; }
+        for (const nm of names.slice().sort()) {
+          if (nm.startsWith('.') && !seg.startsWith('.')) continue;
+          if (re.test(nm)) next.push(`${base}/${nm}`);
+        }
+      }
+    } else {
+      for (const base of cur) {
+        const p = `${base}/${seg}`;
+        if (hostExists(p)) next.push(p);
+      }
+    }
+    cur = next;
+    if (cur.length === 0) break;
+  }
+  /* 模式末尾带斜杠 = 只要目录（POSIX 的 `GLOB_MARK` 不管这件事，是 R 自己的用法）。 */
+  if (pat.endsWith('/')) cur = cur.filter((p) => hostIsDir(p));
+  return cur.map((p) => (abs ? p : p.replace(/^\.\//, '')));
+}
+
+
+const UTS = { s: 'Omni', n: 'omni', r: '1.0', v: 'omni-js', m: 'linear-memory' };
 /** 我们自己答得上来的那几条 shell 命令（给 `popen` 用）。答不上来回 `null`。
  *
  *  先把 shell 的壳剥掉：`2>/dev/null` 这类重定向丢掉（这条腿上没有第二条流要接），
@@ -3526,6 +3621,70 @@ const LIBC = {
     if (!files.delete(f)) return BigInt.asIntN(32, -1n);
     return 0n;
   },
+  /** `__omni_glob`：C 那边 `glob()` 的身子在宿主这一侧（`ext/r/rt/omni_libc.c` 只管
+   *  把结果摆进 `glob_t` —— 那张结构的布局交给编译器算，不在 JS 里抄第二遍）。
+   *  这扇门只过标量，所以答案的形状是"一串用 0 隔开的名字"+ 个数；装不下回 -1。 */
+  __omni_glob: (a) => {
+    const pat = readCStr(a[0]);
+    const at = BigInt(a[1]);
+    const cap = Number(BigInt(a[2]));
+    let out;
+    try { out = globExpand(pat); } catch { return BigInt.asIntN(64, -1n); }
+    let n = 0;
+    for (const s of out) {
+      const bs = new TextEncoder().encode(s);
+      if (n + bs.length + 1 > cap) return BigInt.asIntN(64, -1n);
+      for (const b of bs) { memStore('i8', at + BigInt(n), 0, BigInt(b)); n += 1; }
+      memStore('i8', at + BigInt(n), 0, 0n);
+      n += 1;
+    }
+    return BigInt(out.length);
+  },
+  /** `setlocale`（C11 7.11.1.1）：这条腿上**只有一种 locale** —— UTF-8 那一种
+   *  （`omni_locale_init` 已经把 R 自己那几个全局摆成 UTF-8 了，见第三十三格）。
+   *
+   *  所以这一格的语义是："问就答 `C.UTF-8`，设就收下但还是这一种"。
+   *  回的是**静态缓冲区**（C 说的样子：下一次调用可以盖掉）。
+   *  撞它的是 `pdf()` 那条路（`devPS.c` 要按 locale 挑编码），少这一格的指纹是
+   *  `setlocale: libc: 没有这个函数`。 */
+  setlocale: () => {
+    if (localeStr === 0n) {
+      localeStr = heapAlloc(16n);
+      writeCStr(localeStr, 'C.UTF-8');
+    }
+    return localeStr;
+  },
+  /** `__omni_localtime`：C 那边 `localtime`/`gmtime` 的算术在这儿（`struct tm` 的布局
+   *  留给 C，见 `ext/r/rt/omni_libc.c`）。九个整数按 `struct tm` 的顺序摆出来。
+   *  `utc` 非 0 走 UTC（`gmtime`），否则走**宿主的本地时区**（`localtime`）。 */
+  __omni_localtime: (a) => {
+    const t = Number(BigInt(a[0]));
+    const at = BigInt(a[1]);
+    const utc = BigInt(a[2]) !== 0n;
+    const d = new Date(t * 1000);
+    if (Number.isNaN(d.getTime())) return BigInt.asIntN(64, -1n);
+    const jan1 = Date.UTC(utc ? d.getUTCFullYear() : d.getFullYear(), 0, 1);
+    const v = utc
+      ? [d.getUTCSeconds(), d.getUTCMinutes(), d.getUTCHours(), d.getUTCDate(),
+        d.getUTCMonth(), d.getUTCFullYear() - 1900, d.getUTCDay(),
+        Math.floor((Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - jan1) / 86400000), 0]
+      : [d.getSeconds(), d.getMinutes(), d.getHours(), d.getDate(),
+        d.getMonth(), d.getFullYear() - 1900, d.getDay(),
+        Math.floor((Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) - jan1) / 86400000), 0];
+    for (let i = 0; i < 9; i += 1) memStore('i64', at + BigInt(i * 8), 0, BigInt(v[i]));
+    return 0n;
+  },
+  /** `getpid`：这条腿上只有**一个**"进程"，所以进程号是个定数。
+   *  R 拿它拼临时文件名（`InitTempDir`）与 `Sys.getpid()`。挑 1 是因为它至少不像 0
+   *  那样在 POSIX 里有特别意思。 */
+  getpid: () => 1n,
+  getppid: () => 0n,
+  /** `rand` / `srand`（C11 7.22.2）：序列由实现定的，所以这儿摆一个**确定的** LCG
+   *  （`RAND_MAX` = 0x7fffffff，与 glibc 一个量级）。确定是好事：这条腿上跑两趟
+   *  出一样的东西，判据才比得。谁真要随机数走的是 R 自己的 RNG，不是这一格。
+   *  撞它的是 `R_tmpnam`（临时文件名那一段）。 */
+  rand: () => { randState = (randState * 1103515245n + 12345n) & 0x7fffffffn; return randState; },
+  srand: (a) => { randState = BigInt.asUintN(31, BigInt(a[0])); return undefined; },
   memcpy: (a) => {
     const n = Number(BigInt(a[2]));
     for (let i = 0; i < n; i++) {

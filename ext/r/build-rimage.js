@@ -110,10 +110,11 @@ say('开机 17 步：' + (Date.now() - t0) + 'ms、起来 ' + $RT.linkStats().mo
   const { gunzipSync } = await import('node:zlib');
   const bytes = new Uint8Array(gunzipSync(readFileSync(${JSON.stringify(IMG)})));
 $RT.memImageLoad({ bytes, bump: META.bump });
-/* **像里没有环境变量**：那一摞在宿主那一侧的 Map 里（`interp/libc.js` 的 `envCache`），
-   `memImageSave` 只存线性内存。所以铺完像要把"住在宿主那边"的那一步补上 ——
-   现在只有 `etc/Renviron` 这一格。不补的症状：`Sys.getenv("EDITOR")` 回空串，
-   于是 `loadNamespace("utils")` 报 `invalid value for 'editor'`。 */
+/* 像里没有环境变量：那一摞在宿主那一侧的 Map 里（interp/libc.js 的 envCache），
+   memImageSave 只存线性内存。所以铺完像要把"住在宿主那边"的那一步补上 ——
+   现在只有 etc/Renviron 这一格。不补的症状：Sys.getenv("EDITOR") 回空串，
+   于是 loadNamespace("utils") 报 invalid value for editor。
+   （这段在模板串里，所以一个反引号都不能有 —— 有就把模板提前收了。） */
 F('omni_env_init')();
   pos = META.pos; stmts = META.stmts;
   say('铺回上一轮：' + META.order.length + ' 份 + ' + bytes.length + ' 字节、'
@@ -173,6 +174,7 @@ const tLoad = Date.now() - t0;
 const { gunzipSync } = await import('node:zlib');
 const bytes = new Uint8Array(gunzipSync(readFileSync(${JSON.stringify(IMG)})));
 $RT.memImageLoad({ bytes, bump: META.bump });
+F('omni_env_init')();       /* 像里没有环境变量 —— 见上面造像那一段的注释 */
 say('铺像：装 ' + META.order.length + ' 份 ' + tLoad + 'ms、铺 ' + bytes.length + ' 字节、共 '
   + (Date.now() - t0) + 'ms');
 const st = $RT.memStoreFn('i8');

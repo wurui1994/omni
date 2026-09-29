@@ -256,7 +256,13 @@ export function cJsModules(units, opts) {
   const mods = units.map((u) => ({
     path: u.path,
     out: u.out,
-    mir: cMir(u.path, opts.incs ?? [], opts.defs ?? [], [], opts.sysIncs, opts.tgt, { tu: true }),
+    /* `u.defs`：**这一份**额外的 `-D`。用处是"一份 .so 一套名字"那件事 ——
+       R 的每个包各自一份 .so，两个包里同名的文件局部帮手（`getListElement` 那种）
+       在 R 那边各管各的，而我们这边是一张平表，一碰就是 duplicate symbol。
+       靠预处理器给整组改名（`-DgetListElement=lib_grid_getListElement`）是最省的一刀：
+       定义与引用都在同一遍预处理里，**一个字的源码都不用改**。 */
+    mir: cMir(u.path, opts.incs ?? [], [...(opts.defs ?? []), ...(u.defs ?? [])],
+      [], opts.sysIncs, opts.tgt, { tu: true }),
   }));
   /* 符号表 = 这一步就是"链接"。 */
   const provide = new Map();

@@ -95,3 +95,127 @@ static int omni_fill_stat(const char *path, struct stat *sb, long long follow) {
 
 int stat(const char *path, struct stat *sb) { return omni_fill_stat(path, sb, 1); }
 int lstat(const char *path, struct stat *sb) { return omni_fill_stat(path, sb, 0); }
+
+/* ---- `inet_ntoa`：又一个**按值收 struct** 的（第三十八格）------------------
+ *
+ * `utils/src/utils.c:158` 的 `nsl()` 用它把地址印成点分十进制。按值收 struct 的外部
+ * 函数在 `tu` 档里不发桩（同 `div` 那条），所以宿主那扇只过标量的门接不住它 ——
+ * 症状是 `undefined symbol 'inet_ntoa'`（loud，不是静默答错）。
+ *
+ * 身子是**纯计算**：`struct in_addr` 里那个 32 位按网络字节序拆成四段。回的是静态
+ * 缓冲区 —— 这正是 POSIX 说的样子（下一次调用会盖掉），不自己发明别的。
+ */
+struct omni_in_addr { unsigned int s_addr; };
+
+char *inet_ntoa(struct omni_in_addr in) {
+  static char buf[16];
+  unsigned int a = in.s_addr;
+  unsigned char *b = (unsigned char *)&a;
+  char *p = buf;
+  int i;
+  for (i = 0; i < 4; i++) {
+    unsigned int v = b[i];
+    if (i > 0) *p++ = '.';
+    if (v >= 100) *p++ = (char)('0' + v / 100);
+    if (v >= 10) *p++ = (char)('0' + (v / 10) % 10);
+    *p++ = (char)('0' + v % 10);
+  }
+  *p = '\0';
+  return buf;
+}
+
+/* ---- `glob` / `globfree`：目录展开（第三十八格）--------------------------------
+ *
+ * 撞它的是 base 的 `.libPaths()` —— `etc/Renviron` 把 `R_LIBS` 摆上之后才走到这一步
+ * （所以第三十七格补完 Renviron 才冒出来），指纹是 `glob: libc: 没有这个函数`。
+ *
+ * 分工：**找名字**那件事在宿主那一侧（`__omni_glob`，一级一级往下走、列目录），
+ * **摆进 `glob_t`** 这件事在这儿 —— 那张结构的布局是平台的事（`gl_pathc` / `gl_pathv`
+ * 的偏移），让编译器按 `<glob.h>` 算，就不必在 JS 里把 ABI 抄第二遍（抄错一格是静默答错）。
+ *
+ * 门只过标量，所以宿主回的是"一串用 0 隔开的名字"+ 个数。R 只读 `gl_pathc`/`gl_pathv`。
+ */
+#include <glob.h>
+
+long long __omni_glob(const char *pat, char *buf, long long cap);
+void *malloc(unsigned long);
+void free(void *);
+char *strcpy(char *, const char *);
+unsigned long strlen(const char *);
+
+int glob(const char *pat, int flags, int (*errfunc)(const char *, int), glob_t *g) {
+  static char names[65536];
+  long long n, i;
+  char *p = names;
+  (void)flags;
+  (void)errfunc;
+  g->gl_pathc = 0;
+  g->gl_matchc = 0;
+  g->gl_offs = 0;
+  g->gl_flags = 0;
+  g->gl_pathv = 0;
+  n = __omni_glob(pat, names, (long long)sizeof names);
+  if (n < 0) return GLOB_NOSPACE;
+  if (n == 0) return GLOB_NOMATCH;
+  g->gl_pathv = (char **)malloc(sizeof(char *) * (unsigned long)(n + 1));
+  if (g->gl_pathv == 0) return GLOB_NOSPACE;
+  for (i = 0; i < n; i++) {
+    unsigned long len = strlen(p);
+    char *s = (char *)malloc(len + 1);
+    if (s == 0) return GLOB_NOSPACE;
+    strcpy(s, p);
+    g->gl_pathv[i] = s;
+    p += len + 1;
+  }
+  g->gl_pathv[n] = 0;
+  g->gl_pathc = (unsigned long)n;
+  g->gl_matchc = (int)n;
+  return 0;
+}
+
+void globfree(glob_t *g) {
+  unsigned long i;
+  if (g->gl_pathv == 0) return;
+  for (i = 0; i < g->gl_pathc; i++) free(g->gl_pathv[i]);
+  free(g->gl_pathv);
+  g->gl_pathv = 0;
+  g->gl_pathc = 0;
+}
+
+/* ---- `localtime` / `gmtime`：把一个时刻拆成 `struct tm`（第三十八格）--------
+ *
+ * 撞它的是 `pdf()` —— `devPS.c` 要往 PDF 里写 `/CreationDate`。
+ *
+ * 分工与 `stat` 那格一样：**算**在宿主那一侧（`__omni_localtime`，九个整数），
+ * **摆进 `struct tm`** 在这儿 —— 那张结构的布局（macOS 上还多两格 `tm_gmtoff`/
+ * `tm_zone`）交给编译器按 `<time.h>` 算，不在 JS 里抄第二遍。
+ *
+ * `tm_zone` 摆成 NULL：这条腿上**没有时区库**，与其编一个名字出来，不如空着 ——
+ * 谁真去印 `%Z` 会当场看见 NULL，而不是拿到一个假的"CST"。
+ */
+#include <time.h>
+
+long long __omni_localtime(long long t, long long *out, long long utc);
+
+static struct tm omni_tm;
+
+static struct tm *omni_fill_tm(long long t, long long utc) {
+  long long v[9];
+  unsigned char *p = (unsigned char *)&omni_tm;
+  unsigned long i;
+  if (__omni_localtime(t, v, utc) != 0) return 0;
+  for (i = 0; i < sizeof(struct tm); i++) p[i] = 0;
+  omni_tm.tm_sec = (int)v[0];
+  omni_tm.tm_min = (int)v[1];
+  omni_tm.tm_hour = (int)v[2];
+  omni_tm.tm_mday = (int)v[3];
+  omni_tm.tm_mon = (int)v[4];
+  omni_tm.tm_year = (int)v[5];
+  omni_tm.tm_wday = (int)v[6];
+  omni_tm.tm_yday = (int)v[7];
+  omni_tm.tm_isdst = (int)v[8];
+  return &omni_tm;
+}
+
+struct tm *localtime(const time_t *t) { return omni_fill_tm((long long)*t, 0); }
+struct tm *gmtime(const time_t *t) { return omni_fill_tm((long long)*t, 1); }

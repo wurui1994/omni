@@ -1435,6 +1435,72 @@ R 的包是**压过的 lazy-load 数据库**，所以 `loadNamespace` 那条路�
 **这一格的教训与第三十四格（系统 `Rprofile`）是同一条**：R 的"启动"有一半不在 C 的
 `Init*` 里，在 `R_HOME/etc` 的那几份文本里。缺了不报错，**在离它很远的地方答错**。
 
+## 第三十八格：图形那一层也是运行时（`src/library/<包>/src` 进单子）
+
+**边界先说清楚**（用户 2026-09-29 当面纠正过一次）："R 的全部运行时编到 JS"里的**全量
+包含图形/GUI 那一层** —— 设备、`grDevices`/`graphics`/`grid` 的 C 都要在内，
+唯一排除的是**R 自己那层 R 代码写的解释器**。ggplot2 的画图引擎是 `grid`，
+`grid` 落到设备那一层；设备缺了就只有"算对了"没有"画出来"。
+
+进单子的五组（`src/library/<包>/src` 的 `SOURCES_C`）：
+`utils` 7 份、`grDevices` 13 份、`graphics` 7 份、`grid` 14 份、`stats` 57 份。
+**跳过三份**：`devQuartz.c` / `qdBitmap.c` / `qdPDF.c` 是 macOS 的 Quartz/Cocoa 专有件
+（Objective-C + 框架）—— 那不是 R 的运行时，是本机的 GUI 工具包。纯 C 的 `devPS.c`
+在里头，所以 `pdf()` / `postscript()` 这两个设备是**真身**。
+
+一路撞出来的三格，都是 loud 报出来的：
+
+1. **`GraphicsBase.h:28: ';' expected (got 'GPar')`** —— 根因是**macOS 的文件系统不分
+   大小写**：把包目录放进 `-I` 之后，`<Graphics.h>` 被 `graphics/src/graphics.h` 顶掉，
+   于是 `GPar` 这个 typedef 根本没出现过。本地头（`"graphics.h"`）按源文件所在目录找，
+   **包目录本来就不该进 `-I`**。去掉之后 graphics 7/7。
+2. **`duplicate symbol 'getListElement'`** —— R 的每个包各自一份 `.so`，两个包里同名的
+   文件局部帮手在那边各管各的；我们这边是**一张平表**。量了一遍（五个包对外 757 个名字
+   对核心 2573 个）：**全场只有这一格撞**（`grid/src/util.c` 与 `stats/src/optim.c`，
+   身子不一样 —— 挑错一份就是静默答错）。做法是靠**预处理器给整组改名**
+   （`-DgetListElement=lib_stats_getListElement`，`PKG_RENAME`）：定义与引用都在同一遍
+   预处理里，**一个字的源码都不用改**。这张表也算进发射缓存的 key。
+3. **`undefined symbol 'inet_ntoa'`** —— 又一个**按值收 struct** 的（同 `div` 那条：
+   `tu` 档不发桩，宿主那扇只过标量的门接不住）。自己用 C 写在 `ext/r/rt/omni_libc.c` 里，
+   身子是纯计算（四段点分十进制 + POSIX 说的静态缓冲区）。
+
+量出来的：**350 份 `.mjs`、对外符号 3331 个**（原来 252 份 / 2573 个），`jsrun` 那一节
+19 步初始化一步不欠。
+
+### 接着往下：`pdf()` 真画出了一张图（差最后一位）
+
+装上之后沿着 loud 一格一格往前推（探针 `.omni-cache/probe/gfxwhere.js`：跑一句 R、
+把 libc 点名册一起印出来）：
+
+`glob` → `makeQuartzDefault` → `setlocale` → `sscanf` 的 `%[…]` → `localtime`
+→ `getpid` → `rand` → `compress`。
+
+其中三格值得记：
+
+* **`glob`**：分工与 `stat` 一样 —— 找名字在宿主那一侧（一级一级往下走、列目录），
+  摆进 `glob_t` 在 C 那一侧（那张结构的布局交给编译器算，不在 JS 里抄第二遍）。
+  它是**第三十七格补完 Renviron 才冒出来的**：`R_LIBS` 一被摆上，`.libPaths()` 就走到了。
+* **`compress`（zlib 的编码器）**：这一格**没做**，而是把判据改成 `pdf(compress = FALSE)`。
+  理由：带压缩要逐字节相同，就得连 deflate 的编码器都与 zlib 一个字节不差 ——
+  那是在比熵编码，不是在比画得对不对。关掉之后比的正是那一串画图算子。
+  欠账记着：这条腿上还没有 deflate 编码器。
+* **`setlocale`**：这条腿上只有一种 locale（UTF-8），问就答 `C.UTF-8`。
+
+结果：**真出了一份 14261 字节的 PDF**，与同一棵树编出来的 `R.bin` 画的那一份
+**大小一模一样、算子一行不差**，只差在圆（`pch = 1`）的贝塞尔控制点上 `%.2f` 的最后一位：
+我们 `88.69`、R `88.68`。
+
+追到的根不是格式化 —— `printf("%.2f", 88.685)` 在 clang 与 V8 的 `toFixed` 上**都**给
+`88.69`（量过）。所以是**值**差了 1 ulp。最像的解释是**浮点收缩**：判据那把尺子
+（`R.bin`）是 clang 在 arm64 上编的，`a*b+c` 默认会收缩成一条 `fma`；我们这条腿上
+乘和加是两步，结果差在最后一位上。下一刀该做的是**让尺子与我们一样不收缩**
+（`build-libR.js` 那边加 `-ffp-contract=off`），而不是在判据里放宽到"差一位也算对" ——
+那就等于把静默答错合法化了。
+
+`tests/r/rtc.js gfx` 现在是**红的**，红在这一位上，错误信息里直接印出第一处差在第几个
+字节、两边各是什么。它只在点名要它的时候跑（`only === 'gfx'`），所以这一格红是**账**，
+不是拦路。
+
 
 
 

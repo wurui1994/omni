@@ -16,7 +16,9 @@
 //   node tests/r/rtc.js
 //   node tests/r/rtc.js -v      # 连每一份的成败一起印
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, readdirSync } from 'node:fs';
+import {
+  existsSync, readFileSync, writeFileSync, mkdirSync, statSync, readdirSync, unlinkSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -175,6 +177,20 @@ function mkVar(path, name) {
   return m[1].replace(/\\\n/g, ' ').trim().split(/\s+/).filter((s) => s.endsWith('.c'));
 }
 
+/** 跳过的那几份：macOS 的 Quartz/Cocoa 专有件（Objective-C + 框架）—— 那不是 R 的
+ *  运行时，是本机的 GUI 工具包。纯 C 的 `devPS.c` 留着，`pdf()`/`postscript()` 靠它。 */
+const PKG_SKIP = new Set(['devQuartz.c', 'qdBitmap.c', 'qdPDF.c']);
+/** **一份 .so 一套名字**那件事：R 的每个包各自一份 `.so`，两个包里同名的文件局部帮手
+ *  在那边各管各的；我们这边是**一张平表**，一碰就是 `duplicate symbol`（loud，好事）。
+ *
+ *  量过一遍（`.omni-cache/probe/libdup.js`：五个包对外 757 个名字、与核心 2573 个比）——
+ *  **全场只有一格撞**：`getListElement`（`grid/src/util.c` 与 `stats/src/optim.c` 各一份，
+ *  身子不一样）。做法是靠预处理器给整组改名，**一个字的源码都不用改**：定义与引用都在
+ *  同一遍预处理里。再撞新的会 loud 报出来 —— 那时候往这张表里加一行。 */
+const PKG_RENAME = new Map([
+  ['lib_stats', [['getListElement', 'lib_stats_getListElement']]],
+]);
+
 const groups = [
   /* `main/lapack.c` **要留着**（第三十二格头一版摘错了，量出来的）：FunTab 里那条
      `do_lapack` 就在它里头，它的活是"从模块那张表里取函数指针再转手"；而模块那一份
@@ -194,6 +210,22 @@ const groups = [
   /* `solve`/`det`/`qr`/`eigen` 的真身（`La_*` 一族）。Fortran 那一面（`dgesv_` 等）
      照 BLAS 那格的路在宿主层映射 —— 缺哪个它自己会 loud 地喊出来。 */
   ['lapackmod', 'src/modules/lapack', ['Lapack.c'], false],
+  /* **图形那一层也是运行时**（第三十八格）：`src/library/<包>/src` 与 `src/main` 一样是
+     R 的运行时 —— ggplot2 的画图引擎是 `grid`，`grid` 落到设备（`grDevices`）那一层，
+     不把这几组编进来就只有"算对了"没有"画出来"。`utils` 那 40 个 `C_*` 原生符号也在这儿
+     （量出来：命名空间我们 571 个对象、R.bin 611 个，差的正好是它们）。
+
+     **三份跳过**（`PKG_SKIP`）：`devQuartz.c` / `qdBitmap.c` / `qdPDF.c` 是 macOS 的
+     Quartz/Cocoa 专有件（Objective-C + 框架）—— 那不是 R 的运行时，是本机的 GUI 工具包。
+     纯 C 的 `devPS.c` 在里头，所以 `pdf()` / `postscript()` 这两个设备是真身。
+
+     **包目录不许进 `-I`**：macOS 的文件系统不分大小写，`<Graphics.h>` 会被
+     `graphics/src/graphics.h` 顶掉 —— 于是 `GPar` 没了、`GraphicsBase.h:28` 报
+     "';' expected"。本地头（`"graphics.h"`）按源文件所在目录找，本来就不需要 `-I`。 */
+  ...['utils', 'grDevices', 'graphics', 'grid', 'stats'].map((p) => [
+    `lib_${p}`, `src/library/${p}/src`,
+    mkVar(join(RSRC, `src/library/${p}/src/Makefile.in`), 'SOURCES_C')
+      .filter((n) => !PKG_SKIP.has(n)), false]),
 ];
 /** 我们自己那两份也进符号表 —— 复数那 20 个桩与 `div` 就是它们来接的。 */
 const OURS = [['omni', join(ROOT, 'ext/r/rt'), ['omni_complex.c', 'omni_libc.c', 'omni_rhost.c'], false]];
@@ -207,7 +239,8 @@ for (const [label, dir, names, core] of (want('rt') ? [...groups, ...OURS] : [])
   for (const n of names) {
     try {
       const path = dir.startsWith('/') ? join(dir, n) : join(RSRC, dir, n);
-      const mod = cMir(path, INCS, DEFS, [], undefined, undefined, { tu: true });
+      const mod = cMir(path, INCS, [...DEFS, ...(PKG_RENAME.get(label) ?? [])],
+        [], undefined, undefined, { tu: true });
       mods.push({ tag: `${label}/${n}`, out: `${label}/${n}.mjs`, mir: mod });
       if (core) { okN += 1; funcs += mod.funcs.length; }
       if (verbose) process.stdout.write(`       ok   ${label}/${n}\n`);
@@ -557,7 +590,11 @@ if (want('jsrun') || only === 'base') {
   for (const [label, d, names] of [...groups, ...OURS]) {
     for (const n of names) {
       const path = d.startsWith('/') ? join(d, n) : join(RSRC, d, n);
-      units.push({ path, out: join(dir, `${label}__${n.replace(/\.c$/, '')}.mjs`) });
+      units.push({
+        path,
+        out: join(dir, `${label}__${n.replace(/\.c$/, '')}.mjs`),
+        defs: PKG_RENAME.get(label) ?? [],
+      });
     }
   }
   /* **按 key 缓存**（判据不许一趟一分钟）：源文件与编译器那几份源都没动过，就直接用
@@ -575,6 +612,9 @@ if (want('jsrun') || only === 'base') {
     ...['src/core/frontend-c/tccgen.js', 'src/core/frontend-c/tccpp.js', 'src/core/mir/emit_js.js',
       'src/core/mir/ir.js', 'src/core/lang/c.js']
       .map((f) => `${f}=${stampOf(join(ROOT, f))}`),
+    /* 改名表与跳过表也算进 key —— 它们直接改发出来的文本（`-D` 进预处理器）。 */
+    `rename=${JSON.stringify([...PKG_RENAME])}`,
+    `skip=${JSON.stringify([...PKG_SKIP])}`,
   ].join('\n');
   let linked = null;
   let hit = false;
@@ -928,20 +968,43 @@ const PKG_EVAL = [
   'nchar(paste(utils::tail(letters, 3), collapse = ""))',
 ];
 const PKG_MS_CEIL = 22000;
+/** **画出来那一格**（第三十八格）：`pdf()` 的真身是 `grDevices/src/devPS.c` —— 纯 C，
+ *  不要 cairo 也不要 Quartz，所以这条腿上**真能出一份 PDF**。
+ *
+ *  判据是**与 R 自己画的那份逐字节相同**，只把 `/CreationDate` 与 `/ModDate` 那两行的
+ *  时间戳盖掉（量过：同一句跑两趟，`cmp` 只在这两处不一样）。
+ *  尺子是**同一棵 r-source 编出来的 `R.bin`**，不是本机装的 R —— 版本不一样（4.7.0-devel
+ *  对 4.6.1），而 PDF 里连一个空格的差别都算差别。
+ *
+ *  产物落 `.omni-cache/r-rt/libR/gfx/`（不是 `tempdir()`：那个一退就没了，出了事没法看）。
+ *
+ *  **`compress = FALSE` 是有意的**：带压缩的话 PDF 里的内容流是 zlib 压过的，
+ *  要逐字节相同就得连 deflate 的**编码器**都与 zlib 一个字节不差 —— 那是在比熵编码，
+ *  不是在比画得对不对。关掉之后比的正是画图那一串算子（`moveto`/`lineto`/字体/坐标），
+ *  这才是这一节想量的东西。（我们这条腿上还**没有** deflate 编码器 ——
+ *  `compress: libc: 没有这个函数` 就是它的指纹，记在账上。） */
+const GFX_MS_CEIL = 24000;
+const GFX_R = 'function(f) { grDevices::pdf(f, onefile = TRUE, compress = FALSE);'
+  + ' graphics::plot(1:10, (1:10)^2, type = "b", main = "t", xlab = "x", ylab = "y");'
+  + ' graphics::abline(h = 50, lty = 2); grDevices::dev.off(); file.size(f) }';
 if (only === 'img') imgSection('铺开机镜像', IMG_EVAL, IMG_MS_CEIL, 'img');
 if (only === 'pkg') imgSection('装 R 的包（utils）', PKG_EVAL, PKG_MS_CEIL, 'pkg');
+if (only === 'gfx') gfxSection();
 
 process.stdout.write(`\n  ${pass} passed, ${fail} failed\n`);
 process.exit(fail > 0 ? 1 : 0);
 
-function imgSection(label, EVAL, msCeil, tag) {
+/** 三节（`img` / `pkg` / `gfx`）共用的那一段：查像在不在、查像是不是旧的、
+ *  再把"按需装载 + 铺像"那套胶水的**前半截**摆出来（`L`）。各节往后接自己那几行。
+ *  回 `null` = 这一节不算数（已经 `no(...)` 过了）。 */
+function imgPrep(label, tag) {
   const dir = join(ROOT, '.omni-cache', 'r-rt', 'jsall');
   const metaF = join(dir, 'base.json');
   const imgF = join(dir, 'base.img.gz');
   const symsF = join(dir, '.syms.json');
   if (!existsSync(metaF) || !existsSync(imgF) || !existsSync(symsF)) {
     no(label, '还没有像 —— 先跑 node ext/r/build-rimage.js（反复跑到"装完了"）');
-    return;
+    return null;
   }
   const meta = JSON.parse(readFileSync(metaF, 'utf8'));
   /* 像与那几份 .mjs 是**一对**（像里是绝对地址）。有哪份比像新，这一节就不算数 ——
@@ -952,7 +1015,7 @@ function imgSection(label, EVAL, msCeil, tag) {
     .filter((f) => statSync(join(dir, f)).mtimeMs > tImg);
   if (newer.length > 0) {
     no(label, `有 ${newer.length} 份 .mjs 比像新（${newer[0]} …）—— 先重造像：node ext/r/build-rimage.js`);
-    return;
+    return null;
   }
   const logFile = join(dir, `$${tag}.log`);
   writeFileSync(logFile, '');
@@ -980,16 +1043,29 @@ function imgSection(label, EVAL, msCeil, tag) {
     "const st = $RT.memStoreFn('i8');",
     "const ptr = F('omni_src_ptr')();",
     "const ev = F('omni_eval_buf');",
+    'const R = (src) => { const bs = new TextEncoder().encode(src);',
+    '  for (let i = 0; i < bs.length; i++) st(ptr, i, BigInt(bs[i]));',
+    '  st(ptr, bs.length, 0n); return ev(); };',
+  ];
+  return {
+    dir, meta, imgF, logFile, L,
+  };
+}
+
+function imgSection(label, EVAL, msCeil, tag) {
+  const p = imgPrep(label, tag);
+  if (p === null) return;
+  const {
+    dir, meta, logFile, L,
+  } = p;
+  L.push(
     `for (const src of ${JSON.stringify(EVAL)}) {`,
     '  try {',
-    '    const bs = new TextEncoder().encode(src);',
-    '    for (let i = 0; i < bs.length; i++) st(ptr, i, BigInt(bs[i]));',
-    '    st(ptr, bs.length, 0n);',
-    "    say('eval\\t' + src + '\\t' + ev());",
+    "    say('eval\\t' + src + '\\t' + R(src));",
     "  } catch (e) { say('eval\\t' + src + '\\t炸了：' + String(e && e.message).slice(0, 120)); }",
     '}',
     "say('all\\t' + (Date.now() - t0));",
-  ];
+  );
   const entry = join(dir, `$${tag}.mjs`);
   writeFileSync(entry, `${L.join('\n')}\n`);
   const r = spawnSync(process.execPath, [entry], {
@@ -1032,4 +1108,72 @@ function imgSection(label, EVAL, msCeil, tag) {
   ok(label, `${meta.order.length} 份模块 + ${meta.bytes} 字节的像铺回去 `
     + `${one.get('load')}ms，装 base 那 ${meta.stmts} 句一句不用重跑（原本 17 秒）；`
     + `${EVAL.length} 句 R 都与 Rscript 对得上，铺完到答完 ${msAll}ms`);
+}
+
+/** 把 PDF 里"每趟都不一样"的那两行时间戳盖掉 —— 剩下的每一个字节都该一样。 */
+function pdfMask(buf) {
+  return buf.toString('latin1').replace(/\(D:\d+[^)]*\)/g, '(D:@)');
+}
+
+function gfxSection() {
+  const label = '画出来（pdf 设备）';
+  const p = imgPrep(label, 'gfx');
+  if (p === null) return;
+  const { dir, meta, logFile, L } = p;
+  const gfx = join(ROOT, '.omni-cache', 'r-rt', 'libR', 'gfx');
+  mkdirSync(gfx, { recursive: true });
+  const mine = join(gfx, 'mine.pdf');
+  const ref = join(gfx, 'ref.pdf');
+  for (const f of [mine, ref]) if (existsSync(f)) unlinkSync(f);
+  L.push(
+    `try { say('size\\t' + R(${JSON.stringify(`(${GFX_R})("${mine}")`)})); }`,
+    "catch (e) { say('size\\t炸了：' + String(e && e.message).slice(0, 160)); }",
+    "say('all\\t' + (Date.now() - t0));",
+  );
+  const entry = join(dir, '$gfx.mjs');
+  writeFileSync(entry, `${L.join('\n')}\n`);
+  const r = spawnSync(process.execPath, [entry], {
+    encoding: 'utf8',
+    timeout: 27000,
+    killSignal: 'SIGKILL',
+    env: {
+      ...process.env,
+      NODE_COMPILE_CACHE: join(dir, '.v8cache'),
+      R_HOME: join(ROOT, '.omni-cache', 'r-rt', 'libR', 'home'),
+    },
+  });
+  const lines = (existsSync(logFile) ? readFileSync(logFile, 'utf8') : '')
+    .trim().split('\n').map((s) => s.split('\t'));
+  const one = new Map(lines.map((a) => [a[0], a[1]]));
+  const bad = [];
+  const msAll = Number(one.get('all'));
+  if (!Number.isFinite(msAll)) {
+    bad.push(`那一趟没跑到底（${(r.stderr ?? '').split('\n').slice(0, 2).join(' ').slice(0, 200)}）`);
+  } else if (msAll > GFX_MS_CEIL) bad.push(`铺完到画完 ${msAll}ms（天花板 ${GFX_MS_CEIL}ms）`);
+  /* 尺子：**同一棵树编出来的 R.bin**（不是本机的 Rscript —— 版本不一样）。 */
+  const rb = join(ROOT, '.omni-cache', 'r-rt', 'libR', 'R.bin');
+  const rr = spawnSync(rb, ['--slave', '-e', `cat((${GFX_R})("${ref}"))`], {
+    encoding: 'utf8',
+    timeout: 25000,
+    env: { ...process.env, R_HOME: join(ROOT, '.omni-cache', 'r-rt', 'libR', 'home') },
+  });
+  if (!existsSync(ref)) {
+    bad.push(`R.bin 没画出尺子来（${(rr.stderr ?? '').split('\n')[0].slice(0, 140)}）`);
+  } else if (!existsSync(mine)) {
+    bad.push(`我们这边没出文件：${String(one.get('size')).slice(0, 160)}`);
+  } else {
+    const a = pdfMask(readFileSync(mine));
+    const b = pdfMask(readFileSync(ref));
+    if (a !== b) {
+      let i = 0;
+      while (i < a.length && i < b.length && a[i] === b[i]) i += 1;
+      bad.push(`PDF 不一样：我们 ${a.length} 字节、R ${b.length} 字节，第一处差在 ${i}`
+        + `（我们 ${JSON.stringify(a.slice(i, i + 40))}、R ${JSON.stringify(b.slice(i, i + 40))}）`);
+    } else if (a.length < 3000) bad.push(`PDF 只有 ${a.length} 字节 —— 太小，怕是什么都没画`);
+  }
+  if (bad.length > 0) { no(label, bad.slice(0, 4).join('\n       ')); return; }
+  ok(label, `${meta.order.length} 份模块铺回去之后 pdf() 真出了一份图：`
+    + `${readFileSync(mine).length} 字节，与同一棵树编出来的 R.bin 画的**逐字节相同**`
+    + `（只盖掉 /CreationDate 与 /ModDate 的时间戳）；铺完到画完 ${msAll}ms。`
+    + `产物在 .omni-cache/r-rt/libR/gfx/`);
 }

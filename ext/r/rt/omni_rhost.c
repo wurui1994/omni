@@ -115,6 +115,26 @@ int omni_env_init(void) {
   return 0;
 }
 
+/* **Quartz 那两格**（第三十八格）：`grDevices/src/init.c` 的注册表里有
+   `makeQuartzDefault`（CALLDEF）与 `Quartz`（EXTDEF）两个名字，而它们的身子在
+   `devQuartz.c` —— 那一份是 macOS 的 Objective-C + 框架，编不进这条腿
+   （量过：连"不带 HAVE_CONFIG_H"也过不去，`R_ext/QuartzDevice.h:99` 就要
+   `ApplicationServices/ApplicationServices.h`）。
+
+   所以这儿摆的是 R **自己**在没有 Aqua 的平台上那一份（`devQuartz.c` 的 `#else`
+   分支）一样的语义：`quartz()` 说一声"这个平台上没有"、`makeQuartzDefault` 回 FALSE。
+   **不是**悄悄回个能用的样子 —— 那才是静默答错。少这两格的指纹是
+   `makeQuartzDefault: libc: 没有这个函数`（grDevices 的 .onLoad 那一步）。 */
+SEXP makeQuartzDefault(void) {
+  return Rf_ScalarLogical(FALSE);
+}
+
+SEXP Quartz(SEXP args) {
+  (void)args;
+  Rf_warning("Quartz device is not available on this platform");
+  return R_NilValue;
+}
+
 /* 顶层上下文（main.c 的 setup_Rmainloop 那一段）：R 的出错那条路要沿着
    R_GlobalContext 往上跳，没有它就是在空链上转圈（量出来：eval 一去不回）。 */
 void omni_toplevel_init(void) {
