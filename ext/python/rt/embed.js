@@ -22,7 +22,7 @@ import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { filesIn, flagsFor, GENERATED, incDirFor, perFileFlags } from './scope.js';
+import { filesIn, flagsFor, GENERATED, incDirFor, perFileFlags, externalLinkArgs, opensslRoot } from './scope.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..', '..');
@@ -128,13 +128,27 @@ const BIN = join(OUT, 'embed-probe');
 /* 平台库：`_scproxy` 要 macOS 那两个 framework（configure.ac:8542），另加 -lm。
    整份运行时那一趟才有 `_scproxy` 的 .o，不给就缺 26 个 CF 与 kSC 那两族符号。 */
 const SYS_LIBS = process.platform === 'darwin'
-  ? ['-framework', 'SystemConfiguration', '-framework', 'CoreFoundation', '-lm'] : ['-lm'];
+  ? ['-framework', 'SystemConfiguration', '-framework', 'CoreFoundation', '-lm',
+    ...externalLinkArgs()]
+  : ['-lm', ...externalLinkArgs()];
 /* 同一摊平台库，**写成方言那一格**（门三）：`(lib "X.framework")` -> `-framework X`、
    `(lib "libm")` -> `-lm`（`hir/c_abi.js` 的 `C_SYSLIBS` 与 `cli.js` 的 `libLinkArgs`
    两处早就认，两条链接路都认）。不给就是缺 26 个 CF 与 kSC 那两族符号 —— 这不是
    `omni build` 少一个入口，是**源码没说全自己要什么**。 */
-const SX_LIBS = process.platform === 'darwin'
-  ? ['SystemConfiguration.framework', 'CoreFoundation.framework', 'libm'] : ['libm'];
+const SX_LIBS = (() => {
+  const out = process.platform === 'darwin'
+    ? ['SystemConfiguration.framework', 'CoreFoundation.framework', 'libm'] : ['libm'];
+  /* `zlib` 与 OpenSSL 那三格模块也进了库（`externalReady`），于是这一份 `.sx` 也得
+     说出它们要的库：`libz` 是预登记的系统库那一格（`C_SYSLIBS`），OpenSSL 是**本机装的
+     那份**，给的是磁盘上那两个真文件（表外的名字按路径原样交给链接器）。 */
+  out.push('libz');
+  const root = opensslRoot();
+  if (root !== null) {
+    const dyl = process.platform === 'darwin' ? 'dylib' : 'so';
+    out.push(join(root, 'lib', `libssl.${dyl}`), join(root, 'lib', `libcrypto.${dyl}`));
+  }
+  return out;
+})();
 const ld = spawnSync(CC, ['-o', BIN, POBJ, ...objs, ...SYS_LIBS], { encoding: 'utf8' });
 if (ld.status !== 0 || !existsSync(BIN)) {
   say(`py-rt/embed: 链不起来：\n${(ld.stderr ?? '').split('\n').slice(0, 8).join('\n')}`);

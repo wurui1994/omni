@@ -1413,6 +1413,42 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 
 ### 已落地
 
+- **第三方库那条线开了（2026-09-29，用户定的方向）** —— 原话：「至少先把 asyncio /
+  requests / lxml / httpx 的支持做起来，我们可以正常使用第三方库。」
+  判据换成了**真库真代码**：新的薄皮 `ext/python/rt/pyrun.c`（59 行，与 `embed-boot.c`
+  共用 boot）收一个 `.py` 的路径，于是"能不能用第三方库"这件事有了尺子。
+  - **asyncio 真跑起来了**：`asyncio.run` 拿到 42、`start_server` + `open_connection`
+    本机 TCP 收发一轮（`b'hello-asyncio'` 反转回来）、`gather` 六格、`wait_for` 真超时。
+    从前是 `OSError [Errno 102] Operation not supported on socket`（`_make_self_pipe`
+    里 `sock.setblocking(False)`），根因在**我们那台 C 前端**，见下面两条。
+  - **requests / httpx 能 import 了**（连 urllib3 / anyio / httpcore / h11 / certifi /
+    idna / charset_normalizer）—— 缺口原来只有两格 C 扩展：`zlib` 与 `_ssl`。
+    现在 `scope.js` 的 `externalReady` 把"探到库的 external 那几格"也算进运行时
+    （`configure` 就是这么干的）：`zlib` 总在、OpenSSL 探 `opensslRoot()`（brew 那份），
+    `_ssl.c` / `_hashopenssl.c` / `zlibmodule.c` **三份一字不改编得出**，进 inittab
+    （76 → 79 格）、进链接（`externalLinkArgs`：`-lz` / `-L…/lib -lssl -lcrypto`），
+    `embed` 三门仍全过（产物 30.2M）。
+  - **路上抓到三格真 bug，都是"静静答错"那一族**：
+    * **十六进制字面量的类型**（`frontend-c/tccpp.js`）：C11 6.4.4.1 那张表里
+      十六/八进制的候选序列是 int → **unsigned int** → long → …，而我们直接跳到了
+      `long long`。于是 macOS 的 `FIONBIO`（`_IOW('f',126,int)`）算成
+      `0xffffffff8004667e`（clang 是 `0x8004667e`），`ioctl` 的 request 对不上、
+      内核回 `ENOTSUP`。顺带修了 `0x80000000u` 的宽度（它是 unsigned int，不是 ull）。
+    * **cast 的常量折叠丢了源那侧的符号性**（`frontend-c/tccgen.js` 的 `castTo`）：
+      MIR 里 32 位常量的规范形是有符号的，所以 `unsigned int` 的 `0x80000000` 读出来是
+      `-2147483648`，直接 `asUintN(64,…)` 就符号扩展。现在先按源类型读回来再按目标截。
+      判据是七格与 clang 逐字节相同（`0x80000000` / `…u` / `(uint32_t)…` / `| 0x667e` /
+      变量那格 / `sizeof`）。
+    * **`_Noreturn` 一个关键字都没登记**（`frontend-c/tccdefs.js`）：OpenSSL 的
+      `crypto.h:471` 那句 `ossl_noreturn void OPENSSL_die(…)` 在 C11 那支展开成它，
+      症状是 `';' expected (got 'void')`。落成 `__attribute__((noreturn))`（那一格早就认）。
+  - **下一刀已经量到，是 `__thread`**：`threading.Thread.start()` 撞
+    `Fatal Python error: _PyThreadState_Attach: non-NULL old thread state`。最小复现
+    18 行 C（`__thread int tl;` + 一个 pthread）：clang 上主线程读回 3、**我们那台读回 7**
+    —— thread-local 被当成了普通全局变量，**所有线程共用一格**。所以 `requests` 真发
+    一次请求（判据里用 `http.server` 起本机服务）现在还过不去，`lxml` 那格（Cython 出的
+    C 扩展）也在它后面。这不是 python 的账，是 C 前端的账。
+
 - **整份运行时链成动态库，三门全过（2026-09-29）** —— 第十七趟，"借运行时"这一刀收口：
   - **一份 dylib**：`node ext/python/rt/link.js --runtime` —— 范围 **275 份 `.c`**（核心 164 +
     `Modules/` 111）另加我们自己生成的 `Modules/config.c`，**276 份 `.o` 全是我们那台 C 前端

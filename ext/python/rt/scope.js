@@ -14,6 +14,46 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 
 /**
+ * **本机的 OpenSSL 在哪儿**（探不到回 `null`）。
+ *
+ * 为什么要这一格：`requests` / `httpx` / `anyio` 一律 `import ssl`，而 `ssl` 要 `_ssl`，
+ * `_ssl.c` 要 OpenSSL 的头。CPython 的 `configure.ac` 在这一格上做的是同一件事
+ * （`--with-openssl=…`、`pkg-config openssl`、再几个老地方），我们照它的路子探：
+ * 环境变量先说，再看几个常见的装法，**判据是 `include/openssl/ssl.h` 真在**。
+ * 探不到就什么都不给 —— 那两份于是照旧"头文件不在"、记在账上（不假装借到了）。
+ */
+export function opensslRoot() {
+  const hints = [
+    process.env.OPENSSL_ROOT_DIR, process.env.OPENSSL_PREFIX,
+    '/opt/homebrew/opt/openssl@3', '/usr/local/opt/openssl@3',
+    '/opt/homebrew/opt/openssl', '/usr/local/opt/openssl',
+    '/opt/homebrew', '/usr/local', '/usr',
+  ];
+  for (const p of hints) {
+    if (p === undefined || p === '') continue;
+    if (existsSync(join(p, 'include', 'openssl', 'ssl.h'))) return p;
+  }
+  return null;
+}
+
+/**
+ * **要外部库那一档在链接命令上要什么**（`--with-external` 那一趟）。
+ *
+ * 与 `perFileFlags` 分工：那一边是"编得过"（`-I`），这一边是"链得上"（`-L` / `-l`）。
+ * 现在真开的只有两格：`zlib`（macOS 自带 `libz`）与 OpenSSL（`_ssl` + `_hashlib`）。
+ * 别的（`_sqlite3` / `_ctypes` / `_lzma` …）还在账上 —— 开一格就在这儿加一格，
+ * 不开就一个字都不加。
+ */
+export function externalLinkArgs() {
+  const out = ['-lz'];
+  const root = opensslRoot();
+  if (root !== null) {
+    out.push('-L', join(root, 'lib'), '-lssl', '-lcrypto');
+  }
+  return out;
+}
+
+/**
  * `Modules/` 那张名单：**真进 libpython 的那几份**，从借来的那棵树里**读出来**，不写死。
  *
  * 来路是 `Makefile.pre.in:595-607` 的 `LIBRARY_OBJS`：
@@ -169,10 +209,27 @@ export function runtimeModuleFiles(src, { withExternal = false } = {}) {
   const { runtime, external } = stdlibModules(src);
   for (const files of runtime.values()) for (const f of files) out.add(f);
   for (const f of vendoredFiles(src)) out.add(f);
-  if (withExternal) {
-    for (const files of external.values()) for (const f of files) out.add(f);
+  /* **探到库的那几格 external 也算运行时**（`configure` 就是这么干的：探到就编）。
+     不这么做的后果不是"少几份 .o"，是**跑起来缺模块** —— `import zlib` / `import ssl`
+     失败，`requests` / `httpx` / `urllib3` / `anyio` 一格都进不来。 */
+  for (const [name, files] of external) {
+    if (withExternal || externalReady(name)) for (const f of files) out.add(f);
   }
   return out;
+}
+
+/**
+ * 一格「要外部库」的模块**本机备齐了没有**。
+ *
+ * 现在真开的只有两摊：`zlib`（`libz` 与它的头都在 SDK 里，macOS/Linux 都自带）与
+ * OpenSSL 那两格（`_ssl` / `_hashlib`，探 `opensslRoot()`）。别的（`_sqlite3` /
+ * `_ctypes` / `_lzma` / `_bz2` / `_zstd` …）**还在账上**：它们的 `-I`/`-l` 还没接，
+ * 所以这儿一律回 false —— 宁可"跑起来说没这个模块"，不要"链接那天缺一片符号"。
+ */
+export function externalReady(name) {
+  if (name === 'zlib') return true;
+  if (name === '_ssl' || name === '_hashlib') return opensslRoot() !== null;
+  return false;
 }
 
 /**
@@ -183,8 +240,14 @@ export function runtimeModuleFiles(src, { withExternal = false } = {}) {
 export function runtimeModuleNames(src) {
   const out = [...coreModuleNames(src)];
   const seen = new Set(out);
-  for (const name of stdlibModules(src).runtime.keys()) {
+  const { runtime, external } = stdlibModules(src);
+  for (const name of runtime.keys()) {
     if (!seen.has(name)) { out.push(name); seen.add(name); }
+  }
+  /* 探到库的那几格也要**进 inittab** —— 少这一步就是"`.o` 在库里、`import zlib`
+     还是说没这个模块"（编得出、链得上，跑起来才缺，见上面那段）。 */
+  for (const name of external.keys()) {
+    if (externalReady(name) && !seen.has(name)) { out.push(name); seen.add(name); }
   }
   return out;
 }
@@ -298,6 +361,16 @@ const HACL_MODULES = new Set([
  */
 export function perFileFlags(name, src) {
   if (name === 'Python/dynload_shlib.c') return [`-DSOABI="${soabi(src)}"`];
+  /* **要外部库那一档里我们真开的那两格**（第三方库那条线：`requests` / `httpx` 卡在
+     `zlib` 与 `_ssl` 上 —— 量出来的原话是 `ModuleNotFoundError: No module named 'zlib'`
+     与 `'_ssl'`）。`zlib` 的头在 SDK 的默认搜索路径里（一个 `-I` 都不用），OpenSSL 在
+     本机是 brew 装的那份，所以要明着给 —— `configure.ac` 里那一格也是这么找的
+     （`--with-openssl` / `pkg-config openssl`），我们把候选目录探一遍、探不到就不给，
+     于是那两份照旧"头文件不在"、记在账上，不假装借到了。 */
+  if (name === 'Modules/_ssl.c' || name === 'Modules/_hashopenssl.c') {
+    const root = opensslRoot();
+    return root === null ? [] : ['-I', join(root, 'include')];
+  }
   /* HACL\* 那一族：`Modules/` 顶层那六份**摘**它的（`blake2module.c` …），外加
      `Modules/_hacl/` 里 vendored 的那九份**自己**（`LIBHACL_*_OBJS`）——
      `LIBHACL_CFLAGS` 是给整族的，所以两处给同一个 `-I`。少给的症状：

@@ -28,7 +28,7 @@ import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { filesIn, GENERATED } from './scope.js';
+import { filesIn, GENERATED, externalLinkArgs } from './scope.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..', '..');
@@ -139,8 +139,9 @@ process.stdout.write(`\nar: ${lib} —— ${mb(lib)}M\n`);
    `SCDynamicStoreCopyProxies`（量出来的原话）—— 那不是我们的欠账，是**没把
    构建系统该给的链接开关给上**。 */
 const SYS_LIBS = process.platform === 'darwin'
-  ? ['-framework', 'SystemConfiguration', '-framework', 'CoreFoundation', '-lm']
-  : ['-lm'];
+  ? ['-framework', 'SystemConfiguration', '-framework', 'CoreFoundation', '-lm',
+    ...externalLinkArgs()]
+  : ['-lm', ...externalLinkArgs()];
 const t0 = Date.now();
 const l = spawnSync(CC, ['-dynamiclib', '-o', dylib, ...have, ...SYS_LIBS], { encoding: 'utf8' });
 const secs = ((Date.now() - t0) / 1000).toFixed(1);
