@@ -70,6 +70,9 @@ const D = {
  *
  * 只列常用那几族（方向/修饰键/字母/数字/空格回车 Esc Tab 退格）—— 表里没有的键
  * **就不记**（不瞎编号：编错了脚本会读到一格别的键，那比读不到更难查）。
+ *
+ * **导出它**（下面那行）：Worker 那一档设备在另一个线程上，键盘事件只能页面这边收
+ * （`studio.js` 往共享内存里写），那边要的就是这张表 —— **不许在页面那侧另抄一份**。
  */
 const SCAN = {
   Escape: 0x01, Digit1: 0x02, Digit2: 0x03, Digit3: 0x04, Digit4: 0x05, Digit5: 0x06,
@@ -86,6 +89,9 @@ const SCAN = {
   ArrowUp: 0xc8, ArrowLeft: 0xcb, ArrowRight: 0xcd, ArrowDown: 0xd0,
   ControlRight: 0x9d, AltRight: 0xb8,
 };
+
+/** 上面那张表（见它的头注）—— Worker 那一档页面那侧要用同一份。 */
+export const SCANCODES = SCAN;
 
 const VS = `#version 300 es
 in vec4 a_pos;

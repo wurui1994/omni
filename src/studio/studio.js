@@ -1149,7 +1149,170 @@ async function glDevice() {
 /** 停掉页面那格帧循环（换文件、跑别的语言都要它 —— 不停的话上一份脚本一直在画）。 */
 function glStop() {
   if (GLDEV !== null) GLDEV.dev.stop();
+  wkStop();
   liveFpsStop();
+}
+
+/* ---------------------------------------------------------------- EVAL 跑进 Worker
+ *
+ * **为什么要它**（任务 #39，口径 `docs/design/eval-realtime-gpu.md` §41）：语料里二十几份
+ * 脚本**自己在死循环里用 `refresh()` 驱动帧**。主线程上 `refresh()` 没法真等 —— 一等就把
+ * 标签页冻住，所以那一档只有一道看门狗（1500ms 抛），那一族画不动。Worker 里阻塞是合法的。
+ *
+ * 形状：画布 `transferControlToOffscreen()` 交给 Worker（**只能交一次**，所以换程序不换
+ * Worker）、产物在那边 `import()` 跑、fps 从那边来。停与输入走**共享内存** ——
+ * 那一族不回消息循环，`postMessage` 那两封永远排不上（`gfx-gl.js` 的 `waitBuf` 有格子表）。
+ *
+ * **单体那一档（`file://`）不走这条路**：没有跨源隔离就没有 `SharedArrayBuffer`，而且
+ * 单体里编译器就在本页 —— 那一档照旧主线程 + 看门狗。
+ */
+let WK = null;
+let WK_OPENING = null;
+let WK_SCAN = null;
+
+const wkCan = () => typeof Worker === 'function'
+  && typeof window.__OMNI_LOCAL !== 'function'
+  && typeof HTMLCanvasElement === 'function'
+  && typeof HTMLCanvasElement.prototype.transferControlToOffscreen === 'function';
+
+/** 问一句、等回信。**按 `id` 配对**（自循环那一族的 `run` 永远不回信，按次序配会错位）。 */
+const wkAsk = (st, m, tr) => new Promise((res) => {
+  const id = ++st.nid;
+  st.wait.set(id, res);
+  st.w.postMessage({ ...m, id }, tr ?? []);
+});
+
+/** 等回信，但**到点就当它在跑**（自循环那一族就是这样 —— 回信永远不来）。
+    到点那一下把等着的那一格**摘掉** —— 不然每问一句就在表里留一条（那一族问得很勤）。 */
+const wkAskOr = (st, m, ms) => {
+  const id = ++st.nid;
+  return Promise.race([
+    new Promise((res) => { st.wait.set(id, res); st.w.postMessage({ ...m, id }); }),
+    new Promise((res) => { setTimeout(() => { st.wait.delete(id); res(null); }, ms); }),
+  ]);
+};
+
+/**
+ * 开那一格 Worker（懒开、**一页只一格**）。
+ *
+ * **不许重入**：`run()` 在实时模式下会连着进来好几趟（一边打字一边跑），而这一格是
+ * `async` 的 —— 不存住"正在开"的那个许诺，两趟都会看见 `WK === null`，于是**开出两格
+ * Worker**：画布是后开那一格的、`run` 却可能发给前一格，表现成"跑起来了但一帧都不动"
+ * （查这一格花了四趟判据：`{"kind":"open",…,"id":1}` 在记录里出现了两回才看出来）。
+ */
+async function wkOpen() {
+  if (WK !== null) return WK;
+  if (WK_OPENING !== null) return WK_OPENING;
+  WK_OPENING = wkOpen1();
+  try { return await WK_OPENING; } finally { WK_OPENING = null; }
+}
+
+async function wkOpen1() {
+  if (!wkCan()) return null;
+  const st = {
+    w: null, canvas: el('canvas', 'gfx-canvas'), sh: null,
+    wait: new Map(), nid: 0, frames: 0, fps: 0, ms: 0,
+  };
+  st.canvas.width = 320;
+  st.canvas.height = 240;
+  try { st.w = new Worker(new URL('./eval-worker.js', import.meta.url), { type: 'module' }); }
+  catch { return null; }
+  st.w.onmessage = (ev) => {
+    const d = ev.data;
+    if (d === null || d === undefined) return;
+    /* `tick`：每帧一声（那一族只能靠它报活）。**不占回信的位子**。 */
+    if (d.kind === 'tick') {
+      st.frames = d.frames;
+      if (d.fps > 0) { st.fps = d.fps; st.ms = d.ms; }
+      return;
+    }
+    const f = st.wait.get(d.id);
+    if (f !== undefined) { st.wait.delete(d.id); f(d); }
+  };
+  const off = st.canvas.transferControlToOffscreen();
+  const r = await wkAsk(st, { kind: 'open', canvas: off, w: 320, h: 240 }, [off]);
+  if (r === null || r.err !== undefined || r.dev === null || r.dev === undefined) {
+    st.w.terminate();
+    return null;
+  }
+  if (r.shared !== null && r.shared !== undefined) {
+    st.sh = new Int32Array(r.shared);
+    await wkInput(st);
+  }
+  WK = st;
+  /* 判据那一侧要看得见这条腿的账（帧号 / fps / ms）—— 与主线程那一档
+     `globalThis.__OMNI_GFX` 同一类窗口。 */
+  window.__OMNI_WK = st;
+  return WK;
+}
+
+/**
+ * 输入：**页面收事件，写进共享内存**（`gfx-gl.js` 的 `pullShared` 每帧搬一回）。
+ * 位置每动都写；`bstatus` 与 `keystatus` 写完推一格序号 —— 那两格脚本自己写得动
+ * （"消掉一次点击"），设备那侧只在序号变了时才覆盖。
+ */
+async function wkInput(st) {
+  const sh = st.sh;
+  const c = st.canvas;
+  if (WK_SCAN === null) {
+    try { WK_SCAN = (await import('./gfx-gl.js')).SCANCODES; } catch { WK_SCAN = {}; }
+  }
+  let bst = 0;
+  const keys = new Int32Array(8);
+  const at = (ev) => {
+    const r = c.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return;
+    Atomics.store(sh, 2, Math.round((ev.clientX - r.left) * (c.width / r.width)));
+    Atomics.store(sh, 3, Math.round((ev.clientY - r.top) * (c.height / r.height)));
+  };
+  const bit = (b) => (b === 0 ? 1 : (b === 2 ? 2 : 4));
+  c.addEventListener('mousemove', at);
+  c.addEventListener('mousedown', (ev) => {
+    at(ev);
+    bst |= bit(ev.button);
+    Atomics.store(sh, 4, bst);
+    Atomics.add(sh, 14, 1);
+  });
+  c.addEventListener('mouseup', (ev) => {
+    at(ev);
+    bst &= ~bit(ev.button);
+    Atomics.store(sh, 4, bst);
+    Atomics.add(sh, 14, 1);
+  });
+  c.addEventListener('contextmenu', (ev) => { ev.preventDefault(); });
+  const key = (code, on) => {
+    const k = WK_SCAN[code];
+    if (k === undefined) return;
+    const w = k >> 5;
+    const m = 1 << (k & 31);
+    keys[w] = on ? (keys[w] | m) : (keys[w] & ~m);
+    Atomics.store(sh, 5 + w, keys[w]);
+    Atomics.add(sh, 13, 1);
+  };
+  window.addEventListener('keydown', (ev) => { key(ev.code, true); });
+  window.addEventListener('keyup', (ev) => { key(ev.code, false); });
+  Atomics.store(sh, 15, 1);
+}
+
+/** 让那边正在跑的那一份停下（共享内存那格旗子；没有 SAB 就只能靠 `stop` 那封消息）。 */
+function wkStop() {
+  if (WK === null) return;
+  if (WK.sh !== null) { Atomics.store(WK.sh, 1, 1); Atomics.notify(WK.sh, 0); }
+  WK.w.postMessage({ kind: 'stop', id: ++WK.nid });
+}
+
+/**
+ * 在 Worker 里跑一份按单元产物。**先让上一份停下**（那一格旗子），再发 `run` ——
+ * 那边 `run` 的头一件事是 `dev.reset()`，reset 里把旗子归零，所以次序是安全的。
+ *
+ * 回信可能永远不来（自循环那一族）：到点就回 null，调用方按"在跑"处理。
+ */
+async function wkRun(st, main, units, assets) {
+  if (st.sh !== null) { Atomics.store(st.sh, 1, 1); Atomics.notify(st.sh, 0); }
+  st.frames = 0;
+  st.fps = 0;
+  st.ms = 0;
+  return wkAskOr(st, { kind: 'run', main, units, assets, cap: 0 }, 1200);
 }
 
 /* ---------------------------------------------------------------- 实时那一档的 fps
@@ -1173,12 +1336,25 @@ function liveFpsStart(base) {
   LIVE_BASE = base;
   if (LIVE_TIMER !== 0) return;
   LIVE_TIMER = setInterval(() => {
+    /* Worker 那一档：数从那边来 —— 自循环那一族**答不出 `perf`**（不回消息循环），
+       所以先用 `tick` 里带的那两格；没有 tick（宿主驱动那一族）才问一句 `perf`。 */
+    if (WK !== null) {
+      if (WK.fps > 0) { liveFpsShow(WK.fps, WK.ms); return; }
+      wkAskOr(WK, { kind: 'perf' }, 400).then((p) => {
+        if (p !== null && p.err === undefined && p.fps > 0) liveFpsShow(p.fps, p.ms);
+      }).catch(() => {});
+      return;
+    }
     if (GLDEV === null || typeof GLDEV.dev.perf !== 'function') return;
     const p = GLDEV.dev.perf();
     /* 还没攒够半秒（`fps === 0`）、或者帧循环没在转（单帧脚本）就不动状态栏。 */
     if (!p.live || p.fps === 0) return;
-    setStatus(`${LIVE_BASE} · ${fps1(p.fps)} fps · ${fps1(p.ms)}ms/帧`, 'ok');
+    liveFpsShow(p.fps, p.ms);
   }, 500);
+}
+/** 把那两个数接在状态栏那句话后头（两条腿共用 —— 页面那台设备与 Worker 那台）。 */
+function liveFpsShow(fps, ms) {
+  setStatus(`${LIVE_BASE} · ${fps1(fps)} fps · ${fps1(ms)}ms/帧`, 'ok');
 }
 function liveFpsStop() {
   if (LIVE_TIMER !== 0) clearInterval(LIVE_TIMER);
@@ -1245,20 +1421,31 @@ async function run() {
   /**
    * **EVAL 两门直通 GPU 那一格**：设备先摆好（画布挂进"预览"栏、状态回初值、
    * `OMNI_GFX=host` 让画图落成 `(gfxcall …)`），然后才跑 —— 产物一跑起来就往这格
-   * 上下文上画，而且帧循环（rAF）在页面这边转着，所以它是**活的**，不是一张图。
+   * 上下文上画，而且帧循环在转着，所以它是**活的**，不是一张图。
    *
-   * **两档都走这条路**：单体里编译器就在本页；`omni serve` 那一档编译在服务端
-   * （`emit js --gfx host`）、跑在这台设备上（`eval-live.js`）。
+   * **哪一档走哪条腿**：
+   *   * `omni serve` 这一档优先**交给 Worker**（`wkOpen`，任务 #39）：那儿 `refresh()`
+   *     是真等待点，于是"脚本自己拿 `refresh()` 当帧循环"那一族（语料里二十几份）也转得动，
+   *     而且一帧算多久都不卡页面；
+   *   * 单体 HTML（`file://`）与"Worker 开不起来"那一档退回**主线程那台设备**
+   *     （`glDevice`）—— 那儿只有一道看门狗，自循环那一族画不动（§41.3）。
    */
-  const live = GL_LANGS.has(S.lang) ? await glDevice() : null;
   const offline = typeof window.__OMNI_LOCAL === 'function';
-  if (live !== null) {
+  const wantGfx = GL_LANGS.has(S.lang);
+  const wk = wantGfx && !offline ? await wkOpen() : null;
+  const live = wantGfx && wk === null ? await glDevice() : null;
+  const assets = String(S.path ?? '').replace(/\/[^/]*$/, '');
+  if (wk !== null) {
+    const box = $('#preview');
+    box.textContent = '';
+    box.classList.remove('empty');
+    box.append(wk.canvas);
+    showPreviewTab(true);
+  } else if (live !== null) {
     live.dev.reset();
     /* **图从哪儿取**：文件纹理与 `pic("a.png")` 里的名字是相对**脚本所在目录**的，
        页面这一档过网取（`/api/asset?path=…`）—— 所以跑之前把那个目录告诉设备。 */
-    if (typeof live.dev.setAssets === 'function') {
-      live.dev.setAssets(String(S.path ?? '').replace(/\/[^/]*$/, ''));
-    }
+    if (typeof live.dev.setAssets === 'function') live.dev.setAssets(assets);
     const box = $('#preview');
     box.textContent = '';
     box.classList.remove('empty');
@@ -1273,7 +1460,7 @@ async function run() {
   /* serve 那一档的 EVAL 两门：**服务端只编（按单元产物），页面 import 启动器跑**。
      每跑一趟过网的只有入口那几 KB —— 运行时那两格（`ev_rt_<哈希>` 与 `omni_rt`）
      是所有脚本共用的，浏览器按 URL 缓存（见 `eval-live.js` 的头注）。 */
-  if (live !== null && !offline) {
+  if (wantGfx && !offline && (wk !== null || live !== null)) {
     try {
       const em = await post('/api/units', {
         path: S.path,
@@ -1286,6 +1473,23 @@ async function run() {
       if (em.code !== 0 || em.main === null || em.main === undefined) {
         $('#stderr').textContent = em.stderr ?? '';
         setStatus('失败', 'bad');
+        return;
+      }
+      /* Worker 那一档：跑在那边。**回信可能永远不来**（自循环那一族）—— 到点就
+         按"在跑"处理，fps 从 `tick` 里来。 */
+      if (wk !== null) {
+        const rr = await wkRun(wk, em.main, em.units ?? [], assets);
+        if (my !== S.seq) return;
+        $('#stdout').textContent = rr === null ? '' : (rr.stdout ?? '');
+        $('#stderr').textContent = rr === null ? '' : (rr.stderr ?? rr.err ?? '');
+        renderStages(em.stages, em.stderr ?? '', Math.round(performance.now() - t0));
+        markStale(false);
+        showPreviewTab(true);
+        const bad = rr !== null && (rr.err !== undefined || rr.code !== 0);
+        const base = rr === null ? `在跑 · ${Math.round(performance.now() - t0)}ms`
+          : (rr.code === 0 ? `ok · ${Math.round(performance.now() - t0)}ms` : `exit ${rr.code}`);
+        setStatus(base, bad ? 'bad' : 'ok');
+        if (!bad) liveFpsStart(base);
         return;
       }
       const mod = await import('./eval-live.js');

@@ -7,7 +7,7 @@
  * 没有浏览器）。Worker 那条路要三样一起在：服务（`/eval-worker.js` 与 `/api/units`
  * 都是它发的）、真 WebGL2、以及**画布 `transferControlToOffscreen()` 交给 Worker**。
  *
- * 判的是七件事：
+ * 判的是十件事（前八件自己起 Worker，后两件**照人那样用 Studio 那一页**）：
  *   1. Worker 里那台设备**开得起来**（`webgl2`，没有 DOM 也没有 rAF），而且**停的旗子在**
  *      （`SharedArrayBuffer` —— 服务发了 COOP/COEP 才有它，见 §41.2）；
  *   2. 按单元产物在 Worker 里**跑得起来**（`/api/units` -> `import(启动器 URL)`）；
@@ -18,7 +18,10 @@
  *   6. 同一族不给上限时**按 60fps 一直转**（`Atomics.wait` 那条真等待点）；
  *   7. 宿主写一格共享内存里的旗子就能把它停下 —— 不用 `terminate()`（画布只能交一次，
  *      掐了 Worker 就连画布一起没了）；
- *   8. **输入也走那块共享内存**（`input.kc`：把鼠标写进去，那一列上就出现了十字与圆）。
+ *   8. **输入也走那块共享内存**（`input.kc`：把鼠标写进去，那一列上就出现了十字与圆）；
+ *   9. **整条路**：在树上点开 `selfloop.kc` 按「跑」，状态栏上有 fps、页面上一台设备都没有
+ *      （那就是"真的交给了 Worker"）；
+ *  10. 一页**只开一格 Worker**（`wkOpen` 不许重入 —— 那一格坑查了四趟判据）。
  *
  * `playwright-cli` 不在仓库依赖里（是台机器上的工具），没装就**明着跳过**。
  */
@@ -92,7 +95,13 @@ const PROBE = 'async () => {'
   + ' }'
   + ' const ran = await ask({ kind: "run", main: em.main, units: em.units ?? [],'
   + '   assets: "ext/evaldraw/examples" });'
-  + ' const s1 = await ask({ kind: "shot" });'
+  /* **等第一帧真画完再抓**（`run` 回信只说"程序体跑完了"，画是宿主那格节拍器下一跳干的
+     —— 不等的话偶尔抓到一张全黑，判据红在"真画上了"那一格）。 */
+  + ' let s1 = await ask({ kind: "shot" });'
+  + ' for (let i = 0; i < 60 && s1.frames < 1; i++) {'
+  + '   await new Promise((r) => setTimeout(r, 20));'
+  + '   s1 = await ask({ kind: "shot" });'
+  + ' }'
   + ' await new Promise((r) => setTimeout(r, 500));'
   + ' const s2 = await ask({ kind: "shot" });'
   + ' await ask({ kind: "stop" });'
@@ -147,6 +156,88 @@ const PROBE = 'async () => {'
   + ' return { opened, ran, s1, s2, capped, cappedTicks, cappedFrame, s3,'
   + '   free, t1, t2, t3, t4, s4, ink, ink2, inw,'
   + '   iso: globalThis.crossOriginIsolated === true }; }';
+
+/**
+ * 第二段是**整条路**：不自己起 Worker，而是照人那样用 Studio 那一页 —— 在树上点开
+ * `selfloop.kc`、按「跑」，然后看状态栏。`studio.js` 那一侧现在优先把 EVAL 两门交给
+ * Worker（`wkOpen`），所以这一格判的是"那条接线真的接上了"：
+ *
+ *   * 状态栏先是 **`ok · Nms`**：这一族的 `run` **是回得来的** —— 产物入口把帧函数交给
+ *     设备（`gfxframefn`）就返回了，脚本那个 `while(1)` 是在**帧函数里头**转的，
+ *     不是在程序体里。（`在跑 …` 那句留给"程序体自己就不返回"的形状。）
+ *   * 一秒后状态栏上**有 fps**（数是从 `tick` 里带回来的 —— 那一族答不出 `perf`）；
+ *   * 预览栏里那格 canvas 在，而**页面上一台设备都没有**（`globalThis.__OMNI_GFX`
+ *     是空的）—— 那就是"真的走了 Worker 那条腿"的证据。
+ *
+ * 从前这一族在页面上只能被看门狗掐掉（1500ms 抛一格错，画面就停在那儿）。
+ */
+const PAGE = 'async () => {'
+  + ' const sleep = (ms) => new Promise((res) => setTimeout(res, ms));'
+  /* **把递给 Worker 的消息记下来**（点「跑」之前就包上）：红的时候要分清"页面没发"、
+     "发给了另一格 Worker"与"那边没动"。`open` 出现两回就是重入那一格坑的指纹。 */
+  + ' const sent = [];'
+  + ' const OW = window.Worker;'
+  + ' window.Worker = class extends OW { constructor(u, o) { super(u, o);'
+  + '   const op = this.postMessage.bind(this);'
+  + '   this.postMessage = (m, tr) => { sent.push(String(m === null ? "?" : m.kind));'
+  + '     return op(m, tr); }; } };'
+  + ' const seg = document.querySelector(\'.seg [data-mode="ide"]\');'
+  + ' if (seg !== null) seg.click();'
+  + ' const path = "ext/evaldraw/examples/selfloop.kc";'
+  + ' for (let i = 0; i < 12; i++) {'
+  + '   const rows = [...document.querySelectorAll("#tree-body .row")];'
+  + '   const f = rows.find((r) => r.title === path);'
+  + '   if (f !== undefined) { f.click(); break; }'
+  + '   const d = rows.find((r) => !r.classList.contains("file")'
+  + '     && path.startsWith(r.title + "/") && r.getAttribute("aria-expanded") !== "true");'
+  + '   if (d === undefined) return { err: "树上找不到那一份 .kc" };'
+  + '   d.click();'
+  + '   await sleep(30);'
+  + ' }'
+  /* **等到编辑框里真有那份源码**：路径先亮、文本后到。这一步少了的话按「跑」递过去的是
+     空缓冲（页面按"改过了"把空文本当暂存递上去）—— 服务照样回 0，但那份程序什么都不干，
+     于是判据看见的是"跑起来了却一帧都没有"。第一次就栽在这儿。 */
+  + ' for (let i = 0; i < 150; i++) {'
+  + '   if (document.querySelector("#cur-path").textContent === path'
+  + '     && /refresh/.test(document.querySelector("#edit").value)) break;'
+  + '   await sleep(20);'
+  + ' }'
+  + ' const btn = document.querySelector("#btn-run");'
+  + ' if (btn.disabled) return { err: "跑不动（RUNNABLE 里没有 kc？）" };'
+  + ' btn.click();'
+  + ' let st1 = "";'
+  + ' for (let i = 0; i < 240; i++) {'
+  + '   st1 = document.querySelector("#status").textContent;'
+  + '   if (st1 !== "跑…" && st1 !== "") break;'
+  + '   await sleep(25);'
+  + ' }'
+
+  /* fps 要等两样：Worker 那边攒够半秒才结算一次，页面这边每半秒读一回 ——
+     所以**盯着状态栏等**（最多 3 秒），别按死时间睡（机器忙的时候 1.2 秒不够）。 */
+  + ' let st2 = "";'
+  + ' for (let i = 0; i < 60; i++) {'
+  + '   st2 = document.querySelector("#status").textContent;'
+  + '   if (/fps/.test(st2)) break;'
+  + '   await sleep(50);'
+  + ' }'
+  + ' const cv = document.querySelector("#preview canvas") !== null;'
+  /* 分清走的是哪条腿：主线程那台设备会把自己挂在 `globalThis.__OMNI_GFX` 上，
+     Worker 那一档页面上一台都没有。 */
+  + ' const dev = globalThis.__OMNI_GFX !== undefined && globalThis.__OMNI_GFX !== null;'
+  + ' const wk = globalThis.__OMNI_WK;'
+  + ' let pr = "?";'
+  + ' if (wk !== undefined && wk !== null) {'
+  + '   pr = await new Promise((res) => {'
+  + '     const h = (e) => { if (e.data !== null && e.data.id === 987654) {'
+  + '       wk.w.removeEventListener("message", h); res(JSON.stringify(e.data)); } };'
+  + '     wk.w.addEventListener("message", h);'
+  + '     wk.w.postMessage({ kind: "perf", id: 987654 });'
+  + '     setTimeout(() => res("没回话（那边在转）"), 800); });'
+  + ' }'
+  + ' const acct = wk === undefined || wk === null ? "?"'
+  + '   : JSON.stringify({ frames: wk.frames, fps: Math.round(wk.fps * 10) / 10, ms: wk.ms,'
+  + '     waiting: wk.wait.size });'
+  + ' return { st1, st2, cv, dev, acct, pr, sent }; }';
 
 try {
   try { await pw([S, 'open', s.url]); } catch { /* 这个名字的会话已经开着也行 */ }
@@ -205,6 +296,21 @@ try {
   ok('输入走那块共享内存（不发消息也到得了脚本手里）',
     r.ink >= 3 && r.ink2 === 0, `鼠标在 x=200 时那一列 ${r.ink} 格、挪到 x=60 之后 ${r.ink2} 格`
     + `、设备手里的输入 ${r.inw}`);
+  /* ---- 整条路：Studio 那一页自己把 EVAL 两门交给 Worker（见 `PAGE` 的头注）。 ---- */
+  await pw([S, 'goto', s.url]);
+  const g = JSON.parse(await pw([S, '--raw', 'eval', PAGE]));
+  ok('Studio 那一页：点开自循环那一族按「跑」，它是活的（从前只能被看门狗掐掉）',
+    g.err === undefined && g.cv === true && g.dev === false
+    && (String(g.st1).startsWith('ok') || String(g.st1).startsWith('在跑'))
+    && /fps/.test(String(g.st2)),
+    `err=${g.err ?? '-'} 第一句「${g.st1}」 一秒后「${g.st2}」 画布=${g.cv}`
+    + ` 页面上有设备=${g.dev} 那条腿的账=${g.acct} 直接问那边=${g.pr}`
+    + ` 递过去的消息=${JSON.stringify(g.sent)}`);
+  /* **只许开一格 Worker**：`open` 递了两回就是 `wkOpen` 重入（画布是后开那格的、`run`
+     发给了前一格 —— 表现成"跑起来了但一帧都不动"）。这一格是那次查错留下的尺子。 */
+  ok('Studio 那一页：一页只开一格 Worker（`wkOpen` 不许重入）',
+    (g.sent ?? []).filter((k) => k === 'open').length === 1,
+    `递过去的消息=${JSON.stringify(g.sent)}`);
 } finally {
   await pw([S, 'close']).catch(() => {});
   if (typeof s.close === 'function') await s.close();
