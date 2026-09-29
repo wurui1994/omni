@@ -28,6 +28,8 @@ import { dlopenAddon } from './ffi_host.js';
 /** 设备的那几格状态。**一格进程一格设备**（EVAL 的宿主本来就是这个形状）。 */
 const D = {
   w: 0, h: 0, fb: null, col: 0xffffff, x: 0, y: 0, on: false,
+  /* 点多大（`glpointsize(n)`）：点那一档按 n×n 一块画（默认 1）。 */
+  psize: 1,
   /* 落点。空着 = 没人明说，由 `outPath()` 定（`OMNI_GFX_OUT` > 这一格 > CLI 摆的默认）。 */
   out: '',
   /* 帧循环那三格：`fno` 是已经开始画的帧数（脚本里的 `numframes` = fno-1，第一帧是 0）、
@@ -567,6 +569,7 @@ export function gfxOpen(w = 320, h = 240) { D.on = false; need(w, h); }
  */
 export function gfxResetRun() {
   D.fno = 0;
+  D.psize = 1;      /* 点多大（`glpointsize`）：上一份程序设的不许跨到下一份 */
   D.frames = -1;
   D.dirty = false;
   D.only = -1;
@@ -1030,7 +1033,20 @@ export function gfxCall(name, args) {
     case 'batchblend/1':
       if (G.on) G.m.blend(Math.trunc(a(0)));
       return 0;
-    case 'glpointsize/1': case 'glcullface/1': case 'gllinewidth/1':
+    /**
+     * `glpointsize(n)`（`polydraw.c` 的 `kglPointSize`）：接下来那些点多大。
+     * 这一档**记下来，点那一档按 n×n 一块画**（见 `batch` 里 `kind === 2` 那一段）——
+     * 与浏览器那台设备同一条口径（那边把点摊成 n×n 的四边形）。
+     * 语料里两份靠它（`examples/opengl/03_point.pss`、`05_rotate_points.pss`）：
+     * 从前当"收下不管"，于是 9 像素的点只画 1 格。
+     *
+     * GL 那一档（`--gfx gl`）**还没转过去**：那边点走的是 `GL_POINTS`，要 `glPointSize`
+     * 那一格插件接线（记在任务里，别以为三档已经一致）。
+     */
+    case 'glpointsize/1':
+      D.psize = a(0) >= 1 ? Math.round(a(0)) : 1;
+      return 0;
+    case 'glcullface/1': case 'gllinewidth/1':
     case 'glswapinterval/1': case 'glalphaenable/1': case 'glalphadisable/1':
     /* `glklockstart` / `glklockelaps`：GPU 那一侧的计时（`polydraw.c` 的 GLKLOCK*）——
        脚本拿它印自己的帧耗时。这一层收下：时间那一格由 `klock` 那一族统一给
@@ -1338,11 +1354,19 @@ function batch(kind, n, verts) {
     return n;
   }
   if (kind === 2) {
-    /* 点那一档：一格顶点一个像素（"一个点多大"是设备的事 —— 语言那一侧不知道像素）。 */
+    /* 点那一档：一格顶点一块 **n×n** 的像素（`n` 是 `glpointsize`，默认 1 —— "一个点
+       多大"是设备的事，语言那一侧不知道像素）。n 为 1 时与从前逐字节相同；
+       n 更大时**以那一点为中心**铺开（真 GL 的点光栅化就是这么定的）。 */
+    const ps = D.psize ?? 1;
+    const h = (ps - 1) >> 1;
     for (let i = 0; i < n; i++) {
       const ia = i * VSTRIDE;
       const [ax, ay] = vxy(verts, ia);
-      px(ax, ay, vcol(verts, ia));
+      const c = vcol(verts, ia);
+      if (ps <= 1) { px(ax, ay, c); continue; }
+      for (let dy = 0; dy < ps; dy++) {
+        for (let dx = 0; dx < ps; dx++) px(ax - h + dx, ay - h + dy, c);
+      }
     }
     return n;
   }

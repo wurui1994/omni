@@ -62,6 +62,10 @@ const D = {
      每过一帧叫一声谁（`tick`，宿主用它知道"又活了一帧"）。 */
   slot: 0, bend: 0, cap: 0, tick: null,
   gk: 0,                          /* `glklockstart()` 的那个起点（见 call 里那两格） */
+  /* **点多大**（`glpointsize(n)`，`polydraw.c` 的 `kglPointSize`）：这一档把点摊成
+     n×n 的四边形（WebGL 里 `gl_PointSize` 只在顶点着色器里写得动，而脚本自己那份
+     着色器我们不改一个字 —— 摊四边形两边都管得住）。默认 1。 */
+  psize: 1,
 };
 
 /**
@@ -1516,6 +1520,18 @@ function call(name, args) {
     case 'glcapture/4':
       return capBegin4(Math.trunc(a(0)), Math.trunc(a(1)), Math.trunc(a(2)), Math.trunc(a(3)));
     case 'glcaptureend/1': return capEnd(Math.trunc(a(0)));
+    /**
+     * `glpointsize(n)`（`polydraw.c` 的 `kglPointSize`）：接下来那些点多大。
+     * 这一档**摊成 n×n 的四边形**（见 `batchIn` 里点那一段）—— WebGL 里 `gl_PointSize`
+     * 只有顶点着色器写得动，而脚本自己那份着色器我们不动一个字。
+     * 语料里两份靠它（`examples/opengl/03_point.pss`、`05_rotate_points.pss`）：
+     * 从前当"收下不管"，于是 9 像素的点只画 1 格，整幅几乎全黑。
+     */
+    case 'glpointsize/1': {
+      const v = a(0);
+      D.psize = v >= 1 ? Math.round(v) : 1;
+      return 0;
+    }
     /* 收下但不管的那几格（光照/混合/剔除/线宽）。 */
     case 'glnormal/3':
     case 'glcullface/1':
@@ -1854,6 +1870,7 @@ function reset() {
   D.col = [1, 1, 1];
   D.x = 0;
   D.y = 0;
+  D.psize = 1;      /* 点多大（`glpointsize`）：上一份程序设的不许跨到下一份 */
   D.fno = 0;
   D.t0 = performance.now();
   /* 性能账也归零 —— 上一份脚本的 fps 不许挂在下一份头上。 */
@@ -1962,15 +1979,24 @@ function batchIn(kind, n, verts) {
     const w = verts[o + 3] === 0 ? 1 : verts[o + 3];
     return [(verts[o] / w * 0.5 + 0.5) * D.w, (0.5 - verts[o + 1] / w * 0.5) * D.h, verts[o + 2] / w];
   };
-  /* 点那一档：一格顶点摊成一个 1×1 的四边形（WebGL 里 `gl_PointSize` 不可靠 ——
-     与 `setpix` 同一手）。"一个点多大"是设备的事，语言那一侧不知道像素。 */
+  /* 点那一档：一格顶点摊成一个 **n×n** 的四边形（`n` 是 `glpointsize`，默认 1 ——
+     WebGL 里 `gl_PointSize` 只有顶点着色器写得动，而脚本自己那份着色器我们不动一个字）。
+     n 为 1 时与从前逐字节相同（`x..x+1`）；n 更大时**以那一点为中心**铺开 ——
+     真 GL 的点光栅化就是这么定的（`glPointSize(9)` 是 9×9 一块）。
+     "一个点多大"是设备的事，语言那一侧不知道像素。 */
   if (kind === 2) {
     const b = batch('tri', null, null, B.prog === 2);
+    const ps = D.psize;
+    const h = (ps - 1) >> 1;
     for (let i = 0; i < n; i++) {
       const o = i * 16;
       const [x, y, z] = sx(o);
       const c = [verts[o + 4], verts[o + 5], verts[o + 6], verts[o + 7]];
-      const quad = [[x, y], [x + 1, y], [x + 1, y + 1], [x, y], [x + 1, y + 1], [x, y + 1]];
+      const x0 = x - h;
+      const y0 = y - h;
+      const x1 = x0 + ps;
+      const y1 = y0 + ps;
+      const quad = [[x0, y0], [x1, y0], [x1, y1], [x0, y0], [x1, y1], [x0, y1]];
       for (const [qx, qy] of quad) {
         b.v.push(qx, qy, z, 1, c[0], c[1], c[2], c[3], 0, 0, 0, 1, 0, 0, 1, 0);
       }

@@ -4425,3 +4425,30 @@ glGetTexImage(tex[itex].tar,0,format,type,gbmp);   // tar 可能是 3D / CUBE_MA
 顺手两条判据自己的坑：**按「跑」之前要等编辑框里真有源码**（路径先亮、文本后到；不等的话
 递上去的是空缓冲，服务照样回 0 而那份程序什么都不干），以及**抓第一帧之前要等它画完**
 （`run` 回信只说程序体跑完了，画是宿主那格节拍器下一跳干的）。
+
+## 42. 浏览器那一档再点一遍 86 份 `.pss`：73 过、10 红分四类（2026-09-29）
+
+尺子是 `/tmp/omni-w/sweep.mjs`（真 Chrome + 真 `omni serve`，一份等 0.7s，读回 320×240
+数"非背景色几格"）。**路径要走挂载点**（`polydraw/ken/x.pss`，`studio/shared.js` 的
+`mounts()`）：递绝对路径时 `/api/asset` 一律 404 ⇒ `gspiral` / `cubetex` / `texture`
+三份贴图例子全判成"全黑"。那是**尺子的错**（改回挂载点之后 gspiral 26796 格、
+cubetex 76800 格）—— 又一次"红先怀疑尺子"。
+
+十红分四类：
+
+* **`glpointsize` 真缺一格**（`examples/opengl/03_point.pss`、`05_rotate_points.pss`）：
+  三档设备从前都是"收下不管"，于是 `glPointSize(9)` 的点只画 1 格 ⇒ 整幅几乎全黑。
+  这一刀补了两档：WebGL2 把点摊成 **n×n 的四边形**（那儿 `gl_PointSize` 只有顶点着色器
+  写得动，而脚本自己那份着色器我们不动一个字），CPU 备选按 n×n 一块像素铺
+  （`host/gfx-cpu.js` 与 `runtime/omni_fmt.c` 逐句相同）。`03_point.pss` 从 1 格变
+  **81 格 = 9×9**（CPU 备选那一档 js 腿与 c 腿**逐字节相同**，浏览器那一档量出来也是
+  **81** —— 两台设备对得上；`05_rotate_points.pss` 48 格）。**本机 OpenGL 那一档还没接**（那边点走
+  `GL_POINTS`，要 `glPointSize` 一格插件接线）—— 记着，别以为三档已经一致。
+* **语料自己标着 `UNSUPPORTED`** 的三份（`08_getinfo` / `15_paraboloid` / `22_text`）：
+  名字里就写了，不算我们的缺口。
+* **几何着色器那两份**（`geo_test` / `geo_duptris`）与 **`orthoglobe`**（几何摆在
+  `mousy` 上，离屏探针天生画不出东西，§35.9）：已记账的故意偏差。
+* **还没归因的三份**：`11_transform_cube`（先转后平移，可能参考也是空的 —— 要拿
+  `polydraw_a64` 裁）、`18_curve`（188 格，可能本来就是一条细线）、`ken/texture`
+  （三张纹理 + 两份着色器，30 帧无错全黑）。
+

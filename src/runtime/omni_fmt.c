@@ -348,6 +348,8 @@ static int64_t g_gw = 0, g_gh = 0;
 static int64_t g_gcol = 0xffffff;
 static double g_gx = 0.0, g_gy = 0.0;
 static int g_gon = 0;
+/* 点多大（`glpointsize(n)`，与 host/gfx-cpu.js 的 D.psize 一一对应）：默认 1。 */
+static int g_gfx_psize = 1;
 /* 帧循环那三格（与 host/gfx-cpu.js 的 D.fno / D.frames / D.dirty 一一对应）。 */
 static int64_t g_gfno = 0, g_gframes = -1;
 static int g_gdirty = 0;
@@ -1344,12 +1346,20 @@ double omni_gfx_batch(int64_t kind, int64_t n, struct omni_arr_f64_s *verts) {
     return (double)n;
   }
   if (kind == 2) {
-    /* 点那一档：一格顶点一个像素（"一个点多大"是设备的事）。 */
+    /* 点那一档：一格顶点一块 **n×n** 的像素（`n` 是 `glpointsize`，默认 1 ——
+       "一个点多大"是设备的事）。n 为 1 时与从前逐字节相同；n 更大时**以那一点为中心**
+       铺开（真 GL 的点光栅化就是这么定的）。 */
+    int ps = g_gfx_psize >= 1 ? g_gfx_psize : 1;
+    int hh = (ps - 1) >> 1;
     for (int64_t i = 0; i < n; i++) {
       const double *a = v + i * GFX_VSTRIDE;
       double ax, ay;
       gfx_vxy(a, &ax, &ay);
-      gfx_px(ax, ay, gfx_vcol(a));
+      int64_t c = gfx_vcol(a);
+      if (ps <= 1) { gfx_px(ax, ay, c); continue; }
+      for (int dy = 0; dy < ps; dy++) {
+        for (int dx = 0; dx < ps; dx++) gfx_px(ax - hh + dx, ay - hh + dy, c);
+      }
     }
     return (double)n;
   }
@@ -1891,7 +1901,13 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
   if (!strcmp(nm, "gltexcoord") && argc == 2) { return 0.0; }
   if (!strcmp(nm, "gltexcoord") && argc == 3) { return 0.0; }
   if (!strcmp(nm, "gltexcoord") && argc == 4) { return 0.0; }
-  if (!strcmp(nm, "glpointsize") && argc == 1) { return 0.0; }
+  /* `glpointsize(n)`（`polydraw.c` 的 `kglPointSize`）：接下来那些点多大 ——
+     点那一档按 n×n 一块画（见 `omni_gfx_batch` 里 `kind == 2` 那一段）。
+     与 `host/gfx-cpu.js` 逐句相同（三条腿逐字节相同是判据）。 */
+  if (!strcmp(nm, "glpointsize") && argc == 1) {
+    g_gfx_psize = a0 >= 1.0 ? (int)(a0 + 0.5) : 1;
+    return 0.0;
+  }
   if (!strcmp(nm, "glcullface") && argc == 1) { return 0.0; }
   if (!strcmp(nm, "gllinewidth") && argc == 1) { return 0.0; }
   if (!strcmp(nm, "glswapinterval") && argc == 1) { return 0.0; }
