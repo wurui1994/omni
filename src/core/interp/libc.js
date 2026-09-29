@@ -50,15 +50,20 @@ export class ExitCall extends Error {
   }
 }
 
-/** 从线性内存里读一个 C 字符串（读到 0 为止）。回 JS 字符串，一个字符一个字节。 */
+/** 从线性内存里读一个 C 字符串（读到 0 为止）。回 JS 字符串，一个字符一个字节。
+ *
+ *  **地址只转一次 BigInt**，往后走的是 `memLoad` 的第三个参数（普通 Number 的偏移）——
+ *  每个字节做一次 BigInt 加法在这条路上是实打实的钱：量出来装一次 grDevices + 画一张图
+ *  要 4.4M 次 `strcmp`、22 万次 `fread`。 */
 export function readCStr(addr) {
+  const base = BigInt(addr);
   let s = '';
-  let p = BigInt(addr);
+  let i = 0;
   for (;;) {
-    const b = Number(memLoad('i8u', p, 0));
+    const b = Number(memLoad('i8u', base, i));
     if (b === 0) break;
     s += String.fromCharCode(b);
-    p += 1n;
+    i += 1;
   }
   return s;
 }
@@ -2569,16 +2574,27 @@ const LIBC = {
   },
   strlen: (a) => BigInt(readCStr(a[0]).length),
   strcmp: (a) => {
-    const x = readCStr(a[0]);
-    const y = readCStr(a[1]);
-    /* C 只保证符号，但 tcc 用的是宿主 libc，而宿主回的是**字节差**。要逐字节对账
+    /* **直接在内存上逐字节比**，不先把两个串读出来（多半在头几个字节就分出胜负了）。
+     *
+     * **量出来这一格是平的**：装一次 grDevices + 画一张图要 4.4M 次 strcmp，改完
+     * user 时间 21.2s → 20.6s（噪声内）。留着是因为它不分配 JS 串；真正的钱不在这儿 ——
+     * `node --cpu-prof` 那一趟profile 是**平的**（最高一格 1.5%），时间摊在
+     * `memChk` / `MEM_LD` 那一层上：每条访问都要 `Number(BigInt 地址)` + 越界检查 +
+     * 出口再 `BigInt(...)` 装箱。那是"整数一律用 BigInt 表示"这条设计的代价，
+     * 要动得单开一刀（ADR 那一级），不是在 libc 里挪几行能解决的。
+     *
+     * C 只保证符号，但 tcc 用的是宿主 libc，而宿主回的是**字节差**。要逐字节对账
      * 就得跟着回字节差 —— 只回 -1/0/1 的话 `printf("%d", strcmp(…))` 两边就不同。 */
-    const n = x.length < y.length ? x.length : y.length;
-    for (let i = 0; i < n; i++) {
-      const d = x.charCodeAt(i) - y.charCodeAt(i);
-      if (d !== 0) return BigInt(d);
+    const p = BigInt(a[0]);
+    const q = BigInt(a[1]);
+    let i = 0;
+    for (;;) {
+      const x = Number(memLoad('i8u', p, i));
+      const y = Number(memLoad('i8u', q, i));
+      if (x !== y) return BigInt(x - y);
+      if (x === 0) return 0n;
+      i += 1;
     }
-    return BigInt(x.length - y.length);
   },
   strcpy: (a) => { writeCStr(a[0], readCStr(a[1])); return BigInt(a[0]); },
   /* `stpcpy` / `stpncpy`（POSIX）：回的是**写完那个 NUL 的地址**，于是"接着往后拼"

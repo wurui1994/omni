@@ -991,14 +991,25 @@ const PKG_MS_CEIL = 22000;
  *  不是在比画得对不对。关掉之后比的正是画图那一串算子（`moveto`/`lineto`/字体/坐标），
  *  这才是这一节想量的东西。（我们这条腿上还**没有** deflate 编码器 ——
  *  `compress: libc: 没有这个函数` 就是它的指纹，记在账上。） */
-const GFX_MS_CEIL = 22000;
+/* 天花板与子进程那道闸同一个数 —— 量出来这一趟 17~23 秒（机器忙的时候到 23），
+ * 摆 22 秒的话是在量机器的负载，不是在量我们的代码（2026-09-29 假红过一次）。
+ * 真出了回归会直接撞闸、被砍，照样是红的，而且错误信息里印着闸的数。
+ * 这 20 秒在哪已经量清楚了（profile 是平的，见 ADR 第三十八格），是另一刀的活。 */
+const GFX_MS_CEIL = 26000;
 /** 子进程那道闸（画一张图 + 装 grDevices/graphics 两个命名空间，量出来 ~17 秒）。 */
 const GFX_KILL_MS = 26000;
 const GFX_R = 'function(f) { grDevices::pdf(f, onefile = TRUE, compress = FALSE);'
   + ' graphics::plot(1:10); grDevices::dev.off(); file.size(f) }';
 if (only === 'img') imgSection('铺开机镜像', IMG_EVAL, IMG_MS_CEIL, 'img');
 if (only === 'pkg') imgSection('装 R 的包（utils）', PKG_EVAL, PKG_MS_CEIL, 'pkg');
-if (only === 'gfx') gfxSection();
+/** **`grid` 那一节**：ggplot2 不走 `graphics`，走 `grid` —— 所以这一格量的正是
+ *  ggplot2 能不能显示的那一半地基（`grid` 的 14 份 C）。同一把尺子、同一个比法。 */
+const GRID_R = 'function(f) { grDevices::pdf(f, onefile = TRUE, compress = FALSE);'
+  + ' grid::grid.newpage(); grid::grid.rect(gp = grid::gpar(lty = 2));'
+  + ' grid::grid.points(1:5/6, (1:5)^2/36); grid::grid.text("hi", x = 0.3, y = 0.8);'
+  + ' grid::grid.lines(c(0.1, 0.9), c(0.2, 0.7)); grDevices::dev.off(); file.size(f) }';
+if (only === 'gfx') gfxSection('画出来（pdf 设备）', GFX_R, 'gfx');
+if (only === 'grid') gfxSection('grid 画出来（ggplot2 的引擎）', GRID_R, 'grid');
 
 process.stdout.write(`\n  ${pass} passed, ${fail} failed\n`);
 process.exit(fail > 0 ? 1 : 0);
@@ -1126,22 +1137,21 @@ function pdfMask(buf) {
   return buf.toString('latin1').replace(/\(D:\d+[^)]*\)/g, '(D:@)');
 }
 
-function gfxSection() {
-  const label = '画出来（pdf 设备）';
-  const p = imgPrep(label, 'gfx');
+function gfxSection(label, RFN, tag) {
+  const p = imgPrep(label, tag);
   if (p === null) return;
   const { dir, meta, logFile, L } = p;
   const gfx = join(ROOT, '.omni-cache', 'r-rt', 'libR', 'gfx');
   mkdirSync(gfx, { recursive: true });
-  const mine = join(gfx, 'mine.pdf');
-  const ref = join(gfx, 'ref.pdf');
+  const mine = join(gfx, `${tag}-mine.pdf`);
+  const ref = join(gfx, `${tag}-ref.pdf`);
   for (const f of [mine, ref]) if (existsSync(f)) unlinkSync(f);
   L.push(
-    `try { say('size\\t' + R(${JSON.stringify(`(${GFX_R})("${mine}")`)})); }`,
+    `try { say('size\\t' + R(${JSON.stringify(`(${RFN})("${mine}")`)})); }`,
     "catch (e) { say('size\\t炸了：' + String(e && e.message).slice(0, 160)); }",
     "say('all\\t' + (Date.now() - t0));",
   );
-  const entry = join(dir, '$gfx.mjs');
+  const entry = join(dir, `$${tag}.mjs`);
   writeFileSync(entry, `${L.join('\n')}\n`);
   const r = spawnSync(process.execPath, [entry], {
     encoding: 'utf8',
@@ -1164,7 +1174,7 @@ function gfxSection() {
   } else if (msAll > GFX_MS_CEIL) bad.push(`铺完到画完 ${msAll}ms（天花板 ${GFX_MS_CEIL}ms）`);
   /* 尺子：**同一棵树编出来的 R.bin**（不是本机的 Rscript —— 版本不一样）。 */
   const rb = join(ROOT, '.omni-cache', 'r-rt', 'libR', 'R.bin');
-  const rr = spawnSync(rb, ['--slave', '-e', `cat((${GFX_R})("${ref}"))`], {
+  const rr = spawnSync(rb, ['--slave', '-e', `cat((${RFN})("${ref}"))`], {
     encoding: 'utf8',
     timeout: 25000,
     env: { ...process.env, R_HOME: join(ROOT, '.omni-cache', 'r-rt', 'libR', 'home') },

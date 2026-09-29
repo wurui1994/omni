@@ -96,7 +96,19 @@ const run = (src, tag) => {
 
 writeFileSync(LOG, '');
 const meta0 = existsSync(METAF) ? JSON.parse(readFileSync(METAF, 'utf8')) : null;
-if (meta0 === null || meta0.done !== true) {
+/** **烤进像里的命名空间**（第三十八格）：装一个命名空间要把压过的 lazy-load 库整份解出来
+ *  再求值 —— 量出来 utils 8~13 秒、grDevices 5~7 秒、graphics 3 秒。那笔钱与 base 那 1300 句
+ *  是同一种：算一次、存进像里，以后铺回去就有了。`gfx` 那一节因此从 22 秒掉下来。
+ *
+ *  **一轮只烤一个**：头一版把四个跟在 base 最后一轮后面，量出来那一轮 40 秒开外、
+ *  被 28 秒的闸砍掉，于是**一个字节都没存下**、反复跑也不前进（rg7.5~8 那几份日志）。
+ *  一轮一个就都在闸里头了。 */
+const NS_BAKE = ['utils', 'grDevices', 'graphics', 'grid'];
+const nsHave = meta0 === null ? [] : (meta0.ns ?? []);
+const baseDone = meta0 !== null && meta0.done === true;
+/** 这一轮烤哪个（`null` = 这一轮还在装 base）。 */
+const nsNext = baseDone && nsHave.length < NS_BAKE.length ? NS_BAKE[nsHave.length] : null;
+if (meta0 === null || !baseDone || nsNext !== null) {
   /* ---- 一、造像：**一轮一轮**（一轮不许超过 30 秒）。有上一轮的像就先铺回去、接着装。 */
   const src = `${head(meta0 === null ? '' : `const META = ${JSON.stringify({
     bump: meta0.bump, bases: meta0.bases, order: meta0.order, pos: meta0.pos, stmts: meta0.stmts,
@@ -123,7 +135,7 @@ F('omni_env_init')();
 const step = F('omni_base_step');
 const p = F('omni_src_ptr')();
 const t1 = Date.now();
-let errs = 0; let more = 1; let n = 0;
+let errs = 0; let more = ${baseDone ? 0 : 1}; let n = 0;
 while (more === 1 && n < ${CAP}) {
   more = step(BigInt(pos), 100, p, p + 8n);
   pos = Number($RT.memLoadFn('i64')(p, 0));
@@ -134,7 +146,20 @@ while (more === 1 && n < ${CAP}) {
 stmts += n;
 /* base 装完那一轮顺手把系统 Rprofile 也跑一遍（第三十六格）：那份文件里的
    options(warn = 0) 一族不设上，table() 一类就报 option 'warn' cannot be deleted。 */
-if (more === 0) say('Rprofile：错 ' + F('omni_profile_init')());
+if (more === 0 && n > 0) say('Rprofile：错 ' + F('omni_profile_init')());
+${nsNext === null ? '' : `{
+  /* 这一轮不装 base，专烤一个命名空间（一轮一个，见上面那段账）。 */
+  const st0 = $RT.memStoreFn('i8');
+  const ev0 = F('omni_eval_buf');
+  const s = 'length(loadNamespace("${nsNext}"))';
+  const bs = new TextEncoder().encode(s);
+  for (let i = 0; i < bs.length; i++) st0(p, i, BigInt(bs[i]));
+  st0(p, bs.length, 0n);
+  const t3 = Date.now();
+  const v = ev0();
+  say('烤命名空间：' + s + ' -> ' + v + '（' + (Date.now() - t3) + 'ms）');
+  if (v === -3 || v === -2) { say('烤不进去 —— 这一轮不存像'); process.exit(1); }
+}`}
 say('这一轮装 base：' + n + ' 句、到字节 ' + pos + '、错 ' + errs + '、' + (Date.now() - t1)
   + 'ms、还有=' + more);
 const img = $RT.memImageSave();
@@ -143,7 +168,8 @@ const t2 = Date.now();
 writeFileSync(${JSON.stringify(IMG)}, gzipSync(img.bytes, { level: 1 }));
 writeFileSync(${JSON.stringify(METAF)}, JSON.stringify({
   bump: img.bump, bytes: img.bytes.length, stmts, pos, errs: ${meta0 === null ? 0 : meta0.errs} + errs,
-  done: more === 0, bases: $RT.baseLog(), order,
+  done: ${baseDone ? 'true' : 'more === 0'}, bases: $RT.baseLog(), order,
+  ns: ${JSON.stringify(nsNext === null ? nsHave : [...nsHave, nsNext])},
 }));
 say('存像：' + img.bytes.length + ' 字节、压 ' + (Date.now() - t2) + 'ms、bump=' + img.bump
   + '、钉住 ' + Object.keys($RT.baseLog()).length + ' 个基址、次序 ' + order.length + ' 份');
@@ -156,10 +182,12 @@ say('存像：' + img.bytes.length + ' 字节、压 ' + (Date.now() - t2) + 'ms�
   if (now === null) { process.stdout.write('\n这一轮没存下像\n'); process.exit(1); }
   process.stdout.write(`\n账：${JSON.stringify({
     stmts: now.stmts, pos: now.pos, errs: now.errs, done: now.done, bytes: now.bytes,
-    bases: Object.keys(now.bases).length, order: now.order.length,
+    bases: Object.keys(now.bases).length, order: now.order.length, ns: now.ns ?? [],
   })}\n`);
-  process.stdout.write(now.done ? '装完了 —— 再跑一次这个命令就是"铺像 + 验"那一趟\n'
-    : '还没装完 —— 再跑一次接着装\n');
+  const nsLeft = NS_BAKE.length - (now.ns ?? []).length;
+  process.stdout.write(now.done && nsLeft === 0
+    ? '装完了 —— 再跑一次这个命令就是"铺像 + 验"那一趟\n'
+    : `还没装完（base done=${now.done}、还差 ${nsLeft} 个命名空间）—— 再跑一次接着装\n`);
   process.exit(0);
 }
 
