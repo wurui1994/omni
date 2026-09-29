@@ -1629,23 +1629,65 @@ const unraf = (id) => {
 /** 在不在 Worker 里（没有 `document` 就是）。这一格决定 `refresh()` 能不能真等。 */
 const inWorker = () => typeof globalThis.document === 'undefined';
 
-/** `Atomics.wait` 用的那一格（跨源隔离的页面才有 SAB —— 见 §41.2）。懒开一次。
+/** `Atomics.wait` 与**跨线程那几格状态**用的那一块（跨源隔离的页面才有 SAB —— 见 §41.2）。
+ * 懒开一次，16 格 int32：
  *
- * 两格 int32：`[0]` 是睡觉那一格（永远是 0，拿它当"睡到某一刻"用），
- * `[1]` 是**停的旗子** —— 宿主在主线程上写 1，Worker 里下一格帧边界就退出去（见
- * `frameBeat`）。为什么要它：脚本自己拿 `refresh()` 当帧循环那一族**不回消息循环**，
- * `stop` 那封消息永远排不上 —— 不给这条路，宿主只能 `terminate()`，而画布
- * （`transferControlToOffscreen`）只能交一次，掐了 Worker 就连画布一起没了。
+ *     [0]      睡觉那一格（永远是 0，拿它当"睡到某一刻"用；宿主 notify 能提前叫醒）
+ *     [1]      **停的旗子**：宿主写 1，Worker 下一格帧边界就退出去（见 `frameBeat`）
+ *     [2][3]   鼠标 x / y（canvas 像素）
+ *     [4]      `bstatus` 那几位
+ *     [5..12]  `keystatus[256]` 的位图（8 格 × 32 位）
+ *     [13]     键盘那一侧的序号（变了才覆盖 —— 不然脚本"消掉一次按键"当场被写回来）
+ *     [14]     鼠标那一侧的序号（同理，管 `bstatus`）
+ *     [15]     宿主接上了没有（0 = 没人写，`pullShared` 就什么都不做）
+ *
+ * 为什么输入也要走共享内存：**脚本自己拿 `refresh()` 当帧循环那一族不回消息循环**
+ * （`postMessage` 推过来的 `input` 永远排不上），而那一族正是游戏那一类最需要输入的。
  */
 let WAITBUF = null;
+
+const SH_MX = 2;
+const SH_MY = 3;
+const SH_BST = 4;
+const SH_KEYS = 5;
+const SH_KSEQ = 13;
+const SH_MSEQ = 14;
+const SH_ON = 15;
 
 const waitBuf = () => {
   if (WAITBUF !== null) return WAITBUF;
   const SAB = globalThis.SharedArrayBuffer;
   if (typeof SAB !== 'function') return null;
-  WAITBUF = new Int32Array(new SAB(8));
+  WAITBUF = new Int32Array(new SAB(64));
   return WAITBUF;
 };
+
+/** 上一趟看见的那两个序号（见 `waitBuf` 的表）。 */
+let SH_KSEEN = 0;
+let SH_MSEEN = 0;
+
+/**
+ * **把宿主写在共享内存里的输入搬进设备**（每帧一回，两条帧路径上都叫它）。
+ *
+ * 位置每帧都搬；`bstatus` 与 `keystatus` 只在**序号变了**的时候搬 —— 那两格脚本自己
+ * 写得动（说明书里"消掉一次点击/一次按键"），每帧无条件覆盖的话那一手当场失效。
+ */
+function pullShared() {
+  const b = WAITBUF;
+  if (b === null || D.keys === null) return;
+  if (Atomics.load(b, SH_ON) === 0) return;
+  D.mx = Atomics.load(b, SH_MX);
+  D.my = Atomics.load(b, SH_MY);
+  const ms = Atomics.load(b, SH_MSEQ);
+  if (ms !== SH_MSEEN) { SH_MSEEN = ms; D.bst = Atomics.load(b, SH_BST); }
+  const ks = Atomics.load(b, SH_KSEQ);
+  if (ks === SH_KSEEN) return;
+  SH_KSEEN = ks;
+  for (let w = 0; w < 8; w++) {
+    const v = Atomics.load(b, SH_KEYS + w);
+    for (let i = 0; i < 32; i++) D.keys[w * 32 + i] = (v >>> i) & 1;
+  }
+}
 
 /**
  * **等到 `at`（`performance.now()` 的刻度）**。两条路：
@@ -1682,6 +1724,8 @@ function sleepTo(at) {
  */
 function frameBeat() {
   const t = performance.now();
+  /* 输入：每帧一回从共享内存里搬（那一族不回消息循环，`input` 那封消息排不上）。 */
+  pullShared();
   /* 头一帧、或者落后超过 100ms（机器忙了一下）：把零点重新摆在现在 —— 不然它会
      为了"追上"连着跑好几帧不等（那就成了忙循环）。 */
   if (D.slot === 0 || t > D.slot + 100) D.slot = t;
@@ -1724,6 +1768,8 @@ function setFrame(f) {
   const tick = () => {
     D.raf = 0;
     D.fno += 1;
+    /* Worker 那一档：输入从共享内存来（页面上是真事件，见 `installInput`）。 */
+    if (inWorker()) pullShared();
     const t = performance.now();
     if (D.pt0 === 0) D.pt0 = t;
     /* 看门狗的零点（见 `refresh/0`）：这一趟帧函数从这儿算起。 */
@@ -1814,8 +1860,11 @@ function reset() {
   D.slot = 0;
   D.bend = 0;
   /* 停的旗子也归零（不然上一份程序停下那一下会把下一份当场停掉 —— "一页里连着跑
-     两份产物"那一类坑的第五个）。 */
+     两份产物"那一类坑的第五个）。那两个"上一趟看见的序号"也要作废：新一份程序的
+     `keys` 是新数组，得让它下一帧无条件搬一回。 */
   if (WAITBUF !== null) Atomics.store(WAITBUF, 1, 0);
+  SH_KSEEN = -1;
+  SH_MSEEN = -1;
   G.depth = false;
   G.cull = 0;
   G.attrs.clear();
@@ -2177,12 +2226,13 @@ export function installGlDevice(canvas, w = 320, h = 240) {
     /** 帧号上限（0 = 无上限）：Worker 里脚本自己那个 `while` 靠它有个出口。 */
     setCap: (n) => { D.cap = typeof n === 'number' && n > 0 ? Math.trunc(n) : 0; },
     /**
-     * **停的旗子那一块共享内存**（`Int32Array` 的 `[1]`，见 `waitBuf`）：Worker 把它交给
-     * 宿主，宿主写 1 + `Atomics.notify(buf, 0)` 就能让自循环那一族在下一格帧边界退出去。
+     * **跨线程那一块共享内存**（`Int32Array`，格子表见 `waitBuf`）：Worker 把它交给宿主，
+     * 宿主靠它做两件消息做不到的事 —— 让自循环那一族**停下**（`[1]` 那格旗子 +
+     * `Atomics.notify(buf, 0)`），以及**每帧推输入**（鼠标/键盘，`[2]` 起那几格）。
      * 没有 `SharedArrayBuffer`（页面没跨源隔离，比如单体的 `file://`）时回 null ——
-     * 那一档只能 `terminate()`。
+     * 那一档只能 `terminate()` + `input` 那封消息。
      */
-    stopBuf: () => {
+    shared: () => {
       const b = waitBuf();
       return b === null ? null : b.buffer;
     },

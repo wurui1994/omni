@@ -52,13 +52,13 @@ self.onmessage = async (ev) => {
         INSTALL = g.installGlDevice;
       }
       DEV = INSTALL(m.canvas, m.w, m.h);
-      /* **停的旗子**：脚本自己拿 `refresh()` 当帧循环那一族不回消息循环（`stop` 那封
-         消息永远排不上），所以把那一块共享内存交给宿主 —— 它写 1 就能让那一族在下一格
-         帧边界退出去。没跨源隔离时是 null（那一档只能 `terminate()`，见 §41.2）。 */
+      /* **那一块共享内存**：脚本自己拿 `refresh()` 当帧循环那一族不回消息循环
+         （`stop` 与 `input` 那两封永远排不上），所以把它交给宿主 —— 宿主靠它让那一族
+         停下、以及每帧推鼠标键盘。没跨源隔离时是 null（见 §41.2/§41.3）。 */
       self.postMessage({
         kind: 'open',
         dev: DEV === null ? null : DEV.kind,
-        stop: DEV !== null && typeof DEV.stopBuf === 'function' ? DEV.stopBuf() : null,
+        shared: DEV !== null && typeof DEV.shared === 'function' ? DEV.shared() : null,
       });
       return;
     }
@@ -72,7 +72,15 @@ self.onmessage = async (ev) => {
         /* **每过一帧报一声**：脚本自己拿 `refresh()` 当帧循环的那一族**不会回来**
            （`run` 那封回信永远不发），宿主只能靠这一串 `tick` 知道它还活着。 */
         if (typeof DEV.setTick === 'function') {
-          DEV.setTick((n) => { self.postMessage({ kind: 'tick', frames: n }); });
+          DEV.setTick((n) => {
+            const p = typeof DEV.perf === 'function' ? DEV.perf() : null;
+            self.postMessage({
+              kind: 'tick',
+              frames: n,
+              fps: p === null ? 0 : p.fps,
+              ms: p === null ? 0 : p.ms,
+            });
+          });
         }
         /* 帧号上限（`cap`，0 = 无上限）：给那一族一个出口，于是 `run` 能正常回信。 */
         if (typeof DEV.setCap === 'function') DEV.setCap(m.cap ?? 0);
@@ -82,6 +90,37 @@ self.onmessage = async (ev) => {
       return;
     }
     if (m.kind === 'shot') { self.postMessage({ kind: 'shot', ...shotOf() }); return; }
+    /* `perf`：只要那几个数（不读像素）—— 页面状态栏每半秒问一回。宿主驱动那一族走它；
+       自循环那一族**答不出话**（不回消息循环），页面那边靠 `tick` 里带的数。 */
+    if (m.kind === 'perf') {
+      if (DEV === null) { self.postMessage({ kind: 'perf', err: '设备还没开' }); return; }
+      const p = DEV.perf();
+      self.postMessage({ kind: 'perf', frames: DEV.frames(), fps: p.fps, ms: p.ms, live: p.live });
+      return;
+    }
+    /* `pick`：**一列上有几格非背景色**（判据用）。为什么按列数而不是按某一点读：
+       抓屏那一块的上下方向这一层不担保，按列数与它无关。 */
+    if (m.kind === 'pick') {
+      if (DEV === null) { self.postMessage({ kind: 'pick', err: '设备还没开' }); return; }
+      const s = DEV.snapshot();
+      const x = Math.trunc(m.x);
+      let n = 0;
+      if (x >= 0 && x < s.w) {
+        for (let y = 0; y < s.h; y++) {
+          const i = (y * s.w + x) * 4;
+          if (s.bytes[i] !== s.bytes[0] || s.bytes[i + 1] !== s.bytes[1]
+            || s.bytes[i + 2] !== s.bytes[2]) n += 1;
+        }
+      }
+      self.postMessage({
+        kind: 'pick',
+        v: n,
+        /* 顺手把设备手里那格输入也带回去 —— 判据红的时候要分清"没到设备"与"到了没画"。 */
+        in: typeof DEV.input === 'function' ? DEV.input() : null,
+      });
+      return;
+    }
+    /* `input`：**宿主驱动那一族**的输入走这封消息（自循环那一族走共享内存，见 `open`）。 */
     if (m.kind === 'input') {
       if (DEV !== null && typeof DEV.setInput === 'function') DEV.setInput(m.v);
       self.postMessage({ kind: 'input', ok: 1 });

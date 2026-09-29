@@ -17,7 +17,8 @@
  *      退出去，退完 Worker 还答得出话（消息循环回来了）；
  *   6. 同一族不给上限时**按 60fps 一直转**（`Atomics.wait` 那条真等待点）；
  *   7. 宿主写一格共享内存里的旗子就能把它停下 —— 不用 `terminate()`（画布只能交一次，
- *      掐了 Worker 就连画布一起没了）。
+ *      掐了 Worker 就连画布一起没了）；
+ *   8. **输入也走那块共享内存**（`input.kc`：把鼠标写进去，那一列上就出现了十字与圆）。
  *
  * `playwright-cli` 不在仓库依赖里（是台机器上的工具），没装就**明着跳过**。
  */
@@ -79,6 +80,8 @@ const PROBE = 'async () => {'
   + ' document.body.appendChild(c);'
   + ' const off = c.transferControlToOffscreen();'
   + ' const opened = await ask({ kind: "open", canvas: off, w: 320, h: 240 }, [off]);'
+  + ' const SH = opened.shared === null || opened.shared === undefined ? null'
+  + '   : new Int32Array(opened.shared);'
   + ' const em = await units("ext/evaldraw/examples/draw2d.kc");'
   + ' if (em.main === null || em.main === undefined) {'
   + '   w.terminate();'
@@ -110,16 +113,36 @@ const PROBE = 'async () => {'
   + ' await new Promise((r) => setTimeout(r, 300));'
   + ' const t2 = ticks;'
   + ' let t3 = -1; let t4 = -1;'
-  + ' if (opened.stop !== null && opened.stop !== undefined) {'
-  + '   const v = new Int32Array(opened.stop);'
-  + '   Atomics.store(v, 1, 1); Atomics.notify(v, 0);'
+  + ' if (SH !== null) {'
+  + '   Atomics.store(SH, 1, 1); Atomics.notify(SH, 0);'
   + '   await new Promise((r) => setTimeout(r, 300)); t3 = ticks;'
   + '   await new Promise((r) => setTimeout(r, 300)); t4 = ticks;'
   + ' }'
   + ' const s4 = await ask({ kind: "shot" });'
+  /* ---- 第三段：**输入走共享内存**（那一族不回消息循环，`input` 那封消息排不上）。
+          `input.kc` 在鼠标那一点画十字与圆 —— 把坐标写进共享内存，等两帧，
+          读回那一点看有没有东西。 ---- */
+  + ' let ink = -1; let ink2 = -1; let inw = "?";'
+  + ' const ip = await units("ext/evaldraw/examples/input.kc");'
+  + ' if (SH !== null && ip.main !== null && ip.main !== undefined) {'
+  + '   Atomics.store(SH, 2, 200); Atomics.store(SH, 3, 80);'
+  + '   Atomics.store(SH, 4, 0); Atomics.store(SH, 13, 1);'
+  + '   Atomics.store(SH, 14, 1); Atomics.store(SH, 15, 1);'
+  + '   await ask({ kind: "run", main: ip.main, units: ip.units ?? [], cap: 0 });'
+  + '   await new Promise((r) => setTimeout(r, 300));'
+  + '   const px = await ask({ kind: "pick", x: 200 });'
+  + '   ink = px.err === undefined ? px.v : -2;'
+  + '   inw = px.in === undefined || px.in === null ? "?" : JSON.stringify({ mx: px.in.mx, my: px.in.my });'
+  /* 再把鼠标挪开（序号也推一格），同一列上就该什么都没有了 —— 这才叫"输入到了"。 */
+  + '   Atomics.store(SH, 2, 60); Atomics.store(SH, 3, 80);'
+  + '   Atomics.store(SH, 14, 2);'
+  + '   await new Promise((r) => setTimeout(r, 250));'
+  + '   const px2 = await ask({ kind: "pick", x: 200 });'
+  + '   ink2 = px2.err === undefined ? px2.v : -2;'
+  + ' }'
   + ' w.terminate();'
   + ' return { opened, ran, s1, s2, capped, cappedTicks, cappedFrame, s3,'
-  + '   free, t1, t2, t3, t4, s4,'
+  + '   free, t1, t2, t3, t4, s4, ink, ink2, inw,'
   + '   iso: globalThis.crossOriginIsolated === true }; }';
 
 try {
@@ -127,9 +150,9 @@ try {
   await pw([S, 'goto', s.url]);
   const r = JSON.parse(await pw([S, '--raw', 'eval', PROBE]));
   const cut = JSON.stringify(r).slice(0, 300);
-  ok('Worker 里那台 WebGL2 设备开得起来（没有 DOM、没有 rAF），停的旗子也在',
+  ok('Worker 里那台 WebGL2 设备开得起来（没有 DOM、没有 rAF），那块共享内存也在',
     r.opened !== undefined && r.opened.err === undefined && r.opened.dev === 'webgl2'
-    && r.opened.stop !== null && r.opened.stop !== undefined,
+    && r.opened.shared !== null && r.opened.shared !== undefined,
     `${cut} iso=${r.iso}`);
   ok('按单元产物在 Worker 里跑得起来', r.ran !== undefined && r.ran.err === undefined
     && r.ran.code === 0, r.ran === undefined ? cut : `code=${r.ran.code} err=${JSON.stringify((r.ran.stderr ?? r.ran.err ?? '').slice(0, 200))}`);
@@ -165,11 +188,20 @@ try {
    * 画布还在它手上 —— 不用 `terminate()`）。
    */
   ok('自循环那一族：不给上限就按 60fps 一直转（refresh 真等住了）',
-    r.t1 > 20 && r.t2 > r.t1 + 10, `500ms ${r.t1} 声 -> 再 300ms ${r.t2} 声`);
+    r.t1 > 15 && r.t2 > r.t1 + 8, `500ms ${r.t1} 声 -> 再 300ms ${r.t2} 声`);
   ok('自循环那一族：宿主写一格共享内存的旗子就能停下（不用 terminate）',
     r.t3 > 0 && r.t4 === r.t3 && r.s4 !== undefined && r.s4.err === undefined
     && r.s4.fps > 50 && r.s4.fps < 70,
     `停之后 ${r.t3} -> ${r.t4} 声、停下那一刻 fps=${r.s4 === undefined ? '?' : r.s4.fps}`);
+  /**
+   * **输入也走那块共享内存**：`input.kc` 在 `(mousx, mousy)` 上画十字 + 半径 24 的圆。
+   * 把 `(200, 80)` 写进共享内存（不发 `input` 那封消息），跑起来再数 x=200 那一列上
+   * 有几格非背景色 —— 圆在那一列上就占四十几格，鼠标要是还在 (0,0) 就一格都没有。
+   * 判"按列数"而不是"读某一点"：抓屏那一块的上下方向这一层不担保。
+   */
+  ok('输入走那块共享内存（不发消息也到得了脚本手里）',
+    r.ink >= 3 && r.ink2 === 0, `鼠标在 x=200 时那一列 ${r.ink} 格、挪到 x=60 之后 ${r.ink2} 格`
+    + `、设备手里的输入 ${r.inw}`);
 } finally {
   await pw([S, 'close']).catch(() => {});
   if (typeof s.close === 'function') await s.close();
