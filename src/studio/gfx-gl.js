@@ -57,6 +57,10 @@ const D = {
      `refresh()`、给它多少毫秒。`fbudget` 摆 1500ms：够慢脚本画一帧，又远在浏览器
      "这一页没响应"那道线之前。 */
   fstart: 0, refs: 0, fbudget: 1500,
+  /* **Worker 那一档的帧边界**（`frameBeat`）：下一帧该在什么时刻（`slot`）、上一帧等完的
+     时刻（`bend`，拿来算"我们花了多少"）、帧号上限（`cap`，0 = 无上限）、
+     每过一帧叫一声谁（`tick`，宿主用它知道"又活了一帧"）。 */
+  slot: 0, bend: 0, cap: 0, tick: null,
   gk: 0,                          /* `glklockstart()` 的那个起点（见 call 里那两格） */
 };
 
@@ -1378,19 +1382,41 @@ function call(name, args) {
     case 'refresh/0': {
       flush();
       D.refs += 1;
+      /**
+       * **Worker 里这一格是真的等待点**（任务 #39 / §41）—— 但"第几回"要分开，口径与
+       * CPU 备选那一档逐句相同（`host/gfx-cpu.js` 的 `refresh/0`）：
+       *
+       * * **一趟帧函数里的第一回只交图**：宿主每帧调一次帧函数的那一族（绝大多数），
+       *   帧的边界是宿主那格节拍器，这儿再等一次就是白等两帧；
+       * * **第二回起才是帧边界**：那正是**脚本自己拿 `refresh()` 当帧循环**的形状
+       *   （`ext/evaldraw/examples/selfloop.kc`）—— 它那个 `while(1)` 一轮一回，
+       *   于是从第二回开始每回都等到下一格 60fps 的时刻、帧号加一、报一声活。
+       *
+       * 不能拿"在不在帧函数里"分（产物永远是从帧函数里进来的），也不能拿
+       * "有没有人调过 nextframe"分（产物入口永远调它）—— 与 CPU 那一档踩过的坑同一个。
+       */
+      if (inWorker() && D.refs >= 2) { frameBeat(); return 0; }
+      if (inWorker()) return 0;
       if (D.fstart > 0 && performance.now() - D.fstart > D.fbudget) {
         throw new Error(`这一份脚本在一趟帧函数里调了 ${D.refs} 次 refresh() 还没回来`
           + `（超过 ${D.fbudget}ms）—— 它是**自己拿 refresh() 当帧循环**的那一族。`
-          + '浏览器这一档的帧函数在主线程上同步跑，refresh() 没法真等；'
-          + '要跑这一族得把脚本挪进 Web Worker + OffscreenCanvas（任务 #32）。'
+          + '浏览器主线程这一档的帧函数是同步跑的，refresh() 没法真等；'
+          + '要跑这一族就把它交给 Worker（`studio/eval-worker.js`，任务 #39）。'
           + ' 本机那两档（omni run --gfx gl / host）现在就能跑它。');
       }
       return 0;
     }
     /**
-     * `nextframe`：**这一档一帧都不放过去**（直接回 0）。理由：浏览器里产物是在主线程
-     * 同步跑的，`while` 会把页面卡死 —— 所以帧循环交给
+     * `nextframe`：**两档都一帧都不放过去**（直接回 0）。
+     *
+     * 主线程那一档的理由：产物是在主线程同步跑的，`while` 会把页面卡死 —— 所以帧循环交给
      * `requestAnimationFrame`（`setFrame` 那一格），产物那条 while 一轮都不转。
+     *
+     * **Worker 里也回 0**（量过才知道的一格，§41.3）：那儿等得住，可一旦让
+     * `while (nextframe()) { … }` 真转起来，`run` 这一趟**就再也不回来** ——
+     * Worker 的消息循环跟着一起停（`shot`/`input`/`stop` 全排在队里没人收）。所以这一族
+     * 照旧交给宿主那格节拍器（`setFrame`），只有**脚本自己拿 `refresh()` 当帧循环**
+     * 那一族才走真等待点（见上面 `refresh/0`）—— 那一族没有别的办法。
      */
     case 'nextframe/0': flush(); return 0;
     case 'numframes/0': return D.fno > 0 ? D.fno - 1 : 0;
@@ -1600,6 +1626,97 @@ const unraf = (id) => {
   else globalThis.clearTimeout(id);
 };
 
+/** 在不在 Worker 里（没有 `document` 就是）。这一格决定 `refresh()` 能不能真等。 */
+const inWorker = () => typeof globalThis.document === 'undefined';
+
+/** `Atomics.wait` 用的那一格（跨源隔离的页面才有 SAB —— 见 §41.2）。懒开一次。
+ *
+ * 两格 int32：`[0]` 是睡觉那一格（永远是 0，拿它当"睡到某一刻"用），
+ * `[1]` 是**停的旗子** —— 宿主在主线程上写 1，Worker 里下一格帧边界就退出去（见
+ * `frameBeat`）。为什么要它：脚本自己拿 `refresh()` 当帧循环那一族**不回消息循环**，
+ * `stop` 那封消息永远排不上 —— 不给这条路，宿主只能 `terminate()`，而画布
+ * （`transferControlToOffscreen`）只能交一次，掐了 Worker 就连画布一起没了。
+ */
+let WAITBUF = null;
+
+const waitBuf = () => {
+  if (WAITBUF !== null) return WAITBUF;
+  const SAB = globalThis.SharedArrayBuffer;
+  if (typeof SAB !== 'function') return null;
+  WAITBUF = new Int32Array(new SAB(8));
+  return WAITBUF;
+};
+
+/**
+ * **等到 `at`（`performance.now()` 的刻度）**。两条路：
+ * * 有 `SharedArrayBuffer` 就 `Atomics.wait`（**不烧 CPU**，误差几毫秒，而且宿主一
+ *   `Atomics.notify` 就能当场叫醒 —— 停的时候不用等满这一格）；
+ * * 没有就忙等（量过误差 < 1ms）。烧一格核，但这是在 Worker 里 —— **主线程照旧刷新**。
+ *
+ * 只许在 Worker 里叫（页面上等一下就是把标签页冻住）。
+ */
+function sleepTo(at) {
+  const b = waitBuf();
+  if (b !== null && typeof Atomics === 'object' && Atomics !== null) {
+    for (;;) {
+      const left = at - performance.now();
+      if (left <= 0) return;
+      if (Atomics.load(b, 1) !== 0) return;   /* 宿主说停：不等了，回去看那格旗子 */
+      /* 那一格永远是 0，所以这一句一定等到超时（或者被 notify 叫醒）。 */
+      Atomics.wait(b, 0, 0, left);
+    }
+  }
+  while (performance.now() < at) { /* 忙等 */ }
+}
+
+/**
+ * **一帧的边界**（Worker 里 `refresh()` / `nextframe()` 走的就是它，任务 #39 / §41）。
+ *
+ * 语料里二十几份脚本自己在死循环里用 `refresh()` 驱动帧（`ext/evaldraw/examples/selfloop.kc`
+ * 就是那个形状）。主线程上这一族只能被看门狗掐掉；Worker 里**阻塞是合法的**，于是
+ * 这一格做四件事：按 60fps 走位等到下一格、帧号加一、记一笔性能账、（有的话）叫一声
+ * `D.tick` 让宿主知道又过了一帧。
+ *
+ * `D.cap > 0` 时数到了就抛一格带 `$exit` 的错 —— 与 CPU 备选那一档 `OMNI_FRAMES` 用尽时
+ * 同一手（`host/gfx-cpu.js` 的 `refresh/0`）：脚本自己那个 `while` 没有别的出口。
+ */
+function frameBeat() {
+  const t = performance.now();
+  /* 头一帧、或者落后超过 100ms（机器忙了一下）：把零点重新摆在现在 —— 不然它会
+     为了"追上"连着跑好几帧不等（那就成了忙循环）。 */
+  if (D.slot === 0 || t > D.slot + 100) D.slot = t;
+  D.slot += 1000 / 60;
+  sleepTo(D.slot);
+  D.fno += 1;
+  /* 性能账：`ms` 是**我们**花的（这一帧的活 = 这一趟进来到开始等之间），`fps` 是墙上的。 */
+  if (D.pt0 === 0) D.pt0 = t;
+  D.psum += t - (D.bend === 0 ? t : D.bend);
+  D.pn += 1;
+  const span = performance.now() - D.pt0;
+  if (span >= 500) {
+    D.pfps = (D.pn * 1000) / span;
+    D.pms = D.psum / D.pn;
+    D.pn = 0;
+    D.psum = 0;
+    D.pt0 = performance.now();
+  }
+  D.bend = performance.now();
+  if (typeof D.tick === 'function') D.tick(D.fno);
+  /* **宿主说停**（`[1]` 那格旗子，见 `waitBuf`）：这一族的 `while` 没有别的出口，
+     所以停也只能从这儿停 —— 与帧数用尽同一手（抛一格带 `$exit` 的错）。 */
+  const b = WAITBUF;
+  if (b !== null && Atomics.load(b, 1) !== 0) {
+    const e = new Error('gfx: 宿主说停（脚本自己那个 while 没有别的出口）');
+    e.$exit = 0;
+    throw e;
+  }
+  if (D.cap > 0 && D.fno >= D.cap) {
+    const e = new Error('gfx: 帧数够了（脚本自己那个 while 没有别的出口）');
+    e.$exit = 0;
+    throw e;
+  }
+}
+
 function setFrame(f) {
   if (typeof f !== 'function') return;
   D.frameFn = f;
@@ -1615,6 +1732,10 @@ function setFrame(f) {
     try {
       D.frameFn();
     } catch (e) {
+      /* 带 `$exit` 的那一格**不是错**：脚本自己拿 `refresh()` 当帧循环那一族就是从
+         帧边界上退出去的（帧数够了 / 宿主说停，见 `frameBeat`）—— 安静地收摊，
+         不然真浏览器那几条判据会在控制台上看见一条"错"。 */
+      if (e !== null && typeof e === 'object' && e.$exit !== undefined) { flush(); return; }
       console.error('EVAL 的帧函数抛了，帧循环停下：', e);
       return;
     }
@@ -1689,6 +1810,12 @@ function reset() {
   D.pms = 0;
   D.pfps = 0;
   D.pt0 = 0;
+  /* Worker 那一档的帧边界（`frameBeat`）：走位的零点按程序算，不许跨程序接着数。 */
+  D.slot = 0;
+  D.bend = 0;
+  /* 停的旗子也归零（不然上一份程序停下那一下会把下一份当场停掉 —— "一页里连着跑
+     两份产物"那一类坑的第五个）。 */
+  if (WAITBUF !== null) Atomics.store(WAITBUF, 1, 0);
   G.depth = false;
   G.cull = 0;
   G.attrs.clear();
@@ -2045,6 +2172,20 @@ export function installGlDevice(canvas, w = 320, h = 240) {
     input: () => ({ mx: D.mx, my: D.my, bst: D.bst, keys: D.keys }),
     /** 输入从外头推进来（没有 DOM 的那一档：Worker + OffscreenCanvas，见 `setInput`）。 */
     setInput,
+    /** 每过一帧叫一声谁（Worker 那一档：宿主靠它知道"又活了一帧"，见 `frameBeat`）。 */
+    setTick: (f) => { D.tick = typeof f === 'function' ? f : null; },
+    /** 帧号上限（0 = 无上限）：Worker 里脚本自己那个 `while` 靠它有个出口。 */
+    setCap: (n) => { D.cap = typeof n === 'number' && n > 0 ? Math.trunc(n) : 0; },
+    /**
+     * **停的旗子那一块共享内存**（`Int32Array` 的 `[1]`，见 `waitBuf`）：Worker 把它交给
+     * 宿主，宿主写 1 + `Atomics.notify(buf, 0)` 就能让自循环那一族在下一格帧边界退出去。
+     * 没有 `SharedArrayBuffer`（页面没跨源隔离，比如单体的 `file://`）时回 null ——
+     * 那一档只能 `terminate()`。
+     */
+    stopBuf: () => {
+      const b = waitBuf();
+      return b === null ? null : b.buffer;
+    },
   };
   globalThis.__OMNI_GFX = dev;
   return dev;

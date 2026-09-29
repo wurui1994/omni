@@ -117,9 +117,11 @@ export async function runUnits(mainUrl, units = []) {
   return { stdout: outs.join(''), stderr: errs.join(''), code };
 }
 
-/** 装一台 WebGL2 设备（单体那一档页面上已经挂好了；serve 那一档现取现装）。 */
+/** 装一台 WebGL2 设备（单体那一档页面上已经挂好了；serve 那一档现取现装）。
+    按 `globalThis` 问而不是 `window` —— 这一份在 Worker 里也要用（`eval-worker.js`）。 */
 export async function installer() {
-  if (typeof window.__OMNI_INSTALL_GL === 'function') return window.__OMNI_INSTALL_GL;
+  const put = globalThis.__OMNI_INSTALL_GL;
+  if (typeof put === 'function') return put;
   const m = await import('./gfx-gl.js');
   return m.installGlDevice;
 }

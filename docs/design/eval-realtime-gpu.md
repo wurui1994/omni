@@ -4342,3 +4342,43 @@ glGetTexImage(tex[itex].tar,0,format,type,gbmp);   // tar 可能是 3D / CUBE_MA
 * **单体 HTML（`file://`）拿不到任何头 ⇒ 那一档永远没有 SAB**。所以 `refresh()` 的等待点
   必须写成两条路：有 SAB 走 `Atomics.wait`（不烧 CPU），没有就忙等（烧一核，但页面不卡，
   因为它在 Worker 里）。**别把 Worker 那条路写成"非 SAB 不可"**。
+
+### 41.3 Worker 那一档落地了：谁驱动帧、谁是等待点、怎么停（2026-09-29）
+
+壳子是 `src/studio/eval-worker.js`（消息：`open` / `run` / `shot` / `input` / `stop`），
+判据是 `tests/worker/run.js`（**真浏览器 + 真 `omni serve`**，7 格全过）。设备与产物那两半
+一个字都没改 —— 41.1 与 41.2 就是它的两格前置。
+
+**先踩了一刀反的**：一开始把 `nextframe()` 在 Worker 里改成回 1（"那儿等得住，让产物
+自己那条 `while` 转起来"）。结果 `draw2d.kc` 那一趟 `run` **再也不回来** —— 产物入口那条
+`while ((gfxcall "nextframe")) { … }` 真转起来之后，Worker 的**消息循环跟着一起停**：
+`shot`/`input`/`stop` 全排在队里没人收，判据表现成"每一格都超时"。所以：
+
+* **`nextframe/0` 两档都回 0**：绝大多数脚本是"宿主每帧调一次帧函数"那一族，帧循环归
+  宿主那格节拍器（`setFrame` + rAF / Worker 里 `setTimeout(…,16)`）—— 这样消息循环一直活着，
+  `shot` 与 `input` 随时答得出话。
+* **只有 `refresh()` 是真等待点，而且要分"一趟帧函数里第几回"**（口径与 CPU 备选那一档
+  `host/gfx-cpu.js` 的 `refresh/0` 逐句相同）：第一回只交图（宿主那格节拍器才是边界），
+  **第二回起**才是帧边界 —— 那正是**脚本自己拿 `refresh()` 当帧循环**那一族的形状。
+  不能拿"在不在帧函数里"分（产物永远是从帧函数里进来的），也不能拿"有没有人调过
+  `nextframe`"分（产物入口永远调它）。
+* 帧边界那一格（`frameBeat`）干五件事：等到下一格 60fps 的时刻（`Atomics.wait`，没 SAB 就
+  忙等）、帧号加一、记一笔性能账、叫一声 `D.tick`（宿主靠这一串知道它还活着）、看两个出口。
+
+两个出口，因为那一族**不回消息循环**，`stop` 那封消息永远排不上：
+
+* `dev.setCap(n)`：帧号到了就抛一格带 `$exit` 的错（与 `OMNI_FRAMES` 用尽同一手）。
+* **停的旗子**：`dev.stopBuf()` 把一块 `SharedArrayBuffer` 交给宿主（两格 int32，`[1]` 是
+  旗子），宿主写 1 + `Atomics.notify(buf, 0)`，Worker 下一格帧边界就退出去。
+  为什么非要它：画布是 `transferControlToOffscreen()` 交过去的，**只能交一次** ——
+  拿 `terminate()` 停就连画布一起没了，换程序得连 canvas 元素一起重建。
+  没跨源隔离（单体 `file://`）时 `stopBuf()` 回 null，那一档只剩 `terminate()`。
+* 帧函数抛出来的错里带 `$exit` 的**不许往控制台印**（那一族正是从帧边界退出去的），
+  不然"控制台一条错都没有"那几条判据会红。
+
+判据里量到的几个数（`selfloop.kc`，320×240）：
+
+    给上限 20：帧号正好停在 20、tick 正好 19 声（宿主那格节拍器占掉第 1 帧、
+               脚本那个 while 里第一回 refresh 只交图）；退完 shot 立刻答得出话
+    不给上限：500ms 30 声 -> 再 300ms 48 声（≈60fps），fps 量出来 59.8
+    写旗子之后：49 -> 49 声（停住了），shot 照旧答得出话 —— Worker 活着、画布还在它手上
