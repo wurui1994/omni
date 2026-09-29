@@ -44,6 +44,9 @@ const OBJ = argOf('--obj', join(WORK, 'obj'));
 const DIRS = argOf('--dirs', 'Objects,Python,Parser,Modules').split(',');
 const CC = argOf('--cc', process.env.CC ?? 'clang');
 const KEEP = argv.includes('--keep');
+/** **整份运行时**（`--runtime`）：`Modules/` 那一棵连 `Setup.stdlib.in` 那一族一起链
+ *  —— 与 `sweep --runtime` 同一个口径（见 `scope.js` 的 `runtimeModuleFiles`）。 */
+const RUNTIME = argv.includes('--runtime');
 
 /**
  * **允许还缺的那几个符号** —— 它们的定义都在"要构建系统先跑一步"的那三份源码里
@@ -78,7 +81,7 @@ if (!existsSync(join(SRC, 'Include', 'Python.h'))) {
   process.exit(0);
 }
 
-const { files } = filesIn(SRC, DIRS, {});
+const { files } = filesIn(SRC, DIRS, { runtime: RUNTIME });
 const objOf = ([d, f]) => join(OBJ, `${d}-${f}`.replace(/[/.]/g, '-') + '.o');
 const have = [];
 const missing = [];
@@ -129,9 +132,17 @@ if (a.status !== 0) {
 const mb = (p) => (statSync(p).size / (1024 * 1024)).toFixed(1);
 process.stdout.write(`\nar: ${lib} —— ${mb(lib)}M\n`);
 
-/* 二、真链一次：**让链接器说还缺什么**（libc 那一族它自己从 libSystem 解析） */
+/* 二、真链一次：**让链接器说还缺什么**（libc 那一族它自己从 libSystem 解析）。
+   **平台那几格库要明着给**：`_scproxy` 要 macOS 的两个 framework
+   （`configure.ac:8542`：`-framework SystemConfiguration -framework CoreFoundation`），
+   `math` / `cmath` 那几格要 `-lm`。不给的症状是链接缺 26 个 `kSC*` / `CF*` /
+   `SCDynamicStoreCopyProxies`（量出来的原话）—— 那不是我们的欠账，是**没把
+   构建系统该给的链接开关给上**。 */
+const SYS_LIBS = process.platform === 'darwin'
+  ? ['-framework', 'SystemConfiguration', '-framework', 'CoreFoundation', '-lm']
+  : ['-lm'];
 const t0 = Date.now();
-const l = spawnSync(CC, ['-dynamiclib', '-o', dylib, ...have], { encoding: 'utf8' });
+const l = spawnSync(CC, ['-dynamiclib', '-o', dylib, ...have, ...SYS_LIBS], { encoding: 'utf8' });
 const secs = ((Date.now() - t0) / 1000).toFixed(1);
 const undef = [...new Set([...(l.stderr ?? '').matchAll(/^ {2}"([^"]+)", referenced from:/gm)]
   .map((m) => m[1]))].sort();

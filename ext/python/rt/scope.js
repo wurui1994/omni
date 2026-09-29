@@ -132,14 +132,43 @@ export function stdlibModules(src) {
 }
 
 /**
+ * **树里 vendored 的那两套**（`Makefile.pre.in` 的 `LIBEXPAT_OBJS` 与 `LIBHACL_*_OBJS`）。
+ *
+ * 它们不是"第三方库要去外面装"：**源码就在借来的那棵树里** —— `Modules/expat/`（3 份）
+ * 与 `Modules/_hacl/`（9 份）。不编它们的后果是链接那天缺 56 个 `XML_*` 与 60 来个
+ * `_Py_LibHacl_*`（量出来的原话），而 `pyexpat` / `_elementtree` / 五格 hash 模块
+ * 都在运行时那一族里。
+ *
+ * `$(…)` 与 `@…@` 那几行跳过：前者是别的变量（展开了会重复），后者是 configure 替换的
+ * SIMD 变体（本机不开）。
+ */
+export function vendoredFiles(src) {
+  const mk = readFileSync(join(src, 'Makefile.pre.in'), 'utf8');
+  const out = new Set();
+  const re = /^LIB(?:EXPAT|HACL_[A-Z0-9]+)_OBJS=((?:[^\n]*\\\n)*[^\n]*)$/gm;
+  for (const m of mk.matchAll(re)) {
+    for (const tok of m[1].split(/[\s\\]+/)) {
+      if (!tok.startsWith('Modules/') || !tok.endsWith('.o')) continue;
+      out.add(`${tok.slice('Modules/'.length, -2)}.c`);
+    }
+  }
+  if (out.size < 10) {
+    throw new Error(`scope.js: Makefile.pre.in 里只读出 ${out.size} 份 vendored 源码`
+      + '（expat 3 份 + HACL* 9 份）—— 那几个变量的形状变了');
+  }
+  return out;
+}
+
+/**
  * **整份运行时**要编的那些 `Modules/` 源文件 = `LIBRARY_OBJS`（核心 + bootstrap 静态
- * 模块）**加上** `Setup.stdlib.in` 里那一族。`withExternal` 为真时把"要外部库"那一档
- * 也算进来（探到库了才该开）。
+ * 模块）**加上** `Setup.stdlib.in` 里那一族，**再加上**树里 vendored 的 expat 与 HACL\*。
+ * `withExternal` 为真时把"要外部库"那一档也算进来（探到库了才该开）。
  */
 export function runtimeModuleFiles(src, { withExternal = false } = {}) {
   const out = new Set(coreModuleFiles(src));
   const { runtime, external } = stdlibModules(src);
   for (const files of runtime.values()) for (const f of files) out.add(f);
+  for (const f of vendoredFiles(src)) out.add(f);
   if (withExternal) {
     for (const files of external.values()) for (const f of files) out.add(f);
   }
@@ -255,8 +284,28 @@ const HACL_MODULES = new Set([
  */
 export function perFileFlags(name, src) {
   if (name === 'Python/dynload_shlib.c') return [`-DSOABI="${soabi(src)}"`];
-  if (name.startsWith('Modules/') && HACL_MODULES.has(name.slice('Modules/'.length))) {
-    return ['-I', join(src, 'Modules', '_hacl', 'include')];
+  /* HACL\* 那一族：`Modules/` 顶层那六份**摘**它的（`blake2module.c` …），外加
+     `Modules/_hacl/` 里 vendored 的那九份**自己**（`LIBHACL_*_OBJS`）——
+     `LIBHACL_CFLAGS` 是给整族的，所以两处给同一个 `-I`。少给的症状：
+     "头文件不在：krml/internal/types.h"（量出来的原话，9 份全红）。 */
+  if (name.startsWith('Modules/_hacl/')
+    || (name.startsWith('Modules/') && HACL_MODULES.has(name.slice('Modules/'.length)))) {
+    /* `Modules/_hacl/` 那九份自己还要**它自己那一层**：里头写的是
+       `#include "internal/Hacl_Streaming_Types.h"` 与 `#include "libintvector-shim.h"`
+       —— 引号包含按"源文件所在目录"找，`Makefile` 那边是靠 `VPATH` 给到的，
+       我们这儿明着加一个 `-I`（量出来的原话：那两份头"不在"，4 份红）。 */
+    return ['-I', join(src, 'Modules', '_hacl', 'include'), '-I', join(src, 'Modules', '_hacl')];
+  }
+  /* **vendored 的 expat 那三份**，外加**摘它的那两格模块**（`pyexpat.c` / `_elementtree.c`
+     —— `configure.ac:8549/8550` 给这两格的正是 `$LIBEXPAT_CFLAGS`）：
+     `configure.ac:4360` 的 `LIBEXPAT_CFLAGS="-I$(srcdir)/Modules/expat"`。
+     少这一个 `-I` 的症状很隐蔽：`pyexpat.c:15` 那句 `#include "expat_config.h"` 会找到
+     **系统里那份 expat 的 config**（编得过！），于是它引用的是**裸名** `XML_*`，
+     而树里那三份包到了 `Modules/expat/pyexpatns.h`、定义出来的是 `PyExpat_XML_*` ——
+     链接那天缺 56 个符号（量出来的原话）。 */
+  if (name.startsWith('Modules/expat/')
+    || name === 'Modules/pyexpat.c' || name === 'Modules/_elementtree.c') {
+    return ['-I', join(src, 'Modules', 'expat')];
   }
   /* **冻出来的那些头在我们这边**（参考树只读，所以落 `.omni-cache/py-rt/gen/`）。
    * 两份的写法不一样，所以两个 `-I` 都给：

@@ -1453,6 +1453,26 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     开了 3000 秒，47 秒被取消、**一行有用的输出都没有** —— 正确的量法是只抽 asyncio 那条线
     的几份（`--filters`、7 秒出数），整族的数留给"提交前"或交给用户跑。
 
+  - **整份运行时链成一份动态库，一个未定义符号都没有**（`py-rt/link --runtime --keep`）：
+    范围 **275 份** `.c`（Objects / Python / Parser 164 + `Modules/` 111），静态库 31.9M、
+    **dylib 29.5M、导出 3591 个符号**，里头 `PyInit__asyncio` / `PyInit_select` /
+    `PyInit__socket` / `PyInit_pyexpat` / `PyInit_mmap` / `PyInit__multiprocessing` 各一格。
+    链接那一趟 0.7 秒。**全都是我们自己那台 C 前端编出来的 `.o`。**
+  - 补齐这一步要过三道，每一道都是"构建系统该给而我们没给"的开关，不是源码问题：
+    1. **树里 vendored 的两套源码也得编**（`scope.js` 的 `vendoredFiles`，从
+       `Makefile.pre.in` 的 `LIBEXPAT_OBJS` / `LIBHACL_*_OBJS` 读）：`Modules/expat/` 3 份、
+       `Modules/_hacl/` 9 份。不编它们 = 链接缺 56 个 `XML_*` 与 60 来个 `_Py_LibHacl_*`。
+       HACL 那九份还要 `-I Modules/_hacl`（它们写 `#include "internal/…"` 与
+       `"libintvector-shim.h"`，引号包含按源文件目录找，`Makefile` 靠 VPATH 给）。
+    2. **平台库要明着给链接器**（`link.js` 的 `SYS_LIBS`）：`_scproxy` 要
+       `-framework SystemConfiguration -framework CoreFoundation`
+       （`configure.ac:8542`），另加 `-lm`。少了就缺 26 个 `kSC*` / `CF*`。
+    3. **`pyexpat.c` / `_elementtree.c` 也要 `-I Modules/expat`**（`configure.ac:8549`
+       给这两格的正是 `$LIBEXPAT_CFLAGS`）。这一格**最隐蔽**：`pyexpat.c:15` 那句
+       `#include "expat_config.h"` 没这个 `-I` 时会找到**系统里那份 expat 的 config**、
+       照样编得过，可它引用的是裸名 `XML_*`，而树里那三份包了 `Modules/expat/pyexpatns.h`、
+       定义的是 `PyExpat_XML_*` —— 两边名字不是一套，链接那天才炸。
+
 - **继承（`class Q(P)` / `super()`）（2026-09-29）** —— 第十六趟，剩下的大件里挑的一格：
   - **落法是"编译期抄进子类"**（方言的记录没有继承这一档，这一层也不要 vtable）：
     一格基类、必须是**这份源码里前面已经定义过的类**；子类的方法表先摆父类那几格
