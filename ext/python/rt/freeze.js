@@ -122,7 +122,11 @@ if (miss.length > 0) {
   process.exit(1);
 }
 
-/* 三份构建系统产物。`config.c` 现生成（照 `config.c.in`），另两份在参考树里。 */
+/* 三份构建系统产物。`config.c` 现生成（照 `config.c.in`），另两份在参考树里。
+   **这一格只用 bootstrap 那张 inittab**：它要的是"冻 frozen 头"，链的是核心那 199 份 `.o`
+   —— 给它整份运行时那张名单的话 `config.c` 会引用 76 个 `PyInit_`，而 `Setup.stdlib.in`
+   那一族的 `.o` 不在这一趟里，链接缺一大片（试过一次，别再试）。整份运行时那张 inittab
+   是第五格判据（`embed.js --runtime`）的事。 */
 const CONF = join(GEN, 'config.c');
 const g = spawnSync(process.execPath, [join(here, 'gen-config.js'), '--src', SRC, '--out', CONF],
   { encoding: 'utf8' });

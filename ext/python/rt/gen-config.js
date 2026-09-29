@@ -25,7 +25,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { coreModuleNames } from './scope.js';
+import { coreModuleNames, runtimeModuleNames } from './scope.js';
 
 const argv = process.argv.slice(2);
 const argOf = (n, d) => {
@@ -53,7 +53,11 @@ for (const m of [M1, M2]) {
 
 /* 模板里已经钉着的那些名字（`{"marshal", …}` 一族）不再加一遍 */
 const already = new Set([...tpl.matchAll(/\{"([^"]+)",/g)].map((m) => m[1]));
-const names = coreModuleNames(SRC).filter((n) => !already.has(n));
+/* **`--runtime`：整份运行时那张名单**（bootstrap 那几格 + `Setup.stdlib.in` 里运行时
+   那一族）。缺省只给 bootstrap —— 那时 `import select` / `import _asyncio` 编得出、
+   链得上，**跑起来才发现模块不在**（`_PyImport_Inittab` 里没有那一行）。 */
+const names = (argv.includes('--runtime') ? runtimeModuleNames(SRC) : coreModuleNames(SRC))
+  .filter((n) => !already.has(n));
 
 const externs = names.map((n) => `extern PyObject* PyInit_${n}(void);`).join('\n');
 const entries = names.map((n) => `    {"${n}", PyInit_${n}},`).join('\n');

@@ -176,6 +176,20 @@ export function runtimeModuleFiles(src, { withExternal = false } = {}) {
 }
 
 /**
+ * **整份运行时那张"静态模块名"表** = `Setup.bootstrap.in` 那几格 + `Setup.stdlib.in`
+ * 里运行时那一族。`Modules/config.c` 的 `_PyImport_Inittab` 照它生成 —— 名单少一格，
+ * `import select` 那一句就找不到模块（编得出、链得上，**跑起来才缺**）。
+ */
+export function runtimeModuleNames(src) {
+  const out = [...coreModuleNames(src)];
+  const seen = new Set(out);
+  for (const name of stdlibModules(src).runtime.keys()) {
+    if (!seen.has(name)) { out.push(name); seen.add(name); }
+  }
+  return out;
+}
+
+/**
  * **要构建系统先跑一步**的那几份（在不在树里都不算我们的欠账）：
  *   * `Modules/config.c` —— `makesetup` 生成的内建模块表（树里压根没有这份文件）；
  *   * `Python/frozen.c` 与 `Modules/getpath.c` —— 要 `Python/frozen_modules/*.h`

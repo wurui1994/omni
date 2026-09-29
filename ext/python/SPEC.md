@@ -1413,6 +1413,27 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 
 ### 已落地
 
+- **整份运行时链成动态库，三门全过（2026-09-29）** —— 第十七趟，"借运行时"这一刀收口：
+  - **一份 dylib**：`node ext/python/rt/link.js --runtime` —— 范围 **275 份 `.c`**（核心 164 +
+    `Modules/` 111）另加我们自己生成的 `Modules/config.c`，**276 份 `.o` 全是我们那台 C 前端
+    编的**，摞成 `libomnipython.dylib` **29.5M**、**一个未定义符号都没有**（0.5s）。
+    链接命令上补的三格都不是源码问题、是**构建系统该给而我们没给**的：vendored 的
+    expat 三份 + HACL 九份要编且要 `-I Modules/expat` / `-I _hacl`（否则 56 个 `XML_*` 与
+    60 来个 `_Py_LibHacl_*` 缺）；平台库要明着给链接器（`_scproxy` 要
+    `-framework SystemConfiguration -framework CoreFoundation`，26 个 CF 与 kSC 那两族）。
+  - **inittab 按范围走**：`gen-config.js --runtime` 从 `Setup.bootstrap.in` + `Setup.stdlib.in`
+    的运行时那档发名单，**27 → 76 个静态模块**。`freeze.js` **不跟着走 `--runtime`**
+    （它只链核心那 199 份，跟着走就缺一大片 `PyInit_` —— 试过一次，注释里记着别再试）；
+    `freeze` 那一门仍是 26 份 frozen 头 + 两份下游，**26/26 过**（11.7s）。
+  - **`embed.js --runtime` 三门全过**（8.2s）：门一"4 格与本机 python3 逐字节相同"、
+    门二"产物自带标准库"（搜索路径留空、cwd 换到 `/` 也对，29.5M）、门三
+    "`omni build` 出来的产物调借来的运行时"（三行逐字节相同，29.6M）。
+  - **门三从前的缺口在源码那侧，不在 `omni build`**：缺 `_get_proxies` 不是"`omni build`
+    少一个额外链接参数的入口"，是**生成的 `.sx` 没说全自己要什么**。方言那一格早就认：
+    `(lib "X.framework")` → `-framework X`、`(lib "libm")` → `-lm`
+    （`hir/c_abi.js` 的 `C_SYSLIBS`、`cli.js` 的 `libLinkArgs` 与 `selfLibArgs` 两条链接路
+    都认）。于是 `embed.js` 的 `SX_LIBS` 把那摊平台库写进 `.sx`，一行链接参数都没加。
+
 - **运行时的范围按"全部"重定（2026-09-29，用户第三次纠正）** —— 原话：「必须覆盖**全部
   运行时**，运行时主要**编译为动态库**。运行时覆盖全部，自然包含 asyncio 依赖的
   **epoll / kqueue / IOCP / thread** 那些。」

@@ -36,7 +36,10 @@ const SRC = argOf('--src', process.env.OMNI_CPYTHON
   ?? join(homedir(), 'Documents', 'Lang', 'reference', 'cpython'));
 const WORK = join(root, '.omni-cache', 'py-rt');
 const OBJ = join(WORK, 'obj');
-const INC = incDirFor(WORK, false);
+/* 探出来的 `pyconfig.h` 按范围分开放：整份运行时那一趟用 `inc-rt`（名单更大 ——
+   `Modules/` 整棵带进来的宏更多，见 `scope.js` 的 `pyconfExtra`）。 */
+const INC = process.argv.includes('--runtime')
+  ? join(WORK, 'inc-rt') : incDirFor(WORK, false);
 const OUT = join(WORK, 'embed');
 const CC = argOf('--cc', process.env.CC ?? 'clang');
 const say = (s) => process.stdout.write(`${s}\n`);
@@ -53,7 +56,9 @@ if (spawnSync('python3', ['--version'], { encoding: 'utf8' }).status !== 0) skip
  * 所以这一圈已经把它们收进来了 —— 它们是第四把尺子那一趟落下的，少了就说"先跑 py:freeze"。
  */
 function ourObjects() {
-  const { files } = filesIn(SRC, ['Objects', 'Python', 'Parser', 'Modules'], {});
+  /* `--runtime`：连 `Setup.stdlib.in` 那一族一起链（select / _socket / _asyncio …）。 */
+  const RT = process.argv.includes('--runtime');
+  const { files } = filesIn(SRC, ['Objects', 'Python', 'Parser', 'Modules'], { runtime: RT });
   const out = [];
   const miss = [];
   for (const [d, f] of files) {
@@ -63,7 +68,31 @@ function ourObjects() {
     else miss.push(GENERATED.has(name) ? `${name}（生成的那份）` : name);
   }
   /* `Modules/config.c` 树上没有（它是 `config.c.in` 生成的），所以名单里不会有它 ——
-   * 那份 `.o` 是第四把尺子（`freeze.js`）落在 `obj/` 里的，`_PyImport_Inittab` 就在里头。 */
+   * 那份 `.o` 是第四把尺子（`freeze.js`）落在 `obj/` 里的，`_PyImport_Inittab` 就在里头。
+   *
+   * **`--runtime` 要另一份**：`freeze.js` 落下的那份只有 bootstrap 那张名单
+   * （它那一趟链的就是核心那 199 份，给它整份运行时的名单会缺一大片）。所以这儿
+   * **自己生成一份 `config-rt.c` 并编它** —— `_PyImport_Inittab` 里有 76 格，
+   * `import select` / `import _asyncio` 才找得到模块。 */
+  if (RT) {
+    const src = join(WORK, 'gen', 'config-rt.c');
+    const o = join(OBJ, 'Modules-config-rt-c.o');
+    const g = spawnSync(process.execPath,
+      [join(here, 'gen-config.js'), '--src', SRC, '--out', src, '--runtime'], { encoding: 'utf8' });
+    if (g.status !== 0) {
+      say(`py-rt/embed: gen-config --runtime 没过：\n${g.stderr}${g.stdout}`);
+      process.exit(1);
+    }
+    const cc2 = spawnSync(process.execPath,
+      [CLI, ...flagsFor(o, INC, SRC, perFileFlags('Modules/config.c', SRC)), src],
+      { encoding: 'utf8' });
+    if (cc2.status !== 0) {
+      say(`py-rt/embed: config-rt.c 编不过：\n${cc2.stderr}${cc2.stdout}`);
+      process.exit(1);
+    }
+    out.push(o);
+    return { out, miss };
+  }
   const conf = join(OBJ, 'Modules-config-c.o');
   if (existsSync(conf)) out.push(conf);
   else miss.push('Modules/config.c（生成的那份）');
@@ -96,7 +125,17 @@ say('cc: embed-probe.c —— 我们自己编出来的');
 
 /* 2) 链（链接器用 clang —— 这一格量的不是链接器）。 */
 const BIN = join(OUT, 'embed-probe');
-const ld = spawnSync(CC, ['-o', BIN, POBJ, ...objs], { encoding: 'utf8' });
+/* 平台库：`_scproxy` 要 macOS 那两个 framework（configure.ac:8542），另加 -lm。
+   整份运行时那一趟才有 `_scproxy` 的 .o，不给就缺 26 个 CF 与 kSC 那两族符号。 */
+const SYS_LIBS = process.platform === 'darwin'
+  ? ['-framework', 'SystemConfiguration', '-framework', 'CoreFoundation', '-lm'] : ['-lm'];
+/* 同一摊平台库，**写成方言那一格**（门三）：`(lib "X.framework")` -> `-framework X`、
+   `(lib "libm")` -> `-lm`（`hir/c_abi.js` 的 `C_SYSLIBS` 与 `cli.js` 的 `libLinkArgs`
+   两处早就认，两条链接路都认）。不给就是缺 26 个 CF 与 kSC 那两族符号 —— 这不是
+   `omni build` 少一个入口，是**源码没说全自己要什么**。 */
+const SX_LIBS = process.platform === 'darwin'
+  ? ['SystemConfiguration.framework', 'CoreFoundation.framework', 'libm'] : ['libm'];
+const ld = spawnSync(CC, ['-o', BIN, POBJ, ...objs, ...SYS_LIBS], { encoding: 'utf8' });
 if (ld.status !== 0 || !existsSync(BIN)) {
   say(`py-rt/embed: 链不起来：\n${(ld.stderr ?? '').split('\n').slice(0, 8).join('\n')}`);
   process.exit(1);
@@ -169,7 +208,7 @@ if (!existsSync(FREEZER)) {
     }
   }
   if (bad2 === 0) {
-    const ld2 = spawnSync(CC, ['-o', B2, O2, ...objs], { encoding: 'utf8' });
+    const ld2 = spawnSync(CC, ['-o', B2, O2, ...objs, ...SYS_LIBS], { encoding: 'utf8' });
     if (ld2.status !== 0 || !existsSync(B2)) {
       say(`py-rt/embed: 自带标准库那一份链不起来：\n${(ld2.stderr ?? '').split('\n').slice(0, 6).join('\n')}`);
       bad2 += 1;
@@ -231,6 +270,7 @@ if (!existsSync(FREEZER)) {
     writeFileSync(SX, `;; 生成的（ext/python/rt/embed.js 门三）—— adapter 将来发的就是这个形状
 (module
   (lib "${A}")
+${SX_LIBS.map((l) => `  (lib "${l}")`).join('\n')}
   (cabi omni_py_boot i32 (ptr))
   (cabi PyRun_SimpleString i32 (ptr))
   (cabi omni_py_fini i32 ())
