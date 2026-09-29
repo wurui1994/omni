@@ -1432,12 +1432,25 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     `-DCYTHON_CCOMPLEX=0`（不然 `#include <complex.h>`，我们那台前端还没有 `_Complex`
     那一族 —— `complex.h:78: identifier expected`）与 `-DCYTHON_ATOMICS=0`
     （不然要 `stdatomic.h`；借来的运行时那 278 份走的是 `__atomic_*` 内建）。
-  - **lxml 本身为什么还没进来**（两条都不是我们的账）：它 6.0.2 的源码**还不支持
-    3.12 之后**的 CPython（用的 `PyUnicode_AS_DATA` / `PyUnicode_IS_READY` 那一族在
-    3.12 就删了），而且 wheel 里**没打包顶层的 `python.pxd`**（48 个名字要靠它声明）。
-    要它就得选一支：或者等上游适配、或者我们自己补那份 `.pxd` 并把被删的 API 垫回去、
-    或者运行时那一份另指一棵 3.14 的树（`--src` 本来就是参数 —— 版本是参考树说的，
-    不是写死的）。这一格**是选择，不是限制**。
+  - **lxml 自己也进来了**（`ext/python/rt/build-lxml.js`，`npm run py:lxml`）——
+    用户那句「不能妥协」是对的：卡住的两条都不是能力问题，是**还没说清那些名字等于什么**。
+    * **wheel 没打包的三份声明表**我们自己写：`ext/python/compat/lxml/python.pxd`
+      （48 个名字）、`cvarargs.pxd`（变参那四格）、`tree-extra.pxd`（`includes/tree.pxd`
+      被裁掉的尾巴 —— 构建脚本**追加**上去，不替换那几百行 libxml2 声明）。
+    * **3.12 删掉的那几个 API** 在 `ext/python/compat/omni_py_compat.h` 里一格一格顶：
+      `PyUnicode_IS_READY` 恒真（所以旧表示那一支是死代码，另两个顶成"炸"而不是给个错数）、
+      `_PyEval_SliceIndex` 用 `PyNumber_AsSsize_t` 等价重建（这一格是活代码）、
+      `_cstr` / `__cstr` / `_isString` 三格小工具挪到 C 那一侧（变参调用点要确定的 C 类型）。
+    * **补齐我们自己的一份 `stdalign.h`**（`src/include/`）：C11 7.15 那两格，我们本来
+      就认 `_Alignas` / `_Alignof`，缺的只是那份头（Cython 出的 C 按 C11 走）。
+    * **读数**：cython 出 **304816 行 C**，**我们自己那台 C 前端 5.6s 编出 6.1M 的 `.o`
+      （零诊断）**，链成 5.4M 的 `etree.cpython-316.so`，**九行 XML 操作（fromstring /
+      xpath / tostring / attrib / iter / 切片 / len / findall / 语法错）与「本机 python3 +
+      它自己那份 lxml」逐字节相同**。
+    * **一格如实记账**：XSLT 那一半还没量 —— lxml 6.x 要 libxml2 2.10+（本机只有 brew 那份
+      2.15 合用），而配套的 libxslt 本机只有 SDK 那份 1.1.34（它链的是 2.9）。两份 libxml2
+      在同一进程里必崩（量到 segfault），brew 又没有 libxslt 的 bottle。这一格是**依赖版本
+      的事**，不是我们这条链的事。
 
 - **外部 C 扩展（`.so`）装得进来了（2026-09-29）** —— `lxml` 那一刀的前置条件，量完了：
   一份 30 行的最小扩展（`PyModule_Create` + `PyInit_omnihello`）**过我们自己的 C 前端**

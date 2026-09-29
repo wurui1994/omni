@@ -29,10 +29,8 @@ import { OmniError } from '../source/diag.js';
  * 于是这张表只留**数据**：叫什么、语法在哪、认哪些后缀、adapter 是哪份文件、
  * 从那份文件里取哪几个导出。**代码**由 `borrow.js` 在被问到的那一刻装（一门只装一门）。 */
 
-/* **这棵树的根只答一份** —— 正本在 `host/treeroot.js`（它只问宿主两句话，与语言无关，
-   所以它该在 `host/` 那一层；单开一份的缘由见那边的文件头）。这儿再导出一次，
-   老的 import 路径照旧能用。 */
-export { treeRoot } from '../host/treeroot.js';
+/* 这棵树的根的正本在 `host/treeroot.js`（它只问宿主两句话，与语言无关，
+   所以它该在 `host/` 那一层；单开一份的缘由见那边的文件头）。要它的人从那儿 import。 */
 
 /**
  * 一门语言一格：`grammar` 是相对这棵树根的路径，`exts` 是它的源文件后缀
