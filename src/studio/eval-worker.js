@@ -45,6 +45,9 @@ function shotOf() {
 
 self.onmessage = async (ev) => {
   const m = ev.data;
+  /* **回信带上来信那格 `id`**：自循环那一族的 `run` 永远不回信，宿主那侧要是按"来一封
+     消息就取队头那个等着的人"配对，之后每一封都错位。所以按 `id` 配（`tick` 没有 id）。 */
+  const reply = (o) => { self.postMessage({ ...o, id: m === null || m === undefined ? 0 : m.id }); };
   try {
     if (m.kind === 'open') {
       if (INSTALL === null) {
@@ -55,7 +58,7 @@ self.onmessage = async (ev) => {
       /* **那一块共享内存**：脚本自己拿 `refresh()` 当帧循环那一族不回消息循环
          （`stop` 与 `input` 那两封永远排不上），所以把它交给宿主 —— 宿主靠它让那一族
          停下、以及每帧推鼠标键盘。没跨源隔离时是 null（见 §41.2/§41.3）。 */
-      self.postMessage({
+      reply({
         kind: 'open',
         dev: DEV === null ? null : DEV.kind,
         shared: DEV !== null && typeof DEV.shared === 'function' ? DEV.shared() : null,
@@ -86,22 +89,22 @@ self.onmessage = async (ev) => {
         if (typeof DEV.setCap === 'function') DEV.setCap(m.cap ?? 0);
       }
       const r = await LIVE.runUnits(m.main, m.units ?? []);
-      self.postMessage({ kind: 'run', stdout: r.stdout, stderr: r.stderr, code: r.code });
+      reply({ kind: 'run', stdout: r.stdout, stderr: r.stderr, code: r.code });
       return;
     }
-    if (m.kind === 'shot') { self.postMessage({ kind: 'shot', ...shotOf() }); return; }
+    if (m.kind === 'shot') { reply({ kind: 'shot', ...shotOf() }); return; }
     /* `perf`：只要那几个数（不读像素）—— 页面状态栏每半秒问一回。宿主驱动那一族走它；
        自循环那一族**答不出话**（不回消息循环），页面那边靠 `tick` 里带的数。 */
     if (m.kind === 'perf') {
-      if (DEV === null) { self.postMessage({ kind: 'perf', err: '设备还没开' }); return; }
+      if (DEV === null) { reply({ kind: 'perf', err: '设备还没开' }); return; }
       const p = DEV.perf();
-      self.postMessage({ kind: 'perf', frames: DEV.frames(), fps: p.fps, ms: p.ms, live: p.live });
+      reply({ kind: 'perf', frames: DEV.frames(), fps: p.fps, ms: p.ms, live: p.live });
       return;
     }
     /* `pick`：**一列上有几格非背景色**（判据用）。为什么按列数而不是按某一点读：
        抓屏那一块的上下方向这一层不担保，按列数与它无关。 */
     if (m.kind === 'pick') {
-      if (DEV === null) { self.postMessage({ kind: 'pick', err: '设备还没开' }); return; }
+      if (DEV === null) { reply({ kind: 'pick', err: '设备还没开' }); return; }
       const s = DEV.snapshot();
       const x = Math.trunc(m.x);
       let n = 0;
@@ -112,7 +115,7 @@ self.onmessage = async (ev) => {
             || s.bytes[i + 2] !== s.bytes[2]) n += 1;
         }
       }
-      self.postMessage({
+      reply({
         kind: 'pick',
         v: n,
         /* 顺手把设备手里那格输入也带回去 —— 判据红的时候要分清"没到设备"与"到了没画"。 */
@@ -123,18 +126,18 @@ self.onmessage = async (ev) => {
     /* `input`：**宿主驱动那一族**的输入走这封消息（自循环那一族走共享内存，见 `open`）。 */
     if (m.kind === 'input') {
       if (DEV !== null && typeof DEV.setInput === 'function') DEV.setInput(m.v);
-      self.postMessage({ kind: 'input', ok: 1 });
+      reply({ kind: 'input', ok: 1 });
       return;
     }
     if (m.kind === 'stop') {
       if (DEV !== null) DEV.stop();
-      self.postMessage({ kind: 'stop', ok: 1 });
+      reply({ kind: 'stop', ok: 1 });
       return;
     }
-    self.postMessage({ kind: m.kind, err: `不认识的消息 '${String(m.kind)}'` });
+    reply({ kind: m.kind, err: `不认识的消息 '${String(m.kind)}'` });
   } catch (e) {
     /* **错要按消息回去**，不能只丢给 `onerror`：宿主那一侧在 `await` 一格回信，
        不回的话它就那么挂着（判据里表现成超时，而不是"这一格坏了"）。 */
-    self.postMessage({ kind: m === null || m === undefined ? '?' : m.kind, err: String(e && e.stack ? e.stack : e) });
+    reply({ kind: m === null || m === undefined ? '?' : m.kind, err: String(e && e.stack ? e.stack : e) });
   }
 };

@@ -57,20 +57,23 @@ const pw = async (args) => (await execFile('playwright-cli', args,
 /* 页面里那一段：起 Worker、把画布交过去、编一份、跑、等几帧、读回来。
    写成一行行拼起来的串（`--raw eval` 收的是一格表达式）—— 与 tests/studio 那几节同一手。
 
-   **`tick` 不占回信的位子**：脚本自己拿 `refresh()` 当帧循环的那一族**不会回来**
-   （`run` 那封回信永远不发），Worker 靠 `tick` 报活；宿主这儿按 `kind` 分路，
-   不然那一串 tick 会把等回信的那几个 resolver 吃掉（次序全乱）。 */
+   **回信按 `id` 配对**：脚本自己拿 `refresh()` 当帧循环的那一族**不会回来**
+   （`run` 那封回信永远不发），Worker 靠 `tick` 报活。所以两件事都要：`tick` 不占回信的
+   位子（它没有 `id`），而回信按来信那格 `id` 找人 —— 按"队头那个等着的人"配的话，
+   那一封没来的回信会让之后每一封都错位。 */
 const PROBE = 'async () => {'
   + ' const w = new Worker("/eval-worker.js", { type: "module" });'
-  + ' const box = [];'
+  + ' const wait = new Map();'
+  + ' let nid = 0;'
   + ' let ticks = 0;'
   + ' let lastFrame = 0;'
   + ' w.onmessage = (e) => {'
   + '   const d = e.data;'
   + '   if (d !== null && d !== undefined && d.kind === "tick") { ticks += 1; lastFrame = d.frames; return; }'
-  + '   const f = box.shift(); if (f !== undefined) f(d);'
+  + '   const f = wait.get(d.id); if (f !== undefined) { wait.delete(d.id); f(d); }'
   + ' };'
-  + ' const ask = (m, tr) => new Promise((res) => { box.push(res); w.postMessage(m, tr ?? []); });'
+  + ' const ask = (m, tr) => { const id = ++nid;'
+  + '   return new Promise((res) => { wait.set(id, res); w.postMessage({ ...m, id }, tr ?? []); }); };'
   + ' const units = async (p) => (await (await fetch("/api/units", { method: "POST",'
   + '   headers: { "content-type": "application/json" },'
   + '   body: JSON.stringify({ path: p, lang: p.endsWith(".kc") ? "kc" : "pss" }) })).json());'
