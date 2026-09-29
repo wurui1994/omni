@@ -1435,6 +1435,12 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
     **四格全过** —— `selectmodule.c`（kqueue 那一路）、`socketmodule.c`、
     `_asynciomodule.c`、`_queuemodule.c`，外加 `mmapmodule.c` 与
     `_multiprocessing/*.c`，都**一字不改编得出**。
+  - **`Setup.stdlib.in` 那 62 份全量拆三批量完，62/62 编得出**（20 + 30 + 12，各 6～11 秒）。
+    顺手补掉一格**"链接那天才炸"的欠账**：`Modules/_remote_debugging/*.c` 那 12 份都读
+    `__builtin_bswap32`，我们那台 C 前端**没有字节翻转那一族** —— 从前只是"隐式声明"的
+    警告。现在 `COMPILE_DEFS` 里补了 `bswap16` / `32` / `64`（移位与掩码落法），
+    那 12 份从"带警告 12"变成"干净 12"；判据是三个宽度与 clang 逐字节相同
+    （`0x1234` / `0x11223344` / `0x1122334455667788`）。
   - **补上一族探测：`AC_CHECK_TYPES`**（`gen-pyconf.js` 的 `TYPE_CHECKS`）——
     `HAVE_ADDRINFO` / `HAVE_SOCKADDR_STORAGE` / `HAVE_SOCKADDR_ALG` 问的是"这个结构体
     在不在"，宏名上与函数那一族分不开（`HAVE_ADDRINFO` vs `HAVE_GETADDRINFO`），从前落进

@@ -408,6 +408,22 @@ export const COMPILE_DEFS = [
     '(__extension__ ({ unsigned long long __btl = (unsigned long long)(x);'
     + ' __builtin_popcountll((__btl & (0ull - __btl)) - 1ull); }))'],
   ['__builtin_ctzl(x)', '__builtin_ctzll((unsigned long long)(x))'],
+  /* **字节翻转那一族**（`bswap16` / `32` / `64`）—— 逼出它的是借来的运行时：
+     `Modules/_remote_debugging/*.c` 那 12 份都读 `__builtin_bswap32`，从前只是
+     "隐式声明"的警告，**那意味着链接那天才炸**（与 popcount 那一族同一个病）。
+     落成移位与掩码，不依赖任何指令：`_Static_assert` 级的东西不必有，这一族的语义
+     就是"把字节倒过来"。 */
+  ['__builtin_bswap16(x)',
+    '(__extension__ ({ unsigned short __bs16 = (unsigned short)(x);'
+    + ' (unsigned short)(((__bs16 >> 8) & 0xffu) | ((__bs16 & 0xffu) << 8)); }))'],
+  ['__builtin_bswap32(x)',
+    '(__extension__ ({ unsigned int __bs32 = (unsigned int)(x);'
+    + ' ((__bs32 >> 24) & 0xffu) | ((__bs32 >> 8) & 0xff00u)'
+    + ' | ((__bs32 << 8) & 0xff0000u) | ((__bs32 << 24) & 0xff000000u); }))'],
+  ['__builtin_bswap64(x)',
+    '(__extension__ ({ unsigned long long __bs64 = (unsigned long long)(x);'
+    + ' ((unsigned long long)__builtin_bswap32((unsigned int)(__bs64 & 0xffffffffull)) << 32)'
+    + ' | (unsigned long long)__builtin_bswap32((unsigned int)(__bs64 >> 32)); }))'],
   ['__builtin_clz(x)',
     '(__extension__ ({ unsigned int __bz = (unsigned int)(x);'
     + ' __bz |= __bz >> 1; __bz |= __bz >> 2; __bz |= __bz >> 4;'
