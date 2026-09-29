@@ -1413,6 +1413,40 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 
 ### 已落地
 
+- **运行时的范围按"全部"重定（2026-09-29，用户第三次纠正）** —— 原话：「必须覆盖**全部
+  运行时**，运行时主要**编译为动态库**。运行时覆盖全部，自然包含 asyncio 依赖的
+  **epoll / kqueue / IOCP / thread** 那些。」
+  - **从前的分母错在哪**：`scope.js` 只按 `LIBRARY_OBJS`（核心 + `Setup.bootstrap.in`
+    那几格静态模块，`Modules/` **37 份**）。那一档只保证"解释器起得来"，**标准库的 C 扩展
+    一格都没有** —— asyncio 那条线（`selectmodule.c` 里的 epoll / kqueue / IOCP、
+    `socketmodule.c`、`_asynciomodule.c`、`_queuemodule.c`）、`math` / `_struct` /
+    `_pickle` / `unicodedata` / cjkcodecs / `mmap` / `_multiprocessing` 全在
+    `Setup.stdlib.in` 里。
+  - **新口径**（`scope.js` 的 `stdlibModules` / `runtimeModuleFiles`）：分母 =
+    `LIBRARY_OBJS` + `Setup.stdlib.in` 那一族，量出来的数 —— 核心 37 份 +
+    stdlib 运行时 **49 格模块 / 62 份 `.c`** = `Modules/` **99 份**；
+    **要外部库**那一档另 **16 格 / 32 份**（`_ssl`/`zlib`/`_sqlite3`/`_ctypes`/`_decimal`…
+    —— 探到库才开、探不到就记账，`pyexpat` / `_elementtree` 例外：expat vendored 在树里）；
+    **测试模块 15 格 / 93 份**（`_testcapi` 那一族与 `xxlimited*`）**不是运行时**，明着排除。
+  - 跑法：`node ext/python/rt/sweep.js --runtime`（`--with-external` 带第三方那档）。
+    探出来的 `pyconfig.h` **按范围分开放**（`inc-rt` / `inc-rt-ext`）—— 共用一份会拿
+    "少几格宏的那份"去编更大的范围，那是静悄悄答错。
+  - **第一批量到的**（拿 `inc-rt` 那份 pyconfig，几秒一趟）：asyncio 那条线
+    **四格全过** —— `selectmodule.c`（kqueue 那一路）、`socketmodule.c`、
+    `_asynciomodule.c`、`_queuemodule.c`，外加 `mmapmodule.c` 与
+    `_multiprocessing/*.c`，都**一字不改编得出**。
+  - **补上一族探测：`AC_CHECK_TYPES`**（`gen-pyconf.js` 的 `TYPE_CHECKS`）——
+    `HAVE_ADDRINFO` / `HAVE_SOCKADDR_STORAGE` / `HAVE_SOCKADDR_ALG` 问的是"这个结构体
+    在不在"，宏名上与函数那一族分不开（`HAVE_ADDRINFO` vs `HAVE_GETADDRINFO`），从前落进
+    "链得上 `addrinfo` 这个函数吗"、一律不定义 —— 于是 `Modules/addrinfo.h` 自己补一份
+    `struct addrinfo`，与系统头撞成 `redefinition of 'struct sockaddr_storage'`。
+  - **另一处口径修正**：`--extra`（"源码真读到哪些宏"那一侧）对整份运行时要把 **`Modules/`
+    整棵**给进去，不能只列那几份 `.c` —— 上面那两条宏是 `Modules/socketmodule.h` 与
+    `addrinfo.h`（**`.h` 文件**）读的，按 `.c` 名单给就整族漏掉。
+  - **预算纪律（同一天用户明说）**：任何一步 **60 秒**上限。这一趟先给 `sweep --runtime`
+    开了 3000 秒，47 秒被取消、**一行有用的输出都没有** —— 正确的量法是只抽 asyncio 那条线
+    的几份（`--filters`、7 秒出数），整族的数留给"提交前"或交给用户跑。
+
 - **继承（`class Q(P)` / `super()`）（2026-09-29）** —— 第十六趟，剩下的大件里挑的一格：
   - **落法是"编译期抄进子类"**（方言的记录没有继承这一档，这一层也不要 vtable）：
     一格基类、必须是**这份源码里前面已经定义过的类**；子类的方法表先摆父类那几格

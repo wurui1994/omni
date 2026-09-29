@@ -403,6 +403,30 @@ function hasMember(macro) {
   return null;
 }
 
+/**
+ * **`AC_CHECK_TYPES` 那一族**（`HAVE_ADDRINFO` / `HAVE_SOCKADDR_STORAGE` /
+ * `HAVE_SOCKADDR_ALG`）：问的是"**这个结构体在不在**"，不是"链得上这个函数吗"。
+ *
+ * 宏名上看不出来 —— `HAVE_ADDRINFO` 与 `HAVE_GETADDRINFO` 长得一模一样，所以从前它们
+ * 落进函数那一族、`hasFunc('addrinfo')` 链不上、**一律不定义**。代价是借来的
+ * `socketmodule.c` 编不出来：`Modules/addrinfo.h` 见 `HAVE_ADDRINFO` 没定义就**自己
+ * 补一份** `struct addrinfo` / `struct sockaddr_storage`，与系统头撞成 redefinition
+ * （量出来的原话：`redefinition of 'struct sockaddr_storage'` / `'struct addrinfo'`）。
+ *
+ * 来路：`configure.ac` 的 `AC_CHECK_TYPES([struct addrinfo],…,[#include <netdb.h>])`
+ * 那三条。这一族**只有这三格**，所以一格一格列、各写自己的头。
+ */
+const TYPE_CHECKS = new Map([
+  ['HAVE_ADDRINFO', ['struct addrinfo', ['netdb.h']]],
+  ['HAVE_SOCKADDR_STORAGE', ['struct sockaddr_storage', ['sys/types.h', 'sys/socket.h']]],
+  ['HAVE_SOCKADDR_ALG', ['struct sockaddr_alg', ['sys/socket.h', 'linux/if_alg.h']]],
+]);
+function hasType(macro) {
+  const [ty, heads] = TYPE_CHECKS.get(macro);
+  const inc = heads.map((h) => `#include <${h}>\n`).join('');
+  return compiles(`${inc}int main(void){ ${ty} x; (void)x; return 0; }\n`) ? 1 : null;
+}
+
 /** `SIZEOF_VOID_P` / `ALIGNOF_MAX_ALIGN_T` -> C 里那个类型（认不出来交 null）。 */
 function typeOfSizeMacro(macro) {
   const KNOWN = new Map([
@@ -451,6 +475,7 @@ function hasDecl(macro) {
 for (const name of needed) {
   if (HOW.has(name)) continue;
   if (name.startsWith('HAVE_DECL_')) { HOW.set(name, () => hasDecl(name)); continue; }
+  if (TYPE_CHECKS.has(name)) { HOW.set(name, () => hasType(name)); continue; }
   if (name.startsWith('HAVE_STRUCT_')) { HOW.set(name, () => hasMember(name)); continue; }
   if (/^HAVE_[A-Z0-9_]+_H$/.test(name)) { HOW.set(name, () => (hasHeader(name) ? 1 : null)); continue; }
   if (/^(SIZEOF|ALIGNOF)_/.test(name) && typeOfSizeMacro(name) !== null) {

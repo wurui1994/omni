@@ -71,6 +71,82 @@ export function coreModuleNames(src) {
 }
 
 /**
+ * **`Setup.stdlib.in` 那张名单** —— 标准库里那一族 C 扩展模块。
+ *
+ * 为什么要它：`Setup.bootstrap.in` 只是"起得来解释器"那几格（`_io` / `posix` /
+ * `_thread` …）。**运行时要覆盖全部**，就得连这一份一起借 —— asyncio 那条线
+ * （`select` 里的 epoll / kqueue / IOCP、`_socket`、`_asyncio`、`_queue`）全在这一份里，
+ * `math` / `_struct` / `_datetime` / `_pickle` / `unicodedata` 也在。
+ *
+ * 三档分开记，每一档都写**为什么**：
+ *   * **运行时**：本机该编、编得出的那些（`array` / `math` / `select` / `_socket` /
+ *     `_asyncio` / `_queue` / cjkcodecs 那一族 / HACL\* 那六格 …）；
+ *   * **要外部库**：`_ssl`（OpenSSL）/ `zlib` / `_bz2` / `_lzma` / `_zstd` / `_sqlite3` /
+ *     `_curses` / `_tkinter` / `_dbm` / `_gdbm` / `readline` / `_ctypes`（libffi）/
+ *     `_uuid` / `_decimal`（libmpdec）—— 借不借要先探本机有没有那个库，**探不到就记账**，
+ *     不装作借到了（`pyexpat` / `_elementtree` 例外：expat 就 vendored 在树里）；
+ *   * **不是运行时**：`_testcapi` 那一族与 `xxlimited*` / `xxsubtype`（CPython 自己的
+ *     测试与示例模块，`Makefile` 也只在 `make test` 那条路上编它们）。
+ *
+ * 交回来的形状：`{ runtime, external, notRuntime }`，每一格是
+ * `Map<模块名, 相对 Modules/ 的源文件数组>`。
+ */
+const STDLIB_EXTERNAL = new Map([
+  ['_ssl', 'openssl'], ['_hashlib', 'openssl'], ['zlib', 'zlib'], ['_bz2', 'libbz2'],
+  ['_lzma', 'liblzma'], ['_zstd', 'libzstd'], ['_sqlite3', 'libsqlite3'],
+  ['_curses', 'libncurses'], ['_curses_panel', 'libpanel'], ['_tkinter', 'tcl/tk'],
+  ['_dbm', 'libndbm/libgdbm_compat/libdb'], ['_gdbm', 'libgdbm'],
+  ['readline', 'libreadline/libedit'], ['_ctypes', 'libffi'], ['_uuid', 'libuuid'],
+  ['_decimal', 'libmpdec'],
+]);
+
+const STDLIB_NOT_RUNTIME = new Set([
+  'xxsubtype', '_xxtestfuzz', '_testbuffer', '_testinternalcapi', '_testcapi',
+  '_testlimitedcapi', '_testclinic', '_testclinic_limited', '_testimportmultiple',
+  '_testmultiphase', '_testsinglephase', '_ctypes_test',
+  'xxlimited', 'xxlimited_35', 'xxlimited_3_13',
+]);
+
+export function stdlibModules(src) {
+  const p = join(src, 'Modules', 'Setup.stdlib.in');
+  const runtime = new Map();
+  const external = new Map();
+  const notRuntime = new Map();
+  for (const raw of readFileSync(p, 'utf8').split('\n')) {
+    const line = raw.replace(/@[A-Z0-9_]+@/g, '').trim();
+    if (line === '' || line.startsWith('#') || line.startsWith('*')) continue;
+    const toks = line.split(/\s+/);
+    const name = toks[0];
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue;
+    const files = toks.slice(1).filter((t) => t.endsWith('.c'));
+    if (files.length === 0) continue;
+    if (STDLIB_NOT_RUNTIME.has(name)) notRuntime.set(name, files);
+    else if (STDLIB_EXTERNAL.has(name)) external.set(name, files);
+    else runtime.set(name, files);
+  }
+  if (runtime.size < 20) {
+    throw new Error(`scope.js: Setup.stdlib.in 里只读出 ${runtime.size} 格运行时模块`
+      + ' —— 那份名单的形状变了');
+  }
+  return { runtime, external, notRuntime, needs: STDLIB_EXTERNAL };
+}
+
+/**
+ * **整份运行时**要编的那些 `Modules/` 源文件 = `LIBRARY_OBJS`（核心 + bootstrap 静态
+ * 模块）**加上** `Setup.stdlib.in` 里那一族。`withExternal` 为真时把"要外部库"那一档
+ * 也算进来（探到库了才该开）。
+ */
+export function runtimeModuleFiles(src, { withExternal = false } = {}) {
+  const out = new Set(coreModuleFiles(src));
+  const { runtime, external } = stdlibModules(src);
+  for (const files of runtime.values()) for (const f of files) out.add(f);
+  if (withExternal) {
+    for (const files of external.values()) for (const f of files) out.add(f);
+  }
+  return out;
+}
+
+/**
  * **要构建系统先跑一步**的那几份（在不在树里都不算我们的欠账）：
  *   * `Modules/config.c` —— `makesetup` 生成的内建模块表（树里压根没有这份文件）；
  *   * `Python/frozen.c` 与 `Modules/getpath.c` —— 要 `Python/frozen_modules/*.h`
@@ -247,10 +323,16 @@ function sourcesUnder(dir) {
  * 要量的那一串 `[目录, 文件名]`。`filters` 非空时只留名字里带那几个词的。
  * 不在本机范围里的（`outOfScope`）**不进这张表** —— 分母就是"本机该编的份数"。
  */
-export function filesIn(src, dirs, { allModules = false, filters = [] } = {}) {
+export function filesIn(src, dirs, {
+  allModules = false, filters = [], runtime = false, withExternal = false,
+} = {}) {
   const out = [];
   const skipped = [];
-  const core = dirs.includes('Modules') && !allModules ? coreModuleFiles(src) : null;
+  /* `Modules/` 缺省只量 `LIBRARY_OBJS` 那几份；`runtime` 为真时量**整份运行时**
+     （加上 `Setup.stdlib.in` 那一族 —— asyncio 那条线就在那儿）。 */
+  const core = dirs.includes('Modules') && !allModules
+    ? (runtime ? runtimeModuleFiles(src, { withExternal }) : coreModuleFiles(src))
+    : null;
   for (const d of dirs) {
     const dir = join(src, d);
     if (!existsSync(dir)) continue;
@@ -285,10 +367,17 @@ export function filesIn(src, dirs, { allModules = false, filters = [] } = {}) {
  * `Modules/` 不整棵给：那会带进 13 个"要不要借第三方库"的宏（见 `coreModuleFiles`），
  * 所以按文件名一份一份给。
  */
-export function pyconfExtra(dirs, allModules = false, src = null) {
+export function pyconfExtra(dirs, allModules = false, src = null, runtime = false) {
   return ['Include', ...dirs.flatMap((d) => {
     if (d !== 'Modules' || allModules) return [d];
     if (src === null) return [d];
+    /* **整份运行时那一档把 `Modules/` 整棵给进去**（不只那几份 `.c`）：
+       `HAVE_ADDRINFO` / `HAVE_SOCKADDR_STORAGE` 这两条是 `Modules/socketmodule.h` 与
+       `Modules/addrinfo.h` 读的 —— **`.h` 里读到的宏**，按文件名只给 `.c` 就漏了整族，
+       于是 `addrinfo.h` 见宏没定义就自己补一份 `struct addrinfo`，与系统头撞成
+       redefinition（量出来的原话）。整棵给进来会多探十几条"要不要第三方库"的宏，
+       那一档本来就单列（`stdlibModules` 的 `external`），多几条 `#undef` 不影响。 */
+    if (runtime) return [d];
     return [...coreModuleFiles(src)].map((f) => `Modules/${f}`);
   })].join(',');
 }

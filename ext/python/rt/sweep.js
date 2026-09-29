@@ -54,8 +54,18 @@ const DIRS = argOf('--dirs', 'Objects,Python,Parser,Modules').split(',');
  * 名单从 `Setup.bootstrap.in` 读出来（`scope.js` 的 `coreModuleFiles`）。整棵都想量：`--all-modules`。
  */
 const ALL_MODULES = argv.includes('--all-modules');
-/* 探出来的 `pyconfig.h` 落哪儿 —— **按范围分开放**（见 scope.js 的 `incDirFor`）。 */
-const INC = argOf('--inc', null) ?? incDirFor(WORK, ALL_MODULES);
+/**
+ * **整份运行时**（`--runtime`）：`Modules/` 那一棵除了 `LIBRARY_OBJS`，还要
+ * `Setup.stdlib.in` 里那一族 —— asyncio 那条线（`select` 的 epoll / kqueue / IOCP、
+ * `_socket` / `_asyncio` / `_queue`）就在那儿。`--with-external` 再把"要外部库"
+ * 那一档也算进来（`_ssl` / `zlib` / `_sqlite3` …，探不到库的照旧编不出，那是明账）。
+ */
+const RUNTIME = argv.includes('--runtime');
+const WITH_EXT = argv.includes('--with-external');
+/* 探出来的 `pyconfig.h` 落哪儿 —— **按范围分开放**（见 scope.js 的 `incDirFor`）。
+   整份运行时那一趟的名单更大（`Modules/` 带进来的宏更多），所以另放一处。 */
+const INC = argOf('--inc', null)
+  ?? (RUNTIME ? join(WORK, WITH_EXT ? 'inc-rt-ext' : 'inc-rt') : incDirFor(WORK, ALL_MODULES));
 /**
  * 编得出 `.o` 的最少份数（ok + warn）。往上走是好事，往下走是回归。
  *
@@ -84,7 +94,7 @@ if (!existsSync(PYCONF)) {
   const g = spawnSync(process.execPath,
     /* `--extra` 怎么算（为什么必须带 `Include` 整棵）：见 scope.js 的 `pyconfExtra` */
     [join(here, 'gen-pyconf.js'), '--src', SRC, '--out', PYCONF,
-      '--extra', pyconfExtra(DIRS, ALL_MODULES, SRC)],
+      '--extra', pyconfExtra(DIRS, ALL_MODULES, SRC, RUNTIME)],
     { encoding: 'utf8' });
   if (g.status !== 0) {
     process.stdout.write(`py-rt/sweep: gen-pyconf 没过：\n${g.stderr}${g.stdout}`);
@@ -111,7 +121,7 @@ function familyOf(msg) {
 }
 
 /* 分母是**本机该编的份数**：代码生成器的输入与别的平台那几份不算（见 scope.js）。 */
-const { files, skipped } = filesIn(SRC, DIRS, { allModules: ALL_MODULES, filters });
+const { files, skipped } = filesIn(SRC, DIRS, { allModules: ALL_MODULES, filters, runtime: RUNTIME, withExternal: WITH_EXT });
 mkdirSync(join(WORK, 'obj'), { recursive: true });
 
 /** 一份的结果：`{ name, kind: 'ok' | 'warn' | 'fail', first }`。 */

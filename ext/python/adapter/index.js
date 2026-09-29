@@ -728,7 +728,18 @@ function infer(C, tree, scriptStmts) {
     /* **`*` 那个标记**（`def f(a, *, b=1)`）—— 它自己不是一格形参，只是说"后面那几格
        只能按名字给"。这一层把它**筛掉**，那条规矩在调用点上查（`kwOrder`）。 */
     const ps = paramsOf(f).filter((p) => tag(p) !== 'kwonly');
-    for (const p of ps) {
+    /* **`*args`** —— 只接"最后一格、没标注、不带默认值"那一档：调用点多出来的那几格
+       实参**打成一张表**递进去（单态化那趟按"多出来那几格合成一格元素类型"收实例）。
+       `**kw` 还没接（那要运行期的名字，不是一张表能装的）。 */
+    const starAt = ps.findIndex((p) => tag(p) === 'vararg');
+    for (const [i, p] of ps.entries()) {
+      if (tag(p) === 'vararg') {
+        if (i !== ps.length - 1) {
+          throw new Error(`python->IR: \`def ${nm}\` 的 \`*${String(nameOf(kids(p)[0]))}\``
+            + ' 后面还有形参 —— 还没接（`*args` 只接最后一格）');
+        }
+        continue;
+      }
       if (tag(p) !== 'p') throw new Error(`python->IR: \`def ${nm}\` 的形参里有 \`${tag(p)}\` —— 还没接（*args / **kw）`);
       checkDefault(nm, p, C);
     }
@@ -747,6 +758,8 @@ function infer(C, tree, scriptStmts) {
       annots: ps.map((p, i) => (rec !== null && i === 0 ? rec.type : typeOfAnnot(annotTok(p), C))),
       retAnnot: typeOfAnnot(kids(part(f, 'ret') ?? { kind: 'list', items: [] })[0], C),
       rec,
+      /** `*args` 那一格的位置（没有就是 -1）—— 它装的是一张表。 */
+      starAt,
     });
     /* 形参全带标注的那一档第一轮就定得下来；别的先摆一格空表，等调用点。 */
     const sh = shells.get(nm);
