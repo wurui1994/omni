@@ -61,6 +61,12 @@ export const C_SYSLIBS = {
   libm: { dl: true, link: '-lm' },
   libpthread: { dl: true, link: '-lpthread' },
   libdl: { dl: true, link: '-ldl' },
+  /* libz：与 libm 同一类 —— **两个平台都自带**（macOS 的 SDK 里有它的 stub，Linux 上
+     是 `libz.so`），而且解压这件事没有"第三方"可言。逼出它的是借来的那份 CPython：
+     `zlib` 那格模块（`Modules/zlibmodule.c`）在链接命令上要 `-lz`，而源码里说
+     "我要哪些库"的地方只有 `(lib …)` —— 不登记它，`(lib "libz")` 就被当成一个**路径**
+     原样交给链接器（macOS 上磁盘里压根没有 `/usr/lib/libz.dylib` 这个文件）。 */
+  libz: { dl: true, link: '-lz' },
 };
 
 /** 一个 `(lib …)` 的名字是不是预登记的系统库。 */

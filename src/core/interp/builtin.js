@@ -1278,6 +1278,13 @@ export function applyBuiltin(I, e, a) {
     }
 
     case 'chr': return chrOf(a[0]);
+    /* `(cstr ADDR)`：**解释器上过不去** —— 这一格读的是 C 的地址空间，而解释器里没有
+       "真地址"这回事（`pnew` 回的是 arena 的偏移）。与旁边 `CCall` 那一支同一条纪律：
+       解释执行是 oracle，它不该假装能做 FFI，宁可报错也不给个错答案。 */
+    case 'str_from_cstr':
+      rtError('interp: (cstr ADDR) 读的是 C 的地址空间，解释器里没有真地址'
+        + '（这一格与 (ccall …) 同命，只在原生腿上有）');
+      return undefined;
     case 'fail': rtError(a[0]); return undefined;
     case 'repr': return reprOf(a[0]);
     /* python 的 repr(float)（方言的 `(srepr E)`）。inf / nan 在这一格是**合法的**

@@ -380,6 +380,8 @@ int64_t omni_str_cpord(omni_str s);
 int64_t omni_str_length(omni_str s);
 omni_str omni_chr(int64_t cp);
 char *omni_cstr(omni_str s);
+/* `(cstr ADDR)` —— C 那侧一个 NUL 结尾的字节串 -> 一格 string（拷一份，见 omni_str.c）。 */
+omni_str omni_str_from_cstr(int64_t addr);
 
 /* omni_fmt.c */
 omni_str omni_str_int(int64_t v);

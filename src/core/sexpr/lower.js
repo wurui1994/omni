@@ -2308,6 +2308,28 @@ class CoreLowerer {
       if (v.type !== INT) return this.err(n, `(chr E) 的实参要是 int，这里是 ${coreTypeText(v.type)}`);
       return { kind: 'Builtin', name: 'chr', args: [v], argType: INT, type: STRING };
     }
+    /* `(cstr ADDR)` —— **C 那侧一个 NUL 结尾的字节串** -> 方言的 string（"出串那一格"）。
+     *
+     * 为什么非要这一格：`(ccall …)` 回 `ptr` 落到这一端只是**一个地址**（`int`，见
+     * `backend-c/emit.js` 的 `(int64_t)(…)` 那一行），而方言里造串的形一格都收不下地址
+     * （`chr` 收的是码位、拼接只有 `+`、`pload` 只从 `pnew` 来的指针读）。于是"借来的
+     * 运行时回一个 `char *`"就卡在这儿 —— 这一格就是那道门。
+     *
+     * 口径（与 `mload` 那一族**不是**同一个地址空间，别混）：这里的地址是 **C 的地址
+     * 空间里的**，与 `(ccall … ptr)` 回来的那个数配对；`(memory …)` 那块线性内存的下标
+     * 走 `(mload i8u …)`。于是这一格与 `(ccall)` 同命：原生两条腿上是真读，解释器上
+     * 明着报错（它连 `(ccall)` 都不做），JS 腿要那份 N-API 扩展（ADR-0038）。
+     *
+     * 字节**原样拷一份**（不校验 UTF-8、不别名过去）：C 那侧那块内存的寿命不由我们说。
+     */
+    if (h === 'cstr') {
+      const v = this.expr(n.items[1]);
+      if (v === null) return null;
+      if (v.type !== INT) {
+        return this.err(n, `(cstr ADDR) 的实参要是 int（一个地址），这里是 ${coreTypeText(v.type)}`);
+      }
+      return { kind: 'Builtin', name: 'str_from_cstr', args: [v], argType: INT, type: STRING };
+    }
     if (h === 'srep') {
       const s = this.expr(n.items[1]);
       const k = this.expr(n.items[2]);

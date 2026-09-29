@@ -1060,6 +1060,12 @@ class JsEmitter {
       // 引用的身份整数：这条腿上是一张 WeakMap 发的号（prelude 的 $refid）
       case 'refid': return `$refid(${a[0]})`;
       case 'chr': return `$chr(${a[0]})`;
+      /* `(cstr ADDR)`：这条腿上要那份 N-API 扩展**再多一格**（从任意地址读 NUL 结尾的
+         字节 —— `cffi.js` 现在只有"把 ArrayBuffer 换成地址"与"把串写进草稿区"两格）。
+         没落之前发一条当场报错的，与 `$js_cabi_unavailable` 同族：不给错答案。 */
+      case 'str_from_cstr':
+        return `$rt_error("omni js: (cstr ADDR) 这一格还没落到 JS 腿上"`
+          + ` + "（要 N-API 那份桥多一格'从地址读串'，ADR-0038）")`;
       case 'fail': return `$rt_error(${a[0]})`;
       case 'repr': return `$repr_real(${a[0]})`;
       /* python 的 repr(float)（方言的 `(srepr E)`）—— 排版门槛与上一条不同，见 prelude.js */

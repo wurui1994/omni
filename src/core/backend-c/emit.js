@@ -2947,6 +2947,9 @@ class CEmitter {
       // 真符号留着给 run-llvm 那条腿）。
       case 'refid': return `omni_refid(${a[0]})`;
       case 'chr': return `omni_chr(${a[0]})`;
+      /* `(cstr ADDR)` —— C 那侧 NUL 结尾的字节串 -> 一格 string（"出串那一格"）。
+         地址是**C 的地址空间里的**（`(ccall … ptr)` 回来那个数），不是线性内存的下标。 */
+      case 'str_from_cstr': return `omni_str_from_cstr(${a[0]})`;
       case 'fail': return `omni_fail(${a[0]})`;
       case 'repr': return `omni_repr_real(${a[0]})`;
       /* python 的 repr(float)（方言的 `(srepr E)`）—— 排版门槛与上一条不同，见 omni_fmt.c */

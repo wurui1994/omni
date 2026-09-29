@@ -232,6 +232,8 @@ const RT_OPS = new Map([
   // 另外四条腿早就有 chr（Omni 的 `chr(65)`），漏的一直只是这一行。
   ['write.string', { sym: 'omni_write_string', ret: 'void', params: ['[2 x i64]'] }],
   ['chr.int', { sym: 'omni_chr', ret: '[2 x i64]', params: ['i64'] }],
+  // `(cstr ADDR)`：C 那侧 NUL 结尾的字节串 -> string（原生腿才有真地址这回事）。
+  ['str_from_cstr.int', { sym: 'omni_str_from_cstr', ret: '[2 x i64]', params: ['i64'] }],
   ['str_repeat.string', { sym: 'omni_str_repeat', ret: '[2 x i64]', params: ['[2 x i64]', 'i64'] }],
   // 这两条是 ADR-0016 第七刀补的（jancy 的 %x / %X / %o）。
   ['str_base.int', { sym: 'omni_str_base', ret: '[2 x i64]', params: ['i64', 'i64'] }],

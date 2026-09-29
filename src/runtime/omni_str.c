@@ -255,3 +255,18 @@ char *omni_cstr(omni_str s) {
   b[s.len] = 0;
   return b;
 }
+
+/* 反方向：**C 那侧一个 NUL 结尾的字节串** -> 一格 string（`(cstr ADDR)`，ADR-0022 J4b）。
+ *
+ * 为什么要拷一份而不是别名过去：那块内存是 C 那侧的（`malloc` 的、静态的、或者下一次
+ * 调用就被改写的草稿区），而 omni_str 是不可变的、寿命由 arena 说 —— 别名进来就是
+ * "谁先释放"这种不该有的问题。长度由第一个 0 定，字节**原样收**（不校验 UTF-8：
+ * C 那侧给的是什么就是什么，验不验是上一层的事）。 */
+omni_str omni_str_from_cstr(int64_t addr) {
+  if (addr == 0) omni_errorf("cstr(): 地址是 0（C 那侧回了 NULL）");
+  const char *p = (const char *)(intptr_t)addr;
+  int64_t n = (int64_t)strlen(p);
+  char *b = omni_alloc_bytes(n);
+  if (n) memcpy(b, p, (size_t)n);
+  return omni_str_new(b, n);
+}
