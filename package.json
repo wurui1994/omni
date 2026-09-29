@@ -64,6 +64,7 @@
     "py:link": "node ext/python/rt/link.js",
     "py:freeze": "node ext/python/rt/freeze.js",
     "py:embed": "node ext/python/rt/embed.js",
+    "py:3rd": "node ext/python/rt/thirdparty.js",
     "py:selflink": "node ext/python/rt/selflink.js",
     "py:ucase": "node ext/python/rt/ucase.js",
     "py:ucase-tab": "node ext/python/rt/gen-ucase.js --check",

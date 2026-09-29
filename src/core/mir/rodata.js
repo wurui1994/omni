@@ -82,6 +82,7 @@ export function planRodata(mod) {
   const items = [];
   for (let gi = 0; gi < mod.globals.length; gi++) {
     if (mod.globalRo[gi] !== true) continue;
+    if (mod.globalTls[gi] === true) continue;   // thread-local 自己那两节，见 planTls
     const blob = mod.globalBlob[gi];
     /* 外部的全局量不占字节（第三十一片）。 */
     if (blob !== null && blob.extern) continue;
@@ -110,11 +111,41 @@ export function planData(mod) {
   for (let gi = 0; gi < mod.globals.length; gi++) {
     if (mod.globalRo[gi] === true) continue;
     if (mod.globalBss[gi] === true) continue;
+    if (mod.globalTls[gi] === true) continue;   // thread-local 自己那两节，见 planTls
     const blob = mod.globalBlob[gi];
     if (blob !== null && blob.extern) continue;
     items.push(globalItem(mod, gi));
   }
   return layout(items);
+}
+
+/**
+ * thread-local（`__thread`）那两节（Mach-O 的 `__thread_data` / `__thread_vars`）。
+ *
+ * 与上面三节**各自独立**：`__thread_data` 里是每个变量的**初值模板**（按它自己的对齐摆），
+ * `__thread_vars` 里是每格 **24 字节的 tlv descriptor**（三个 u64：`__tlv_bootstrap` /
+ * key / 模板的偏移）。回 `{ size, al, gOff, vars, varOff }` —— `gOff` 是模板的落点，
+ * `varOff` 是 descriptor 的落点，`vars` 是 descriptor 那一节的总字节数。
+ *
+ * 为什么 descriptor 不与模板同节：dyld **按节的类型**认它们（`S_THREAD_LOCAL_VARIABLES`
+ * 才会被当成 tlv 登记），混在一处就只是三个普通指针，"每条线程一份"不会发生。
+ */
+export function planTls(mod) {
+  const items = [];
+  for (let gi = 0; gi < mod.globals.length; gi++) {
+    if (mod.globalTls[gi] !== true) continue;
+    const blob = mod.globalBlob[gi];
+    if (blob !== null && blob.extern) continue;
+    items.push(globalItem(mod, gi));
+  }
+  const plan = layout(items);
+  const varOff = new Map();
+  let at = 0;
+  for (const it of [...items].sort((x, y) => (x.seq ?? 0) - (y.seq ?? 0))) {
+    varOff.set(it.no, at);
+    at += 24;
+  }
+  return { size: plan.size, al: plan.al, gOff: plan.gOff, varOff, vars: at };
 }
 
 /**
@@ -132,6 +163,7 @@ export function planBss(mod) {
   for (let gi = 0; gi < mod.globals.length; gi++) {
     if (mod.globalBss[gi] !== true) continue;
     if (mod.globalRo[gi] === true) continue;
+    if (mod.globalTls[gi] === true) continue;   // thread-local 自己那两节，见 planTls
     const blob = mod.globalBlob[gi];
     if (blob !== null && blob.extern) continue;
     items.push(globalItem(mod, gi));

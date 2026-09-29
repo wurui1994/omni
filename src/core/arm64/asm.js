@@ -35,6 +35,14 @@ export const RELOC_ARM64 = {
    */
   GOT_PAGE21: 'GOT_PAGE21',
   GOT_PAGEOFF12: 'GOT_PAGEOFF12',
+  /**
+   * thread-local（`__thread`）那一格的地址（Mach-O 的 TLV）。与 GOT 那一对同形 ——
+   * `adrp Rd, sym@TLVPPAGE` + `ldr Rd, [Rd, sym@TLVPPAGEOFF]` —— 只是链接器填的是
+   * **tlv descriptor** 的地址，拿到之后还要 `ldr x8,[x0]` + `blr x8` 才是「这条线程
+   * 那一份」的地址（clang 出的就是这四条）。
+   */
+  TLVP_PAGE21: 'TLVP_PAGE21',
+  TLVP_PAGEOFF12: 'TLVP_PAGEOFF12',
   /** 数据里的一个 8 字节绝对地址。 */
   ABS64: 'ABS64',
 };
@@ -181,6 +189,18 @@ export class Arm64CodeBuf {
   /** `ldr Rt, [Rn, <sym>@GOTPAGEOFF]`。取出来的就是那个符号的真地址。 */
   ldrSymGot(rt, rn, sym) {
     this.relocs.push({ at: this.pos(), kind: RELOC_ARM64.GOT_PAGEOFF12, sym, addend: 0 });
+    return this.word(ldrU(3, rt, rn, 0));
+  }
+
+  /** `adrp Rd, <sym>@TLVPPAGE`（thread-local 那一对的头一条，见 `RELOC_ARM64.TLVP_PAGE21`）。 */
+  adrpSymTlvp(rd, sym) {
+    this.relocs.push({ at: this.pos(), kind: RELOC_ARM64.TLVP_PAGE21, sym, addend: 0 });
+    return this.word(adrp(rd, 0));
+  }
+
+  /** `ldr Rt, [Rn, <sym>@TLVPPAGEOFF]`。取出来的是 **tlv descriptor** 的地址。 */
+  ldrSymTlvp(rt, rn, sym) {
+    this.relocs.push({ at: this.pos(), kind: RELOC_ARM64.TLVP_PAGEOFF12, sym, addend: 0 });
     return this.word(ldrU(3, rt, rn, 0));
   }
 

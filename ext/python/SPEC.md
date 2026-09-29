@@ -1413,6 +1413,43 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 
 ### 已落地
 
+- **`__thread` 落成真 TLS，于是 threading / requests / httpx 真跑起来（2026-09-29）** ——
+  第三方库那条线的第二刀，也是**这一路上最深的一格静静答错**：
+  - **病**：`__thread` / `_Thread_local` 在 `parseBtype` 里与 `restrict` 并排被吃掉，
+    于是它与普通全局量**完全不可区分** —— 所有线程共用一格。最小复现 18 行 C
+    （`__thread int tl;` + 一个 pthread）：clang 上主线程读回 3，我们读回 **7**。
+    症状在 python 那一头：`threading.Thread.start()` 撞
+    `Fatal Python error: _PyThreadState_Attach: non-NULL old thread state`
+    （CPython 的 `_Py_thread_local PyThreadState *_Py_tss_tstate` 就指着它）。
+  - **落法**：**真 TLS**，先只做 macOS/arm64 那条（`c obj` 出 Mach-O 再交 clang 链，
+    我们 python 这条线正走它）。ELF/PE 两条明着报"还没到"，不静默当普通全局。
+    - `ctype.js`：新存储类位 `VT_THREAD`（位 16），并进 `VT_STORAGE`（类型比较要剥掉它）；
+    - `tccgen.js`：`parseBtype` 收它、声明处记在 `e.tls` 上、封盘那步 `markGlobalTls`
+      （`extern __thread` **也要标** —— 访问序列由用的那一侧发）；
+    - `mir/ir.js` + `mir/rodata.js`：`globalTls` 与 `planTls`（模板一节、descriptor 一节，
+      与 `.data`/`.data.ro`/`.bss` 三节各自独立）；
+    - `arm64/asm.js` + `from_mir.js`：`TLVP_PAGE21`/`TLVP_PAGEOFF12` 两格重定位，
+      `globalAddr` 对 TLS 发 clang 那四条（`adrp x0,@TLVPPAGE` / `ldr x0,[x0,@TLVPPAGEOFF]` /
+      `ldr x16,[x0]` / `blr x16`）；结果只能在 x0，目标不是 x0 时先把 x0 挪到栈上；
+    - `link/macho.js`：写出器从"写死 1 或 2 节"改成**节表驱动**，加
+      `__DATA,__thread_data`（`S_THREAD_LOCAL_REGULAR`）与 `__DATA,__thread_vars`
+      （`S_THREAD_LOCAL_VARIABLES`，每格 24 字节：`__tlv_bootstrap` / key / 模板）。
+      descriptor 第 0 格的符号名写**不带前导下划线**那个（`_tlv_bootstrap`）——
+      多给一个的症状是链接器找不到 `___tlv_bootstrap`。
+  - **判据**（`ext/python/rt/thirdparty.js`，`npm run py:3rd`，新的薄皮 `pyrun.c` 跑真 `.py`）：
+    * 门一 **asyncio 真跑一趟**：事件循环、`start_server` + `open_connection` 本机 TCP
+      一来一回、`gather` 六格、`wait_for` 真超时 —— 四行与 python3 逐字节相同；
+    * 门二 **标准库那 24 格 import**：与 python3 **一格不差**（`缺 0 []`，含 `ssl`/`zlib`/
+      `threading`/`mmap`/`pickle`/`decimal`）；
+    * 门三 **`requests` / `httpx` 真发一次请求**：自己用 `http.server` 在 127.0.0.1 上起一个
+      （deflate 压过的 JSON，走 zlib 那一格），两个库各发一次，四行与 python3 逐字节相同。
+      一格外网都不碰。
+  - **整份运行时重编一趟**：278 份 `.c`（加了 zlib/_ssl/_hashlib 三格）**全编得出**（207s），
+    `freeze` 26/26，`embed --runtime` 三门仍全过（30.2M）。
+  - **剩下的那一格是 `lxml`**：它是 Cython 出的 C 扩展（要 libxml2/libxslt，且 ABI tag
+    与本机装的那份 `.so` 不通用 —— 得我们自己编）。这一格与「按 SOABI 装载外部 `.so`」
+    是同一刀，记在下一刀里。
+
 - **第三方库那条线开了（2026-09-29，用户定的方向）** —— 原话：「至少先把 asyncio /
   requests / lxml / httpx 的支持做起来，我们可以正常使用第三方库。」
   判据换成了**真库真代码**：新的薄皮 `ext/python/rt/pyrun.c`（59 行，与 `embed-boot.c`

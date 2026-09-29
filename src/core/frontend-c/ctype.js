@@ -58,6 +58,11 @@ export const VT_EXTERN = 0x00001000;
 export const VT_STATIC = 0x00002000;
 export const VT_TYPEDEF = 0x00004000;
 export const VT_INLINE = 0x00008000;
+/* `__thread` / `_Thread_local`（tcc 没有这一格 —— 它在 ELF 那条路上靠汇编器与链接器，
+ * 我们要自己发 Mach-O 的 TLV，所以这一位必须传到后端）。位 16，在 `VT_STRUCT_SHIFT`
+ * （20）那一段之下，与位域那两个 6 位段不打架。
+ * 不带这一位的后果是**静静答错**：所有线程共用一格（量过，clang 主线程读 3、我们读 7）。 */
+export const VT_THREAD = 0x00010000;
 
 /* ------------------------------------------------- struct/enum 的那两位（tcc.h:1077-1104）
  * 位移 20，两个 6 位段给位域的「偏移与宽度」用。`VT_UNION`/`VT_ENUM` 借同一段的低位 ——
@@ -68,7 +73,7 @@ export const VT_UNION = (1 * (1 << VT_STRUCT_SHIFT)) | VT_STRUCT;
 export const VT_ENUM = 2 * (1 << VT_STRUCT_SHIFT);
 export const VT_ENUM_VAL = 3 * (1 << VT_STRUCT_SHIFT);
 
-export const VT_STORAGE = VT_EXTERN | VT_STATIC | VT_TYPEDEF | VT_INLINE;
+export const VT_STORAGE = VT_EXTERN | VT_STATIC | VT_TYPEDEF | VT_INLINE | VT_THREAD;
 
 /* ------------------------------------------------- 问句
  * 全部照 tcc 的宏，一条不多。加一条「方便的」判断的代价是：它会与已有的某条重叠，

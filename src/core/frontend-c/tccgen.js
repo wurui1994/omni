@@ -174,7 +174,7 @@ import { evalCConst } from './cconst.js';
 import {
   VT_VOID, VT_BYTE, VT_SHORT, VT_INT, VT_LLONG, VT_BOOL, VT_PTR, VT_FUNC, VT_STRUCT,
   VT_BTYPE, VT_UNSIGNED, VT_DEFSIGN, VT_LONG, VT_FLOAT, VT_DOUBLE,
-  VT_EXTERN, VT_STATIC, VT_TYPEDEF, VT_INLINE, VT_CONSTANT, VT_VOLATILE, VT_STORAGE, VT_ENUM,
+  VT_EXTERN, VT_STATIC, VT_TYPEDEF, VT_INLINE, VT_THREAD, VT_CONSTANT, VT_VOLATILE, VT_STORAGE, VT_ENUM,
   btype, isInteger, isFloat, isUnsigned, isPtr, isArray, isFunc, isStruct, isUnion, isEnum,
   isBitfield, bitPosOf, bitSizeOf, mkBitfield, bitfieldBase, bfAccess,
   ctype, mkPointer, mkArray, mkStruct, mkEnum, enumBase, mkFunc, typeSize, cTypeText, sameType,
@@ -7237,17 +7237,21 @@ export class CGen {  /**
       if (t === TOK_VOLATILE || t === TOK_VOLATILE1 || t === TOK_VOLATILE2) {
         quals = quals | VT_VOLATILE; any = true; this.next(); continue;
       }
+      /* `__thread` / `_Thread_local` —— **一个真的存储类**，不是可以吃掉的限定符
+       * （从前与 `restrict` 并排被丢掉，后果是所有线程共用一格：量出来的原话是
+       * clang 主线程读回 3、我们读回 7）。落成 `VT_THREAD` 一路带到后端，
+       * 在 Mach-O 上发 TLV 那两节。 */
+      if (t === TOK_THREAD_LOCAL || t === TOK_THREAD) {
+        storage = storage | VT_THREAD; any = true; this.next(); continue;
+      }
       /* 真的系统头里到处都是的那几个（第八刀第十六片）。它们在这一层**没有可观察的
        * 效果**，所以吃掉就行：
        *   - `restrict` 是一个**承诺**（不别名），只影响优化，不影响语义；
        *   - `__extension__` 是「别为下面这个 gcc 扩展警告」；
-       *   - `_Atomic` / `_Thread_local` / `__thread` 我们是单线程一条腿；
-       *   - `__attribute__((…))` 整块跳过（`skipAttrs`）。
-       * 吃掉不等于装作没看见：`_Atomic` 真要做的话是另一件事，那时这一行会变成一条
-       * 真的实现，而不是「原来漏了」。 */
+       *   - `_Atomic` 我们按"单线程那条腿"对待（真做是另一件事）；
+       *   - `__attribute__((…))` 整块跳过（`skipAttrs`）。 */
       if (t === TOK_RESTRICT || t === TOK_RESTRICT1 || t === TOK_RESTRICT2
-          || t === TOK_EXTENSION || t === TOK_ATOMIC
-          || t === TOK_THREAD_LOCAL || t === TOK_THREAD) {
+          || t === TOK_EXTENSION || t === TOK_ATOMIC) {
         any = true; this.next(); continue;
       }
       if (t === TOK_ATTRIBUTE1 || t === TOK_ATTRIBUTE2) { any = true; this.parseAttrs(ad); continue; }
@@ -8448,6 +8452,11 @@ export class CGen {  /**
             if (dad.weak === true) e.weak = true;
             /* `visibility` 同理（第一百〇六片）：记在登记上，封盘那步进符号。 */
             if ((dad.visibility ?? 0) !== 0) e.vis = mergeVis(e.vis, dad.visibility);
+            /* `__thread`（`VT_THREAD`）：同 `static` / `weak` 那一路 —— 记在登记上、
+               封盘那一步（`lowerCNative`）才变成"落 TLV 那两节"。声明与定义分两条写
+               （头文件里 `extern __thread T x;`、.c 里 `__thread T x = …;`）是常态，
+               所以只往上加不往下抹。 */
+            if ((spec.t & VT_THREAD) !== 0) e.tls = true;
           } else if (isExtern) e = this.declareExternLocal(name, vty, hasInit, dad.aligned);
           else if (hasStatic) e = this.declareStaticLocal(name, vty, dad.aligned, extra);
           else e = this.declareLocal(name, vty, dad.aligned, extra);
@@ -9768,6 +9777,10 @@ export function lowerCNative(path, text, host, defs) {
        * 也不该算它，所以顺手把那几个字节丢掉。 */
       const no0 = e.gno === undefined ? mod.globalNo(name) : e.gno;
       mod.setGlobalExtern(no0, s0.size, s0.align);
+      /* `extern __thread T x;` 也要标：**访问序列由用的那一侧发**（过 tlv descriptor），
+         而这一侧压根不知道定义在哪个 `.o` 里。不标的后果是拿 descriptor 的地址当数据地址
+         用 —— 读出来的是 `__tlv_bootstrap` 那个指针。 */
+      if (e.tls === true) mod.markGlobalTls(no0);
       /* 丢的是**当初真留下的那几个字节**（`allocGlobal` 记在 `allocSize` 上），
        * 不是"现在这个类型有多大"：不完整类型的 extern 声明当初只留了一格
        * （`PyAPI_DATA(PyTypeObject) PyType_Type;` 那时 `struct _typeobject` 还没定义），
@@ -9818,6 +9831,9 @@ export function lowerCNative(path, text, host, defs) {
     /* 没有初始化式的进 `.bss`（第一百三十二片）：三步是**有次序**的 —— `const` 先问，
      * 所以 `const int i;`（没有初值）还是落在只读那一节里，不进 `.bss`。 */
     else if (e.hasInit !== true) mod.markGlobalBss(no);
+    /* thread-local 是**另一档**，与上面那三步并行（它自己那两节，见 `globalTls`）：
+       `__thread int x;`（没初值）也有初值模板，那一格就是全零 —— 所以不进 `.bss`。 */
+    if (e.tls === true) mod.markGlobalTls(no);
     mod.setGlobalData(no, size, al, bytes, fixups);
   }
   /* 匿名的静态块（第三十四片）：静态的复合字面量。与有名字的那些一模一样地切 ——

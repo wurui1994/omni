@@ -444,7 +444,7 @@ function cObj(path, out, arch, incs, defs, fmt, os, sysIncs, instr, cver) {
    * 摆在第一个函数之后，所以这一格得在生成代码的时候就给。 */
   const blob = arch === 'x86_64'
     ? coreMod('x64/from_mir.js').genModule(mod, { unwind: fmt === 'elf' && os === 'win32', win64: os === 'win32' })
-    : coreMod('arm64/from_mir.js').genArm64Module(mod, { win32: os === 'win32' });
+    : coreMod('arm64/from_mir.js').genArm64Module(mod, { win32: os === 'win32', tlv: fmt === 'macho' });
   vNext('codegen');
   const syms = [];
   for (let k = 0; k < mod.funcs.length; k++) {
@@ -501,9 +501,11 @@ function cObj(path, out, arch, incs, defs, fmt, os, sysIncs, instr, cver) {
         ehFrame: ehFrameOf(blob, arch, os),
         seq: relaSeq(blob),
       })
-    /* Mach-O 那一头只有两节，只读那一段与 `.bss` 都折进 `__data` 的尾巴（`macho.js` 的 `foldRo`）。 */
+    /* Mach-O 那一头只读那一段与 `.bss` 折进 `__data` 的尾巴（`macho.js` 的 `foldRo`），
+       而 thread-local（`__thread`）是**两节真的节**（`tls`，折不得 —— dyld 按节的类型
+       认 tlv descriptor）。 */
     : (t, d, ds, rs, a, al) => coreMod('link/macho.js').writeObject(t, d, ds, rs, a, al,
-      { rodata: blob.rodata, bssSize: blob.bssSize });
+      { rodata: blob.rodata, bssSize: blob.bssSize, tls: blob.tls ?? undefined });
   writeBinary(out, write(blob.bytes, blob.data,
     orderSyms([...syms, ...blob.dataSyms]),
     [...blob.relocs, ...blob.dataRelocs, ...blob.roRelocs], arch, blob.dataAlign));

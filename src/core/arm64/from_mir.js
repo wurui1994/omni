@@ -54,7 +54,7 @@ import {
   memArgHfa, memArgAlign16,
   callVaFixed,
 } from '../mir/ir.js';
-import { planRodata, planData, planBss } from '../mir/rodata.js';
+import { planRodata, planData, planBss, planTls } from '../mir/rodata.js';
 /* 栈位按活跃区间复用（第一百四十四片）。算区间那几步住在 regalloc 里 ——
  * 这一条与"优化开不开"无关，C 那条路一遍过也要，所以后端自己叫。 */
 import { assignStackHomes } from '../mir/opt/regalloc.js';
@@ -73,6 +73,11 @@ const SP = 31;
  */
 let WIN32 = false;
 function arm64SetOs(win32) { WIN32 = win32 === true; }
+/* thread-local 那一格落得出来吗（`__thread`）：现在只有 Mach-O 那条路有
+   （`__thread_vars` + TLV 重定位）。ELF/PE 两条要 `.tdata` 与 TLS 那族重定位，
+   还没到 —— 那两条上遇到 `__thread` 明着报，不静默当普通全局（那是静静答错）。 */
+let TLV = false;
+function arm64SetTlv(v) { TLV = v === true; }
 /**
  * **值的寄存器缓存**（第一百四十三片）：x11-x15。
  *
@@ -2500,6 +2505,41 @@ class FnGen {
 
   /** 一个模块级变量的地址算进 `reg`。自家的与外部的**同一条路** —— 见 `symAddr`。 */
   globalAddr(reg, no) {
+    /* thread-local（`__thread`）是**另一条路**：拿到的不是数据的地址，而是一格
+     * **tlv descriptor**，还要调它的第 0 格才是"这条线程那一份"（macOS 的 TLV，
+     * clang 出的就是这四条）：
+     *
+     *     adrp x0, sym@TLVPPAGE  /  ldr x0, [x0, sym@TLVPPAGEOFF]  /  ldr x16, [x0]  /  blr x16
+     *
+     * 三格口径写在这儿：
+     *   - **结果只能在 x0**（thunk 的收发都是它），所以目标不是 x0 时先把 x0 挪到栈上
+     *     再 `mov` 回去 —— 这一格上 x0 可能正装着活着的值；
+     *   - 除 x0 之外的寄存器由 dyld 那份 thunk 保住（LLVM 也是这么假设的，它只把 x0
+     *     标成被写）；`lr` 被 `blr` 改写，靠序言无条件保存它那一条；
+     *   - `x16` 是 IP0，拿它当间接跳转的落点是 ABI 明说可以的。
+     */
+    if (this.mod.globalTls[no] === true) {
+      if (!TLV) {
+        throw new OmniError('arm64: thread-local（__thread）现在只落在 Mach-O 上'
+          + '（ELF/PE 那两条要 .tdata 与 TLS 那族重定位，还没到）');
+      }
+      const sym = this.globalSym(no);
+      const save = reg !== 0;
+      if (save) {
+        this.buf.emit(subImm(1, 31, 31, 16));
+        this.buf.emit(strU(3, 0, 31, 0));
+      }
+      this.buf.adrpSymTlvp(0, sym);
+      this.buf.ldrSymTlvp(0, 0, sym);
+      this.buf.emit(ldrU(3, 16, 0, 0));
+      this.buf.emit(blr(16));
+      if (save) {
+        this.buf.emit(addImm(1, reg, 0, 0));
+        this.buf.emit(ldrU(3, 0, 31, 0));
+        this.buf.emit(addImm(1, 31, 31, 16));
+      }
+      return undefined;
+    }
     return this.symAddr(reg, this.globalSym(no));
   }
 
@@ -2806,6 +2846,8 @@ export function codeOfArm64(mod, f) {
 export function genArm64Module(mod, opts) {
   /* `{win32: true}`：大于一页的帧要自己探栈（见 `arm64SetOs` 与 `gen()`）。 */
   arm64SetOs(opts !== undefined && opts !== null && opts.win32 === true);
+  /* `{tlv: true}`：这一趟出的是 Mach-O，`__thread` 落成 TLV 那两节（见 `arm64SetTlv`）。 */
+  arm64SetTlv(opts !== undefined && opts !== null && opts.tlv === true);
   /* 数据段先排出来 —— 函数体里 `loadRef` 要拿串常量的符号名，所以这一步得在生成之前。
    *
    * 布局：模块级变量**一个八字节一格**、零初始化，串常量接在后面（UTF-8 + 一个 0）。
@@ -2846,6 +2888,11 @@ export function genArm64Module(mod, opts) {
   /* 没有初始化式的那些进 `.bss`（第一百三十二片）：又一个各自独立的游标。这一节
    * **不占文件字节**，所以只有落点、没有字节数组 —— `bssSize` 交给写出器当 `sh_size`。 */
   const bssPlan = planBss(mod);
+  /* thread-local 那两节（`__thread`）：模板与 descriptor 各一节，见 `planTls`。 */
+  const tlsPlan = planTls(mod);
+  const tdBytes = new Array(tlsPlan.size).fill(0);
+  const tvBytes = new Array(tlsPlan.vars).fill(0);
+  const tlsRelocs = [];
   /* 别名要照目标的落点发符号（第一百〇五片），所以边排边记每个全局的起点与它在哪一段。 */
   const gBase = new Map();
   for (let gi = 0; gi < mod.globals.length; gi++) {
@@ -2858,6 +2905,43 @@ export function genArm64Module(mod, opts) {
     if (al > 4096) arm64Nyi(`全局 '${mod.globals[gi]}' 要 ${al} 字节对齐（__data 这一节最多 4096）`);
     if (al > dataAlign) dataAlign = al;
     const ro = mod.globalRo[gi] === true;
+    /* **thread-local 先问**（`__thread`）：它自己那两节，与下面那三段不是一档 ——
+       外面看见的那个名字落在 descriptor 上（`__thread_vars`），初值模板是一格局部符号
+       `x$tlv$init`（`__thread_data`）。descriptor 的三个 u64 里两格要重定位：
+       第 0 格指 `__tlv_bootstrap`（dyld 给的未定义外部符号），第 2 格指模板。 */
+    if (mod.globalTls[gi] === true) {
+      const name = mod.globals[gi];
+      const sym = mod.globalSym[gi] ?? name;
+      const tdBase = tlsPlan.gOff.get(gi);
+      const tvBase = tlsPlan.varOff.get(gi);
+      const initName = `${sym}$tlv$init`;
+      gBase.set(gi, { base: tvBase, sect: 6 });
+      dataSyms.push({
+        name, sym, off: tvBase, sect: 6, size: 24,
+        local: mod.globalLocal[gi] === true,
+        weak: mod.globalWeak[gi] === true,
+        vis: mod.globalVis[gi] ?? 0,
+        seq: mod.globalSeq[gi],
+      });
+      dataSyms.push({
+        name: initName, sym: initName, off: tdBase, sect: 5, size, local: true,
+        seq: mod.globalSeq[gi],
+      });
+      for (let k = 0; k < size; k++) {
+        const b = blob === null ? 0 : blob.bytes[k];
+        tdBytes[tdBase + k] = b === undefined ? 0 : b;
+      }
+      const after = mod.globalAfter[gi] ?? 0;
+      /* descriptor 第 0 格指 dyld 那个 thunk。名字这儿写的是**不带前导下划线的那个**
+         （`_tlv_bootstrap`）—— `macho.js` 的 `macName` 会补上，写出去正是 clang 出的
+         `__tlv_bootstrap`。多给一个下划线的症状是链接器说找不到 `___tlv_bootstrap`。 */
+      tlsRelocs.push({ at: tvBase, kind: 'POINTER64', sym: '_tlv_bootstrap', sect: 6, after });
+      tlsRelocs.push({ at: tvBase + 16, kind: 'POINTER64', sym: initName, sect: 6, after });
+      for (const fx of blob === null ? [] : blob.fixups ?? []) {
+        tlsRelocs.push({ at: tdBase + fx.off, kind: 'POINTER64', sym: fixSym(fx), sect: 5, after });
+      }
+      continue;
+    }
     /* 三段（第一百三十二片）：只读、可写、`.bss`。次序是**有讲究**的 —— `const` 先问，
      * 所以 `const int i;`（没有初值）还是进只读那一节。 */
     const bss = !ro && mod.globalBss[gi] === true;
@@ -2961,6 +3045,15 @@ export function genArm64Module(mod, opts) {
     i++;
   }
   const bytes = buf.bytes();
+  /* thread-local 那两节（`__thread`）。两个 `new Uint8Array` **提到语句里**：
+     自举那条腿（我们自己的 JS 前端编 `cli.js`）不收"惰性求值位置上要临时量的表达式"
+     —— 写在 `?:` 的分支里当场报，`tests/mir` 的 `lower/cli.js` 那一格就是尺子。 */
+  let tlsOut = null;
+  if (tlsPlan.vars !== 0) {
+    const tdOut = new Uint8Array(tdBytes);
+    const tvOut = new Uint8Array(tvBytes);
+    tlsOut = { data: tdOut, vars: tvOut, align: tlsPlan.al };
+  }
   const sizes = [];
   for (let k = 0; k < offsets.length; k++) {
     if (offsets[k] < 0) {
@@ -2990,8 +3083,11 @@ export function genArm64Module(mod, opts) {
      * 下界 8 —— 见 `mir/rodata.js` 的 `layout`。 */
     secAlign: { data: dataPlan.al, rodata: roPlan.al, bss: bssPlan.al },
     dataSyms,
-    dataRelocs,
+    dataRelocs: [...dataRelocs, ...tlsRelocs],
     roRelocs,
     dataAlign,
+    /* thread-local 那两节（`__thread`）：写出器按 `sect: 5`/`6` 认符号与重定位。
+       一格都没有的时候是 `null` —— 那就一节都不写（绝大多数 `.o` 是这一档）。 */
+    tls: tlsOut,
   };
 }

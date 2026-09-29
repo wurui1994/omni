@@ -60,12 +60,23 @@ const MACH_S_ATTR_SOME_INSTRUCTIONS = 0x00000400;
 
 const MACH_PLATFORM_MACOS = 1;
 
+/* thread-local（`__thread`）那两节的类型（`<mach-o/loader.h>` 的 `S_THREAD_LOCAL_*`）。
+ * dyld **按节的类型**认它们：`__thread_vars` 里每 24 字节是一格 tlv descriptor
+ * （`__tlv_bootstrap` / key / 初值模板的偏移），`__thread_data` 是那些初值模板。
+ * 折进 `__data` 的话它们就只是三个普通指针，"每条线程一份"那件事根本不会发生。 */
+const MACH_S_THREAD_LOCAL_REGULAR = 0x11;
+const MACH_S_THREAD_LOCAL_VARIABLES = 0x13;
+
 /* <mach-o/reloc.h> 的 arm64 那一族。 */
 const ARM64_RELOC_BRANCH26 = 2;
 const ARM64_RELOC_PAGE21 = 3;
 const ARM64_RELOC_PAGEOFF12 = 4;
 const ARM64_RELOC_GOT_LOAD_PAGE21 = 5;
 const ARM64_RELOC_GOT_LOAD_PAGEOFF12 = 6;
+/* TLV 那一对：`adrp x0, _x@TLVPPAGE` / `ldr x0, [x0, _x@TLVPPAGEOFF]` ——
+ * 与 GOT 那一对同形，只是链接器填的是 descriptor 的地址（clang 出的就是这两号）。 */
+const ARM64_RELOC_TLVP_LOAD_PAGE21 = 8;
+const ARM64_RELOC_TLVP_LOAD_PAGEOFF12 = 9;
 
 /* <mach-o/reloc.h> 的 x86_64 那一族。`SIGNED` 是「RIP 相对、带符号的四字节」，
  * `BRANCH` 是 `call`/`jmp` 的那一格 —— 两者的 pcrel 都是 1。 */
@@ -180,6 +191,8 @@ MACH_RELOC_TYPE[RELOC_ARM64.PAGE21] = { type: ARM64_RELOC_PAGE21, pcrel: 1, len:
 MACH_RELOC_TYPE[RELOC_ARM64.PAGEOFF12] = { type: ARM64_RELOC_PAGEOFF12, pcrel: 0, len: 2 };
 MACH_RELOC_TYPE[RELOC_ARM64.GOT_PAGE21] = { type: ARM64_RELOC_GOT_LOAD_PAGE21, pcrel: 1, len: 2 };
 MACH_RELOC_TYPE[RELOC_ARM64.GOT_PAGEOFF12] = { type: ARM64_RELOC_GOT_LOAD_PAGEOFF12, pcrel: 0, len: 2 };
+MACH_RELOC_TYPE[RELOC_ARM64.TLVP_PAGE21] = { type: ARM64_RELOC_TLVP_LOAD_PAGE21, pcrel: 1, len: 2 };
+MACH_RELOC_TYPE[RELOC_ARM64.TLVP_PAGEOFF12] = { type: ARM64_RELOC_TLVP_LOAD_PAGEOFF12, pcrel: 0, len: 2 };
 MACH_RELOC_TYPE.X86_64_RELOC_BRANCH = { type: X86_64_RELOC_BRANCH, pcrel: 1, len: 2 };
 MACH_RELOC_TYPE.X86_64_RELOC_SIGNED = { type: X86_64_RELOC_SIGNED, pcrel: 1, len: 2 };
 MACH_RELOC_TYPE.X86_64_RELOC_UNSIGNED = { type: X86_64_RELOC_UNSIGNED, pcrel: 0, len: 2 };
@@ -201,7 +214,8 @@ const MACH_ARCH = {
     cpu: MACH_CPU_TYPE_ARM64,
     sub: MACH_CPU_SUBTYPE_ARM64_ALL,
     kinds: [RELOC_ARM64.BRANCH26, RELOC_ARM64.PAGE21, RELOC_ARM64.PAGEOFF12,
-      RELOC_ARM64.GOT_PAGE21, RELOC_ARM64.GOT_PAGEOFF12, 'POINTER64'],
+      RELOC_ARM64.GOT_PAGE21, RELOC_ARM64.GOT_PAGEOFF12,
+      RELOC_ARM64.TLVP_PAGE21, RELOC_ARM64.TLVP_PAGEOFF12, 'POINTER64'],
   },
   x86_64: {
     cpu: MACH_CPU_TYPE_X86_64,
@@ -266,11 +280,18 @@ function foldRo(data, defs, relocs, opts, dal) {
  * @param arch  `'arm64'`（默认）或 `'x86_64'`
  * @param dataAlign `__data` 那一节要的对齐（字节，2 的幂，默认 8）。
  *                  里面有 16 字节对齐的全局量就得给 16 —— 见第九刀第二十九片。
- * @param opts  `{rodata, bssSize}`（第一百二十二、一百三十二片）：只读那一段的字节与
- *              `.bss` 的长度。这个写出器只有 `__text`/`__data` 两节，所以那两段都
- *              **折进 `__data` 的尾巴**上 —— `sect: 3`/`sect: 4` 的符号与重定位跟着挪。
- *              真正的 `__DATA,__const` 与 `__bss` 是笔欠账，这儿只保证 clang 那条
- *              「真的能跑」的腿不掉字节。
+ * @param opts  `{rodata, bssSize, tls}`（第一百二十二、一百三十二片）：只读那一段的字节与
+ *              `.bss` 的长度 —— 那两段都**折进 `__data` 的尾巴**上（`sect: 3`/`sect: 4`
+ *              的符号与重定位跟着挪）。
+ *
+ *              `tls`（thread-local，`__thread`）是**两节真的节**，不能折：
+ *              `{ data, vars, align }` —— `data` 是 `__DATA,__thread_data`
+ *              （`S_THREAD_LOCAL_REGULAR`，每个变量的**初值模板**），`vars` 是
+ *              `__DATA,__thread_vars`（`S_THREAD_LOCAL_VARIABLES`，每格 24 字节的
+ *              tlv descriptor）。`sect: 5` 指前者、`sect: 6` 指后者。
+ *              为什么必须是真节：descriptor 的第 0 格要指 `__tlv_bootstrap`，而
+ *              dyld 是**按节的类型**认它们的 —— 折进 `__data` 就只是三个普通指针，
+ *              每条线程一份那件事根本不会发生（症状是所有线程共用一格，量过）。
  */
 export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
   const archName = arch === undefined ? 'arm64' : arch;
@@ -278,16 +299,53 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
   if (cpu === undefined) throw new OmniError(`macho: 还不认识架构 ${archName}`);
   const dal = dataAlign === undefined ? 8 : dataAlign;
   const { bytes: dataBytes, defs: defsIn, relocs: relocsIn } = foldRo(data, defs, relocs, opts, dal);
-  const nsects = dataBytes.length === 0 ? 1 : 2;
+  const tls = opts === undefined || opts.tls === undefined ? null : opts.tls;
   /* 节头里写的是**对齐的指数**（2^n），所以这儿要算 log2，而且只认 2 的幂。 */
-  let dalLog = 0;
-  while (2 ** dalLog < dal) dalLog++;
-  if (2 ** dalLog !== dal) throw new OmniError(`macho: 数据节的对齐 ${dal} 不是 2 的幂`);
-  /* 节的地址在段里是**接着排**的：代码从 0 起，数据紧跟着（按数据节自己的对齐）。
-   * 这个数要先算出来 —— 符号的 `n_value` 是**段里的地址**，不是节里的偏移。
-   * 少加这一格的话链接器会说
-   * 「_x symbol is ignored, because its address isn't in its designated section」。 */
-  const dataAddr = machAlign(text.length, dal);
+  const logOf = (n, what) => {
+    let k = 0;
+    while (2 ** k < n) k++;
+    if (2 ** k !== n) throw new OmniError(`macho: ${what}的对齐 ${n} 不是 2 的幂`);
+    return k;
+  };
+  const dalLog = logOf(dal, '数据节');
+  /* **节表驱动**（从前是写死的 1 或 2 节）：地址与文件偏移都按这张表依次推，
+   * 内部的 `sect` 号（1 代码 / 2 数据 / 5 thread_data / 6 thread_vars）与**写出去的
+   * 第几节**是两件事 —— 没有数据节的时候 `thread_data` 就是第 2 节，符号表里的 `n_sect`
+   * 要写后者。 */
+  const secs = [{
+    sect: 1, name: '__text', seg: '__TEXT', bytes: text, alignLog: 2,
+    flags: MACH_S_ATTR_PURE_INSTRUCTIONS | MACH_S_ATTR_SOME_INSTRUCTIONS,
+  }];
+  if (dataBytes.length !== 0) {
+    secs.push({ sect: 2, name: '__data', seg: '__DATA', bytes: dataBytes, alignLog: dalLog, flags: 0 });
+  }
+  if (tls !== null && tls.vars.length !== 0) {
+    secs.push({
+      sect: 5, name: '__thread_data', seg: '__DATA', bytes: tls.data,
+      alignLog: logOf(tls.align === undefined ? 8 : tls.align, 'thread_data 节'),
+      flags: MACH_S_THREAD_LOCAL_REGULAR,
+    });
+    secs.push({
+      sect: 6, name: '__thread_vars', seg: '__DATA', bytes: tls.vars,
+      alignLog: 0, flags: MACH_S_THREAD_LOCAL_VARIABLES,
+    });
+  }
+  const nsects = secs.length;
+  /* 节的地址在段里是**接着排**的（各按自己的对齐）。符号的 `n_value` 是**段里的地址**，
+   * 不是节里的偏移 —— 少加这一格链接器会说「_x symbol is ignored, because its address
+   * isn't in its designated section」。 */
+  let addr = 0;
+  const addrOf = new Map();
+  const noOf = new Map();
+  for (let i = 0; i < secs.length; i++) {
+    const s = secs[i];
+    addr = machAlign(addr, 2 ** s.alignLog);
+    s.addr = addr;
+    addr += s.bytes.length;
+    addrOf.set(s.sect, s.addr);
+    noOf.set(s.sect, i + 1);
+  }
+  const segSize = addr;
   const strs = new machStrTab();
   /* 符号表的次序是**有讲究**的：局部、定义的外部、未定义的外部，三段各自连着 ——
    * MACH_LC_DYSYMTAB 里报的就是这三段的起点与长度。乱了链接器会说符号表坏了。
@@ -302,17 +360,18 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
   const globals = defsIn.filter((d) => d.local !== true);
   for (const d of [...locals, ...globals]) {
     const sect = d.sect === undefined ? 1 : d.sect;
+    if (!noOf.has(sect)) throw new OmniError(`macho: 符号 '${d.name}' 指着第 ${sect} 节，可那一节没写`);
     /* `name` 是身份（重定位按它找），`sym` 是写进字符串表的名字 —— 见 `elf.js` 的
      * `buildSyms`（第九刀第一百三十三片）。 */
     defNo.set(d.name, syms.length);
     syms.push({
       strx: strs.intern(macName(d.sym === undefined ? d.name : d.sym)),
       type: d.local === true ? MACH_N_SECT : (MACH_N_SECT | MACH_N_EXT),
-      sect,
+      sect: noOf.get(sect),
       /* 弱定义（第九刀第一百〇四片）：Mach-O 里它不在 `n_type` 上，而是 `n_desc` 的
        * `MACH_N_WEAK_DEF` 那一位 —— 与 ELF 的 STB_WEAK 对应的那一格。 */
       desc: d.local !== true && d.weak === true ? MACH_N_WEAK_DEF : 0,
-      value: d.off + (sect === 2 ? dataAddr : 0),
+      value: d.off + addrOf.get(sect),
     });
   }
   const nlocal = locals.length;
@@ -333,21 +392,28 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
   };
 
   const HEAD = 32 + (72 + 80 * nsects) + 24 + 24 + 80;
+  /* 文件里各节依次摆（都是有字节的节 —— 这个写出器不发 `S_ZEROFILL`，`.bss` 折在
+     `__data` 尾巴上，TLS 那两节也都带真字节）。节的**文件偏移**按段基址 + 段内地址算，
+     于是与上面排出来的地址一套。 */
   const textOff = HEAD;
-  /* 数据节在文件里紧跟着代码（地址上的位置是上面那个 `dataAddr`）。 */
-  const dataOff = textOff + dataAddr;
-  const relOff = dataOff + dataBytes.length;
+  for (const s of secs) s.off = textOff + s.addr;
   /* 重定位按地址升序 —— 汇编器出来的就是这个次序，链接器也认它。
    * **一节一张表**：节头里的 `reloff`/`nreloc` 是那一节自己的，而 `r_address` 是
    * 节里的偏移。混成一张（代码的 0x10 与数据的 0x10 撞在一起）链接器会往代码里填数据的坑。 */
   const byAt = (x, y) => x.at - y.at;
-  const rsText = relocsIn.filter((r) => (r.sect === undefined ? 1 : r.sect) === 1).sort(byAt);
-  const rsData = relocsIn.filter((r) => r.sect === 2).sort(byAt);
-  if (rsData.length !== 0 && nsects !== 2) {
-    throw new OmniError('macho: 有数据节的重定位，可是数据节是空的');
+  for (const s of secs) {
+    s.relocs = relocsIn.filter((r) => (r.sect === undefined ? 1 : r.sect) === s.sect).sort(byAt);
   }
-  const dataRelOff = relOff + rsText.length * 8;
-  const symOff = relOff + (rsText.length + rsData.length) * 8;
+  const stray = relocsIn.find((r) => !noOf.has(r.sect === undefined ? 1 : r.sect));
+  if (stray !== undefined) {
+    throw new OmniError(`macho: 有第 ${stray.sect} 节的重定位，可那一节没写`);
+  }
+  let relOff = textOff + segSize;
+  for (const s of secs) {
+    s.relOff = relOff;
+    relOff += s.relocs.length * 8;
+  }
+  const symOff = relOff;
   const strOff = symOff + syms.length * 16;
   const strBytes = strs.bytes();
 
@@ -358,19 +424,14 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
 
   // ---- MACH_LC_SEGMENT_64（目标文件里段名是空的，节自己带段名）
   b.u32(MACH_LC_SEGMENT_64).u32(72 + 80 * nsects).name16('');
-  b.u64(0).u64(dataAddr + dataBytes.length).u64(textOff).u64(dataAddr + dataBytes.length);
+  b.u64(0).u64(segSize).u64(textOff).u64(segSize);
   b.u32(VM_PROT_ALL).u32(VM_PROT_ALL).u32(nsects).u32(0);
-  // ---- section_64：__TEXT,__text
-  b.name16('__text').name16('__TEXT');
-  b.u64(0).u64(text.length).u32(textOff).u32(2);   // machAlign = 2^2 = 4，指令的对齐
-  b.u32(rsText.length === 0 ? 0 : relOff).u32(rsText.length);
-  b.u32(MACH_S_ATTR_PURE_INSTRUCTIONS | MACH_S_ATTR_SOME_INSTRUCTIONS).u32(0).u32(0).u32(0);
-  // ---- section_64：__DATA,__data（没有数据就整节不写）
-  if (nsects === 2) {
-    b.name16('__data').name16('__DATA');
-    b.u64(dataAddr).u64(dataBytes.length).u32(dataOff).u32(dalLog);
-    b.u32(rsData.length === 0 ? 0 : dataRelOff).u32(rsData.length);
-    b.u32(0).u32(0).u32(0).u32(0);
+  // ---- section_64 一节一格
+  for (const s of secs) {
+    b.name16(s.name).name16(s.seg);
+    b.u64(s.addr).u64(s.bytes.length).u32(s.off).u32(s.alignLog);
+    b.u32(s.relocs.length === 0 ? 0 : s.relOff).u32(s.relocs.length);
+    b.u32(s.flags).u32(0).u32(0).u32(0);
   }
 
   // ---- MACH_LC_BUILD_VERSION。不写的话链接器会嘟囔一句「没有平台信息」。
@@ -390,23 +451,26 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
 
   if (b.len !== HEAD) throw new OmniError(`macho: 头算成了 ${b.len}，说好是 ${HEAD}`);
 
-  // ---- 代码（补到数据节的起点）
-  b.bytes(text);
-  while (b.len < dataOff) b.u8(0);
-  b.bytes(dataBytes);
+  // ---- 各节的字节（按各自的文件偏移，空隙补零）
+  for (const s of secs) {
+    while (b.len < s.off) b.u8(0);
+    b.bytes(s.bytes);
+  }
 
   // ---- 重定位。第二个字是位域：
   //      低 24 位符号号、24 位 pcrel、25-26 长度、27 extern、28-31 类型。
-  for (const r of [...rsText, ...rsData]) {
-    const kind = MACH_RELOC_TYPE[r.kind];
-    if (kind === undefined) throw new OmniError(`macho: 还不认识重定位 ${r.kind}`);
-    if (!cpu.kinds.includes(r.kind)) {
-      throw new OmniError(`macho: 重定位 ${r.kind} 不是 ${archName} 的`);
+  for (const s of secs) {
+    for (const r of s.relocs) {
+      const kind = MACH_RELOC_TYPE[r.kind];
+      if (kind === undefined) throw new OmniError(`macho: 还不认识重定位 ${r.kind}`);
+      if (!cpu.kinds.includes(r.kind)) {
+        throw new OmniError(`macho: 重定位 ${r.kind} 不是 ${archName} 的`);
+      }
+      b.u32(r.at);
+      /* 位拼装用乘法，不用 `<<` —— `1 << 31` 在 JS 里是负数（arm64 编码器那边同一条）。 */
+      b.u32(symIndexOf(r.sym) + kind.pcrel * 2 ** 24 + kind.len * 2 ** 25 + 1 * 2 ** 27
+        + kind.type * 2 ** 28);
     }
-    b.u32(r.at);
-    /* 位拼装用乘法，不用 `<<` —— `1 << 31` 在 JS 里是负数（arm64 编码器那边同一条）。 */
-    b.u32(symIndexOf(r.sym) + kind.pcrel * 2 ** 24 + kind.len * 2 ** 25 + 1 * 2 ** 27
-      + kind.type * 2 ** 28);
   }
 
   // ---- 符号表（nlist_64）

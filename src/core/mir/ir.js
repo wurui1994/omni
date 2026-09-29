@@ -1134,6 +1134,11 @@ export class MirModule {
      * `.data` 里、`int a;` 在 `.bss` 里，两者的字节一模一样 —— 后端**不能**按字节猜，
      * 这一格只能由 C 前端填。与 `globalRo` 同一种性质：标注，不是语义。 */
     this.globalBss = [];
+    /* 与 globals 同下标的「这一格是 thread-local 吗」（`__thread` / `_Thread_local`）。
+     * 与 `globalRo` / `globalBss` 不同的一点：它**不只是标注** —— 取地址那一步也变了
+     * （Mach-O 上要过 tlv descriptor 拿"这条线程那一份"），所以后端两处都看它。
+     * `extern __thread` 也要标：访问序列由**用的那一侧**发。 */
+    this.globalTls = [];
     /* 与 globals 同下标的「写进符号表的那个名字」（第九刀第一百三十三片）：不给就用
      * `globals[gi]` 自己。两者不同的只有函数体里的 `static` —— MIR 里那一块的身份得
      * 唯一（我们编的是 `f.n.0`），可 tcc 写进 `.o` 的是**声明时那个名字**（`n`），
@@ -1394,6 +1399,12 @@ export class MirModule {
   markGlobalBss(no) {
     if (this.globals[no] === undefined) throw new Error(`mir: 没有 ${no} 号模块级变量`);
     this.globalBss[no] = true;
+  }
+
+  /** 这个全局是 thread-local（`__thread`）。见 `globalTls` 头上那段。 */
+  markGlobalTls(no) {
+    if (this.globals[no] === undefined) throw new Error(`mir: 没有 ${no} 号模块级变量`);
+    this.globalTls[no] = true;
   }
 
   /** 这个全局写进符号表的名字。见 `globalSym` 头上那段。 */
