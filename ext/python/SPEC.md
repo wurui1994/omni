@@ -1413,6 +1413,21 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 
 ### 已落地
 
+- **外部 C 扩展（`.so`）装得进来了（2026-09-29）** —— `lxml` 那一刀的前置条件，量完了：
+  一份 30 行的最小扩展（`PyModule_Create` + `PyInit_omnihello`）**过我们自己的 C 前端**
+  编成 `.o`、`clang -shared -undefined dynamic_lookup` 链成 `.so`，放进 `sys.path`
+  —— 借来的运行时 `dlopen` 它、调它的两个函数，答案对（`hello, omni (from our own
+  extension)` / `add 42`）。也就是说 `Python/dynload_shlib.c` 那条路是通的。
+  - **文件名要按我们自己的 SOABI**：`importlib.machinery.EXTENSION_SUFFIXES` 在我们这儿是
+    `['.cpython-316.so', '.abi3.so', '.abi3t.so', '.so']`（`scope.js` 的 `soabi()` 给的是
+    `cpython-316`，没有 `-darwin` 那一段）。名字错一格就是 `ModuleNotFoundError`。
+  - **顺手抓到一格缺口**：`sys.abiflags` 不存在（`sysmodule.c` 按 `ABIFLAGS` 宏发它），
+    于是 `import sysconfig` 里 `_get_sysconfigdata_name` 当场 `AttributeError`。
+    那是"构建系统该给而我们没给"的又一格（`-DABIFLAGS`），记在下一刀。
+  - **`lxml` 本身还缺两样**：源码（它是 Cython 出的 C，本机只有 cp314 的 wheel ——
+    ABI tag 与我们的 `cpython-316` 不通用，必须自己编）与 `libxml2` / `libxslt`
+    （`/opt/homebrew/opt/libxml2` 在，`libxslt` 不在）。要下载第三方源码，**先问过再动**。
+
 - **`__thread` 落成真 TLS，于是 threading / requests / httpx 真跑起来（2026-09-29）** ——
   第三方库那条线的第二刀，也是**这一路上最深的一格静静答错**：
   - **病**：`__thread` / `_Thread_local` 在 `parseBtype` 里与 `restrict` 并排被吃掉，
