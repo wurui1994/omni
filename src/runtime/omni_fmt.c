@@ -487,6 +487,7 @@ extern void *dlsym(void *, const char *);
 typedef int (*gfx_gl_open_fn)(int, int);
 typedef void (*gfx_gl_cls_fn)(unsigned int);
 typedef void (*gfx_gl_depth_fn)(int);
+typedef void (*gfx_gl_psize_fn)(double);
 typedef void (*gfx_gl_batch_fn)(int, long, const double *);
 typedef int (*gfx_gl_read_fn)(unsigned char *);
 typedef const char *(*gfx_gl_err_fn)(void);
@@ -523,6 +524,7 @@ static struct {
   gfx_gl_open_fn open;
   gfx_gl_cls_fn cls;
   gfx_gl_depth_fn depth;
+  gfx_gl_psize_fn psize;   /* 点多大（`glpointsize`）—— 老版本的库里没有，可以是 NULL */
   gfx_gl_batch_fn batch;
   gfx_gl_read_fn read;
   gfx_gl_err_fn err;
@@ -1065,6 +1067,7 @@ static int gfx_gl_need(void) {
     g_gl.open = (gfx_gl_open_fn)dlsym(h, "omni_ev_gl_open");
     g_gl.cls = (gfx_gl_cls_fn)dlsym(h, "omni_ev_gl_cls");
     g_gl.depth = (gfx_gl_depth_fn)dlsym(h, "omni_ev_gl_depth");
+    g_gl.psize = (gfx_gl_psize_fn)dlsym(h, "omni_ev_gl_psize");
     g_gl.cull = (gfx_gl_int_fn)dlsym(h, "omni_ev_gl_cull");
     g_gl.batch = (gfx_gl_batch_fn)dlsym(h, "omni_ev_gl_batch");
     g_gl.read = (gfx_gl_read_fn)dlsym(h, "omni_ev_gl_read");
@@ -1906,6 +1909,9 @@ double omni_gfx_call(omni_str name, int64_t argc, double a0, double a1, double a
      与 `host/gfx-cpu.js` 逐句相同（三条腿逐字节相同是判据）。 */
   if (!strcmp(nm, "glpointsize") && argc == 1) {
     g_gfx_psize = a0 >= 1.0 ? (int)(a0 + 0.5) : 1;
+    /* GL 那一档转过去（那边点走 `GL_POINTS`，大小归 `glPointSize`）——
+       与 `host/gfx-cpu.js` 里那一格逐句相同。 */
+    if (g_gl.on && g_gl.psize != NULL) g_gl.psize((double)g_gfx_psize);
     return 0.0;
   }
   if (!strcmp(nm, "glcullface") && argc == 1) { return 0.0; }

@@ -4442,8 +4442,13 @@ cubetex 76800 格）—— 又一次"红先怀疑尺子"。
   写得动，而脚本自己那份着色器我们不动一个字），CPU 备选按 n×n 一块像素铺
   （`host/gfx-cpu.js` 与 `runtime/omni_fmt.c` 逐句相同）。`03_point.pss` 从 1 格变
   **81 格 = 9×9**（CPU 备选那一档 js 腿与 c 腿**逐字节相同**，浏览器那一档量出来也是
-  **81** —— 两台设备对得上；`05_rotate_points.pss` 48 格）。**本机 OpenGL 那一档还没接**（那边点走
-  `GL_POINTS`，要 `glPointSize` 一格插件接线）—— 记着，别以为三档已经一致。
+  **81** —— 两台设备对得上；`05_rotate_points.pss` 48 格）。
+  **本机 OpenGL 那一档随后也接上了**：那边点走 `GL_POINTS`，大小归 `glPointSize`
+  （core profile 里默认就是它说话，`GL_PROGRAM_POINT_SIZE` 是关着的），接线是
+  `omni_ev_gl_psize` + napi 的 `psize` + 两处宿主转发（`host/gfx-cpu.js` 与
+  `runtime/omni_fmt.c` 里那一格 `dlsym`，**老版本的库里没有这个符号 ⇒ 判 NULL**）。
+  `03_point.pss` 在 `--gfx gl` 上量出来**也是 81** —— 三档设备终于是一件事。
+  判据 `tests/gl` 27/27 没动。
 * **语料自己标着 `UNSUPPORTED`** 的三份（`08_getinfo` / `15_paraboloid` / `22_text`）：
   名字里就写了，不算我们的缺口。
 * **几何着色器那两份**（`geo_test` / `geo_duptris`）与 **`orthoglobe`**（几何摆在

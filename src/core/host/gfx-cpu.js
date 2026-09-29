@@ -1040,11 +1040,12 @@ export function gfxCall(name, args) {
      * 语料里两份靠它（`examples/opengl/03_point.pss`、`05_rotate_points.pss`）：
      * 从前当"收下不管"，于是 9 像素的点只画 1 格。
      *
-     * GL 那一档（`--gfx gl`）**还没转过去**：那边点走的是 `GL_POINTS`，要 `glPointSize`
-     * 那一格插件接线（记在任务里，别以为三档已经一致）。
+     * GL 那一档（`--gfx gl`）**转过去**：那边点走 `GL_POINTS`，大小归 `glPointSize`
+     * （core profile 里默认就是它说话）—— 照 `gldepth`/`glcull` 那两格的样子递。
      */
     case 'glpointsize/1':
       D.psize = a(0) >= 1 ? Math.round(a(0)) : 1;
+      if (G.on && typeof G.m.psize === 'function') G.m.psize(D.psize);
       return 0;
     case 'glcullface/1': case 'gllinewidth/1':
     case 'glswapinterval/1': case 'glalphaenable/1': case 'glalphadisable/1':

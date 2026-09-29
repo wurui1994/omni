@@ -314,6 +314,20 @@ void omni_ev_gl_cls(unsigned int rgb) {
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 }
 
+/** 点多大（语言那一侧的 `glpointsize` 转过来的）。默认 1，与另外两档设备同一条口径。 */
+static float g_psize = 1.0f;
+
+/**
+ * `glpointsize(n)`：接下来那些点多大。core profile 里 `glPointSize` 管的就是这一格
+ * （`GL_PROGRAM_POINT_SIZE` 默认是关的，所以着色器里不写 `gl_PointSize` 也没关系）。
+ *
+ * 另外两档设备摊的是 n×n 一块（WebGL2 的四边形 / CPU 备选的像素块）—— 这一档交给 GL
+ * 自己，`03_point.pss` 上量出来的亮格数与它们一致（81 = 9×9）。
+ */
+void omni_ev_gl_psize(double n) {
+  g_psize = n >= 1.0 ? (float)n : 1.0f;
+}
+
 /** 深度测试（语言那一侧的 `gldepth` 转过来的 —— GPU 的 z 缓冲只有设备做得到）。 */
 void omni_ev_gl_depth(int on) {
   if (!g_on) return;
@@ -1375,6 +1389,8 @@ void omni_ev_gl_batch(int kind, long n, const double *verts) {
     g_vattr_dirty = 1;
   }
   GLenum mode = kind == 0 ? GL_LINES : (kind == 2 ? GL_POINTS : GL_TRIANGLES);
+  /* 点那一档的大小（`glpointsize`，见 `omni_ev_gl_psize`）—— 每段批设一次就够。 */
+  if (kind == 2) glPointSize(g_psize);
   glDrawArrays(mode, 0, (GLsizei)n);
 }
 
