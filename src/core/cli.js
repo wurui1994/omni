@@ -4266,7 +4266,13 @@ function runtimeArgsSelf(arch, os, fmt) {
   if (flag === null || objs.length === 0) return objs;
   const lib = join(dirname(objs[0]), 'librt.a');
   try {
-    if (!exists(lib)) {
+    /* **只看"在不在"是不够的**：那 21 格 `.o` 重编过（改了一行运行时的 C）而这份 `.a`
+       还是上一次打的，链接器就拿旧的那份 —— 症状轻的是"符号 '…' 没有定义"（量到过：
+       给 `omni_str.c` 加了一个函数，`.o` 里有、`.a` 里没有），重的是**静静用旧代码**
+       （改的是一个已有函数的实现，那就一个字都不报）。判据：比任何一格 `.o` 旧就重打。 */
+    const stale = exists(lib)
+      && objs.some((p) => exists(p) && mtimeMs(p) > mtimeMs(lib));
+    if (!exists(lib) || stale) {
       const ar = coreMod('link/ar.js');
       const elf = coreMod('link/elf.js');
       const pl = coreMod('link/pe_load.js');
@@ -4319,7 +4325,10 @@ function runtimeArgsCc(cc) {
   if (rt.length === 0) return objs;
   const lib = join(dirname(rt[0]), 'librt-cc.a');
   try {
-    if (!exists(lib)) {
+    /* 同 `runtimeArgsSelf`：比任何一格 `.o` 旧就重打 —— 只看"在不在"会让改过的运行时
+       悄悄不进产物（那一格是"静静用旧代码"，比缺符号更难发现）。 */
+    const stale = exists(lib) && rt.some((p) => exists(p) && mtimeMs(p) > mtimeMs(lib));
+    if (!exists(lib) || stale) {
       /* 每个进程自己一个暂存目录再 rename：`ar rcs` 是**往里加**，半份 `.a` 留在原地
          下一趟就会被接着塞第二遍（同一格 `.o` 进两次）。 */
       const stage = scratchDir('rt-ar');

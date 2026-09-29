@@ -2869,6 +2869,18 @@ export function parseNumber(text) {
   /* 十进制的无后缀常量放不进 intmax_t 时 C 说它是无符号的；十六进制/八进制更早
    * 就会跳到无符号。两种情况都在 64 位这一档上判 —— 这条线就是 tcc 在本机的行为。 */
   if (!unsigned && val > 0x7fffffffffffffffn) unsigned = true;
+  /* **十六/八进制的无后缀常量：`unsigned int` 排在 `long` 前面**（C11 6.4.4.1 那张表 ——
+   * 十六与八进制的候选序列是 int -> unsigned int -> long -> unsigned long -> …，
+   * 而十进制那一列**没有** unsigned 那几格）。
+   *
+   * 量出来的必要性（2026-09-29）：macOS 的 `FIONBIO` 是 `_IOW('f',126,int)`，展开成
+   * `0x80000000 | …`。按 `long` 收它就是个正的 64 位数、`|` 完再当 `unsigned long`
+   * 传给 `ioctl` 就是 `0xffffffff8004667e`（clang 给的是 `0x8004667e`），内核不认这个
+   * request，当场回 `ENOTSUP`(102)。症状离现场很远：**asyncio 起不来** ——
+   * `loop._make_self_pipe()` 里 `sock.setblocking(False)` 抛 OSError 102。 */
+  if (!unsigned && !long && base !== 10 && val > 0x7fffffffn && val <= 0xffffffffn) {
+    unsigned = true;
+  }
   val = unsigned ? BigInt.asUintN(64, val) : BigInt.asIntN(64, val);
   /* **32 位还是 64 位：按 C11 6.4.4.1 表 1 那三列挑，不是一律拿 `0x7fffffff` 比。**
    *   * 带 `U`：`unsigned int` -> `unsigned long long`（界是 `0xffffffff`）；

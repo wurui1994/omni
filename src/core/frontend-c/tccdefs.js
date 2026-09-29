@@ -424,6 +424,14 @@ export const COMPILE_DEFS = [
     '(__extension__ ({ unsigned long long __bs64 = (unsigned long long)(x);'
     + ' ((unsigned long long)__builtin_bswap32((unsigned int)(__bs64 & 0xffffffffull)) << 32)'
     + ' | (unsigned long long)__builtin_bswap32((unsigned int)(__bs64 >> 32)); }))'],
+  /* **C11 的 `_Noreturn`** —— 我们认 `__attribute__((noreturn))`、认 `_Alignas` /
+     `_Alignof`，独缺这一格（一个关键字都没登记）。逼出它的是 OpenSSL 的头：
+     `openssl/crypto.h:471` 那句 `ossl_noreturn void OPENSSL_die(…)`，而 `ossl_noreturn`
+     在 `__STDC_VERSION__ >= 201112L` 那一支就展开成 `_Noreturn` —— 症状是
+     `';' expected (got 'void')`，于是 `_ssl.c` / `_hashopenssl.c` 编不出，
+     再往上就是 `import ssl` 失败、`requests` / `httpx` / `anyio` 全进不来。
+     落成属性而不是新关键字：语义一样，而声明说明符那张表一个字都不用改。 */
+  ['_Noreturn', '__attribute__((noreturn))'],
   ['__builtin_clz(x)',
     '(__extension__ ({ unsigned int __bz = (unsigned int)(x);'
     + ' __bz |= __bz >> 1; __bz |= __bz >> 2; __bz |= __bz >> 4;'

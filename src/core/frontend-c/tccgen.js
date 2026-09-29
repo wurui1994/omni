@@ -1850,18 +1850,31 @@ export class CGen {  /**
      * 截断规则与 `ceCastTo` 同一套：先按目标宽度回绕，再进 `konst` 收成规范形。 */
     const kv = this.kintOf(r);
     if (kv !== null) {
+      /* **先把源那一侧的位按源类型读回来，再按目标截** —— 少了第一步就是符号扩展一个
+         无符号数。MIR 里 32 位常量的规范形是**有符号**的（`konst`），所以一格
+         `unsigned int` 的 `0x80000000` 在这儿读到的是 `-2147483648n`；直接
+         `asUintN(64, …)` 得到的是 `0xffffffff80000000`。
+         量出来的（2026-09-29）：`(unsigned long)FIONBIO` 在 clang 上是 `0x8004667e`，
+         我们给的是 `0xffffffff8004667e` —— `ioctl` 的 request 对不上，内核回
+         `ENOTSUP`(102)，asyncio 的 self-pipe 起不来。指针那一侧按 64 位无符号读。 */
+      const sUns = isPtr(from.t) || isUnsigned(from.t);
+      const sBits = isPtr(from.t) ? 64 : intBitsOf(from);
+      const sv = sUns ? BigInt.asUintN(sBits, kv) : BigInt.asIntN(sBits, kv);
       const bits = isPtr(ty.t) ? 64 : intBitsOf(ty);
-      const folded = isUnsigned(ty.t) ? BigInt.asUintN(bits, kv) : BigInt.asIntN(bits, kv);
+      /* 目标是无符号**或指针**时按无符号收 —— 指针没有符号那回事。 */
+      const folded = isUnsigned(ty.t) || isPtr(ty.t)
+        ? BigInt.asUintN(bits, sv) : BigInt.asIntN(bits, sv);
       /* 折完还是**同一个地址**时记号要跟着走（`char[N]` 退化成 `char *` 就走这条路：
          `printf("…")` 的那个串地址正是这么丢掉记号的）。值变了（真的截断了）就不是
-         地址了 —— 那时按普通整数收，别乱扣记号。 */
-      if (!this.native && folded === kv && this.mod.addrConsts.has(r)) {
+         地址了 —— 那时按普通整数收，别乱扣记号。比较对象是**源侧读回的真值**（sv）：
+         折叠是从它算的，没变才是真的没截断。 */
+      if (!this.native && folded === sv && this.mod.addrConsts.has(r)) {
         return sVal(ty, this.kaddr(folded));
       }
       /* **函数地址那一格同理**（第一百五十二片）：`pick(self, 7)` 里那个实参要过一次
          "指针转指针"，折完值没变 —— 记号也得跟着走，不然它在模块档里成了一个普通的
          小整数，`fnSlot` 那一步就换不成全程序的槽位（静默调错函数）。 */
-      if (!this.native && folded === kv && this.mod.funcRefs.has(r)) {
+      if (!this.native && folded === sv && this.mod.funcRefs.has(r)) {
         return sVal(ty, this.fnAddrConst(this.mod.funcRefs.get(r)));
       }
       return sVal(ty, this.konst(ty, folded));
