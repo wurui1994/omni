@@ -1116,7 +1116,8 @@ async function stash() {
 
 /** 能跑的那几门（别的只展示 —— 比如 `.md`）。 */
 const RUNNABLE = new Set(['omni', 'sx', 'go', 'c', 'asy', 'js', 'lua', 'nim', 'v', 'mojo',
-  'cpp', 'awk', 'scheme', 'lisp', 'basic', 'jancy', 'wat', 'pss', 'kc']);
+  'cpp', 'awk', 'scheme', 'lisp', 'basic', 'jancy', 'wat', 'pss', 'kc',
+  'python', 'r']);
 
 /**
  * **EVAL 两门（`.pss` / `.kc`）在页面里直通 WebGL2** 的那一格设备。

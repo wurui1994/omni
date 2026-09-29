@@ -94,7 +94,8 @@ export const TREE_ROOTS = [
      （那个目录没有 `omni-ext.json`，所以它不是一格扩展，只是例子 —— 见 `ext.js` 里
      "不自述的目录不算扩展"那一句）。 */
   { name: '例子', path: 'ext', exts: ['.go', '.nim', '.v', '.lua', '.mojo', '.cpp', '.bas',
-    '.awk', '.ss', '.lisp', '.asy', '.jnc', '.js', '.sx', '.html', '.omni', '.pss', '.kc'],
+    '.awk', '.ss', '.lisp', '.asy', '.jnc', '.js', '.sx', '.html', '.omni', '.pss', '.kc',
+    '.py', '.R', '.r'],
     only: 'examples' },
   { name: '判据', path: 'tests', exts: ['.go', '.sx', '.asy', '.wat', '.js', '.jnc', '.frag',
     '.omni'],
@@ -126,6 +127,10 @@ export const LANG_OF = {
      `lang` 在"编辑器里改过"那一档会拼成 `__new/live.<lang>`，标签不是后缀的话
      CLI 认不出那份临时文件（`serve.js` 的 `runRequest`）。 */
   '.pss': 'pss', '.kc': 'kc',
+  /* python 与 R：标签是**登记处那门的名字**（`lower/langs.js`），也是后缀去掉点 ——
+     临时文件落成 `__new/live.py` / `__new/live.R`，CLI 按后缀认（R 的两个后缀
+     `R`/`r` 都在这张表里，大小写各一格）。 */
+  '.py': 'python', '.R': 'r', '.r': 'r',
 };
 
 export const extOf = (p) => (p.lastIndexOf('.') < 0 ? '' : p.slice(p.lastIndexOf('.')));

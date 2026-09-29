@@ -341,6 +341,17 @@ try {
     `${JSON.stringify(r.json.stdout)} != ${JSON.stringify(local)}`);
   ok('/api/run 带阶段信息', (r.json.stderr ?? '').split('\n').some((l) => l.startsWith('omni:')));
 
+  /* **python 与 R 两门刚进树**（`shared.js` 的 `TREE_ROOTS` 收了 `.py`/`.R`/`.r`）：
+     同样过一遍"服务与本地逐字节相同" —— 两门都走 adapter → 标准 IR → 公共 lower
+     那条默认路（R 的 `.R` 后缀那格顺带把 langOf 的标签也量了）。 */
+  for (const p of ['ext/python/examples/basics.py', 'ext/r/examples/basics.R']) {
+    const rp = await post('/api/run', { path: p });
+    const lp = execFileSync('node', [join(root, 'src', 'cli.js'), 'run', p],
+      { cwd: root, encoding: 'utf8', timeout: 120000 });
+    ok(`/api/run 与本地 omni run 逐字节相同（${p}）`, rp.json.stdout === lp,
+      `${JSON.stringify(rp.json.stdout)} != ${JSON.stringify(lp)}`);
+  }
+
   /**
    * **EVAL 两门：按单元产物那条路**（`/api/units` + `/api/mod`，
    * `docs/design/omni-serve-studio.md` §9.3）。判的是那条路的**账**，不是"跑通了"：

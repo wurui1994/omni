@@ -37,6 +37,8 @@ export const KW = {
   asy: 'pen path guide picture real pair triple struct void return import access from as new operator',
   wat: 'module func param result local global memory data export import i32 i64 f32 f64 call br_if loop block',
   jancy: 'class property construct destruct int char void bool string alias enum',
+  python: 'def class lambda import from as pass None True False yield with global nonlocal del assert elif except finally raise in is not and or',
+  r: 'function TRUE FALSE NULL NA NA_integer_ NA_real_ Inf NaN repeat next in ifelse vector list matrix',
   glsl: 'void float vec2 vec3 vec4 mat4 uniform varying attribute in out precision',
   /* html / css 在这一层只要"标签与注释分得清"——关键字表给的是常见标签名与属性名。 */
   html: 'html head body meta title link script style div span p a img ul ol li table tr td th'
@@ -48,6 +50,7 @@ const LINE_COM = {
   go: '//', c: '//', cpp: '//', js: '//', v: '//', jancy: '//', glsl: '//', asy: '//',
   omni: '//', sx: ';', nim: '#', mojo: '#', lua: '--', awk: '#', basic: "'",
   scheme: ';', lisp: ';', wat: ';;',
+  python: '#', r: '#',
   /* html / css / json 没有行注释。**得给一个不可能出现的串** —— 缺省那个 `'//'`
      会把 `https://…` 后面整行吞成注释，而留空串更糟（`startsWith('')` 恒真，全文变注释）。 */
   html: '\u0000', css: '\u0000', json: '\u0000', markdown: '\u0000',
