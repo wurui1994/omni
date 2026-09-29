@@ -150,7 +150,15 @@ const HEADERS = [CONFIG_H, RCONFIG_H, RVERSION_H, RMATH_H];
 
 const INC = [GEN, join(RSRC, 'src/include'), join(RSRC, 'src/nmath'), join(RSRC, 'src/extra'),
   '/opt/homebrew/include'].map((p) => `-I${p}`).join(' ');
-const CFLAGS = `-O2 -w -std=gnu17 -fPIC -DHAVE_CONFIG_H ${INC}`;
+/* **`-ffp-contract=off` 不是可选的**（第三十八格量出来的）：clang 在 arm64 上默认把
+   `a*b+c` 收缩成一条 `fmadd`（还顺手向量化成 `fmul.2d`），比"一步乘、一步加"**多一层精度**。
+   而这一份是**尺子** —— 判据拿它的答案当真话，我们那条 JS 腿上乘和加就是两步。
+   两边于是差一个 ulp：平时看不见，一落在 `%.2f` 的切点上就露出来（`pdf()` 画圆的
+   贝塞尔控制点，我们 88.69、R 88.68）。证据是 `otool -tV libR.dylib`：`_GESymbol`
+   里有 2 条 `fmadd`/`fmsub`。
+
+   所以尺子按 C 不收缩那一档编。放宽判据到"差一位也算对"是不许的 —— 那是把静默答错合法化。 */
+const CFLAGS = `-O2 -w -std=gnu17 -fPIC -ffp-contract=off -DHAVE_CONFIG_H ${INC}`;
 
 b.rule('cc', { command: `${CC} ${CFLAGS} $extra -c $in -o $out`, description: 'CC $out' });
 b.rule('fc', { command: `${FC} -O2 -fPIC -c $in -o $out`, description: 'FC $out' });

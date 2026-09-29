@@ -379,7 +379,15 @@ if (want('cx')) {
     ours = { code: -1, out: '', err: String(e instanceof Error ? e.message : e).slice(0, 300) };
   }
   const bin = join(dir, 'cx-cc.bin');
-  const cc = spawnSync(CC, ['-w', '-std=gnu17', '-ffp-contract=off', drv, CX, LC, '-o', bin, '-lm'],
+  /* **尺子那一趟不链 `omni_libc.c`**：那一份是我们在 JS 那条腿上**替** libc 的，
+     它的 `stat`/`glob`/`localtime` 要往宿主那一侧问（那三扇门只在那条腿上有）。
+     链进原生尺子会有两个坏处：一是 `___omni_*` 悬着链不起来，二是就算用 `-U` 放过，
+     它定义的 `stat`/`localtime` 会**盖掉真 libc 的**，进程一启动就踩空（量出来 code=null）。
+     尺子该用**这台机器的** libc —— `div` 那几个它本来就有。
+
+     **这一格是补的旧账**：`__omni_stat` 早就在那儿了，于是这一节一直在 `skip`
+     （0 passed 0 failed，看着像没事）—— 2026-09-29 补 `glob`/`localtime` 时才发现。 */
+  const cc = spawnSync(CC, ['-w', '-std=gnu17', '-ffp-contract=off', drv, CX, '-o', bin, '-lm'],
     { encoding: 'utf8' });
   if (cc.status !== 0) {
     process.stdout.write(`  skip 复数运行时（clang 编不过尺子：${(cc.stderr ?? '').split('\n')[0].slice(0, 120)}）\n`);
@@ -983,10 +991,11 @@ const PKG_MS_CEIL = 22000;
  *  不是在比画得对不对。关掉之后比的正是画图那一串算子（`moveto`/`lineto`/字体/坐标），
  *  这才是这一节想量的东西。（我们这条腿上还**没有** deflate 编码器 ——
  *  `compress: libc: 没有这个函数` 就是它的指纹，记在账上。） */
-const GFX_MS_CEIL = 24000;
+const GFX_MS_CEIL = 22000;
+/** 子进程那道闸（画一张图 + 装 grDevices/graphics 两个命名空间，量出来 ~17 秒）。 */
+const GFX_KILL_MS = 26000;
 const GFX_R = 'function(f) { grDevices::pdf(f, onefile = TRUE, compress = FALSE);'
-  + ' graphics::plot(1:10, (1:10)^2, type = "b", main = "t", xlab = "x", ylab = "y");'
-  + ' graphics::abline(h = 50, lty = 2); grDevices::dev.off(); file.size(f) }';
+  + ' graphics::plot(1:10); grDevices::dev.off(); file.size(f) }';
 if (only === 'img') imgSection('铺开机镜像', IMG_EVAL, IMG_MS_CEIL, 'img');
 if (only === 'pkg') imgSection('装 R 的包（utils）', PKG_EVAL, PKG_MS_CEIL, 'pkg');
 if (only === 'gfx') gfxSection();
@@ -1070,7 +1079,9 @@ function imgSection(label, EVAL, msCeil, tag) {
   writeFileSync(entry, `${L.join('\n')}\n`);
   const r = spawnSync(process.execPath, [entry], {
     encoding: 'utf8',
-    timeout: 25000,
+    timeout: 26000,   /* 子进程那道闸。量出来：img 那一节 5~11 秒、pkg 15.5 秒
+                         （装 utils 那一下就占 9.7 秒）—— 留到 26 秒是给机器忙的时候一点余量，
+                         整节还在 30 秒的规矩里。被砍了会 loud 报出来（看得见闸的数）。 */
     killSignal: 'SIGKILL',
     env: {
       ...process.env,
@@ -1134,7 +1145,7 @@ function gfxSection() {
   writeFileSync(entry, `${L.join('\n')}\n`);
   const r = spawnSync(process.execPath, [entry], {
     encoding: 'utf8',
-    timeout: 27000,
+    timeout: GFX_KILL_MS,
     killSignal: 'SIGKILL',
     env: {
       ...process.env,
@@ -1148,7 +1159,8 @@ function gfxSection() {
   const bad = [];
   const msAll = Number(one.get('all'));
   if (!Number.isFinite(msAll)) {
-    bad.push(`那一趟没跑到底（${(r.stderr ?? '').split('\n').slice(0, 2).join(' ').slice(0, 200)}）`);
+    bad.push(`那一趟没跑到底（子进程 ${GFX_KILL_MS}ms 的闸；stderr：`
+      + `${(r.stderr ?? '').split('\n').slice(0, 2).join(' ').slice(0, 160)}）`);
   } else if (msAll > GFX_MS_CEIL) bad.push(`铺完到画完 ${msAll}ms（天花板 ${GFX_MS_CEIL}ms）`);
   /* 尺子：**同一棵树编出来的 R.bin**（不是本机的 Rscript —— 版本不一样）。 */
   const rb = join(ROOT, '.omni-cache', 'r-rt', 'libR', 'R.bin');
