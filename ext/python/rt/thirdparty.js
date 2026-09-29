@@ -213,8 +213,88 @@ print("zlib 往返", zlib.decompress(zlib.compress(b"x" * 1000)) == b"x" * 1000)
   }
 }
 
+/* 门四：**Cython 出的 C 扩展**（这一问才是"第三方生态能不能进来"的根 —— PyPI 上带
+   C 的包大半是 Cython 出的）。被试者是 `probe-cython.pyx`：本机的 cython 把它变成
+   一万四千行 C，**我们自己的前端**编、`clang -shared` 链成 `.so`（按我们的 SOABI），
+   我们的运行时装它；oracle 是"同一份 `.c` 交给 clang + 本机 python3"。
+
+   两格编译开关要明着给（不给就编不过，量出来的）：
+     * `-DCYTHON_CCOMPLEX=0` —— 不然它 `#include <complex.h>`，而我们那台前端还没有
+       `_Complex` 那一族（症状：`complex.h:78: identifier expected`）；
+     * `-DCYTHON_ATOMICS=0` —— 不然它要 `stdatomic.h`（我们没有那份头；借来的运行时那
+       278 份走的是 `__atomic_*` 内建，见 `scope.js` 的 `-D_Py_USE_GCC_BUILTIN_ATOMICS`）。 */
+const cy = spawnSync('python3', ['-m', 'cython', '--version'], { encoding: 'utf8' });
+if (cy.status !== 0) {
+  say('门四：跳过（本机没有 cython —— 那一问要它把 .pyx 变成 C）');
+} else {
+  const cdir = join(OUT, 'cy');
+  mkdirSync(join(cdir, 'ours'), { recursive: true });
+  mkdirSync(join(cdir, 'ref'), { recursive: true });
+  const cSrc = join(cdir, 'probe_cython.c');
+  const cyr = spawnSync('python3', ['-m', 'cython', '-3', '--module-name', 'probe_cython',
+    '-o', cSrc, join(here, 'probe-cython.pyx')], { encoding: 'utf8' });
+  if (cyr.status !== 0 || !existsSync(cSrc)) {
+    bad += 1;
+    say(`门四：cython 没过：\n${(cyr.stderr ?? '').split('\n').slice(0, 5).join('\n')}`);
+  } else {
+    const CYD = ['-DCYTHON_CCOMPLEX=0', '-DCYTHON_ATOMICS=0'];
+    const eo = join(cdir, 'probe_cython.o');
+    const ours = join(cdir, 'ours', 'probe_cython.cpython-316.so');
+    const e1 = spawnSync(process.execPath, [CLI,
+      ...flagsFor(eo, INC, SRC, [...perFileFlags('Modules/arraymodule.c', SRC), ...CYD]), cSrc],
+    { encoding: 'utf8' });
+    const e2 = e1.status !== 0 ? null
+      : spawnSync(CC, ['-shared', '-undefined', 'dynamic_lookup', '-o', ours, eo], { encoding: 'utf8' });
+    /* oracle 那一侧：同一份 `.c`，clang + 本机 python3 的头。 */
+    const pinc = (spawnSync('python3', ['-c',
+      'import sysconfig;print(sysconfig.get_paths()["include"])'], { encoding: 'utf8' }).stdout ?? '').trim();
+    const ref = join(cdir, 'ref', 'probe_cython.so');
+    const e3 = spawnSync(CC, ['-shared', '-undefined', 'dynamic_lookup', '-I', pinc,
+      '-o', ref, cSrc], { encoding: 'utf8' });
+    if (e1.status !== 0 || e2 === null || e2.status !== 0 || e3.status !== 0) {
+      bad += 1;
+      const why = e1.status !== 0
+        ? (e1.stderr ?? '').split('\n').filter((l) => /error:/.test(l)).slice(0, 4).join('\n')
+        : `链接：${(e2 === null ? '' : e2.stderr ?? '')}${e3.stderr ?? ''}`.slice(0, 300);
+      say(`门四：**Cython 出的扩展** —— 编不出来：\n${why}`);
+    } else {
+      const PY = `import sys
+sys.path.insert(0, sys.argv[1])
+import probe_cython as m
+
+p = m.Point(3, 4)
+print("Point", p, p.norm(), p.x, p.y)
+print("fib", [m.fib(n) for n in (0, 1, 10, 50, 90)])
+print("sieve", m.sieve(60))
+print("words", m.words("the quick brown fox the lazy dog THE fox."))
+print("boom", [m.boom(k) for k in (0, 1, 4)])
+c = m.Counter()
+for w in "a b a c a b".split():
+    c.add(w)
+print("counter", c.top(2))
+`;
+      const p4 = join(cdir, 'gate4.py');
+      writeFileSync(p4, PY);
+      const a = spawnSync(BIN, [LIB, p4, join(cdir, 'ours')], { encoding: 'utf8', cwd: root });
+      const b = spawnSync('python3', [p4, join(cdir, 'ref')], { encoding: 'utf8', cwd: root });
+      const ao = (a.stdout ?? '').trimEnd();
+      const bo = (b.stdout ?? '').trimEnd();
+      const lines = cSrc === '' ? 0 : (spawnSync('wc', ['-l', cSrc], { encoding: 'utf8' }).stdout ?? '').trim().split(/\s+/)[0];
+      if (a.status !== 0 || ao !== bo) {
+        bad += 1;
+        say(`门四：**Cython 出的扩展** —— 没过（exit=${a.status}）`
+          + `\n      我们：${JSON.stringify(ao.slice(0, 300))}\n      py  ：${JSON.stringify(bo.slice(0, 300))}`
+          + `${(a.stderr ?? '') === '' ? '' : `\n      stderr：${(a.stderr ?? '').split('\n').slice(0, 3).join(' / ')}`}`);
+      } else {
+        say(`门四：**Cython 出的扩展**（${lines} 行 C，我们自己的前端编、我们的运行时装）`
+          + ' —— 六行与 clang + 本机 python3 逐字节相同');
+      }
+    }
+  }
+}
+
 say('');
-say(bad === 0 ? '门：三问都过才算过 —— 过' : `门：三问都过才算过 —— 没过（${bad} 问）`);
+say(bad === 0 ? '门：四问都过才算过 —— 过' : `门：四问都过才算过 —— 没过（${bad} 问）`);
 process.exit(bad === 0 ? 0 : 1);
 
 

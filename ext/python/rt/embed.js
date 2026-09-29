@@ -91,6 +91,18 @@ function ourObjects() {
       process.exit(1);
     }
     out.push(o);
+    /* **ABI 垫片**（`abi-shim.c`）：Cython 生成的 C 会引用几个"上一版还在、这一版删了"的
+       内部符号（量到的第一格是 `_PyByteArray_empty_string`）。链进产物里，于是我们自己
+       编出来的第三方扩展 dlopen 得进来 —— 见那一份的头注（也写清了它补不了什么）。 */
+    const shimO = join(OBJ, 'abi-shim-c.o');
+    const cc3 = spawnSync(process.execPath,
+      [CLI, ...flagsFor(shimO, INC, SRC, perFileFlags('Modules/arraymodule.c', SRC)),
+        join(here, 'abi-shim.c')], { encoding: 'utf8' });
+    if (cc3.status !== 0) {
+      say(`py-rt/embed: abi-shim.c 编不过：\n${cc3.stderr}${cc3.stdout}`);
+      process.exit(1);
+    }
+    out.push(shimO);
     return { out, miss };
   }
   const conf = join(OBJ, 'Modules-config-c.o');

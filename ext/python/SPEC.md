@@ -1413,6 +1413,32 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 
 ### 已落地
 
+- **Cython 出的扩展进来了 —— 兼容按我们的口径走（2026-09-29，用户定的原则）** ——
+  原话：「越过兼容性，是我们的能力，而不是被限制…我们既然不要 python 自己解释器，
+  怎么兼容我们自己说了算。」按这条重新摆了 lxml 那一刀，量出来三件事：
+  - **现成的 wheel 不能直接拿**（这一格是量出来的，不是推的）：把 lxml 的
+    `etree.cpython-314-darwin.so` 改名成 `etree.so`（我们的后缀表认裸 `.so`），
+    dlopen **只缺一个符号** `_PyByteArray_empty_string`（3.15 起删了）——
+    补上之后**装得进去，跑起来 segfault**。跨小版本的结构布局本来就不保证，补符号补不了。
+    于是 `ext/python/rt/abi-shim.c` 留下来只做一件事：补 Cython 引用的那几个"上一版还在"
+    的内部符号（现在一格），并在头注里写清它**补不了**什么。
+  - **源码那条路通了**：本机的 cython 3.2.4 把 `ext/python/rt/probe-cython.pyx`
+    （cdef class / cpdef / 异常 / f-string / dict / list comprehension）变成
+    **14795 行 C**，**我们自己那台 C 前端一字不改编得出（零诊断、1.7s）**，
+    `clang -shared` 链成 `.so`（按我们的 SOABI `cpython-316`），我们的运行时装它 ——
+    六行输出与「同一份 `.c` 交给 clang + 本机 python3」**逐字节相同**。
+    这是 `npm run py:3rd` 的**门四**。
+  - **两格编译开关是我们这条链的口径**（不给就编不过，量出来的）：
+    `-DCYTHON_CCOMPLEX=0`（不然 `#include <complex.h>`，我们那台前端还没有 `_Complex`
+    那一族 —— `complex.h:78: identifier expected`）与 `-DCYTHON_ATOMICS=0`
+    （不然要 `stdatomic.h`；借来的运行时那 278 份走的是 `__atomic_*` 内建）。
+  - **lxml 本身为什么还没进来**（两条都不是我们的账）：它 6.0.2 的源码**还不支持
+    3.12 之后**的 CPython（用的 `PyUnicode_AS_DATA` / `PyUnicode_IS_READY` 那一族在
+    3.12 就删了），而且 wheel 里**没打包顶层的 `python.pxd`**（48 个名字要靠它声明）。
+    要它就得选一支：或者等上游适配、或者我们自己补那份 `.pxd` 并把被删的 API 垫回去、
+    或者运行时那一份另指一棵 3.14 的树（`--src` 本来就是参数 —— 版本是参考树说的，
+    不是写死的）。这一格**是选择，不是限制**。
+
 - **外部 C 扩展（`.so`）装得进来了（2026-09-29）** —— `lxml` 那一刀的前置条件，量完了：
   一份 30 行的最小扩展（`PyModule_Create` + `PyInit_omnihello`）**过我们自己的 C 前端**
   编成 `.o`、`clang -shared -undefined dynamic_lookup` 链成 `.so`，放进 `sys.path`
