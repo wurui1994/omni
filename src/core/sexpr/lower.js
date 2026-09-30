@@ -1449,6 +1449,63 @@ class CoreLowerer {
       this.scopes.pop();
       return { kind: 'Block', stmts: body };
     }
+    /* **异常那一族**（python 的 try/except/else/finally 与 raise 那一刀）：
+       `(try BODY (catch CLS [BIND] HANDLER) (else …) (fin …))`；`(raise "类名" [值])`
+       抛一格带类名的异常对象（$omni_exc），catch 按类名走父链匹配（$exc_is）。
+       CLS 写侧发的是 `(str "ValueError")`（字符串记号的 value 已剥引号）。 */
+    if (h === 'try') {
+      const body = this.block(n.items[1].items.slice(1), ret);
+      const handlers = [];
+      let orelse = null;
+      let fin = null;
+      for (const c of n.items.slice(2)) {
+        if (!isList(c)) return this.err(c, '(try …) 的子格要是一个 (…) 形式');
+        const ch = head(c);
+        if (ch === 'catch') {
+          /* `(catch CLS BIND HANDLER)` 或 `(catch CLS HANDLER)` —— 第二格是 (var 名)
+             就是绑定名，是 (do …) 就是没绑。 */
+          const clsT = c.items[1];
+          const cls = isList(clsT) && head(clsT) === 'str' && isStr(clsT.items[1])
+            ? clsT.items[1].value : null;
+          if (cls === null) return this.err(c, '(catch "类名" [名字] 体)');
+          const second = c.items[2];
+          const isDo = isList(second) && head(second) === 'do';
+          const bind = !isDo && isList(second) && head(second) === 'var' && isAtom(second.items[1])
+            ? second.items[1].value : null;
+          const hb = bind === null ? c.items.slice(2) : c.items.slice(3);
+          if (hb.length === 0) return this.err(c, '(catch …) 缺体');
+          this.scopes.push(new Map());
+          if (bind !== null) this.scopes[this.scopes.length - 1].set(bind, STRING);
+          const hbody = this.block(hb, ret);
+          this.scopes.pop();
+          handlers.push({ cls, bind, body: hbody });
+          continue;
+        }
+        if (ch === 'else') {
+          this.scopes.push(new Map());
+          orelse = this.block(c.items.slice(1), ret);
+          this.scopes.pop();
+          continue;
+        }
+        if (ch === 'fin') {
+          this.scopes.push(new Map());
+          fin = this.block(c.items.slice(1), ret);
+          this.scopes.pop();
+          continue;
+        }
+        return this.err(c, `(try …) 的子格头要是 catch / else / fin，见到 '${ch}'`);
+      }
+      return { kind: 'Try', body, handlers, orelse, fin };
+    }
+    if (h === 'raise') {
+      const clsT = n.items[1];
+      const cls = isList(clsT) && head(clsT) === 'str' && isStr(clsT.items[1])
+        ? clsT.items[1].value : null;
+      if (cls === null) return this.err(n, '(raise "类名" [值])');
+      const v = n.items[2] === undefined ? null : this.expr(n.items[2]);
+      if (n.items[2] !== undefined && v === null) return null;
+      return { kind: 'Raise', cls, value: v, type: VOID };
+    }
     if (h === 'let') {
       const nm = isAtom(n.items[1]) ? n.items[1].value : null;
       if (nm === null) return this.err(n, '(let 名字 类型 值)');

@@ -98,6 +98,44 @@ function $inot(a) { return $CN(BigInt.asIntN(64, ~$B(a))); }
 // 这个词法绑定，改 globalThis 上的同名副本对它们无效。
 let $onRtError = null;
 function $js_set_error_hook(f) { $onRtError = f; }
+// **可捕获的异常**（python 的 try/except 那一刀）：抛一格带类名的异常对象，
+// 供生成的 try/catch 按类名匹配（$exc_is 走父链）。与 $rt_error 的分工：
+// $rt_error 是"没人接的运行期错"（打一行、退 70），$rt_throw 是语言语义里的异常。
+function $rt_throw(cls, msg) {
+  $flush();
+  throw { $omni_exc: true, cls, msg: String(msg) };
+}
+/* 异常类的父链（python 内建异常族的子集——我们接住的那几格）。'$exc_is(实际, 要接)'
+   答"catch 那一格接不接得住这次抛"。 */
+const $EXC_PARENTS = {
+  Exception: "BaseException",
+  ArithmeticError: "Exception",
+  ZeroDivisionError: "ArithmeticError",
+  LookupError: "Exception",
+  KeyError: "LookupError",
+  IndexError: "LookupError",
+  ValueError: "Exception",
+  TypeError: "Exception",
+  RuntimeError: "Exception",
+  NotImplementedError: "RuntimeError",
+  TimeoutError: "OSError",
+  OSError: "Exception",
+  StopIteration: "Exception",
+  StopAsyncIteration: "Exception",
+  AttributeError: "Exception",
+  NameError: "Exception",
+  AssertionError: "Exception",
+  UnicodeDecodeError: "ValueError",
+  KeyboardInterrupt: "BaseException",
+};
+function $exc_is(cls, want) {
+  let c = cls;
+  for (let i = 0; i < 8 && c !== undefined && c !== null; i++) {
+    if (c === want) return true;
+    c = $EXC_PARENTS[c];
+  }
+  return false;
+}
 function $rt_error(msg) {
   $flush();  // 先冲刷 stdout，和 C 运行时里 omni_error 的 fflush(stdout) 对齐
   // OMNI_RT_TRACE=1 时连 JS 栈一起印（只调试用）：运行期的错只有一句话，
@@ -221,26 +259,26 @@ function $js_type_err(msg) { return $js_host_err(new $HostBad(msg, "TypeError"))
 // 上界那一查保证 a - r 不越过 2^53-1（|a-r| <= |a|+|b|）。
 function $div(a, b) {
   if (typeof a === "number" && typeof b === "number") {
-    if (b === 0) $rt_error("division by zero");
+    if (b === 0) $rt_throw("ZeroDivisionError", "division by zero");
     if (Math.abs(a) + Math.abs(b) <= $ISAFE) {
       const q = (a - (a % b)) / b;
       return q === 0 ? 0 : q;
     }
   }
   const A = $B(a), B2 = $B(b);
-  if (B2 === 0n) $rt_error("division by zero");
+  if (B2 === 0n) $rt_throw("ZeroDivisionError", "division by zero");
   if (A === $INT_MIN && B2 === -1n) return $CN($INT_MIN);  // 与 C 的溢出行为对齐
   return $CN(A / B2);
 }
 
 function $mod(a, b) {
   if (typeof a === "number" && typeof b === "number") {
-    if (b === 0) $rt_error("division by zero");
+    if (b === 0) $rt_throw("ZeroDivisionError", "division by zero");
     const r = a % b;
     return r === 0 ? 0 : r;
   }
   const A = $B(a), B2 = $B(b);
-  if (B2 === 0n) $rt_error("division by zero");
+  if (B2 === 0n) $rt_throw("ZeroDivisionError", "division by zero");
   if (A === $INT_MIN && B2 === -1n) return 0;
   return $CN(A % B2);
 }
@@ -250,12 +288,12 @@ function $mod(a, b) {
 // 静态那半边的入口是 $iadd/$div/$mod，两半在装箱边界（emit 的 Box -> $B）上接。
 const $DW = (x) => BigInt.asIntN(64, x);
 function $ddiv(a, b) {
-  if (b === 0n) $rt_error("division by zero");
+  if (b === 0n) $rt_throw("ZeroDivisionError", "division by zero");
   if (a === $INT_MIN && b === -1n) return $INT_MIN;
   return a / b;
 }
 function $dmod(a, b) {
-  if (b === 0n) $rt_error("division by zero");
+  if (b === 0n) $rt_throw("ZeroDivisionError", "division by zero");
   if (a === $INT_MIN && b === -1n) return 0n;
   return a % b;
 }
@@ -268,12 +306,12 @@ function $dmod(a, b) {
 const $U = (x) => BigInt.asUintN(64, $B(x));
 
 function $udiv(a, b) {
-  if ($B(b) === 0n) $rt_error("division by zero");
+  if ($B(b) === 0n) $rt_throw("ZeroDivisionError", "division by zero");
   return $CN(BigInt.asIntN(64, $U(a) / $U(b)));
 }
 
 function $umod(a, b) {
-  if ($B(b) === 0n) $rt_error("division by zero");
+  if ($B(b) === 0n) $rt_throw("ZeroDivisionError", "division by zero");
   return $CN(BigInt.asIntN(64, $U(a) % $U(b)));
 }
 
@@ -547,7 +585,7 @@ function $aget(a, i) {
 }
 function $agetslow(a, i) {
   const n = typeof i === "number" ? i : Number(i);
-  if (n < 0 || n >= a.length) $rt_error("array index out of range: " + n + " (length " + a.length + ")");
+  if (n < 0 || n >= a.length) $rt_throw("IndexError", "array index out of range: " + n + " (length " + a.length + ")");
   return a[n];
 }
 function $aset(a, i, v, cp) {
@@ -558,7 +596,7 @@ function $aset(a, i, v, cp) {
 }
 function $asetslow(a, i, v, cp) {
   const n = typeof i === "number" ? i : Number(i);
-  if (n < 0 || n >= a.length) $rt_error("array index out of range: " + n + " (length " + a.length + ")");
+  if (n < 0 || n >= a.length) $rt_throw("IndexError", "array index out of range: " + n + " (length " + a.length + ")");
   a[n] = cp === false ? v : (cp === true ? v.slice() : cp(v));
   return v;
 }
@@ -954,7 +992,7 @@ function $bytes(s) {
 function $slen(s) { return $bytes(s).length; }
 function $byteAt(s, i) {
   const b = $bytes(s), n = typeof i === "number" ? i : Number(i);
-  if (n < 0 || n >= b.length) $rt_error("string index out of range: " + n + " (length " + b.length + ")");
+  if (n < 0 || n >= b.length) $rt_throw("IndexError", "string index out of range: " + n + " (length " + b.length + ")");
   return b[n];
 }
 function $substr(s, start, len) {
@@ -1301,8 +1339,13 @@ function $listPop(a) {
   return a.pop();
 }
 function $dictGet(m, k, kk) {
-  if (!m.has(k)) $rt_error("key not found: " + $keyStr(k, kk));
+  if (!m.has(k)) $rt_throw("KeyError", $keyStr(k, kk));
   return m.get(k);
+}
+// **真除的除零**（python 的 / 语义）：JS 的浮点除给 inf，python 是 ZeroDivisionError。
+function $fdiv(a, b) {
+  if (b === 0) $rt_throw("ZeroDivisionError", "division by zero");
+  return a / b;
 }
 function $dictSet(m, k, v) { m.set(k, v); return v; }
 // 深装箱（ADR-0008）里 dict 那一支：键照抄，值逐个换表示。见 backend-js/emit.js 的 boxDeepJs。

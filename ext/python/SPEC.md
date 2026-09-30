@@ -3032,6 +3032,28 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 - `asyncio.gather` / `wait_for` / TCP 还没接；`sleep` 只接 `sleep(0)`。
   判据：`ext/python/examples/asyncio_min.py`（与本机 python3 逐字节相同）。
 
+## 二之六、异常那一刀（2026-09-30）
+
+**第三方库代码的头号依赖**（asyncio/urllib3/requests 全家的 `try/except` 密度）
+—— 异常从"打一行退 70"的致命错升级为**语言语义**：
+
+- **adapter**：`try/except/else/finally` → 标准 IR 的 `try` 语句（handler 的类按
+  内建异常名单校验，`except (A, B):` 的元组展开成多格 handler，裸 `except:` 落
+  `BaseException`）；`raise E(...)` 抛**带类名**的异常。
+- **方言**：`(try BODY (catch CLS [BIND] HANDLER) … (else …) (fin …))` /
+  `(raise CLS V)` —— CLS 是类名字符串。
+- **js 后端**：`try { … } catch ($exc) { if ($exc_is(...)) {…} else {throw $exc;} }
+  finally {…}` —— 一个 catch 里面 if/else-if 链；异常对象是
+  `{ $omni_exc: true, cls, msg }`（prelude 的 `$rt_throw`），父链匹配
+  `$exc_is`（`$EXC_PARENTS` 表）。
+- **内建错误进异常**：除零（`$div`/`$fdiv`/`$mod` 的检查点）、下标越界
+  （`IndexError`）、字典缺键（`KeyError` → `$dictGet`）都改抛可捕获异常 ——
+  **`d["missing"]` / `xs[9]` / `a / 0` 从此可以被 `except` 接住**。real 的 `/`
+  从前是 IEEE 的 inf（静静答错），现在也查除零。其余 `$rt_error`（致命错）照旧。
+- **边界**：catch 绑定名拿的是 `str(异常)` 那一档（异常对象只有消息这一格，
+  `e.args`/`e.__class__` 还没有）；用户自定义异常类还没接；解释器与 C 腿
+  还没接 try。判据：`ext/python/examples/try_min.py`（与 python3 逐字节相同）。
+
 
 ## 三、口径
 

@@ -34,6 +34,13 @@ export const SX_ARITY = {
      js 后端：afn -> `function*`、await -> `yield`、asyncio_* -> prelude 的
      同步就绪驱动器（`$asyncio_*`）。解释器那一腿还没接。 */
   afn: [4, Infinity], await: 1, asyncio_run: 1, asyncio_sleep: 1,
+  /* **异常那一族**（python 的 `try/except/finally` 与 `raise` 那一刀）：
+     `(try BODY (catch CLS BIND HANDLER) … (else …) (fin …))` —— 子格按头分派
+     （catch/else/fin），BIND 可省；CLS 是**类名字符串**（"ValueError"）。
+     `(raise CLS V)` 抛一格带类名的异常。js 后端：try/catch/finally +
+     `$omni_exc` 异常对象（prelude 的 `$rt_throw` / `$exc_is`）。 */
+  try: [1, Infinity], raise: [1, 2],
+  catch: [1, 3], else: [0, Infinity], fin: [0, Infinity],
   /* **闭包那一族**（`src/core/sexpr/lower.js` 里本来就有）：
      `(cfn 名 ((c T)…) ((p T)…) R 语句…)` 声明一格、`(mkclo 名 v…)` 造一格、`(cap c)` 读捕获。
      提供者不止一门：go 的接口（方法闭包的记录，ADR-0040）、cpp 的 lambda、jnc 的函数值 ——

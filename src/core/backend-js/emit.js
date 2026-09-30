@@ -683,6 +683,59 @@ class JsEmitter {
       case 'ExprStmt':
         this.line(`${this.expr(s.expr)};`);
         break;
+      /* **异常那一族**（python 的 `try/except/else/finally` 与 `raise` 那一刀）：
+         异常对象是 `{ $omni_exc: true, cls, msg }`（prelude 的 `$rt_throw` 抛的），
+         catch 按类名走 `$exc_is` 的父链匹配；绑定名拿的是 `str(异常)` 那一档。 */
+      case 'Try': {
+        this.line('try {');
+        this.indent++;
+        for (const st of s.body) this.stmt(st);
+        if (s.orelse !== null && s.orelse !== undefined) {
+          for (const st of s.orelse) this.stmt(st);
+        }
+        this.indent--;
+        /* **一个 catch、里面一条 if/else-if 链**（JS 一个 try 只许一格 catch）：
+           每格 handler 按类名走 `$exc_is` 的父链匹配；链尾不是"不分类兜底"那种的
+           话兜一格"接着抛"。裸 handler（`except:`）兜住一切，不需要兜底。 */
+        if (s.handlers.length > 0) {
+          this.line('} catch ($exc) {');
+          this.indent++;
+          for (let k = 0; k < s.handlers.length; k++) {
+            const h = s.handlers[k];
+            const cond = h.cls === null
+              ? '$exc !== null && $exc.$omni_exc === true'
+              : `$exc !== null && $exc.$omni_exc === true && $exc_is($exc.cls, ${JSON.stringify(h.cls)})`;
+            this.line(`${k === 0 ? 'if' : '} else if'} (${cond}) {`);
+            this.indent++;
+            if (h.bind !== null && h.bind !== undefined) {
+              this.line(`let v_${h.bind} = $exc.msg;`);
+            }
+            for (const st of h.body) this.stmt(st);
+            this.indent--;
+          }
+          if (!s.handlers.some((h) => h.cls === null)) {
+            this.line('} else {');
+            this.indent++;
+            this.line('throw $exc;');
+            this.indent--;
+          }
+          this.line('}');
+          this.indent--;
+        }
+        if (s.fin !== null && s.fin !== undefined) {
+          this.line('} finally {');
+          this.indent++;
+          for (const st of s.fin) this.stmt(st);
+          this.indent--;
+        }
+        this.line('}');
+        break;
+      }
+      case 'Raise':
+        this.line(s.value === null || s.value === undefined
+          ? `throw { $omni_exc: true, cls: ${JSON.stringify(s.cls)}, msg: ${JSON.stringify(s.cls)} };`
+          : `throw { $omni_exc: true, cls: ${JSON.stringify(s.cls)}, msg: ${this.expr(s.value)} };`);
+        break;
       case 'If': {
         const c = this.expr(s.cond);
         /* 单句的 then、没有 else -> **不发花括号**，整句一行（task #41，量出来的）：
@@ -1036,6 +1089,9 @@ class JsEmitter {
     }
     if (opType.k === 'real') {
       if (op === '%') return `$fmod(${a}, ${b})`;
+      /* **真除的除零**（python 的 `1/0` 是 ZeroDivisionError，不是 IEEE 的 inf）——
+         `/` 走 prelude 的检查函数，其余 real 算子照旧内联。 */
+      if (op === '/') return `$fdiv(${a}, ${b})`;
       return `(${a} ${op} ${b})`;
     }
     if (opType.k === 'string' && op === '+') return `(${a} + ${b})`;

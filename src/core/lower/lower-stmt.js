@@ -38,6 +38,13 @@ export function lowerStmt(stmt, ctx) {
      * 那是那门语言的规矩，不是这一层的。
      */
     case 'scope': return lowerScope(stmt, ctx);
+    /* **异常那一族**（python 的 `try/except/finally` 与 `raise` 那一刀）：
+       `(try BODY (catch CLS BIND HANDLER) … (else …) (fin …))` / `(raise CLS V)`。
+       CLS 是类名字符串；catch 的 BIND 可省（`except E:` 不绑名那一档）。 */
+    case 'try': return lowerTry(stmt, ctx);
+    case 'raise': return stmt.value !== null && stmt.value !== undefined
+      ? sx.op('raise', sx.str(stmt.cls), ctx.lowerExpr(stmt.value, ctx))
+      : sx.op('raise', sx.str(stmt.cls));
     case 'switch': return lowerSwitch(stmt, ctx);
     case 'print': return lowerPrint(stmt, ctx);
     /**
@@ -328,4 +335,30 @@ function lowerSwitch(s, ctx) {
   }
   if (!out && s.default_) return lowerStmts(s.default_, ctx);
   return out || '(do)';
+}
+
+/**
+ * 降级一格 `try`（python 的 `try/except/else/finally`）：
+ *   `(try BODY (catch CLS BIND HANDLER) … (else …) (fin …))` —— 子格按头分派。
+ * CLS 是类名字符串（"ValueError"）；catch 的 BIND 可省（`except E:` 不绑名那一档）。
+ * `else` 是"没抛时补跑"的那格（python 的 `else:`），`fin` 是一定走的那格（`finally:`）。
+ */
+function lowerTry(s, ctx) {
+  /* 三段都走 `lowerStmts`（它给**每条语句**开一格语句槽）—— 表达式位置上"先跑几句"
+     的那些（`block-expr` 的临时量，`print(d["nope"])` 的 `dget` 就是一例）必须落在
+     **try 的 body 里**；直接逐条 `lowerStmt` 的话它们会顺着外头那格槽落到 try 前面，
+     "可捕获的异常"就在 try 外抛了（量出来的：KeyError 逃出 try 直达顶层）。 */
+  const parts = [ctx.lowerStmts(s.body, ctx)];
+  for (const h of s.handlers) {
+    parts.push(h.bind === null || h.bind === undefined
+      ? sx.op('catch', sx.str(h.cls), ctx.lowerStmts(h.body, ctx))
+      : sx.op('catch', sx.str(h.cls), sx.varOf(h.bind), ctx.lowerStmts(h.body, ctx)));
+  }
+  if (s.orelse !== null && s.orelse !== undefined) {
+    parts.push(sx.op('else', ctx.lowerStmts(s.orelse, ctx)));
+  }
+  if (s.fin !== null && s.fin !== undefined) {
+    parts.push(sx.op('fin', ctx.lowerStmts(s.fin, ctx)));
+  }
+  return sx.op('try', ...parts);
 }

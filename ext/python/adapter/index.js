@@ -1331,6 +1331,27 @@ function scanOne(s, C, rets) {
       if (el !== undefined) for (const e of kids(el)) scanBinds(part(e, 'body'), C, rets);
       return;
     }
+    /* **`try/except/else/finally` 那一刀**：三段的赋值照样进绑定（顶层 try 里的
+       x = … 是 global，跟 if/while 的 body 同一条）；handler 的 as e 绑定成
+       str(异常) 那一档（串）。 */
+    case 'try': {
+      for (const k of kids(s)) {
+        const t = tag(k);
+        if (t === 'body' || t === 'else' || t === 'finally') { scanBinds(k, C, rets); continue; }
+        if (t === 'except') {
+          const as = kids(k).find((y) => tag(y) === 'as');
+          const bodyT = kids(k).find((y) => tag(y) === 'body');
+          C.push();
+          if (as !== undefined) {
+            const nmTok = kids(as)[0];
+            if (tag(nmTok) === 'n') C.bind(String(nameOf(nmTok)), STR);
+          }
+          if (bodyT !== undefined) scanBinds(bodyT, C, rets);
+          C.pop();
+        }
+      }
+      return;
+    }
     case 'return':
       if (rets !== null) rets.push(kids(s).length === 0 ? { kind: 'void' } : tyOfCst(kids(s)[0], C));
       return;
@@ -1831,11 +1852,16 @@ export function stmtsOf(x, C) {
     case 'break': return [{ kind: 'break', label: null }];
     case 'continue': return [{ kind: 'continue', label: null }];
     case 'assert': return [assertStmt(x, C)];
-    /* `raise X("话")` —— 方言里没有异常，落成"印一句 + 停下来"（与 mojo 的 assert 同一手）。 */
+    /* **异常那一族**（`try/except/finally` 与 `raise` 那一刀）：
+       `raise` 抛一格**带类名的异常对象**（`$omni_exc`），`try` 的 catch 按类名 +
+       父链匹配（prelude 的 `$exc_is`）—— 异常从"打一行退 70"升级成语言语义。 */
     case 'raise': {
       const vs = kids(x).filter((y) => tag(y) !== 'from');
-      const msg = vs.length === 0 ? { kind: 'string', value: 'raise' } : raiseText(vs[0], C);
-      return [{ kind: 'builtin-stmt', name: 'fail', args: [msg] }];
+      if (vs.length === 0) {
+        throw new Error('python->IR: 裸 `raise`（重抛）还没接');
+      }
+      const [cls, value] = raiseOf(vs[0], C);
+      return [{ kind: 'raise', cls, value }];
     }
     /* 函数里套的函数**已经提到模块级**了（`hoistNested`），所以这一句不发东西。
        有捕获的那一档在 `hoistNested` 里就当场报了，走不到这儿。 */
@@ -1854,7 +1880,8 @@ export function stmtsOf(x, C) {
       }
       throw new Error(`python->IR: \`async ${tag(inner)}\` 还没接`);
     }
-    case 'try': case 'with': case 'match': case 'decorated':
+    case 'try': return [tryOf(x, C)];
+    case 'with': case 'match': case 'decorated':
       throw new Error(`python->IR: \`${tag(x)}\` 还没接`);
     default:
       throw new Error(`python->IR: 这一格语句还没接：${tag(x)}`);
@@ -2696,19 +2723,93 @@ function assertStmt(x, C) {
 }
 
 /** `raise ValueError("话")` → 停下来时印的那一句。 */
-function raiseText(v, C) {
+/* **内建异常类的那张名单**（我们接住的那几格；父链在运行时 prelude 的
+   `$EXC_PARENTS`，两侧对得上）。`raise` / `except` 都按它校验。 */
+const EXC_CLS = new Set(['BaseException', 'Exception', 'ArithmeticError', 'ZeroDivisionError',
+  'LookupError', 'KeyError', 'IndexError', 'ValueError', 'TypeError', 'RuntimeError',
+  'NotImplementedError', 'TimeoutError', 'OSError', 'StopIteration', 'StopAsyncIteration',
+  'AttributeError', 'NameError', 'AssertionError', 'UnicodeDecodeError', 'KeyboardInterrupt']);
+
+function excCheck(nm) {
+  if (!EXC_CLS.has(nm)) {
+    throw new Error(`python->IR: 异常类 \`${nm}\` 还没接（认识的：${[...EXC_CLS].join(', ')}）`);
+  }
+  return nm;
+}
+
+/**
+ * `raise` 后面那一格 → `[类名, 消息表达式 | null]`。
+ *   `raise ValueError` / `raise ValueError("话")` —— 类要是名单里那格名字；
+ * 消息走 `str()` 那一档（运行时 catch 绑定的就是它）。
+ */
+function raiseOf(v, C) {
   if (tag(v) === 'call' && tag(kids(v)[0]) === 'n') {
     const nm = String(nameOf(kids(v)[0]));
+    const cls = excCheck(nm);
     const as = kids(part(v, 'args') ?? { kind: 'list', items: [] });
-    if (as.length === 0) return { kind: 'string', value: nm };
-    return {
-      kind: 'binop', op: '+',
-      left: { kind: 'string', value: `${nm}: ` },
-      right: pyStr(exprOf(as[0], C), C),
-    };
+    if (as.length === 0) return [cls, null];
+    if (as.length > 1) throw new Error(`python->IR: \`${nm}(…)\` 收一格消息`);
+    return [cls, pyStr(exprOf(as[0], C), C)];
   }
-  if (tag(v) === 'n') return { kind: 'string', value: String(nameOf(v)) };
+  if (tag(v) === 'n') return [excCheck(String(nameOf(v))), null];
   throw new Error('python->IR: `raise` 后面那一格还没接（只接了 `raise E` 与 `raise E("话")`）');
+}
+
+/**
+ * `try/except/else/finally` → 标准 IR 的 `try` 语句。
+ *   * handler 的类**先按名单校验**；`except (A, B):` 的元组展开成多格 handler（同体）；
+ *   * 裸 `except:` 落到 `BaseException`（一切我们接住的异常都兜住）；
+ *   * `except E as e` 的绑定名拿的是 `str(异常)` 那一档（异常对象只有消息这一格）。
+ */
+function tryOf(x, C) {
+  let body = null;
+  const handlers = [];
+  let orelse = null;
+  let fin = null;
+  /* 三段各自一格作用域：handler 里的 `as e` 绑定只在那一格里活。 */
+  C.push();
+  for (const c of kids(x)) {
+    const ch = tag(c);
+    if (ch === 'body') {
+      body = flatten(kids(c)).flatMap((s) => stmtsOf(s, C));
+      continue;
+    }
+    if (ch === 'else') {
+      orelse = flatten(kids(c)).flatMap((s) => stmtsOf(s, C));
+      continue;
+    }
+    if (ch === 'finally') {
+      fin = flatten(kids(c)).flatMap((s) => stmtsOf(s, C));
+      continue;
+    }
+    if (ch !== 'except') throw new Error(`python->IR: try 的子格没认出：${ch}`);
+    const clsToks = [];
+    let bind = null;
+    let bodyNode = null;
+    for (const t of kids(c)) {
+      const tg = tag(t);
+      if (tg === 'as') { bind = String(nameOf(kids(t)[0])); continue; }
+      if (tg === 'any') { clsToks.push(...kids(t)); continue; }
+      if (tg === 'body') { bodyNode = t; continue; }
+      clsToks.push(t);
+    }
+    if (bodyNode === null) throw new Error('python->IR: `except` 缺体');
+    C.push();
+    if (bind !== null) C.bind(bind, STR);
+    const hb = flatten(kids(bodyNode)).flatMap((s) => stmtsOf(s, C));
+    C.pop();
+    if (clsToks.length === 0) {
+      handlers.push({ cls: 'BaseException', bind, body: hb });
+      continue;
+    }
+    for (const t of clsToks) {
+      if (tag(t) !== 'n') throw new Error('python->IR: `except` 的异常类只接名字那一格');
+      handlers.push({ cls: excCheck(String(nameOf(t))), bind, body: hb });
+    }
+  }
+  C.pop();
+  if (body === null) throw new Error('python->IR: `try` 缺体');
+  return { kind: 'try', body, handlers, orelse, fin };
 }
 
 /* ─── 语言钩子 ────────────────────────────────────────────────────────────── */
