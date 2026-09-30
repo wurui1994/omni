@@ -28,6 +28,12 @@ export const SX_ARITY = {
   bin: 3, un: 2, sel: 3,
   /* 调用 */
   call: [1, Infinity], callfn: [1, Infinity], ccall: [1, Infinity],
+  /* **协程那一族**（python 的 `async def` / `await` 那一刀）：
+     `(afn …)` 是协程函数（调用不执行体、返回协程对象）；`(await E)` 是挂起点；
+     `(asyncio_run C)` / `(asyncio_sleep T)` 是 asyncio 最小 shim 的两格算子。
+     js 后端：afn -> `function*`、await -> `yield`、asyncio_* -> prelude 的
+     同步就绪驱动器（`$asyncio_*`）。解释器那一腿还没接。 */
+  afn: [4, Infinity], await: 1, asyncio_run: 1, asyncio_sleep: 1,
   /* **闭包那一族**（`src/core/sexpr/lower.js` 里本来就有）：
      `(cfn 名 ((c T)…) ((p T)…) R 语句…)` 声明一格、`(mkclo 名 v…)` 造一格、`(cap c)` 读捕获。
      提供者不止一门：go 的接口（方法闭包的记录，ADR-0040）、cpp 的 lambda、jnc 的函数值 ——

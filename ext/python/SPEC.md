@@ -3009,6 +3009,29 @@ $ node src/cli.js run --mode js /tmp/zf.c     # 一份 C 里手写的 zfill
 5. **`try` / `with` / `match` / 生成器 / 闭包 / 装饰器** —— adapter 现在对它们当场报
    "还没接"，不猜。
 
+## 二之五、`async` / `await` 那一刀（2026-09-30）
+
+`async def` / `await` 接住了，语义与 CPython 的协程模型同构，**不依赖任何后端的
+语言特性**（尤其不是"编译到 JS 的 async/await"）：
+
+- **adapter**：`async def` 与普通 `def` 走同一趟（推断 / 单态化 / 发射），只多带一格
+  协程标记 —— **调用不执行体、返回协程对象**（`GET_AWAITABLE` 的那条语义）；
+  `await e` 是**挂起点**：交出控制权，恢复时那一格表达式的值由驱动者带回来。
+- **方言**：`(afn …)`（协程函数）/ `(await E)`（挂起点）/ `(asyncio_run C)` 与
+  `(asyncio_sleep T)`（asyncio 最小 shim 的两格算子）。
+- **js 后端**：协程函数发成**生成器帧**（`function*`），挂起点发 `yield`，
+  驱动器 `$asyncio_run` 是**同步就绪协议**的循环：每一格 awaitable 都要当场就绪
+  （`await work()` 递归驱动子协程帧；`sleep(0)` 当场就绪；真定时器 / 网络 /
+  C 扩展的异步还没接，当场报）。解释器与 C 那两条腿还没接协程。
+- **边界（必须分清的两件事）**：
+  * `ext/python/rt/thirdparty.js` / `build-lxml.js` 那套判据量的是"我们自己的 C 前端
+    编出来的 **CPython C 运行时**（含 ceval）跑 `.py` 对不对" —— 那是**运行时本身
+    的正确性**，C 是我们编的、不借本机 python3；
+  * 但它**不是**"我们的编译器支持了这些库的源码" —— `.py` 源码那一侧，
+    我们的解释器是上面这条生成器帧的路。两件事不能混着说。
+- `asyncio.gather` / `wait_for` / TCP 还没接；`sleep` 只接 `sleep(0)`。
+  判据：`ext/python/examples/asyncio_min.py`（与本机 python3 逐字节相同）。
+
 
 ## 三、口径
 

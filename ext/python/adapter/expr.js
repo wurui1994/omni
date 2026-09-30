@@ -819,6 +819,9 @@ export function tyOfCst(x, C) {
       return f === undefined ? null : f.type;
     }
     case 'call': return tyOfCall(x, C);
+    /* `await e` 装的就是 `e` 的结果（协程函数标注/推出来的那格 ret）——
+       `asyncio.sleep(0)` 那种不是协程函数的，`tyOfCall` 也不认识，落到 null/DYN。 */
+    case 'await': return tyOfCst(kids(x)[0], C) ?? DYN;
     default: return null;
   }
 }
@@ -964,6 +967,13 @@ const KW_OPTS = new Set(['zip', 'sorted', 'min', 'max', 'print', 'enumerate']);
 /** 一格调用装的是什么。 */
 function tyOfCall(x, C) {
   const [fn, argsTok] = kids(x);
+  /* **asyncio shim 的两格装 dyn**（run 交协程的结果，sleep 交 None —— 都是运行时
+     那侧的事，这一层不猜）。 */
+  if (tag(fn) === 'attr' && tag(kids(fn)[0]) === 'n'
+    && String(nameOf(kids(fn)[0])) === 'asyncio'
+    && ['run', 'sleep'].includes(String(nameOf(kids(fn)[1])))) {
+    return DYN;
+  }
   /* 命名实参先排回位置上（不然单态化那一趟按次序挑实例会挑错 —— 量出来的）。 */
   const args0 = kwOrder(fn, argsTok === undefined ? [] : kids(argsTok), C);
   /* **内建的"选项"那一族命名实参不算一格实参**（`zip(strict=)` / `sorted(reverse=, key=)`
@@ -1627,10 +1637,31 @@ export function exprOf(x, C) {
       }
       return { kind: 'field', obj, name };
     }
+    case 'await': {
+      if (C.curAsync !== true) {
+        throw new Error('python->IR: `await` 只能在 `async def` 里');
+      }
+      return { kind: 'await', value: exprOf(kids(x)[0], C) };
+    }
     case 'call': return callOf(x, C);
     default:
       throw new Error(`python->IR: 这一格表达式还没接：${tag(x)}`);
   }
+}
+
+/**
+ * **asyncio 的两格 shim**（`run` / `sleep`）—— 落成方言的 `(asyncio_run …)` /
+ * `(asyncio_sleep …)` 两格算子，运行时那侧（js 后端的同步就绪驱动器）实现。
+ * 其余的（`gather` / `wait_for` / TCP 那一族）还没接，明着报。
+ */
+function asyncioCallOf(m, argToks, C) {
+  if (m === 'run' && argToks.length === 1) {
+    return { kind: 'builtin', name: 'asyncio_run', args: [exprOf(argToks[0], C)] };
+  }
+  if (m === 'sleep' && argToks.length === 1) {
+    return { kind: 'builtin', name: 'asyncio_sleep', args: [exprOf(argToks[0], C)] };
+  }
+  throw new Error(`python->IR: \`asyncio.${m}()\` 还没接（这一刀只接 run / sleep）`);
 }
 
 /** 比较算子 → 类上那格双下划线方法（`__eq__` 那一族）。 */
@@ -3859,6 +3890,13 @@ function pairsList(kind, args, C) {
 export function callOf(x, C) {
   const [fn, argsTok] = kids(x);
   const argToks = kwOrder(fn, argsTok === undefined ? [] : kids(argsTok), C);
+  /* **asyncio 最小 shim**（`import asyncio` 的 run/sleep 两格）—— 不查 `asyncio`
+     装什么（`import` 那一层不绑名字），也不收实例：落到方言的
+     `(asyncio_run …)` / `(asyncio_sleep …)` 两格算子，运行时那侧驱动。 */
+  if (tag(fn) === 'attr' && tag(kids(fn)[0]) === 'n'
+    && String(nameOf(kids(fn)[0])) === 'asyncio') {
+    return asyncioCallOf(String(nameOf(kids(fn)[1])), argToks, C);
+  }
   /* `isinstance(x, T)` —— T 是类型的名字，不是一格值，要在算实参之前拦。 */
   if (tag(fn) === 'n' && String(nameOf(fn)) === 'isinstance') {
     if (argToks.length !== 2) throw new Error('python->IR: `isinstance(x, T)` 收两格实参');

@@ -25,6 +25,14 @@ export function lowerExpr(expr, ctx) {
     case 'binop': return lowerBinop(expr, ctx);
     case 'unop': return lowerUnop(expr, ctx);
     case 'call': return lowerCall(expr, ctx);
+    /* **挂起点**（python 的 `await`，协程函数里那一格）：求值出 awaitable，交驱动者。 */
+    case 'await': return sx.op('await', lowerExpr(expr.value, ctx));
+    /* **asyncio 最小 shim** 的两格（`ext/python/adapter/expr.js` 的 `asyncioCallOf`）。 */
+    case 'builtin': {
+      if (expr.name === 'asyncio_run') return sx.op('asyncio_run', ...expr.args.map((a) => lowerExpr(a, ctx)));
+      if (expr.name === 'asyncio_sleep') return sx.op('asyncio_sleep', ...expr.args.map((a) => lowerExpr(a, ctx)));
+      return sx.op(expr.name, ...expr.args.map((a) => lowerExpr(a, ctx)));
+    }
     case 'method': return lowerMethod(expr, ctx);
     case 'field': return lowerField(expr, ctx);
     case 'index': return lowerIndex(expr, ctx);

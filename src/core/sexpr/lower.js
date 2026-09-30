@@ -665,7 +665,9 @@ class CoreLowerer {
       if (h === 'cabi') { this.cabiDecl(f); continue; }
       if (h === 'lib') { this.libDecl(f); continue; }
 
-      if (h !== 'fn' && h !== 'kernel') continue;
+      /* `(afn …)` 是**协程函数**（python 的 `async def`）：与 `(fn …)` 同一条登记路，
+         只多带一格 `async` 标记 —— 发射那一侧按它选协程的实现（js 是生成器帧）。 */
+      if (h !== 'fn' && h !== 'afn' && h !== 'kernel') continue;
       const nm = isAtom(f.items[1]) ? f.items[1].value : null;
       if (nm === null) { this.err(f, `(${h} NAME ...) 缺名字`); continue; }
       /* 会话（REPL）里 `(fn …)` **允许重新定义**（ADR-0022 的 J6 第四件事）：改一个函数
@@ -692,7 +694,7 @@ class CoreLowerer {
          - `gen`：第几代。第 2 代起 mangled 名带上代号，两代的正文各有自己的符号。
          整程序那条路两格都不给，`(call …)` 照旧发直接调用 —— 产物逐字节不变。 */
       if (entryName === 'omni_main') {
-        this.funcs.set(nm, { name: nm, mangled: `s_${nm}`, ret: ret, params: ps });
+        this.funcs.set(nm, { name: nm, mangled: `s_${nm}`, ret: ret, params: ps, async: h === 'afn' });
         continue;
       }
       const old = redef ? this.funcs.get(nm) : null;
@@ -714,7 +716,7 @@ class CoreLowerer {
       this.globals.set(fp, ft);
       this.funcs.set(nm, {
         name: nm, mangled: gen === 1 ? `s_${nm}` : `s_${nm}__${gen}`, ret: ret, params: ps,
-        fp: fp, gen: gen, span: f,
+        fp: fp, gen: gen, span: f, async: h === 'afn',
       });
     }
     return this.assemble(forms, entryName, base);
@@ -1060,7 +1062,7 @@ class CoreLowerer {
     const zeroN = mainStmts.length;
     for (const f of forms) {
       const h = head(f);
-      if (h === 'fn') {
+      if (h === 'fn' || h === 'afn') {
         const nm = isAtom(f.items[1]) ? f.items[1].value : null;
         const d = nm === null ? undefined : this.funcs.get(nm);
         if (d === undefined) continue;
@@ -1074,6 +1076,8 @@ class CoreLowerer {
         funcs.push({ name: d.name, mangled: d.mangled, ret: d.ret, params: d.params,
           /* 它来自哪个模块（`resolveModules` 在节点上留的那一格）—— C 那条腿按它切文件。 */
           file: typeof f.unit === 'string' ? f.unit : '',
+          /* **协程标记**（`(afn …)`）：发射那一侧按它选协程的实现（js 是生成器帧）。 */
+          async: h === 'afn',
           body: { kind: 'Block', stmts: body } });
         continue;
       }
@@ -1135,7 +1139,7 @@ class CoreLowerer {
       if (h === 'memory' || h === 'data') continue;    // 第二遍半已经收过了
       if (h === 'cabi') continue;                      // 第三遍已经收过了（cabiDecl）
       if (h === 'lib') continue;                       // 第三遍已经收过了（libDecl）
-      this.err(f, `(module ...) 里只能是 (struct ...) / (class ...) / (global ...) / (memory ...) / (data ...) / (cabi ...) / (lib ...) / (fn ...) / (cfn ...) / (kernel ...) / (main ...)，见到 '${h}'`);
+      this.err(f, `(module ...) 里只能是 (struct ...) / (class ...) / (global ...) / (memory ...) / (data ...) / (cabi ...) / (lib ...) / (fn ...) / (afn ...) / (cfn ...) / (kernel ...) / (main ...)，见到 '${h}'`);
     }
     // REPL 的一批里没有 `(main …)` 是正常的（只写了个函数定义）；整程序时必须有入口。
     if (!sawMain && entryName === 'omni_main') this.err(null, '缺入口：加一个 (main ...)');
@@ -1144,7 +1148,7 @@ class CoreLowerer {
        重新定义的那一代存进去的是新适配器，于是前几批的调用点（走同一格全局）跟着换身体。 */
     const fpStores = [];
     for (const f of forms) {
-      if (head(f) !== 'fn') continue;
+      if (head(f) !== 'fn' && head(f) !== 'afn') continue;
       const fnm = isAtom(f.items[1]) ? f.items[1].value : null;
       if (fnm === null) continue;
       const fd = this.funcs.get(fnm);
@@ -3000,6 +3004,23 @@ class CoreLowerer {
       || h === 'pisnull' || h === 'pfield' || h === 'pthin' || h === 'pelem'
       || h === 'pcast' || h === 'peq') return this.ptrExpr(n, h);
     if (h === 'anew' || h === 'aget' || h === 'alen' || h === 'apop') return this.arrExpr(n, h);
+    /* **协程的挂起点**（python 的 `await`）：求值出 awaitable 交给驱动者，恢复时
+       这一格表达式的值就是驱动者带回来的。类型就是被等的那一格的结果
+       （`await (call work)` 装的是 `work` 的 ret —— 协程结果，不是协程对象）。 */
+    if (h === 'await') {
+      const v = this.expr(n.items[1]);
+      if (v === null) return null;
+      return { kind: 'Await', value: v, type: v.type };
+    }
+    /* **asyncio 最小 shim 的两格**（`ext/python/adapter/expr.js` 的 `asyncioCallOf`）：
+       落成运行时（prelude）的同步就绪驱动器。`run` 交回协程的结果（= 实参那格
+       协程的 ret）；`sleep` 交 None。 */
+    if (h === 'asyncio_run' || h === 'asyncio_sleep') {
+      const a = this.expr(n.items[1]);
+      if (a === null) return null;
+      const t = h === 'asyncio_run' ? a.type : VOID;
+      return { kind: 'Builtin', name: `$${h}`, args: [a], type: t, argType: a.type };
+    }
     if (h === 'dnew' || h === 'dget' || h === 'dhas' || h === 'dlen'
       || h === 'dkeys' || h === 'ddel') return this.dictExpr(n, h);
     // 结构体的两条读侧（写侧是语句 fldset）：`(new Point)` 零值，`(fld p x)` 读字段。

@@ -809,6 +809,44 @@ function $print_raw(s) {
 }
 function $flush() { if ($out.length) { process.stdout.write($out); $out = ""; } }
 
+// ─── asyncio 最小 shim（python 的 import asyncio 那一刀）──────────────────
+//
+// 协程函数（(afn …)）发成 **生成器帧**：调用不执行体、返回可恢复的帧；挂起点
+// （(await …)）yield 出一格 awaitable，驱动者把恢复值 next 回去 —— 与
+// CPython 的协程帧 + SEND 同一条语义，**不借 ceval、不借 JS 的 async/await**。
+//
+// awaitable 走**同步就绪协议**：{ $asyncio_ready: true, $asyncio_value: v } 是
+// "已经就绪"，驱动器当场续；其它（真定时器 / 网络 / C 扩展的异步）这一格还没接，
+// 当场报 —— 不拿"挂在那儿等着"假装支持。
+// 注意：这一段在 String.raw 模板里，注释里一个反引号都不许有（文件头有账）。
+function $asyncio_sleep(t) {
+  if (t !== 0) $rt_error("asyncio: sleep 的定时器那一格还没接（只接 sleep(0)）");
+  return { $asyncio_ready: true, $asyncio_value: null };
+}
+// 驱动一格协程跑到完成（同步循环 —— 每一格 awaitable 都当场就绪），交回结果。
+// 进来的是**已经创建的协程帧**（生成器对象）—— 也有可能是"一调就出帧"的那格函数，
+// 两种形态都收。 */
+function $asyncio_drive(it) {
+  let r = it.next(undefined);
+  while (!r.done) {
+    const aw = r.value;
+    if (aw !== null && typeof aw === "object") {
+      // **await 另一格协程**（await work()）：递归驱动子帧，结果作为恢复值。
+      if (typeof aw.next === "function") { r = it.next($asyncio_drive(aw)); continue; }
+      if (aw.$asyncio_ready === true) { r = it.next(aw.$asyncio_value); continue; }
+    }
+    $rt_error("asyncio: 这一格 awaitable 还没接（同步就绪协议之外）");
+  }
+  return r.value;
+}
+function $asyncio_run(coro) {
+  const it = typeof coro === "function" ? coro() : coro;
+  if (it === null || typeof it.next !== "function") {
+    $rt_error("asyncio: run 的实参不是一格协程");
+  }
+  return $asyncio_drive(it);
+}
+
 // (srep S N)（ADR-0016 第五刀，printf 的宽度要它）。n <= 0 回空串而不是抛异常：
 // 宽度就是"补到至少 N 个字符"，max(0, N - 长度) 常常是 0 或负数，那是正常情形。
 // 与 omni_str_repeat 同一套语义（那边也在 n <= 0 时回空串）。

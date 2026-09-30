@@ -191,7 +191,10 @@ function lowerFn(decl, ctx) {
   ctx.scope.pop();
 
   const paramStr = params.length > 0 ? ` ${params.join(' ')}` : '';
-  return `  (fn ${decl.name} (${paramStr.trim()}) ${ret} ${body})`;
+  /* **协程函数**（`(afn …)`）：调用不执行体、返回协程对象（python 的 `async def`）。
+     各后端按各自的协程实现发（js 后端是生成器帧），解释器那一腿还没接。 */
+  const head = decl.async === true ? 'afn' : 'fn';
+  return `  (${head} ${decl.name} (${paramStr.trim()}) ${ret} ${body})`;
 }
 
 /**

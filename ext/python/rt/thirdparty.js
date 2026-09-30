@@ -3,6 +3,18 @@
 //
 //   node ext/python/rt/thirdparty.js            # 三问都过才算过
 //
+// ## 这一把量的是什么、不量什么（2026-09-30 记一笔，别再混）
+//
+// 被试者是 `pyrun`（`pyrun.c` + `libomnipython.a`）—— 它跑 `.py` 走的是 CPython 的
+// `PyRun_SimpleString`：**compile.c 编成字节码、ceval 解释执行**。所以这一把量的是
+// **我们自己的 C 前端把 CPython 的 C 编对了没有**（C 是我们编的、不借本机 python3
+// 二进制），是"借来的运行时本身"的正确性判据。
+//
+// 它**不是**"我们的编译器支持了这些库的源码" —— `.py` 源码那一侧，我们的解释器是
+// adapter -> 标准 IR -> OIR -> 生成器帧那条路（`ext/python/examples/asyncio_min.py`、
+// `ext/python/SPEC.md` §二之五）。两件事不能混着说：这一把绿了，`omni run` 跑
+// `import asyncio` 照样报"还没接"，直到 adapter 接住为止。
+//
 // ## 为什么要这一把尺子
 //
 // 前五把量的是"编得出 / 链得上 / 起得来 / 答得对四行 / omni build 接得上"。可用户要的是

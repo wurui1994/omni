@@ -596,7 +596,11 @@ class JsEmitter {
     }
     // 闭包体的第一个形参是闭包记录本身：捕获从它上面读（C 侧同一套约定）
     const params = [...(f.closureId === undefined ? [] : ['self']), ...f.params.map((p) => `v_${p.name}`)];
-    this.line(`${this.ex()}function ${f.mangled}(${params.join(', ')}) {`);
+    /* **协程函数**（`(afn …)`，python 的 `async def`）发成**生成器帧**：调用不执行体、
+       返回可恢复的帧；挂起点（`(await …)`）发 `yield`，驱动者 `next(v)` 把值带回来。
+       与 CPython 的协程帧 + `SEND` 同一条语义 —— 不借 JS 的 async/await。 */
+    const kind = f.async === true ? 'function*' : 'function';
+    this.line(`${this.ex()}${kind} ${f.mangled}(${params.join(', ')}) {`);
     this.indent++;
     // 结构体 / enum 形参按值传递：入口处深拷贝，等价于 C 的值语义
     for (const p of f.params) {
@@ -916,6 +920,9 @@ class JsEmitter {
       case 'Call':
         return `${e.func}(${e.args.map((a) => this.rvalue(a, a.type)).join(', ')})`;
       case 'Builtin': return this.builtin(e);
+      /* **挂起点**（python 的 `await`）：把 awaitable 交驱动者（prelude 的
+         `$asyncio_run` 那个同步就绪驱动器），恢复时 `yield` 表达式的值就是带回的。 */
+      case 'Await': return `yield (${this.expr(e.value)})`;
       /* 外部 C 符号。**声明在源码里的那些（`raw`，ADR-0022 的 J4b）落成一次真的 C 调用**
          —— 桥是我们自己发的那份 N-API 扩展（ADR-0038）。封闭表那一族（`hir/c_abi.js`
          的 8 条 libc，实参是 dynamic 装箱值）照旧发一条当场报错的：它的语义是
@@ -1194,6 +1201,10 @@ class JsEmitter {
         const fn = BIT_FN[e.op];
         return fn !== undefined ? `${fn}(${a.join(', ')})` : `$js_bitop(${JSON.stringify(e.op)}, ${a.join(', ')})`;
       }
+      /* **asyncio 最小 shim 的两格**（python 的 `import asyncio` 那一刀）——
+         实现在 prelude 的同步就绪驱动器里，这里的名字就是那两个函数。 */
+      case '$asyncio_run': return `$asyncio_run(${a.join(', ')})`;
+      case '$asyncio_sleep': return `$asyncio_sleep(${a.join(', ')})`;
       default: {
         const abi = JS_ALL[e.name];
         if (!abi) throw new Error(`js.builtin: ${e.name}`);

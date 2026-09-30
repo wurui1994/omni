@@ -70,14 +70,33 @@ export function pyToIR(tree, ctx = {}) {
      不在这门语言的子集里，而 `treeRoot()` 在核心那一份里已经有了。`lib/*.py` 按它拼。 */
   C.root = ctx.root ?? null;
   const top = flatten(kids(tree));
-  const fnNodes = top.filter((s) => tag(s) === 'def');
+  /* **`async def` 解包**：语法那层产 `(async (funcdef …))`（`async for/with` 也是这个
+     形状，见下面的兜底）。协程函数与普通函数走同一趟（推断/单态化/发射），只是
+     `C.asyncFns` 里记一笔 —— 发射时它是**协程**（调用不执行体，返回协程对象）。 */
+  const fnNodes = [];
+  const inAsyncSrc = new Set();
+  for (const s of top) {
+    if (tag(s) === 'async') {
+      const inner = kids(s)[0];
+      if (tag(inner) !== 'def') {
+        throw new Error(`python->IR: 顶层的 \`async ${tag(inner)}\` 还没接（只接 \`async def\`）`);
+      }
+      fnNodes.push(inner);
+      inAsyncSrc.add(inner);
+      continue;
+    }
+    if (tag(s) === 'def') fnNodes.push(s);
+  }
   const classNodes = top.filter((s) => tag(s) === 'class');
-  const scriptStmts = top.filter((s) => tag(s) !== 'def' && tag(s) !== 'class');
+  const scriptStmts = top.filter((s) => tag(s) !== 'def' && tag(s) !== 'class' && tag(s) !== 'async');
 
   for (const f of fnNodes) {
     const nm = String(nameOf(kids(f).find((y) => tag(y) === 'n')));
     if (C.fnNodes.has(nm)) throw new Error(`python->IR: \`def ${nm}\` 定义了两遍 —— 还没接（后一个盖前一个）`);
     C.fnNodes.set(nm, f);
+    /* **协程函数名单**：`async def` 调用时不执行体、返回协程对象（与 CPython 的
+       `GET_AWAITABLE` 同一条语义），发射那一侧按这张名单发。 */
+    if (inAsyncSrc.has(f)) C.asyncFns.add(nm);
   }
   declareClasses(classNodes, C);
   /* **函数里套的函数**：没有捕获外层名字的那一档**提到模块级**（见 `hoistNested`）。 */
@@ -418,6 +437,10 @@ function makeCtx() {
   const C = {
     /** 现在在不在函数体里（模块级的赋值是给 `(global …)` 的 `set`，函数里的是 `let`）。 */
     inFn: false,
+    /** **协程函数名单**（`async def` 的名字，见 `pyToIR` 顶层的解包）。 */
+    asyncFns: new Set(),
+    /** 现在发的这格函数是不是协程（`await` 只在协程里合法，见 `expr.js` 的 `await`）。 */
+    curAsync: false,
     /**
      * **一段表达式源码 → 那棵表达式的树**（`drive.js` 递进来的那一格）。
      * f-string 里那几段靠它 —— 整份 f-string 是一个记号，要用时用**同一张 LR 表**
@@ -1736,8 +1759,10 @@ function fnDecl(nm, inst, C) {
   C.push();
   const wasIn = C.inFn;
   const wasRet = C.retTy;
+  const wasAsync = C.curAsync;
   C.inFn = true;
   C.retTy = inst.ret;
+  C.curAsync = C.asyncFns.has(nm);
   for (const p of inst.params) C.bind(p.name, p.type);
   /* 先只走一趟"绑定"（不建 IR）—— 于是局部量的名字与类型在发第一句之前就全知道了。 */
   scanBinds(bodyNode, C);
@@ -1747,12 +1772,15 @@ function fnDecl(nm, inst, C) {
   const stmts = flatten(kids(bodyNode)).flatMap((s) => stmtsOf(s, C));
   C.inFn = wasIn;
   C.retTy = wasRet;
+  C.curAsync = wasAsync;
   C.pop();
   return {
     kind: 'fn',
     name: inst.mangled,
     params: inst.params,
     ret: inst.ret,
+    /* **协程标记**：降级器发 `(afn …)`，各后端按各自的协程实现发（js 是生成器帧）。 */
+    async: C.asyncFns.has(nm),
     body: [...locals.map(([n, t]) => ({ kind: 'let', name: n, type: t, init: null })), ...stmts],
   };
 }
@@ -1817,7 +1845,16 @@ export function stmtsOf(x, C) {
     case 'class':
       throw new Error('python->IR: `class` 还没接（下一刀）');
     case 'del': return delStmt(x, C);
-    case 'try': case 'with': case 'match': case 'decorated': case 'async':
+    case 'async': {
+      /* 顶层的 `async def` 已在 `pyToIR` 解包（fnNodes），走不到这儿；能走到的是
+         **函数体里**的 `async def`（嵌套）与 `async for/with` —— 都还没接。 */
+      const inner = kids(x)[0];
+      if (tag(inner) === 'funcdef') {
+        throw new Error('python->IR: 函数里套的 `async def` 还没接');
+      }
+      throw new Error(`python->IR: \`async ${tag(inner)}\` 还没接`);
+    }
+    case 'try': case 'with': case 'match': case 'decorated':
       throw new Error(`python->IR: \`${tag(x)}\` 还没接`);
     default:
       throw new Error(`python->IR: 这一格语句还没接：${tag(x)}`);
